@@ -12,6 +12,7 @@ COPY ViralShorts-App/dist/ ./ViralShorts-App/dist/
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
+ENV PORT=10000
 EXPOSE 10000
 
-CMD ["python", "-m", "uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD uvicorn backend:app --host 0.0.0.0 --port $PORT
