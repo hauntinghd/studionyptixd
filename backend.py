@@ -1,0 +1,4177 @@
+import os
+import shutil
+import random
+import asyncio
+import json
+import time
+import subprocess
+import tempfile
+import logging
+import httpx
+import jwt
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
+from typing import Optional
+import stripe as stripe_lib
+import uvicorn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("nyptid-studio")
+
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
+
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
+FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
+
+stripe_lib.api_key = STRIPE_SECRET_KEY
+
+STRIPE_PRICE_TO_PLAN = {
+    "price_1T4eT7BL8lRmwao2hHcUbcny": "starter",
+    "price_1T4eTUBL8lRmwao2EK3JDOpy": "creator",
+    "price_1T4eTjBL8lRmwao2q6WkoZLH": "pro",
+}
+
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+OUTPUT_DIR = Path("generated_videos")
+OUTPUT_DIR.mkdir(exist_ok=True)
+TEMP_DIR = Path("temp_assets")
+TEMP_DIR.mkdir(exist_ok=True)
+
+app = FastAPI(title="NYPTID Studio Engine", version="3.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+jobs: dict = {}
+security = HTTPBearer(auto_error=False)
+
+import asyncio as _asyncio
+_free_queue: _asyncio.Queue = None
+_free_queue_list: list = []
+_free_worker_started = False
+
+def _get_free_queue():
+    global _free_queue
+    if _free_queue is None:
+        _free_queue = _asyncio.Queue()
+    return _free_queue
+
+async def _free_queue_worker():
+    """Processes free-plan jobs one at a time."""
+    q = _get_free_queue()
+    while True:
+        job_id, coro_func, args = await q.get()
+        try:
+            if job_id in _free_queue_list:
+                _free_queue_list.remove(job_id)
+            _update_queue_positions()
+            await coro_func(*args)
+        except Exception as e:
+            log.error(f"[{job_id}] Free queue worker error: {e}", exc_info=True)
+            if job_id in jobs:
+                jobs[job_id]["status"] = "error"
+                jobs[job_id]["error"] = str(e)
+        finally:
+            q.task_done()
+
+def _update_queue_positions():
+    for i, qjid in enumerate(_free_queue_list):
+        if qjid in jobs:
+            jobs[qjid]["queue_position"] = i + 1
+            jobs[qjid]["queue_total"] = len(_free_queue_list)
+
+async def _ensure_free_worker():
+    global _free_worker_started
+    if not _free_worker_started:
+        _free_worker_started = True
+        _asyncio.get_event_loop().create_task(_free_queue_worker())
+
+PLAN_LIMITS = {
+    "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False},
+    "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False},
+    "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True},
+    "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True},
+}
+
+RESOLUTION_CONFIGS = {
+    "720p": {"gen_width": 720, "gen_height": 1280, "output_width": 720, "output_height": 1280, "upscale": False},
+    "1080p": {"gen_width": 768, "gen_height": 1344, "output_width": 1080, "output_height": 1920, "upscale": True, "upscale_factor": 1.43},
+}
+
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+
+ADMIN_EMAILS = {"omatic657@gmail.com"}
+HARDCODED_PLANS = {
+    "omatic657@gmail.com": "admin",
+    "alwakmyhem@gmail.com": "pro",
+}
+
+async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)) -> Optional[dict]:
+    if cred is None:
+        return None
+    try:
+        payload = jwt.decode(
+            cred.credentials,
+            SUPABASE_JWT_SECRET,
+            audience="authenticated",
+            algorithms=["HS256"],
+        )
+        user_id = payload.get("sub")
+        email = payload.get("email", "")
+        plan = HARDCODED_PLANS.get(email, "free")
+
+        if plan == "free" and SUPABASE_URL and SUPABASE_ANON_KEY:
+            try:
+                svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+                async with httpx.AsyncClient(timeout=8) as client:
+                    resp = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=plan,role",
+                        headers={
+                            "apikey": svc_key,
+                            "Authorization": f"Bearer {svc_key}",
+                        },
+                    )
+                    if resp.status_code == 200:
+                        rows = resp.json()
+                        if rows:
+                            plan = rows[0].get("plan", "free")
+            except Exception:
+                pass
+
+        return {"id": user_id, "email": email, "plan": plan}
+    except jwt.exceptions.PyJWTError:
+        return None
+
+
+async def require_auth(cred: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Require valid authentication."""
+    user = await get_current_user(cred)
+    if not user:
+        raise HTTPException(401, "Authentication required. Please sign in.")
+    return user
+
+
+async def get_user_plan(user: dict) -> dict:
+    """Look up user's plan from Supabase. Falls back to free."""
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        return PLAN_LIMITS["free"]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user['id']}&select=plan",
+                headers={
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    plan_name = data[0].get("plan", "free")
+                    return PLAN_LIMITS.get(plan_name, PLAN_LIMITS["free"])
+    except Exception as e:
+        log.warning(f"Failed to fetch user plan: {e}")
+    return PLAN_LIMITS["free"]
+
+
+# ─── xAI Grok Script Generation ───────────────────────────────────────────────
+
+TEMPLATE_SYSTEM_PROMPTS = {
+    "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where skeleton characters in detailed outfits deliver rapid-fire comparisons. The reference channel is CrypticScience.
+
+CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Write visual descriptions as if directing a cinematographer and VFX artist -- describe exactly what the camera sees, the character's pose, outfit details, what they're holding, and the motion/action happening.
+
+THE SKELETON CHARACTER RULES (STRICT):
+- Photorealistic anatomical human skeleton rendered in Unreal Engine 5 / octane render quality, 4K ultra HD
+- Glossy ivory/chrome white bones with subtle metallic reflections, clean and polished, highly detailed bone texture
+- EYES: The skeleton MUST have highly detailed, realistic human-looking EYEBALLS sitting in the orbital sockets. Each eyeball has a colored iris, natural wet shine, subtle veining, and lifelike light reflections. Eyes should look alive and expressive. NEVER empty eye sockets or hollow dark holes.
+- CLOTHING (CRITICAL -- ZERO TRANSPARENCY): ALWAYS wearing a COMPLETE head-to-toe outfit specific to what it represents:
+  * If it's an F1 driver: full F1 racing suit with team colors, gloves, boots, sponsor patches
+  * If it's a doctor: white lab coat, stethoscope around neck, scrubs underneath
+  * ALL clothing and accessories MUST be fully OPAQUE, SOLID fabric with visible realistic texture, stitching, seams, folds, and wrinkles
+  * Clothes fit the skeleton naturally as if worn by a real person with proper draping and fabric weight
+  * ABSOLUTELY NO transparent, see-through, x-ray, ghostly, or sheer clothing. NEVER show bones through clothes.
+- ONE skeleton per scene unless it's a VS/comparison shot (max 2)
+- Always FULL BODY visible from head to toe, centered in frame
+- EVERY scene the skeleton must be DOING something with ultra-smooth human-like natural motion -- fluid arm gestures, natural head turns, realistic weight and momentum. Zach D Films quality movement. NEVER stiff, robotic, or jerky motion.
+
+BACKGROUND: Solid clean teal/mint green (#5AC8B8) studio backdrop. Smooth gradient lighting. No environments, rooms, or outdoor scenes.
+
+CAMERA AND LIGHTING:
+- Professional studio photography lighting: key light from upper-left, fill light from right, rim light on edges
+- Slight depth of field blur on background
+- Camera is at chest height, slight upward angle (heroic framing)
+- Vary camera angle per scene: medium shot, slight close-up, wide establishing, over-shoulder
+
+PROPS AND VISUAL STORYTELLING:
+- Money/dollar bills physically floating in the air when discussing earnings (not CGI overlays)
+- The skeleton HOLDS relevant props: steering wheel, trophy, briefcase, gold bars, tools of the trade
+- In VS scenes: two skeletons face each other with dramatic lighting split between them
+- Relevant objects in frame: race cars in miniature, stacks of cash, equipment
+
+MOTION DIRECTION (for animation -- include this in visual_description):
+- Describe what MOVES: "skeleton gestures with right hand," "money bills drift slowly downward," "skeleton turns head to face camera"
+- Describe the ENERGY: "confident stance, skeleton leans forward assertively" or "skeleton shrugs with palms up"
+- ALL motion must be ultra-smooth and human-like with natural weight and follow-through, like a real person moving. Fluid transitions, no snapping between poses.
+- Clothing must sway and fold realistically with the body movement showing proper fabric physics
+- Eyes must track and shift naturally with subtle micro-movements
+- Keep motion SUBTLE and realistic -- no wild jumping or dancing. Zach D Films quality smooth cinematic motion.
+
+STRUCTURE (10 scenes, 45-50 seconds):
+1. HOOK: "[A] vs [B] -- who makes more?" Skeleton looking directly at camera, arms crossed
+2. SETUP: Context scene. Both skeletons in their outfits facing each other
+3-5. THING A DEEP DIVE: Three scenes with specific salary facts, skeleton A in action poses with props
+6-8. THING B DEEP DIVE: Three scenes with specific salary facts, skeleton B in action poses with props
+9. FACE-OFF: Both skeletons side by side, winner is slightly larger/taller, dramatic split lighting
+10. CONCLUSION: Winner skeleton with arms raised, confetti or money shower
+
+NARRATION RULES:
+- Short. Punchy. Factual. Zero filler words. RAPID-FIRE delivery -- no long pauses between sentences.
+- Use commas sparingly. Avoid ellipses or dramatic pauses. Keep the energy CONSTANT and flowing.
+- NEVER say "dive into", "buckle up", "let's explore", "in this video"
+- Real names, real dollar amounts, real brands in every scene
+- 1-2 sentences MAX per scene -- tight, snappy, high-retention
+
+CAPTION: text_overlay is ONE impactful word ("MILLION", "VERSUS", "DOUBLE", "WINNER")
+
+Output valid JSON:
+{
+  "title": "[A] vs [B] comparison title for SEO",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 4,
+      "narration": "1-2 sentence narration with real facts",
+      "visual_description": "Photorealistic 3D render: single glossy ivory-white anatomical human skeleton with clean polished bones, subtle metallic reflections, and a transparent/translucent body silhouette outline around the bones. The skeleton has highly detailed realistic human-looking eyeballs with iris color, natural wet shine, and lifelike reflections in the orbital sockets. Wearing [EXACT detailed outfit with colors and logos] -- all clothing must be fully OPAQUE solid fabric with visible texture, stitching, folds, and wrinkles, absolutely NO transparency or see-through material. [EXACT pose with hand/arm positions], [holding SPECIFIC prop], standing on solid clean light teal-blue studio backdrop. [Camera angle]. Professional studio photography lighting with strong rim light on bone edges. [Motion cue: ultra-smooth human-like natural movement with realistic weight and momentum]. 4K ultra HD, Unreal Engine 5, octane render, masterpiece.",
+      "text_overlay": "ONE_WORD"
+    }
+  ],
+  "description": "YouTube description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate exactly 10 scenes. EVERY visual_description must be 2-3 sentences minimum describing the EXACT outfit, pose, props, camera angle, and motion.""",
+
+    "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
+
+VISUAL STYLE:
+- Epic photorealistic scenes of historical events, battles, empires, ruins, and legendary figures
+- EVERY scene looks like a frame from a $200M blockbuster -- Ridley Scott, Christopher Nolan level
+- Dramatic lighting: volumetric god rays, golden hour, torchlight, battlefield fire
+- Camera angles: sweeping aerial establishing shots, dramatic low-angle hero shots, close-ups of faces/hands/weapons
+- Color grading: warm amber for ancient civilizations, cold blue-steel for war, desaturated for tragedy
+- Atmospheric: dust particles, fog of war, smoke, rain, sparks, embers floating
+- Characters wear period-accurate clothing with visible detail (armor, crowns, robes, weapons)
+- Environments are MASSIVE in scale -- armies, cities, temples, oceans
+
+NARRATION RULES:
+- Dramatic, authoritative narrator voice -- like a documentary trailer
+- 1-2 sentences per scene. Every sentence reveals a shocking fact or builds tension.
+- Drop real dates, real names, real numbers (death tolls, years, empires)
+- NEVER generic. NEVER "throughout history" or "since the dawn of time"
+- End with a mind-blowing fact or dark twist
+
+CAPTION STYLE:
+- text_overlay: 2-4 word dramatic phrase per scene ("THE FALL", "10,000 DEAD", "YEAR 1453")
+- Bold, impactful, centered lower-third
+
+STRUCTURE:
+1. HOOK: Shocking historical claim or question
+2. CONTEXT: Set the era and stakes (2 scenes)
+3. RISING ACTION: Build to the climactic event (3-4 scenes)
+4. CLIMAX: The most dramatic moment -- battle, betrayal, discovery (2 scenes)
+5. AFTERMATH: Shocking aftermath or legacy (1-2 scenes)
+6. CLOSER: Mind-blowing final fact
+
+Output format MUST be valid JSON:
+{
+  "title": "SEO title -- must include a year or shocking claim",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 4,
+      "narration": "Dramatic 1-2 sentence narration with real facts",
+      "visual_description": "Epic photorealistic cinematic scene. [Historical setting], [characters in period clothing], [dramatic lighting with volumetric effects], [camera angle], [atmospheric details]. Shot on ARRI Alexa, anamorphic lens, 8k.",
+      "text_overlay": "2-4 WORD PHRASE"
+    }
+  ],
+  "description": "YouTube/TikTok description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate 10-12 scenes for a 45-60 second short.""",
+
+    "story": """You are an elite viral scriptwriter creating cinematic AI visual stories -- short films that make people stop scrolling and watch to the very end. Think Pixar emotional depth meets Blade Runner visuals in 50-60 seconds.
+
+VISUAL STYLE:
+- Every scene is a standalone cinematic masterpiece -- Pixar quality 3D or hyper-photorealistic
+- ONE consistent main character described identically in EVERY scene (same face, clothing, build, hair)
+- Art direction changes with emotion: warm golden light (hope), cold blue (danger), saturated vivid (wonder), desaturated gray (loss)
+- Camera work: dolly tracking shots, slow push-ins for emotional moments, wide establishing shots for scale
+- Environments: richly detailed, fantastical or emotionally resonant locations
+- Atmospheric details in EVERY scene: particles, fog, reflections, lens flares, rain, floating elements
+- Lighting: motivated light sources, volumetric beams, bioluminescence, practical lights
+
+STORY STRUCTURE (emotional arc is MANDATORY):
+1. HOOK (Scene 1): Visually stunning opening that demands attention -- a mystery, danger, or beauty
+2. SETUP (Scenes 2-3): Establish the character, their world, and what they want
+3. RISING ACTION (Scenes 4-6): Obstacles, discoveries, building tension
+4. CLIMAX (Scenes 7-9): Peak emotional moment -- beautiful, shocking, or heartbreaking
+5. RESOLUTION (Scenes 10-11): Emotional payoff, satisfying conclusion
+6. CTA (Scene 12): Leave them wanting more
+
+NARRATION RULES:
+- Poetic but accessible. Every sentence earns its place.
+- Short narration at visual peaks -- let the image speak.
+- Build toward an emotional punch. The final line should hit hard.
+- 1-2 sentences per scene max.
+
+CAPTION STYLE:
+- text_overlay: Dramatic phrase or empty string. Use sparingly for impact.
+- Only on emotional peak scenes. Most scenes can have empty text_overlay.
+
+Output format MUST be valid JSON:
+{
+  "title": "Intriguing/clickable SEO title",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 4,
+      "narration": "Emotionally resonant 1-2 sentence narration",
+      "visual_description": "Cinematic scene: [art style], [camera angle], [lighting], [color palette], [character in consistent clothing], [environment], [atmospheric effects]. Pixar/UE5 quality, 8k.",
+      "text_overlay": "DRAMATIC PHRASE or empty string"
+    }
+  ],
+  "description": "YouTube/TikTok description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate 10-12 scenes for a 50-65 second short. The story must have genuine emotional weight.""",
+
+    "reddit": """You are a viral short-form scriptwriter for Reddit story narration content. These are the massively popular videos where a compelling Reddit story (AITA, TIFU, relationship drama, revenge, etc) is narrated over satisfying background visuals.
+
+VISUAL STYLE:
+- Split-screen concept: vivid AI-generated scenes that illustrate the story events
+- Scenes show the CHARACTERS and SITUATIONS described in the story (not Reddit UI)
+- Photorealistic people in realistic modern-day settings (apartments, offices, cars, restaurants)
+- Dramatic lighting to match story mood: warm for happy moments, dark for conflict, bright for resolution
+- Text-heavy overlays showing key dialogue or shocking revelations
+- Character consistency: the main person looks the same across all scenes
+
+STORY STRUCTURE:
+1. HOOK: The Reddit post title as narration + establishing visual of the main character
+2. SETUP: Who they are, the situation (2 scenes)
+3. CONFLICT: The dramatic event/revelation (3-4 scenes)
+4. ESCALATION: Things get worse or more dramatic (2 scenes)
+5. TWIST/RESOLUTION: The satisfying conclusion or shocking reveal (2 scenes)
+6. VERDICT: "So Reddit, AITA?" or equivalent (1 scene)
+
+NARRATION RULES:
+- First person, conversational tone. Like reading the actual Reddit post aloud.
+- Each scene is a story beat -- not just random sentences.
+- Include specific details that make it feel real (ages, relationships, exact quotes).
+- 2-3 sentences per scene. Build suspense.
+
+CAPTION STYLE:
+- text_overlay: Key dialogue in quotes, or dramatic 2-3 word reactions ("SHE LIED", "THE TRUTH", "AITA?")
+- Text appears on every scene.
+
+Output format MUST be valid JSON:
+{
+  "title": "Reddit-style clickbait SEO title",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 5,
+      "narration": "Story narration in first person (2-3 sentences)",
+      "visual_description": "Photorealistic scene illustrating the story moment. [Modern setting], [character with consistent appearance], [dramatic mood lighting], [specific details]. Cinematic photography, 8k.",
+      "text_overlay": "KEY_PHRASE or dialogue in quotes"
+    }
+  ],
+  "description": "YouTube/TikTok description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate 8-10 scenes for a 50-75 second short. The story must have a twist or satisfying conclusion.""",
+
+    "top5": """You are an elite viral scriptwriter for "Top 5" countdown content. These videos count down 5 dramatic items with shocking reveals, building to a #1 that blows minds.
+
+VISUAL STYLE:
+- Each list item gets its own visually DISTINCT, dramatic scene
+- Photorealistic or cinematic 3D quality -- every frame looks like a movie poster
+- Bold, dramatic compositions: the subject is HERO-LIT, centered, powerful
+- Lighting: dramatic chiaroscuro, spotlights, volumetric beams, neon glow
+- Color themes change per item to keep visual variety (warm gold, cold steel, electric blue, deep red, pure white)
+- Include relevant visual elements: if listing dangerous animals, show the animal in dramatic pose; if listing expensive things, show luxury and scale
+- Camera angles: low-angle power shots for impressive items, aerial for scale, close-ups for detail
+
+STRUCTURE (EXACTLY 7 scenes):
+1. HOOK: "You won't believe #1" type opening with dramatic montage visual
+2. #5: First item -- interesting but the weakest of the five
+3. #4: Building intensity
+4. #3: Getting serious now
+5. #2: Almost the best -- this one shocks
+6. #1: The absolute mind-blower. Spend extra detail here.
+7. OUTRO: Recap or CTA ("Which one shocked you most?")
+
+NARRATION RULES:
+- Fast, energetic, building excitement with each item
+- Drop REAL facts, real numbers, real names for every item
+- 2 sentences per item max. First sentence = what it is. Second = the shocking detail.
+- Build a clear escalation of drama from #5 to #1
+
+CAPTION STYLE:
+- text_overlay: "#5 - ITEM NAME" format for countdown items
+- Hook scene: "TOP 5" or the category
+- Bold, numbered, impossible to miss
+
+Output format MUST be valid JSON:
+{
+  "title": "Top 5 [Category] You Won't Believe -- SEO optimized",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 4,
+      "narration": "Punchy 1-2 sentence narration with real facts",
+      "visual_description": "Dramatic photorealistic scene of [subject]. [Hero lighting], [bold composition], [color theme]. Cinematic documentary quality, 8k.",
+      "text_overlay": "#5 - ITEM NAME"
+    }
+  ],
+  "description": "YouTube/TikTok description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate EXACTLY 7 scenes. Each countdown item must be visually completely different from the others.""",
+
+    "random": """You are an unhinged viral scriptwriter creating maximum-chaos short-form content. Think "brain rot" but actually well-produced. Zach D Films energy. Every 2-3 seconds something completely unexpected happens.
+
+VISUAL STYLE:
+- EVERY scene is visually COMPLETELY DIFFERENT from the last -- jarring transitions are the point
+- Mix styles wildly: photorealistic one scene, surreal 3D the next, neon cyberpunk, then underwater
+- Bold, oversaturated colors. Nothing subtle. Everything is cranked to 11.
+- Unexpected subjects: random animals doing human things, surreal landscapes, absurd situations
+- Dramatic angles: extreme close-ups, fisheye, Dutch angles, bird's eye
+- Visual gags: things that are the wrong size, impossible physics, absurd combinations
+
+NARRATION RULES:
+- FAST. Breathless. Like the narrator just chugged three energy drinks.
+- 1 sentence per scene MAX. Sometimes just a few words.
+- Non-sequiturs are fine. Jump between topics. Controlled chaos.
+- Mix humor, shock, and random facts. Keep them guessing.
+- NEVER explain what's happening. Just state it and move on.
+
+CAPTION STYLE:
+- text_overlay: Bold 1-3 word reactions ("WAIT WHAT", "BRO", "NO WAY", "ACTUALLY REAL")
+- Every scene has text. It adds to the chaos.
+
+STRUCTURE:
+- No structure. That's the point.
+- Scene 1: Hook with something absurd
+- Scenes 2-12: Pure chaos, each one completely unrelated to the last
+- Final scene: End on the most absurd thing yet
+
+Output format MUST be valid JSON:
+{
+  "title": "Unhinged clickbait SEO title",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 3,
+      "narration": "Fast 1 sentence (or less)",
+      "visual_description": "Hyper-detailed surreal scene. [Wild subject], [extreme art style], [bold colors], [dramatic angle]. 8k, trending on ArtStation.",
+      "text_overlay": "1-3 WORD REACTION"
+    }
+  ],
+  "description": "YouTube/TikTok description with hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate 12-15 scenes for a 35-50 second short. Maximum chaos. Minimum boredom. Every scene a pattern interrupt.""",
+
+    "roblox": """You are a viral scriptwriter for Roblox Rant content. These shorts feature a Roblox character (blocky avatar) walking/running on a Roblox treadmill or obstacle course while a narrator rants passionately about a relatable topic. The character gameplay is background footage -- the RANT is the content.
+
+VISUAL STYLE:
+- Roblox character gameplay footage: running through obby, on a treadmill, or doing parkour
+- Bright colorful Roblox environments with that signature blocky aesthetic
+- The gameplay should feel casual/autopilot -- the focus is the voiceover rant
+- Clean, well-lit Roblox worlds (not dark or horror)
+- Character wears simple outfit matching the rant topic when possible
+
+NARRATION RULES:
+- Passionate, slightly unhinged rant style. Think someone venting to their best friend
+- Start with a HOT TAKE or controversial opinion that hooks immediately
+- Build frustration/energy as the rant continues
+- Use rhetorical questions: "And you know what the WORST part is?"
+- Relatable everyday frustrations, school life, work, social media, dating, gaming
+- End with a mic-drop conclusion or unexpected twist
+- 1-2 sentences per scene, conversational tone
+
+CAPTION STYLE:
+- text_overlay: Key phrase from the rant in caps ("THE WORST PART", "NOBODY TALKS ABOUT THIS", "I SAID WHAT I SAID")
+
+STRUCTURE (8-10 scenes, 40-55 seconds):
+1. HOOK: Hot take that makes people stop scrolling
+2-3. CONTEXT: Set up the situation everyone relates to
+4-6. THE RANT: Build frustration, specific examples, escalating energy
+7-8. PEAK: The most heated part, rhetorical questions
+9-10. CONCLUSION: Mic-drop ending, call to comment
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+
+    "objects": """You are a viral scriptwriter for "Objects Explain" content. In this format, everyday objects come to life and explain how they work, what they go through, or give their perspective on life. Think Pixar's approach to inanimate objects having feelings and stories.
+
+VISUAL STYLE:
+- Photorealistic close-up of the object as the main character, slightly anthropomorphized
+- The object should look real but with subtle personality (slight glow, positioned as if presenting)
+- Clean studio or contextual background (a toaster in a kitchen, a traffic light on a street)
+- Warm, inviting lighting. Think product photography meets Pixar
+- Each scene shows the object in a different situation or from a different angle
+- Props and other objects in frame that relate to what's being discussed
+
+NARRATION RULES:
+- First person from the object's perspective: "Hey, I'm your refrigerator..."
+- Surprisingly educational -- real facts about how the object works
+- Mix humor with genuine information
+- Self-aware and slightly sarcastic about their existence
+- Relatable complaints: "You open me 47 times a day and STILL don't know what you want"
+- End with a wholesome or unexpected emotional beat
+
+CAPTION STYLE:
+- text_overlay: Fun labels ("YOUR PHONE", "37 TIMES A DAY", "SINCE 1927", "I NEVER SLEEP")
+
+STRUCTURE (8-10 scenes, 40-55 seconds):
+1. HOOK: Object introduces itself in an unexpected way
+2-3. HOW IT WORKS: Surprisingly interesting facts about the object
+4-6. DAILY LIFE: What the object "experiences" (funny perspective)
+7-8. COMPLAINTS/REVELATIONS: Things humans don't know about it
+9-10. EMOTIONAL ENDING: Wholesome twist or existential realization
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+
+    "split": """You are a viral scriptwriter for Split Screen comparison content. These videos show two things side by side with a dramatic comparison -- lifestyles, countries, products, careers, rich vs poor, $1 vs $1000, etc. The split screen format is inherently retention-boosting because viewers compare both sides.
+
+VISUAL STYLE:
+- Every scene is designed for SPLIT SCREEN (left vs right)
+- Left side and right side should be visually contrasting (luxury vs budget, old vs new, etc)
+- Photorealistic scenes with strong visual identity for each side
+- Color coding: one side warm tones, other side cool tones (or gold vs silver, etc)
+- Clean compositions that read well at 50% width
+- Bold visual contrast is key -- the two sides should look dramatically different
+
+NARRATION RULES:
+- Fast-paced comparison style: "On the left... but on the right..."
+- Shocking price differences, lifestyle gaps, or quality comparisons
+- Real facts, real numbers, real brands
+- Build to the most shocking comparison at the end
+- 1-2 sentences per scene, punchy delivery
+
+CAPTION STYLE:
+- text_overlay: Price tags, labels, or comparison words ("$1 VS $10,000", "CHEAP", "LUXURY", "WINNER")
+
+STRUCTURE (8-10 scenes, 40-55 seconds):
+1. HOOK: Show the most dramatic visual contrast immediately
+2-8. COMPARISONS: Each scene compares one specific aspect (left vs right)
+9-10. VERDICT: Which side wins and the mind-blowing final stat
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Each visual_description MUST describe BOTH the left and right side of the split screen. Generate 8-10 scenes.""",
+
+    "twitter": """You are a viral scriptwriter for Twitter/X Thread narration content. These shorts take viral tweets, hot takes, or Twitter drama threads and narrate them over satisfying or relevant visuals. Think of reading the most insane Twitter thread while watching satisfying content.
+
+VISUAL STYLE:
+- Clean, modern aesthetic with subtle Twitter/X branding colors (blues, whites, blacks)
+- Background visuals match the tweet topic (satisfying videos, relevant scenes, dramatic footage)
+- Screenshots or recreated tweet-style text cards can be described for key moments
+- Smooth transitions, modern motion graphics feel
+- Clean typography, dark mode aesthetic
+
+NARRATION RULES:
+- Read the thread like storytelling, not just reading tweets
+- Add dramatic pauses and emphasis on key revelations
+- "And THEN they replied with..." -- build suspense between tweets
+- Mix the original tweet language with narrator commentary
+- Start with the most shocking tweet/take to hook
+- End with the community reaction or plot twist reply
+
+CAPTION STYLE:
+- text_overlay: Key phrases from tweets, reaction words ("THE RATIO", "DELETED", "WENT VIRAL", "PLOT TWIST")
+
+STRUCTURE (8-10 scenes, 40-55 seconds):
+1. HOOK: The most shocking tweet or take
+2-3. CONTEXT: Background on the situation
+4-7. THE THREAD: Build the story tweet by tweet, escalating drama
+8-9. THE TWIST: Plot twist reply or community reaction
+10. CONCLUSION: Aftermath or call to engage
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+
+    "quiz": """You are a viral scriptwriter for Quiz/Trivia content. These shorts present rapid-fire questions with dramatic reveals. The viewer tries to guess before the answer drops. Extremely high retention because people NEED to see if they were right.
+
+VISUAL STYLE:
+- Bold, game-show aesthetic with vibrant colors
+- Each question displayed with large, clean typography
+- Answer reveal with dramatic visual effect (flash, zoom, color change)
+- Progress indicators (Question 1 of 5, etc)
+- Themed visuals matching the question topic
+- Clean dark or gradient backgrounds with bright accents
+
+NARRATION RULES:
+- Energetic quiz host delivery: "Question number 3... and this one's TRICKY"
+- Build suspense before each answer: "The answer is... [pause]"
+- Mix easy and hard questions to keep confidence fluctuating
+- Include a "most people get this wrong" moment
+- Real facts that surprise people
+- End with the hardest question and most shocking answer
+
+CAPTION STYLE:
+- text_overlay: The question number, answer reveals, score-keeping ("Q3", "WRONG!", "CORRECT!", "ONLY 2% KNOW")
+
+STRUCTURE (10-12 scenes, 45-60 seconds):
+1. HOOK: "Only 1 in 100 people get all 5 right" or similar
+2-3. Q1: Easy question + dramatic reveal
+4-5. Q2: Medium question + reveal
+6-7. Q3: Tricky question + shocking answer
+8-9. Q4: Hard question + reveal with fun fact
+10-11. Q5: Nearly impossible question + mind-blowing answer
+12. CONCLUSION: "How many did YOU get right? Comment below!"
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 10-12 scenes.""",
+
+    "argument": """You are a viral scriptwriter for Argument/Debate Conversation content. These shorts feature two opposing viewpoints arguing back and forth, getting increasingly heated. The viewer picks a side. Extremely engaging because people love watching debates.
+
+VISUAL STYLE:
+- Two distinct characters or text bubbles representing each side
+- Split or alternating frames showing each speaker
+- Visual style matches the debate topic (professional setting for career debates, casual for lifestyle)
+- Color-coded sides (blue vs red, warm vs cool)
+- Expressive character poses or text message-style conversation bubbles
+- Escalating visual intensity as the argument heats up
+
+NARRATION RULES:
+- Two distinct voices/tones alternating (confident vs defensive, calm vs heated)
+- Start civil, escalate to passionate
+- Each side makes genuinely good points
+- Include specific facts and examples, not just opinions
+- The "winning" argument should surprise the viewer
+- End without a clear winner to drive comments: "Who's right? Comment below"
+- Use realistic conversational language, interruptions, "wait wait wait..."
+
+CAPTION STYLE:
+- text_overlay: Side labels, reaction words ("SIDE A", "GOOD POINT", "BUT ACTUALLY...", "DESTROYED")
+
+STRUCTURE (10-12 scenes, 45-60 seconds):
+1. HOOK: The controversial question that starts the debate
+2-3. Side A opens with a strong argument
+4-5. Side B fires back with counter-evidence
+6-7. Side A escalates, brings new facts
+8-9. Side B delivers a surprising rebuttal
+10-11. Both sides make their final case
+12. OPEN ENDING: "Who won? Comment below"
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 10-12 scenes.""",
+
+    "wouldyourather": """You are a viral scriptwriter for "Would You Rather" content. These shorts present increasingly difficult dilemmas that viewers mentally debate. Extremely high engagement because EVERYONE has an opinion and NEEDS to comment their choice.
+
+VISUAL STYLE:
+- Split screen or alternating panels showing each option
+- Bold, colorful visuals that make each choice look appealing (or terrifying)
+- Dramatic reveal of statistics: "87% of people chose..."
+- Clean typography with large "A" or "B" labels
+- Visual representation of each scenario (photorealistic, dramatic)
+- Escalating visual intensity as dilemmas get harder
+
+NARRATION RULES:
+- Start easy, get progressively harder/more impossible
+- Each dilemma should be genuinely difficult -- no obvious answers
+- Include the twist or hidden catch in each option
+- React to each choice: "But here's what you didn't consider..."
+- End with the hardest possible dilemma
+- 5-6 dilemmas total, escalating difficulty
+
+CAPTION STYLE:
+- text_overlay: "OPTION A", "OPTION B", percentages, "IMPOSSIBLE", "87% CHOSE..."
+
+STRUCTURE (10-12 scenes, 45-60 seconds):
+1. HOOK: "Would you rather..." with an immediately grabbing dilemma
+2-3. DILEMMA 1: Easy but fun, show both options
+4-5. DILEMMA 2: Getting harder, reveal the catch
+6-7. DILEMMA 3: Now it's personal
+8-9. DILEMMA 4: No good answer
+10-11. DILEMMA 5: The impossible one
+12. CTA: "Which did you pick? Comment!"
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 10-12 scenes.""",
+
+    "scary": """You are an elite viral scriptwriter for Scary Story / True Crime content. These shorts tell bone-chilling stories with maximum suspense. Think "Mr. Nightmare" meets true crime documentary in 50-60 seconds. The goal is to make viewers physically uncomfortable with tension.
+
+VISUAL STYLE:
+- Dark, atmospheric cinematography. Think David Fincher's color palette.
+- Desaturated blues, greens, sickly yellows. Nothing looks warm or safe.
+- Environments: abandoned buildings, dark hallways, foggy forests, empty rooms at night
+- Shadows dominate 60%+ of every frame. Things lurking in darkness.
+- Found-footage quality for "real" moments, cinematic for dramatic beats
+- Subtle horror: doors slightly ajar, figures in background, things that are "wrong"
+- NO jump scares in visuals -- build dread through composition
+
+NARRATION RULES:
+- Hushed, intimate narrator voice. Like someone telling a story around a campfire.
+- Start with "This actually happened" or establish it's real/based on real events
+- Build tension slowly, layer details that seem innocent but become terrifying
+- Use time stamps: "At 3:47 AM..." for credibility
+- End with an unresolved mystery or chilling final detail
+- NEVER resolve everything -- leave the viewer unsettled
+
+CAPTION STYLE:
+- text_overlay: Timestamps, locations, short chilling phrases ("3:47 AM", "NO ONE WAS HOME", "THE DOOR WAS LOCKED", "THEY NEVER FOUND...")
+
+STRUCTURE (8-10 scenes, 50-65 seconds):
+1. HOOK: "What happened at [location] on [date] still can't be explained"
+2-3. SETUP: Establish the normal situation, subtle wrongness
+4-6. ESCALATION: Things get progressively more disturbing
+7-8. CLIMAX: The most terrifying revelation
+9-10. AFTERMATH: The chilling unresolved ending
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+
+    "motivation": """You are an elite viral scriptwriter for Motivation / Inspirational content. These shorts deliver powerful life advice with cinematic visuals that make people screenshot and share. Think Gary Vee intensity meets David Goggins discipline meets cinematic production value.
+
+VISUAL STYLE:
+- Cinematic wide shots of epic environments: mountain peaks, city skylines at golden hour, ocean storms, empty roads
+- Silhouettes of a lone figure against dramatic backdrops
+- Sunrise/sunset golden hour lighting in every scene
+- Dramatic weather: rain, fog, snow, lightning -- nature as metaphor
+- Slow-motion texture shots: rain hitting ground, fists clenching, feet hitting pavement
+- Color grading: warm golds and deep blues. Aspirational and powerful.
+
+NARRATION RULES:
+- Deep, authoritative, gravelly voice. Quiet intensity.
+- Short. Powerful. Every sentence hits like a punch.
+- NO cliches: no "hustle", no "grind", no "rise and shine"
+- Use specific stories or examples, not generic advice
+- Contrast: "Everyone wants the result. Nobody wants the 4 AM alarm."
+- Build to a single powerful conclusion that reframes everything
+- Make it feel personal, like advice from a mentor
+
+CAPTION STYLE:
+- text_overlay: The most powerful phrase from each narration ("4 AM", "NO EXCUSES", "THE REAL PRICE", "YOUR MOVE")
+
+STRUCTURE (8-10 scenes, 45-60 seconds):
+1. HOOK: Controversial truth that challenges the viewer
+2-3. THE PROBLEM: What most people get wrong
+4-6. THE TRUTH: Hard-hitting reality with specific examples
+7-8. THE SHIFT: Reframe that changes perspective
+9-10. THE CHARGE: Powerful call to action, leave them fired up
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+
+    "whatif": """You are a viral scriptwriter for "What If" Scenario content. These shorts explore mind-bending hypothetical scenarios with real science and dramatic visuals. "What if the Sun disappeared for 24 hours?" "What if humans could fly?" The curiosity gap is irresistible.
+
+VISUAL STYLE:
+- Photorealistic CGI depicting the hypothetical scenario playing out
+- Start with normal reality, then visually transform as the "what if" takes effect
+- Scale and spectacle: show the MASSIVE consequences (cities flooding, sky changing color, etc)
+- Scientific visualization: show physics, biology, or chemistry in action
+- Before/after contrast in each scene
+- Epic wide shots showing global-scale effects
+- Color shifts to indicate the change from normal to hypothetical
+
+NARRATION RULES:
+- Curious, slightly awestruck narrator tone
+- Ground every claim in real science: "According to NASA..." or "Physics tells us..."
+- Escalate consequences: minute 1, hour 1, day 1, year 1, etc
+- Each scene reveals a more shocking consequence than the last
+- End with the most mind-blowing implication
+- Make viewers feel smarter for watching
+
+CAPTION STYLE:
+- text_overlay: Time stamps and shocking facts ("HOUR 1", "327°F", "EXTINCT IN 8 MINUTES", "NO RETURN")
+
+STRUCTURE (8-10 scenes, 50-65 seconds):
+1. HOOK: "What if [scenario]? Here's what would actually happen."
+2-3. IMMEDIATE EFFECTS: First seconds/minutes
+4-5. SHORT TERM: Hours to days, things get serious
+6-7. MEDIUM TERM: Weeks to months, cascading consequences
+8-9. LONG TERM: Years, permanent changes
+10. MIND-BLOW: The one consequence nobody expects
+
+Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual_description, text_overlay), description, tags. Generate 8-10 scenes.""",
+}
+
+
+async def generate_script(template: str, topic: str) -> dict:
+    system_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-3-mini-fast",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Create a viral short about: {topic}"},
+                ],
+                "temperature": 0.8,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON found in Grok response")
+        return json.loads(content[start:end])
+
+
+# ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
+
+TEMPLATE_VOICE_SETTINGS = {
+    "skeleton": {
+        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - young, edgy male
+        "stability": 0.30,
+        "similarity_boost": 0.85,
+        "style": 0.55,
+        "speed": 1.15,
+    },
+    "history": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - deep, authoritative
+        "stability": 0.6,
+        "similarity_boost": 0.8,
+        "style": 0.2,
+    },
+    "story": {
+        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - warm, cinematic narrator
+        "stability": 0.65,
+        "similarity_boost": 0.85,
+        "style": 0.15,
+    },
+    "reddit": {
+        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",
+        "stability": 0.5,
+        "similarity_boost": 0.75,
+        "style": 0.35,
+    },
+    "top5": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",
+        "stability": 0.55,
+        "similarity_boost": 0.8,
+        "style": 0.25,
+    },
+    "roblox": {
+        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - young, rant energy
+        "stability": 0.35,
+        "similarity_boost": 0.7,
+        "style": 0.5,
+    },
+    "objects": {
+        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - warm, friendly narrator
+        "stability": 0.6,
+        "similarity_boost": 0.85,
+        "style": 0.3,
+    },
+    "split": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - authoritative comparison
+        "stability": 0.5,
+        "similarity_boost": 0.8,
+        "style": 0.3,
+    },
+    "twitter": {
+        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - casual, dramatic
+        "stability": 0.45,
+        "similarity_boost": 0.75,
+        "style": 0.4,
+    },
+    "quiz": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - game show energy
+        "stability": 0.45,
+        "similarity_boost": 0.8,
+        "style": 0.4,
+    },
+    "argument": {
+        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - animated debate
+        "stability": 0.4,
+        "similarity_boost": 0.75,
+        "style": 0.45,
+    },
+    "wouldyourather": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - dramatic dilemma host
+        "stability": 0.5,
+        "similarity_boost": 0.8,
+        "style": 0.35,
+    },
+    "scary": {
+        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - hushed, intimate
+        "stability": 0.7,
+        "similarity_boost": 0.9,
+        "style": 0.1,
+    },
+    "motivation": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - deep, powerful
+        "stability": 0.65,
+        "similarity_boost": 0.85,
+        "style": 0.15,
+    },
+    "whatif": {
+        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - curious, awestruck
+        "stability": 0.55,
+        "similarity_boost": 0.85,
+        "style": 0.25,
+    },
+    "random": {
+        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - chaotic energy host
+        "stability": 0.4,
+        "similarity_boost": 0.7,
+        "style": 0.5,
+    },
+}
+
+
+async def generate_voiceover(text: str, output_path: str, template: str = "random") -> dict:
+    """Generate voiceover with word-level timestamps for caption sync.
+    Returns {"audio_path": str, "word_timings": list[dict]} where each timing is
+    {"word": str, "start": float, "end": float}.
+    """
+    vs = TEMPLATE_VOICE_SETTINGS.get(template, {})
+    voice_id = vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "model_id": "eleven_turbo_v2_5",
+                "voice_settings": {
+                    "stability": vs.get("stability", 0.5),
+                    "similarity_boost": vs.get("similarity_boost", 0.75),
+                    "style": vs.get("style", 0.3),
+                    "speed": vs.get("speed", 1.0),
+                },
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    import base64 as b64mod
+    audio_b64 = data.get("audio_base64", "")
+    if audio_b64:
+        audio_bytes = b64mod.b64decode(audio_b64)
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+    else:
+        log.warning("No audio_base64 in timestamps response, falling back to standard endpoint")
+        fallback_resp = await httpx.AsyncClient(timeout=120).post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+            json={"text": text, "model_id": "eleven_turbo_v2_5",
+                  "voice_settings": {"stability": vs.get("stability", 0.5),
+                                     "similarity_boost": vs.get("similarity_boost", 0.75),
+                                     "style": vs.get("style", 0.3)}},
+        )
+        fallback_resp.raise_for_status()
+        with open(output_path, "wb") as f:
+            f.write(fallback_resp.content)
+        return {"audio_path": output_path, "word_timings": []}
+
+    word_timings = _extract_word_timings(text, data.get("alignment", {}))
+    log.info(f"Voiceover generated with {len(word_timings)} word timings: {output_path}")
+    return {"audio_path": output_path, "word_timings": word_timings}
+
+
+def _extract_word_timings(original_text: str, alignment: dict) -> list:
+    """Convert ElevenLabs character-level alignment into word-level timings."""
+    chars = alignment.get("characters", [])
+    char_starts = alignment.get("character_start_times_seconds", [])
+    char_ends = alignment.get("character_end_times_seconds", [])
+
+    if not chars or not char_starts or not char_ends:
+        return []
+    if len(chars) != len(char_starts) or len(chars) != len(char_ends):
+        return []
+
+    words = []
+    current_word = ""
+    word_start = None
+
+    for i, ch in enumerate(chars):
+        if ch in (" ", "\n", "\t"):
+            if current_word:
+                words.append({
+                    "word": current_word,
+                    "start": word_start,
+                    "end": char_ends[i - 1] if i > 0 else char_starts[i],
+                })
+                current_word = ""
+                word_start = None
+        else:
+            if word_start is None:
+                word_start = char_starts[i]
+            current_word += ch
+
+    if current_word and word_start is not None:
+        words.append({
+            "word": current_word,
+            "start": word_start,
+            "end": char_ends[-1],
+        })
+
+    return words
+
+
+def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str = "720p") -> str:
+    """Generate an ASS subtitle file with rapid single-word captions.
+    Each word appears individually, large and bold, changing rapidly with every spoken word.
+    High-retention viral TikTok/Reels style -- one word at a time, rapid fire.
+    """
+    res_w = 1080 if resolution == "1080p" else 720
+    res_h = 1920 if resolution == "1080p" else 1280
+    font_size = 72 if resolution == "1080p" else 52
+    outline = 5 if resolution == "1080p" else 4
+    shadow = 2
+    margin_v = int(res_h * 0.25)
+
+    header = f"""[Script Info]
+Title: NYPTID Captions
+ScriptType: v4.00+
+PlayResX: {res_w}
+PlayResY: {res_h}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Word,Arial Black,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,105,105,2,0,1,{outline},{shadow},2,20,20,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def ts_to_ass(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        cs = int((seconds % 1) * 100)
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    events = []
+    for i, wt in enumerate(word_timings):
+        word = wt["word"].strip()
+        if not word:
+            continue
+        start = wt["start"]
+        end = wt["end"]
+        if end - start < 0.08:
+            end = start + 0.12
+
+        safe_word = word.upper().replace("\\", "").replace("{", "").replace("}", "")
+
+        pop_in = r"{\fscx130\fscy130\t(0,60,\fscx105\fscy105)}"
+        events.append(
+            f"Dialogue: 0,{ts_to_ass(start)},{ts_to_ass(end)},Word,,0,0,0,,{pop_in}{safe_word}"
+        )
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write("\n".join(events))
+        f.write("\n")
+
+    log.info(f"ASS subtitle file generated: {output_path} ({len(events)} single-word captions)")
+    return output_path
+
+
+# ─── ComfyUI Image Generation with Upscaling ─────────────────────────────────
+
+SKELETON_IMAGE_PROMPT_PREFIX = (
+    "Photorealistic 3D render of a glossy white anatomical human skeleton with clean polished bone surfaces "
+    "and subtle metallic reflections, visible transparent/translucent body silhouette outline around the bones. "
+    "The skeleton has highly detailed realistic human-looking eyeballs with iris color, natural wet shine, "
+    "subtle veining, and lifelike reflections sitting perfectly in the orbital sockets. "
+    "All clothing and accessories must be fully opaque, solid fabric with visible texture, stitching, folds, "
+    "and wrinkles -- absolutely NO transparency, NO see-through material, NO x-ray effect on clothes. "
+    "Clothes fit the skeleton naturally as if worn by a real person with proper draping and weight. "
+    "Standing on a solid clean light teal-blue studio backdrop. Professional studio photography lighting with "
+    "strong rim light on bone edges. 4K ultra HD, Unreal Engine 5 quality, octane render, masterpiece. "
+    "The skeleton must look exactly like a premium medical anatomy model with ivory-white chrome bones. "
+)
+
+TEMPLATE_KLING_MOTION = {
+    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. Clothing sways and folds realistically with body movement showing fabric physics. Camera holds steady with very slight cinematic push-in. Professional studio lighting stays consistent. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
+    "history": "Epic cinematic camera movement: slow dolly forward through the scene, atmospheric particles drift, fabric and hair move in wind, fire flickers, dramatic lighting shifts. Film-quality motion with depth.",
+    "story": "Emotional character animation: subtle facial expressions, natural body language, characters interact with environment. Cinematic camera slowly orbits or pushes in. Atmospheric lighting shifts to match mood.",
+    "reddit": "Static with subtle motion: slight camera drift, ambient lighting changes, minimal character movement. Clean modern look.",
+    "top5": "Dynamic reveal animation: dramatic camera push-in or orbit around subject, volumetric light beams shift, subject has powerful presence with minimal movement. Epic cinematic energy.",
+    "random": "Chaotic energy: rapid unexpected motion, surreal physics, things morph and transform, wild camera movement. Maximum visual impact.",
+    "roblox": "Roblox gameplay motion: character running forward on treadmill or obstacle course, smooth third-person camera follow, bouncy colorful environment, game-like movement.",
+    "objects": "Subtle product photography motion: slow orbit around the object, gentle lighting shifts, slight zoom in, the object appears to breathe or pulse with personality. Smooth cinematic.",
+    "split": "Split screen reveal: camera slowly pans across both sides showing the contrast, smooth transition between comparison elements, dramatic lighting shifts.",
+    "twitter": "Modern motion graphics: smooth text animations, subtle camera drift, satisfying background footage with gentle movement, clean transitions.",
+    "quiz": "Game show energy: dramatic zoom into answer reveal, spotlight movements, slight camera shake on reveals, bold color transitions between questions.",
+    "argument": "Debate intensity: camera cuts between two sides, slight shake during heated moments, dramatic lighting shifts, confrontational energy building.",
+    "wouldyourather": "Choice reveal: split screen animation revealing both options, dramatic pause before statistics, smooth transitions between dilemmas, building tension.",
+    "scary": "Horror atmosphere: extremely slow camera drift through dark environments, subtle movements in shadows, flickering lights, creeping dread. Almost imperceptible motion that builds unease.",
+    "motivation": "Epic cinematic: slow-motion camera sweep across landscape, golden light shifts, silhouette figure in the distance, wind and weather movement, inspirational energy.",
+    "whatif": "Scientific visualization: transformation from normal to hypothetical, dramatic scale changes, time-lapse effects, before-and-after morphing, epic camera pullback to show scale.",
+}
+
+SKELETON_NEGATIVE_PROMPT = (
+    "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
+    "skin, flesh, muscles, human face, realistic person, "
+    "outdoor scene, room, environment, landscape, nature, buildings, "
+    "dark background, black background, white background, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
+    "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, naked skeleton, "
+    "sheer material, translucent clothing, ghostly clothes, glass clothes, "
+    "jpeg artifacts, pixelated, ugly, low resolution, "
+    "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
+    "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose"
+)
+
+HISTORY_IMAGE_PROMPT_PREFIX = (
+    "Epic cinematic photorealistic historical scene, "
+    "shot on ARRI Alexa with anamorphic lens, film grain, "
+    "dramatic volumetric god rays and atmospheric haze, "
+    "period-accurate costumes and architecture with ultra detailed textures, "
+    "color graded like a Ridley Scott blockbuster, "
+    "production design level of a $200M epic film, "
+    "massive scale with armies or ruins or ancient cities, "
+    "8k ultra HD, masterpiece quality, "
+)
+
+HISTORY_NEGATIVE_PROMPT = (
+    "modern elements, cars, phones, electronics, contemporary clothing, "
+    "cartoon, anime, low poly, plastic, toy, chibi, "
+    "blurry, low quality, watermark, text, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "bright cheerful lighting, flat lighting, studio background"
+)
+
+STORY_IMAGE_PROMPT_PREFIX = (
+    "Cinematic masterpiece scene, Pixar quality 3D meets photorealistic cinematography, "
+    "emotionally resonant composition with depth of field, "
+    "dramatic volumetric lighting with motivated light sources, "
+    "ray traced global illumination, atmospheric particles floating, "
+    "lens flare, bokeh, film grain, color graded for emotional impact, "
+    "character with consistent appearance centered in frame, "
+    "richly detailed fantastical environment, 8k ultra HD, award-winning visual, "
+)
+
+STORY_NEGATIVE_PROMPT = (
+    "cartoon, anime, low poly, flat shading, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "multiple characters unless specified, inconsistent character design, "
+    "flat lighting, boring composition, stock photo feel"
+)
+
+REDDIT_IMAGE_PROMPT_PREFIX = (
+    "Photorealistic modern-day scene illustrating a dramatic life moment, "
+    "cinematic photography with dramatic mood lighting, "
+    "realistic person in contemporary clothing in a modern setting, "
+    "emotional expression and body language visible, "
+    "depth of field, warm or cool tones matching the mood, "
+    "interior or urban environment with realistic details, "
+    "8k ultra HD, photojournalism quality, "
+)
+
+REDDIT_NEGATIVE_PROMPT = (
+    "cartoon, anime, 3D render, CGI look, fantasy, sci-fi, "
+    "historical, period clothing, armor, medieval, "
+    "blurry, low quality, watermark, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "multiple people unless specified, skeleton, robot"
+)
+
+TOP5_IMAGE_PROMPT_PREFIX = (
+    "Dramatic cinematic documentary photograph, "
+    "hero-lit subject with bold chiaroscuro lighting, "
+    "volumetric spotlight beams, deep shadows, "
+    "rich color theme with intentional palette, "
+    "the subject dominates the frame in a powerful pose or composition, "
+    "anamorphic bokeh, film grain, depth of field, "
+    "8k ultra HD, National Geographic meets movie poster quality, "
+)
+
+TOP5_NEGATIVE_PROMPT = (
+    "cartoon, anime, low poly, chibi, cute, "
+    "blurry, low quality, watermark, text, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "flat lighting, boring composition, centered symmetrical, "
+    "multiple unrelated subjects, cluttered background"
+)
+
+RANDOM_IMAGE_PROMPT_PREFIX = (
+    "Hyper-detailed surreal digital art, vivid oversaturated colors, "
+    "unexpected and absurd visual composition, "
+    "extreme camera angle with dramatic perspective, "
+    "mixing photorealistic and fantastical elements, "
+    "bold neon lighting, chromatic aberration, glitch effects, "
+    "trending on ArtStation, concept art masterpiece quality, "
+    "8k ultra HD, maximum visual impact, "
+)
+
+RANDOM_NEGATIVE_PROMPT = (
+    "boring, plain, simple, minimalist, subtle, "
+    "blurry, low quality, watermark, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, "
+    "monochrome, grayscale, desaturated, muted colors"
+)
+
+ROBLOX_IMAGE_PROMPT_PREFIX = (
+    "Roblox game screenshot, blocky character avatar running through colorful obstacle course, "
+    "bright saturated colors, clean Roblox aesthetic, "
+    "third-person view of character on treadmill or obby, "
+    "cheerful lighting, game UI elements, "
+)
+
+ROBLOX_NEGATIVE_PROMPT = (
+    "realistic human, photorealistic, dark horror, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, adult content"
+)
+
+OBJECTS_IMAGE_PROMPT_PREFIX = (
+    "Photorealistic product photography of an everyday object, "
+    "studio lighting with soft diffusion and subtle rim light, "
+    "the object is the hero subject centered in frame, "
+    "slightly anthropomorphized with personality, warm inviting tones, "
+    "shallow depth of field, contextual background, "
+    "Pixar-quality charm, 8k ultra HD, "
+)
+
+OBJECTS_NEGATIVE_PROMPT = (
+    "cartoon, anime, sketch, clipart, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, dark, scary, "
+    "multiple objects cluttered, messy background"
+)
+
+SPLIT_IMAGE_PROMPT_PREFIX = (
+    "Cinematic split-screen comparison photograph, "
+    "two contrasting scenes side by side with dramatic visual difference, "
+    "strong color coding (warm vs cool), "
+    "clean compositions that read well at half-width, "
+    "photorealistic detail, dramatic lighting contrast, "
+    "8k ultra HD, editorial quality, "
+)
+
+SPLIT_NEGATIVE_PROMPT = (
+    "single scene, no contrast, boring, similar sides, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, flat lighting"
+)
+
+TWITTER_IMAGE_PROMPT_PREFIX = (
+    "Modern clean digital aesthetic, dark mode color scheme, "
+    "blues and whites on dark background, "
+    "sleek typography, social media inspired visuals, "
+    "satisfying or dramatic footage matching the topic, "
+    "motion graphics feel, cinematic, "
+    "8k ultra HD, contemporary design, "
+)
+
+TWITTER_NEGATIVE_PROMPT = (
+    "old-fashioned, retro, historical, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, cluttered"
+)
+
+QUIZ_IMAGE_PROMPT_PREFIX = (
+    "Bold vibrant game show aesthetic, "
+    "bright colors with dark gradient background, "
+    "large clean typography, dramatic lighting, "
+    "spotlight effects, volumetric beams, "
+    "themed visual matching the trivia topic, "
+    "high energy presentation style, 8k, "
+)
+
+QUIZ_NEGATIVE_PROMPT = (
+    "boring, plain, muted colors, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, dark, dreary"
+)
+
+ARGUMENT_IMAGE_PROMPT_PREFIX = (
+    "Dramatic debate scene with two opposing sides, "
+    "color-coded lighting (blue vs red), "
+    "confrontational composition, split or face-to-face framing, "
+    "cinematic tension, dramatic shadows, "
+    "expressive characters or visual metaphors, "
+    "8k ultra HD, documentary quality, "
+)
+
+ARGUMENT_NEGATIVE_PROMPT = (
+    "peaceful, harmonious, agreement, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, flat lighting"
+)
+
+WYR_IMAGE_PROMPT_PREFIX = (
+    "Dramatic split choice visual, two contrasting options, "
+    "bold colors, cinematic lighting, "
+    "each option looks equally compelling or terrifying, "
+    "game show dramatic aesthetic, "
+    "photorealistic scenarios, vivid detail, "
+    "8k ultra HD, "
+)
+
+WYR_NEGATIVE_PROMPT = (
+    "boring, plain, single option, no contrast, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly"
+)
+
+SCARY_IMAGE_PROMPT_PREFIX = (
+    "Dark atmospheric horror cinematography, "
+    "David Fincher color palette -- desaturated blues, greens, sickly yellows, "
+    "shadows dominate 60% of the frame, "
+    "abandoned environments, dark hallways, foggy landscapes, "
+    "subtle wrongness in composition, things lurking in shadows, "
+    "found-footage grain, film noir lighting, "
+    "8k, dread-inducing atmosphere, "
+)
+
+SCARY_NEGATIVE_PROMPT = (
+    "bright, cheerful, colorful, warm, sunny, "
+    "cartoon, anime, cute, chibi, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, explicit gore"
+)
+
+MOTIVATION_IMAGE_PROMPT_PREFIX = (
+    "Epic cinematic landscape photography, "
+    "golden hour or dramatic weather (rain, fog, lightning), "
+    "lone silhouette figure against vast dramatic backdrop, "
+    "mountain peaks, ocean storms, city skylines, empty roads, "
+    "warm golds and deep blues color grading, "
+    "slow-motion texture quality, aspirational power, "
+    "8k ultra HD, National Geographic meets movie quality, "
+)
+
+MOTIVATION_NEGATIVE_PROMPT = (
+    "boring, flat, indoor, studio, "
+    "cartoon, anime, chibi, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly, dark horror"
+)
+
+WHATIF_IMAGE_PROMPT_PREFIX = (
+    "Photorealistic CGI scientific visualization, "
+    "hypothetical scenario playing out at massive scale, "
+    "before-and-after contrast, normal reality transforming, "
+    "epic wide shots showing global-scale effects, "
+    "dramatic color shifts indicating change, "
+    "scientifically grounded yet visually spectacular, "
+    "8k ultra HD, blockbuster VFX quality, "
+)
+
+WHATIF_NEGATIVE_PROMPT = (
+    "boring, plain, small scale, mundane, "
+    "cartoon, anime, chibi, "
+    "blurry, low quality, watermark, deformed, "
+    "jpeg artifacts, pixelated, ugly"
+)
+
+TEMPLATE_PROMPT_PREFIXES = {
+    "skeleton": SKELETON_IMAGE_PROMPT_PREFIX,
+    "history": HISTORY_IMAGE_PROMPT_PREFIX,
+    "story": STORY_IMAGE_PROMPT_PREFIX,
+    "reddit": REDDIT_IMAGE_PROMPT_PREFIX,
+    "top5": TOP5_IMAGE_PROMPT_PREFIX,
+    "random": RANDOM_IMAGE_PROMPT_PREFIX,
+    "roblox": ROBLOX_IMAGE_PROMPT_PREFIX,
+    "objects": OBJECTS_IMAGE_PROMPT_PREFIX,
+    "split": SPLIT_IMAGE_PROMPT_PREFIX,
+    "twitter": TWITTER_IMAGE_PROMPT_PREFIX,
+    "quiz": QUIZ_IMAGE_PROMPT_PREFIX,
+    "argument": ARGUMENT_IMAGE_PROMPT_PREFIX,
+    "wouldyourather": WYR_IMAGE_PROMPT_PREFIX,
+    "scary": SCARY_IMAGE_PROMPT_PREFIX,
+    "motivation": MOTIVATION_IMAGE_PROMPT_PREFIX,
+    "whatif": WHATIF_IMAGE_PROMPT_PREFIX,
+}
+
+TEMPLATE_NEGATIVE_PROMPTS = {
+    "skeleton": SKELETON_NEGATIVE_PROMPT,
+    "history": HISTORY_NEGATIVE_PROMPT,
+    "story": STORY_NEGATIVE_PROMPT,
+    "reddit": REDDIT_NEGATIVE_PROMPT,
+    "top5": TOP5_NEGATIVE_PROMPT,
+    "random": RANDOM_NEGATIVE_PROMPT,
+    "roblox": ROBLOX_NEGATIVE_PROMPT,
+    "objects": OBJECTS_NEGATIVE_PROMPT,
+    "split": SPLIT_NEGATIVE_PROMPT,
+    "twitter": TWITTER_NEGATIVE_PROMPT,
+    "quiz": QUIZ_NEGATIVE_PROMPT,
+    "argument": ARGUMENT_NEGATIVE_PROMPT,
+    "wouldyourather": WYR_NEGATIVE_PROMPT,
+    "scary": SCARY_NEGATIVE_PROMPT,
+    "motivation": MOTIVATION_NEGATIVE_PROMPT,
+    "whatif": WHATIF_NEGATIVE_PROMPT,
+}
+
+NEGATIVE_PROMPT = (
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "ugly, bad anatomy, bad proportions, duplicate, error, "
+    "jpeg artifacts, low resolution, worst quality, lowres, "
+    "oversaturated, undersaturated, noise, grain, pixelated"
+)
+
+
+WAN22_I2V_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+WAN22_I2V_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+
+
+async def _run_comfyui_workflow(workflow: dict, output_node: str, output_type: str = "images") -> dict:
+    """Submit a workflow to ComfyUI and wait for the specified output node to complete."""
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow})
+        if resp.status_code != 200:
+            log.error(f"ComfyUI rejected workflow ({resp.status_code}): {resp.text[:1000]}")
+        resp.raise_for_status()
+        prompt_id = resp.json()["prompt_id"]
+
+        for _ in range(300):
+            await asyncio.sleep(2)
+            history = await client.get(f"{COMFYUI_URL}/history/{prompt_id}")
+            hist_data = history.json()
+            if prompt_id in hist_data:
+                outputs = hist_data[prompt_id].get("outputs", {})
+                if output_node in outputs and outputs[output_node].get(output_type):
+                    return outputs[output_node]
+                status = hist_data[prompt_id].get("status", {})
+                if status.get("status_str") == "error":
+                    raise RuntimeError(f"ComfyUI workflow error: {status.get('messages', 'unknown')}")
+        raise TimeoutError("ComfyUI workflow timed out")
+
+
+async def _download_comfyui_file(file_info: dict, output_path: str):
+    """Download a generated file (image or video frame) from ComfyUI."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        filename = file_info["filename"]
+        subfolder = file_info.get("subfolder", "")
+        ftype = file_info.get("type", "output")
+        url = f"{COMFYUI_URL}/view?filename={filename}&subfolder={subfolder}&type={ftype}"
+        resp = await client.get(url)
+        with open(output_path, "wb") as f:
+            f.write(resp.content)
+
+
+GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
+
+
+async def generate_image_grok(prompt: str, output_path: str, resolution: str = "720p") -> dict:
+    """Generate an image using Grok Imagine via fal.ai.
+    Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
+    """
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+
+    aspect = "9:16"
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "prompt": prompt,
+        "num_images": 1,
+        "aspect_ratio": aspect,
+        "output_format": "png",
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError("Grok Imagine failed (" + str(resp.status_code) + "): " + resp.text[:300])
+        data = resp.json()
+
+    images = data.get("images", [])
+    if not images:
+        raise RuntimeError("Grok Imagine returned no images: " + json.dumps(data)[:300])
+
+    cdn_url = images[0].get("url", "")
+    revised = data.get("revised_prompt", "")
+    if revised:
+        log.info(f"Grok Imagine revised prompt: {revised[:120]}...")
+
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        img_resp = await client.get(cdn_url)
+        if img_resp.status_code != 200:
+            raise RuntimeError("Failed to download Grok image: " + str(img_resp.status_code))
+        with open(output_path, "wb") as f:
+            f.write(img_resp.content)
+
+    log.info(f"Grok Imagine image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB), CDN: {cdn_url[:80]}")
+    return {"local_path": output_path, "cdn_url": cdn_url}
+
+
+SKELETON_LORA_NAME = "nyptid_skeleton_v1.safetensors"
+SKELETON_LORA_STRENGTH = 0.85
+SKELETON_TRIGGER_TOKEN = "nyptid_skeleton"
+SKELETON_LORA_NEGATIVE = "blurry, low quality, text, watermark, deformed, ugly, bad anatomy, non-skeleton, human skin, flesh, muscles, realistic human, cartoon, anime, painting, 2D, illustration, transparent clothes, see-through clothes, x-ray clothes, invisible fabric, naked skeleton, broken bones, dislocated joints, extra limbs, missing limbs, empty eye sockets, no eyes, hollow eyes, robotic motion, stiff pose, jerky movement"
+
+
+async def check_skeleton_lora_available() -> bool:
+    """Check if the skeleton LoRA exists on the ComfyUI server."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{COMFYUI_URL}/object_info/LoraLoader")
+            if resp.status_code == 200:
+                data = resp.json()
+                lora_list = data.get("LoraLoader", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+                return SKELETON_LORA_NAME in lora_list
+    except Exception:
+        pass
+    return False
+
+
+async def generate_image_skeleton_lora(prompt: str, output_path: str, resolution: str = "720p") -> str:
+    """Generate skeleton image using fine-tuned LoRA on ComfyUI SDXL."""
+    config = RESOLUTION_CONFIGS[resolution]
+    lora_prompt = f"{SKELETON_TRIGGER_TOKEN}, {prompt}"
+
+    workflow = {
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+        },
+        "10": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": SKELETON_LORA_NAME,
+                "strength_model": SKELETON_LORA_STRENGTH,
+                "strength_clip": SKELETON_LORA_STRENGTH,
+                "model": ["4", 0],
+                "clip": ["4", 1],
+            },
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": lora_prompt, "clip": ["10", 1]},
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": SKELETON_LORA_NEGATIVE, "clip": ["10", 1]},
+        },
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**32),
+                "steps": 35,
+                "cfg": 7.0,
+                "sampler_name": "dpmpp_2m",
+                "scheduler": "karras",
+                "denoise": 1.0,
+                "model": ["10", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+            },
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "nyptid_skeleton_lora", "images": ["8", 0]},
+        },
+    }
+
+    result = await _run_comfyui_workflow(workflow, "9", "images")
+    await _download_comfyui_file(result["images"][0], output_path)
+    log.info(f"Skeleton LoRA image generated: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+    return output_path
+
+
+async def generate_scene_image(prompt: str, output_path: str, resolution: str = "720p", negative_prompt: str = "", template: str = "") -> dict:
+    """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
+    For other templates: Grok Imagine > SDXL.
+    Returns {"local_path": str, "cdn_url": str | None}.
+    """
+    if template == "skeleton":
+        try:
+            lora_available = await check_skeleton_lora_available()
+            if lora_available:
+                await generate_image_skeleton_lora(prompt, output_path, resolution=resolution)
+                log.info("Skeleton image generated via LoRA (zero API cost)")
+                return {"local_path": output_path, "cdn_url": None}
+        except Exception as e:
+            log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
+
+    if FAL_AI_KEY:
+        try:
+            return await generate_image_grok(prompt, output_path, resolution=resolution)
+        except Exception as e:
+            log.warning(f"Grok Imagine failed, falling back to SDXL: {e}")
+
+    await generate_image_comfyui(prompt, output_path, resolution=resolution, negative_prompt=negative_prompt)
+    return {"local_path": output_path, "cdn_url": None}
+
+
+async def generate_image_comfyui(prompt: str, output_path: str, resolution: str = "720p", negative_prompt: str = "") -> str:
+    """Fallback: generate image via ComfyUI SDXL on RunPod."""
+    config = RESOLUTION_CONFIGS[resolution]
+    neg = negative_prompt or NEGATIVE_PROMPT
+
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**32),
+                "steps": 30,
+                "cfg": 7.5,
+                "sampler_name": "dpmpp_2m",
+                "scheduler": "karras",
+                "denoise": 1.0,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+            },
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": prompt, "clip": ["4", 1]},
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": neg, "clip": ["4", 1]},
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "nyptid_gen", "images": ["8", 0]},
+        },
+    }
+
+    if config.get("upscale"):
+        workflow["10"] = {
+            "class_type": "LatentUpscaleBy",
+            "inputs": {
+                "samples": ["3", 0],
+                "scale_by": config["upscale_factor"],
+                "upscale_method": "bislerp",
+            },
+        }
+        workflow["11"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**32),
+                "steps": 15,
+                "cfg": 7.0,
+                "sampler_name": "dpmpp_2m",
+                "scheduler": "karras",
+                "denoise": 0.4,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["10", 0],
+            },
+        }
+        workflow["8"]["inputs"]["samples"] = ["11", 0]
+
+    result = await _run_comfyui_workflow(workflow, "9", "images")
+    await _download_comfyui_file(result["images"][0], output_path)
+    return output_path
+
+
+async def check_wan22_available() -> bool:
+    """Check if the Wan 2.2 I2V models exist on the ComfyUI server."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{COMFYUI_URL}/object_info")
+            if resp.status_code == 200:
+                content = resp.text
+                return WAN22_I2V_HIGH.split(".")[0] in content or "wan2.2" in content.lower()
+    except Exception as e:
+        log.warning(f"Wan 2.2 availability check failed: {e}")
+    return False
+
+
+RUNPOD_SSH_HOST = "root@69.30.85.41"
+RUNPOD_SSH_PORT = "22092"
+COMFYUI_INPUT_DIR = "/workspace/ComfyUI/input"
+
+FAL_SUBMIT_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-to-video"
+FAL_STATUS_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-to-video/requests"
+FAL_UPLOAD_URL = "https://fal.run/fal-ai/fal-file-storage/upload"
+
+
+async def _upload_image_to_fal(image_path: str) -> str:
+    """Upload a local image to fal.ai CDN and return a public URL for it."""
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    headers = {"Authorization": "Key " + FAL_AI_KEY}
+    img_bytes = Path(image_path).read_bytes()
+    filename = "nyptid_" + str(int(time.time() * 1000)) + ".png"
+    upload_url = "https://fal.ai/api/storage/upload/initiate"
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        resp = await client.post(
+            upload_url,
+            headers={**headers, "Accept": "application/json", "Content-Type": "application/json"},
+            json={"file_name": filename, "content_type": "image/png"},
+        )
+        if resp.status_code == 200:
+            upload_info = resp.json()
+            presigned = upload_info.get("upload_url") or upload_info.get("presigned_url")
+            file_url = upload_info.get("file_url")
+            if presigned and file_url:
+                put_resp = await client.put(presigned, content=img_bytes, headers={"Content-Type": "image/png"})
+                if put_resp.status_code in (200, 201):
+                    log.info(f"Image uploaded to fal.ai CDN: {file_url[:80]}")
+                    return file_url
+
+        target_path = "uploads/" + filename
+        rest_url = "https://api.fal.ai/v1/serverless/files/file/local/" + target_path
+        import io
+        files = {"file_upload": (filename, io.BytesIO(img_bytes), "image/png")}
+        resp2 = await client.post(rest_url, headers=headers, files=files)
+        if resp2.status_code in (200, 201):
+            cdn_url = "https://api.fal.ai/v1/serverless/files/file/" + target_path
+            log.info(f"Image uploaded to fal.ai REST: {cdn_url}")
+            return cdn_url
+
+    import base64
+    log.warning("fal.ai CDN upload failed, using data URL fallback")
+    b64 = base64.b64encode(img_bytes).decode()
+    return "data:image/png;base64," + b64
+
+
+async def animate_image_kling(image_path: str, prompt: str, output_clip_path: str, duration: str = "5", aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
+    """Use fal.ai Kling 2.1 Standard I2V to animate an image into a video clip.
+    If image_cdn_url is provided (from Grok Imagine), skip the upload step.
+    Returns the local path to the downloaded MP4 clip.
+    """
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+
+    if image_cdn_url:
+        image_url = image_cdn_url
+        log.info("Kling I2V: using existing CDN URL (from Grok Imagine)")
+    else:
+        image_url = await _upload_image_to_fal(image_path)
+
+    log.info(f"Kling I2V: submitting job (duration={duration}s, ar={aspect_ratio})")
+
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "prompt": prompt,
+        "image_url": image_url,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "negative_prompt": "blur, distort, low quality, watermark, text overlay, UI elements",
+        "cfg_scale": 0.5,
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(FAL_SUBMIT_URL, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError("Kling submit failed (" + str(resp.status_code) + "): " + resp.text[:300])
+        submit_data = resp.json()
+
+    request_id = submit_data.get("request_id")
+    if not request_id:
+        if submit_data.get("video", {}).get("url"):
+            video_url = submit_data["video"]["url"]
+            await _download_url_to_file(video_url, output_clip_path)
+            return output_clip_path
+        raise RuntimeError("No request_id from Kling submit: " + json.dumps(submit_data)[:300])
+
+    log.info(f"Kling I2V queued: request_id={request_id}")
+    status_url = submit_data.get("status_url", FAL_STATUS_URL + "/" + request_id + "/status")
+    result_url = submit_data.get("response_url", FAL_STATUS_URL + "/" + request_id)
+
+    max_wait = 600
+    poll_interval = 5
+    elapsed = 0
+    while elapsed < max_wait:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        async with httpx.AsyncClient(timeout=30) as client:
+            st_resp = await client.get(status_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+            if st_resp.status_code == 202:
+                st_data = st_resp.json()
+                status = st_data.get("status", "IN_PROGRESS")
+                if elapsed % 30 == 0:
+                    log.info(f"Kling I2V waiting... {elapsed}s elapsed, status={status}")
+                continue
+            if st_resp.status_code != 200:
+                log.warning(f"Kling status poll HTTP {st_resp.status_code}: {st_resp.text[:200]}")
+                continue
+            st_data = st_resp.json()
+            status = st_data.get("status", "")
+            if status == "COMPLETED":
+                break
+            if status in ("FAILED", "CANCELLED"):
+                raise RuntimeError("Kling generation failed: " + json.dumps(st_data)[:300])
+            if elapsed % 30 == 0:
+                log.info(f"Kling I2V waiting... {elapsed}s elapsed, status={status}")
+        if poll_interval < 15:
+            poll_interval = min(poll_interval + 2, 15)
+    else:
+        raise TimeoutError("Kling I2V timed out after " + str(max_wait) + "s")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        res_resp = await client.get(result_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+        if res_resp.status_code != 200:
+            raise RuntimeError("Kling result fetch failed: " + str(res_resp.status_code))
+        result_data = res_resp.json()
+
+    video_url = result_data.get("video", {}).get("url")
+    if not video_url:
+        raise RuntimeError("No video URL in Kling result: " + json.dumps(result_data)[:300])
+
+    log.info(f"Kling I2V complete, downloading video from {video_url[:80]}...")
+    await _download_url_to_file(video_url, output_clip_path)
+    log.info(f"Kling clip saved: {output_clip_path} ({Path(output_clip_path).stat().st_size / 1024:.0f} KB)")
+    return output_clip_path
+
+
+async def _download_url_to_file(url: str, output_path: str):
+    """Download a file from a URL to a local path."""
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            raise RuntimeError("Download failed (" + str(resp.status_code) + ") from " + url[:100])
+        with open(output_path, "wb") as f:
+            f.write(resp.content)
+
+
+async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 33, image_cdn_url: str = None) -> dict:
+    """Animate a scene image. Tries Kling first (if FAL_AI_KEY set), falls back to Wan 2.2.
+    Returns {"type": "kling_clip", "path": str} or {"type": "wan_frames", "paths": list} or {"type": "static"}.
+    """
+    if FAL_AI_KEY:
+        try:
+            clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            kling_dur = "5" if duration_sec <= 6 else "10"
+            await animate_image_kling(image_path, prompt, clip_path, duration=kling_dur, aspect_ratio="9:16", image_cdn_url=image_cdn_url)
+            return {"type": "kling_clip", "path": clip_path}
+        except Exception as e:
+            log.warning(f"Kling animation failed for scene {scene_idx}, trying Wan 2.2 fallback: {e}")
+
+    try:
+        wan_available = await check_wan22_available()
+        if wan_available:
+            vid_frame_dir = Path(output_dir_path) / ("wan_" + str(scene_idx))
+            vid_frame_dir.mkdir(exist_ok=True)
+            frame_paths = await animate_image_wan22(image_path, prompt, str(vid_frame_dir), num_frames=num_frames)
+            return {"type": "wan_frames", "paths": frame_paths}
+    except Exception as e:
+        log.warning(f"Wan 2.2 animation also failed for scene {scene_idx}: {e}")
+
+    return {"type": "static"}
+
+
+async def _upload_image_to_comfyui(image_path: str) -> str:
+    """SCP an image directly into ComfyUI's input directory on RunPod."""
+    filename = "nyptid_scene_" + str(int(time.time() * 1000)) + ".png"
+    remote_path = COMFYUI_INPUT_DIR + "/" + filename
+    scp_cmd = (
+        "scp -o StrictHostKeyChecking=no -o ConnectTimeout=15"
+        " -P " + RUNPOD_SSH_PORT
+        + " " + str(image_path)
+        + " " + RUNPOD_SSH_HOST + ":" + remote_path
+    )
+    proc = await asyncio.create_subprocess_shell(
+        scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr.decode()[-200:]
+        log.error(f"SCP to ComfyUI input failed: {err}")
+        raise RuntimeError("Failed to upload image to ComfyUI: " + err[-100:])
+    log.info(f"Image uploaded to ComfyUI via SCP: {filename}")
+    return filename
+
+
+async def animate_image_wan22(image_path: str, prompt: str, output_dir_path: str, num_frames: int = 33) -> list:
+    """Take a generated image and run Wan 2.2 I2V to produce animated video frames."""
+    uploaded_name = await _upload_image_to_comfyui(image_path)
+
+    workflow = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": WAN22_I2V_HIGH,
+                "weight_dtype": "fp8_e4m3fn",
+            },
+        },
+        "3": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan",
+            },
+        },
+        "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "text": prompt,
+                "clip": ["3", 0],
+            },
+        },
+        "5": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": "wan2.2_vae.safetensors"},
+        },
+        "6": {
+            "class_type": "CLIPVisionLoader",
+            "inputs": {"clip_name": "clip_vision_h.safetensors"},
+        },
+        "6b": {
+            "class_type": "CLIPVisionEncode",
+            "inputs": {
+                "clip_vision": ["6", 0],
+                "image": ["7", 0],
+                "crop": "center",
+            },
+        },
+        "7": {
+            "class_type": "LoadImage",
+            "inputs": {"image": uploaded_name},
+        },
+        "8": {
+            "class_type": "WanImageToVideo",
+            "inputs": {
+                "positive": ["4", 0],
+                "negative": ["12", 0],
+                "vae": ["5", 0],
+                "width": 480,
+                "height": 832,
+                "length": num_frames,
+                "batch_size": 1,
+                "clip_vision_output": ["6b", 0],
+                "start_image": ["7", 0],
+            },
+        },
+        "11": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**32),
+                "steps": 30,
+                "cfg": 3.0,
+                "sampler_name": "uni_pc_bh2",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": ["1", 0],
+                "positive": ["8", 0],
+                "negative": ["8", 2],
+                "latent_image": ["8", 1],
+            },
+        },
+        "12": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "text": "",
+                "clip": ["3", 0],
+            },
+        },
+        "13": {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "samples": ["11", 0],
+                "vae": ["5", 0],
+            },
+        },
+        "14": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": "nyptid_wan",
+                "images": ["13", 0],
+            },
+        },
+    }
+
+    result = await _run_comfyui_workflow(workflow, "14", "images")
+
+    frame_paths = []
+    for i, frame_info in enumerate(result["images"]):
+        frame_path = str(Path(output_dir_path) / f"wan_frame_{i:04d}.png")
+        await _download_comfyui_file(frame_info, frame_path)
+        frame_paths.append(frame_path)
+
+    return frame_paths
+
+
+# ─── FFmpeg Video Compositor ──────────────────────────────────────────────────
+
+async def frames_to_clip(frame_paths: list, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
+    """Convert SVD frames into a video clip, stretched/looped to fill the scene duration."""
+    frame_dir = Path(frame_paths[0]).parent
+    num_frames = len(frame_paths)
+    native_fps = 8
+    native_duration = num_frames / native_fps
+
+    drawtext = ""
+    if text_overlay:
+        safe_text = _ffmpeg_safe_text(text_overlay).upper()
+        font_size = 96 if resolution == "1080p" else 72
+        border_w = 6 if resolution == "1080p" else 4
+        drawtext = (
+            ",drawtext=text='" + safe_text + "'"
+            + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
+            + ":x=(w-text_w)/2:y=h*3/4"
+            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        )
+
+    speed_factor = native_duration / duration if duration > 0 else 1.0
+    speed_factor = max(0.25, min(speed_factor, 4.0))
+
+    first_frame = Path(frame_paths[0]).name
+    prefix = first_frame.rsplit("_", 1)[0]
+    input_pattern = str(frame_dir / f"{prefix}_%04d.png")
+    cmd = [
+        "ffmpeg", "-y",
+        "-framerate", str(native_fps),
+        "-i", input_pattern,
+        "-t", str(duration),
+        "-vf", (
+            f"setpts={1.0/speed_factor}*PTS,"
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"format=yuv420p"
+            f"{drawtext}"
+        ),
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-r", "30",
+        str(output_clip),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        log.warning(f"SVD clip ffmpeg error: {stderr.decode()[:500]}")
+        raise RuntimeError("Failed to create clip from SVD frames")
+    return output_clip
+
+
+def _ffmpeg_safe_text(text: str) -> str:
+    """Escape text for FFmpeg drawtext filter."""
+    import re
+    t = re.sub(r"[^\w\s.,!?\-+=#&]", "", text)
+    t = t.replace(":", "\\:").replace("'", "").replace("%", "")
+    return t
+
+
+async def static_image_to_clip(img_path: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
+    """Fallback: create a video clip from a static image with slow zoom."""
+    base_vf = "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+
+    drawtext_vf = base_vf
+    if text_overlay:
+        safe_text = _ffmpeg_safe_text(text_overlay).upper()
+        font_size = 96 if resolution == "1080p" else 72
+        border_w = 6 if resolution == "1080p" else 4
+        drawtext_vf = (
+            base_vf
+            + ",drawtext=text='" + safe_text + "'"
+            + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
+            + ":x=(w-text_w)/2:y=h*3/4"
+            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", str(img_path),
+        "-t", str(duration),
+        "-vf", drawtext_vf,
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-r", "30",
+        str(output_clip),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0 and text_overlay:
+        log.warning(f"Drawtext failed, retrying without text overlay: {stderr.decode()[-200:]}")
+        cmd_plain = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", str(img_path),
+            "-t", str(duration),
+            "-vf", base_vf,
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-r", "30",
+            str(output_clip),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_plain, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = stderr.decode()[-300:]
+        log.error(f"FFmpeg static clip error: {err}")
+        raise RuntimeError("FFmpeg failed on static image clip: " + err[-100:])
+    return output_clip
+
+
+async def kling_clip_to_scene(kling_clip: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
+    """Re-encode a Kling MP4 clip to exact output dimensions, trim/loop to duration, add text overlay."""
+    drawtext = ""
+    if text_overlay:
+        safe_text = _ffmpeg_safe_text(text_overlay).upper()
+        font_size = 96 if resolution == "1080p" else 72
+        border_w = 6 if resolution == "1080p" else 4
+        drawtext = (
+            ",drawtext=text='" + safe_text + "'"
+            + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
+            + ":x=(w-text_w)/2:y=h*3/4"
+            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        )
+    vf = (
+        "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,"
+        + "pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,"
+        + "format=yuv420p"
+        + drawtext
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(kling_clip),
+        "-t", str(duration),
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-r", "30",
+        str(output_clip),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 and text_overlay:
+        log.warning(f"Kling clip drawtext failed, retrying without: {stderr.decode()[-200:]}")
+        vf_plain = (
+            "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,"
+            + "pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,"
+            + "format=yuv420p"
+        )
+        cmd[cmd.index("-vf") + 1] = vf_plain
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr.decode()[-300:]
+        log.error(f"FFmpeg Kling clip error: {err}")
+        raise RuntimeError("FFmpeg failed on Kling clip: " + err[-100:])
+    return output_clip
+
+
+async def composite_video(
+    scenes: list,
+    scene_assets: list,
+    audio_path: str,
+    output_path: str,
+    resolution: str = "720p",
+    use_svd: bool = False,
+    subtitle_path: str = None,
+) -> str:
+    """Composite scene clips into final MP4 with optional burned-in captions.
+    scene_assets: list of dicts with keys: image, frames, kling_clip
+    subtitle_path: optional ASS subtitle file for word-synced captions
+    """
+    config = RESOLUTION_CONFIGS[resolution]
+    out_w = config["output_width"]
+    out_h = config["output_height"]
+
+    job_ts = str(int(time.time() * 1000))
+    concat_file = TEMP_DIR / ("concat_" + job_ts + ".txt")
+    scene_clips = []
+
+    num_scenes = len(scenes)
+    for i, (scene, asset) in enumerate(zip(scenes, scene_assets)):
+        duration = scene.get("duration_sec", 4)
+        if i == num_scenes - 1:
+            duration += 1.0
+        text_overlay = "" if subtitle_path else scene.get("text_overlay", "")
+        clip_name = "scene_" + str(i) + "_" + job_ts + ".mp4"
+        clip_path = str(TEMP_DIR / clip_name)
+
+        if asset.get("kling_clip"):
+            try:
+                await kling_clip_to_scene(
+                    asset["kling_clip"], duration, clip_path,
+                    out_w, out_h, text_overlay, resolution,
+                )
+                scene_clips.append(Path(clip_path))
+                continue
+            except Exception as e:
+                log.warning(f"Kling clip processing failed for scene {i}: {e}")
+
+        if use_svd and asset.get("frames"):
+            try:
+                await frames_to_clip(
+                    asset["frames"], duration, clip_path,
+                    out_w, out_h, text_overlay, resolution,
+                )
+                scene_clips.append(Path(clip_path))
+                continue
+            except Exception as e:
+                log.warning(f"SVD clip failed for scene {i}, falling back to static: {e}")
+
+        await static_image_to_clip(
+            asset["image"], duration, clip_path,
+            out_w, out_h, text_overlay, resolution,
+        )
+        scene_clips.append(Path(clip_path))
+
+    existing_clips = [c for c in scene_clips if c.exists() and c.stat().st_size > 0]
+    if not existing_clips:
+        raise RuntimeError("No scene clips were created -- nothing to composite")
+    log.info(f"Compositing {len(existing_clips)} scene clips into video")
+
+    with open(concat_file, "w") as f:
+        for clip in existing_clips:
+            f.write("file '" + str(clip.resolve()) + "'\n")
+
+    merged_video = TEMP_DIR / ("merged_" + job_ts + ".mp4")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(concat_file),
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        str(merged_video),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr_concat = await proc.communicate()
+    if proc.returncode != 0:
+        err_msg = stderr_concat.decode()[-500:]
+        log.error(f"FFmpeg concat error: {err_msg}")
+        raise RuntimeError("FFmpeg failed to concat scene clips: " + err_msg[-200:])
+
+    if not merged_video.exists() or merged_video.stat().st_size == 0:
+        raise RuntimeError("FFmpeg concat produced no output file")
+
+    if subtitle_path and Path(subtitle_path).exists():
+        sub_abs = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(merged_video),
+            "-i", audio_path,
+            "-vf", f"ass={sub_abs}",
+            "-af", "apad=pad_dur=0.8",
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path),
+        ]
+        log.info(f"Burning captions from {subtitle_path}")
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(merged_video),
+            "-i", audio_path,
+            "-af", "apad=pad_dur=0.8",
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path),
+        ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr_merge = await proc.communicate()
+    if proc.returncode != 0:
+        if subtitle_path:
+            log.warning(f"Subtitle burn-in failed, retrying without: {stderr_merge.decode()[-300:]}")
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-i", str(merged_video),
+                "-i", audio_path,
+                "-af", "apad=pad_dur=0.8",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_fallback, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            _, stderr_merge = await proc.communicate()
+        if proc.returncode != 0:
+            err_msg = stderr_merge.decode()[-500:]
+            log.error(f"FFmpeg final merge error: {err_msg}")
+            raise RuntimeError("FFmpeg failed to merge video + audio: " + err_msg[-200:])
+
+    if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
+        raise RuntimeError("FFmpeg produced no final output file")
+
+    for clip in scene_clips:
+        clip.unlink(missing_ok=True)
+    concat_file.unlink(missing_ok=True)
+    merged_video.unlink(missing_ok=True)
+
+    log.info(f"Video composited successfully: {Path(output_path).stat().st_size / 1024 / 1024:.1f} MB")
+    return str(output_path)
+
+
+# ─── Full Generation Pipeline ─────────────────────────────────────────────────
+
+async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p"):
+    try:
+        jobs[job_id]["status"] = "generating_script"
+        jobs[job_id]["progress"] = 5
+        log.info(f"[{job_id}] Generating script for '{topic}' ({template}, {resolution})")
+
+        script_data = await generate_script(template, topic)
+        scenes = script_data.get("scenes", [])
+        if not scenes:
+            raise ValueError("Script generation returned no scenes")
+
+        use_kling = bool(FAL_AI_KEY)
+        use_video = use_kling or await check_wan22_available()
+        if template == "reddit":
+            use_video = False
+        mode_label = "Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image")
+        jobs[job_id]["generation_mode"] = "kling" if use_kling else ("video" if use_video else "image")
+
+        jobs[job_id]["status"] = "generating_images"
+        jobs[job_id]["progress"] = 10
+        jobs[job_id]["total_scenes"] = len(scenes)
+        log.info(f"[{job_id}] Script ready: {len(scenes)} scenes. Mode: {mode_label}, {resolution}")
+
+        prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+        neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+        scene_assets = []
+        total_steps = len(scenes) * (2 if use_video else 1)
+        gen_ts = str(int(time.time() * 1000))
+
+        for i, scene in enumerate(scenes):
+            jobs[job_id]["current_scene"] = i + 1
+            step_base = i * (2 if use_video else 1)
+            jobs[job_id]["progress"] = 10 + int((step_base / total_steps) * 55)
+            jobs[job_id]["status"] = "generating_images"
+
+            full_prompt = prompt_prefix + scene.get("visual_description", "")
+            img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
+            img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+            cdn_url = img_result.get("cdn_url")
+            engine_name = "Skeleton LoRA" if (template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
+            log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
+
+            asset = {"image": img_path, "frames": None, "kling_clip": None}
+
+            if use_video:
+                jobs[job_id]["status"] = "animating_scenes"
+                jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
+                kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
+                anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                anim_result = await animate_scene(
+                    img_path, anim_prompt,
+                    str(TEMP_DIR), i, gen_ts,
+                    duration_sec=scene.get("duration_sec", 5),
+                    image_cdn_url=cdn_url,
+                )
+                if anim_result["type"] == "kling_clip":
+                    asset["kling_clip"] = anim_result["path"]
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Kling 2.1")
+                elif anim_result["type"] == "wan_frames":
+                    asset["frames"] = anim_result["paths"]
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Wan 2.2")
+                else:
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+
+            scene_assets.append(asset)
+
+        jobs[job_id]["status"] = "generating_voice"
+        jobs[job_id]["progress"] = 70
+        log.info(f"[{job_id}] Generating voiceover...")
+
+        full_narration = " ".join(s.get("narration", "") for s in scenes)
+        audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
+        vo_result = await generate_voiceover(full_narration, audio_path, template=template)
+        audio_path = vo_result["audio_path"]
+        word_timings = vo_result.get("word_timings", [])
+
+        subtitle_path = None
+        if word_timings:
+            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+            log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
+
+        jobs[job_id]["status"] = "compositing"
+        jobs[job_id]["progress"] = 82
+        log.info(f"[{job_id}] Compositing final video at {resolution}...")
+
+        output_filename = template + "_" + job_id + ".mp4"
+        output_path = str(OUTPUT_DIR / output_filename)
+        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+
+        for asset in scene_assets:
+            Path(asset["image"]).unlink(missing_ok=True)
+            if asset.get("kling_clip"):
+                Path(asset["kling_clip"]).unlink(missing_ok=True)
+            if asset.get("frames"):
+                for fp in asset["frames"]:
+                    Path(fp).unlink(missing_ok=True)
+                frame_dir = Path(asset["frames"][0]).parent
+                if frame_dir.exists():
+                    shutil.rmtree(frame_dir, ignore_errors=True)
+        Path(audio_path).unlink(missing_ok=True)
+        if subtitle_path:
+            Path(subtitle_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "complete"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["output_file"] = output_filename
+        jobs[job_id]["resolution"] = resolution
+        jobs[job_id]["metadata"] = {
+            "title": script_data.get("title", topic),
+            "description": script_data.get("description", ""),
+            "tags": script_data.get("tags", []),
+        }
+        log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
+
+    except Exception as e:
+        log.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+
+
+# ─── API Endpoints ────────────────────────────────────────────────────────────
+
+class GenerateRequest(BaseModel):
+    template: str
+    prompt: str
+    resolution: str = "720p"
+
+
+@app.get("/api/health")
+async def health():
+    skeleton_lora = await check_skeleton_lora_available()
+    return {
+        "status": "online",
+        "engine": "NYPTID Studio Engine v3.0",
+        "kling_enabled": bool(FAL_AI_KEY),
+        "video_engine": "Kling 2.1 Standard" if FAL_AI_KEY else "Wan 2.2 (local)",
+        "skeleton_lora": skeleton_lora,
+        "image_engine_skeleton": "Skeleton LoRA (local)" if skeleton_lora else ("Grok Imagine" if FAL_AI_KEY else "SDXL"),
+    }
+
+
+@app.get("/api/config")
+async def public_config():
+    return {
+        "supabase_url": SUPABASE_URL,
+        "supabase_anon_key": SUPABASE_ANON_KEY,
+        "stripe_enabled": bool(STRIPE_SECRET_KEY),
+        "plans": {
+            name: {k: v for k, v in limits.items()}
+            for name, limits in PLAN_LIMITS.items()
+        },
+        "prices": {v: k for k, v in STRIPE_PRICE_TO_PLAN.items()},
+    }
+
+
+@app.get("/api/me")
+async def get_me(user: dict = Depends(require_auth)):
+    plan = user.get("plan", "free")
+    if plan == "admin":
+        limits = PLAN_LIMITS["pro"]
+        limits = {**limits, "videos_per_month": 9999}
+    else:
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "plan": plan if plan != "admin" else "pro",
+        "role": "admin" if plan == "admin" else "user",
+        "limits": limits,
+    }
+
+
+@app.post("/api/generate")
+async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks, request: Request = None):
+    if not XAI_API_KEY:
+        raise HTTPException(500, "XAI_API_KEY not configured")
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
+
+    user = await get_current_user(request) if request else None
+    user_plan = "free"
+    if user:
+        user_plan = user.get("plan", "free")
+        if user_plan == "admin":
+            user_plan = "pro"
+
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    is_priority = plan_limits.get("priority", False)
+
+    resolution = req.resolution if req.resolution in RESOLUTION_CONFIGS else "720p"
+    if not is_priority and resolution == "1080p":
+        resolution = "720p"
+
+    job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "template": req.template,
+        "topic": req.prompt,
+        "resolution": resolution,
+        "plan": user_plan,
+        "created_at": time.time(),
+    }
+
+    if is_priority:
+        background_tasks.add_task(run_generation_pipeline, job_id, req.template, req.prompt, resolution)
+    else:
+        await _ensure_free_worker()
+        _free_queue_list.append(job_id)
+        jobs[job_id]["queue_position"] = len(_free_queue_list)
+        jobs[job_id]["queue_total"] = len(_free_queue_list)
+        _update_queue_positions()
+        await _get_free_queue().put((job_id, run_generation_pipeline, (job_id, req.template, req.prompt, resolution)))
+
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/api/status/{job_id}")
+async def job_status(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    return jobs[job_id]
+
+
+@app.get("/api/download/{filename}")
+async def download_video(filename: str):
+    path = OUTPUT_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "Video not found")
+    return FileResponse(str(path), media_type="video/mp4", filename=filename)
+
+
+CLONE_ANALYSIS_PROMPT = """You are a viral video reverse-engineering expert. Analyze the source video and extract its EXACT winning formula so it can be replicated on a new topic.
+
+You will receive:
+1. Context about a viral short (uploaded video metadata, audio timing, or description)
+2. A new topic to apply the viral formula to
+
+Your job: figure out the EXACT structure, pacing, and style of the source video and replicate it beat-for-beat on the new topic.
+
+Analyze these elements:
+- HOOK: What made someone stop scrolling in the first 1-3 seconds? (question? claim? shock?)
+- PACING: How fast are cuts? What is the average scene duration?
+- VISUAL STYLE: 3D skeletons? Cinematic? Text-heavy? What background color?
+- NARRATION STYLE: Fast? Punchy? How many sentences per scene?
+- TEXT OVERLAYS: One word at a time? Full sentences? Bold impact font?
+- STRUCTURE: VS comparison? Countdown? Story arc? How is info revealed?
+- RETENTION TRICKS: Money flying, size comparisons, face-offs, shocking numbers?
+
+TEMPLATE DEFINITIONS (pick the one that matches BEST):
+- "skeleton" = 3D skeleton characters wearing topic-relevant outfits on teal/green studio background. VS comparisons, career/earnings breakdowns. One-word bold captions. Example: "NASCAR vs F1 Driver Who Makes More Money"
+- "history" = Epic cinematic historical scenes. Battles, empires, ancient events. Dramatic narrator, god rays, film grain. 2-4 word caption phrases. Example: "What Happened to the Roman Legion That Vanished"
+- "story" = Cinematic AI visual stories with emotional arc. Pixar/UE5 quality. Consistent character across scenes. Poetic narration. Minimal captions. Example: "The Last Lighthouse Keeper"
+- "reddit" = Reddit story narration. First-person dramatic stories (AITA, TIFU). Photorealistic modern-day scenes illustrating the story. Dialogue/reaction captions. Example: "AITA for Kicking Out My Sister"
+- "top5" = Ranked countdown lists (#5 to #1). Each item dramatically different. Documentary quality visuals. Numbered captions. Example: "Top 5 Most Expensive Things Ever Sold"
+- "random" = Chaotic, fast-paced, unpredictable content. Every scene wildly different. Surreal visuals. 1-3 word reaction captions. Example: "Things That Should Not Exist"
+
+Output MUST be valid JSON:
+{
+  "detected_template": "skeleton|history|story|reddit|top5|random",
+  "viral_analysis": {
+    "hook_type": "What kind of hook (shock/question/claim/visual)",
+    "pacing": "fast|medium|slow",
+    "avg_scene_duration": 3.5,
+    "scene_count": 10,
+    "tone": "Description of voice/narration tone",
+    "retention_tricks": ["trick1", "trick2"],
+    "what_made_it_viral": "1-2 sentence summary"
+  },
+  "optimized_prompt": "An enhanced prompt that combines the viral formula with the new topic. This should be detailed enough to pass directly to the script generator."
+}"""
+
+
+async def extract_audio_from_video(video_path: str) -> str | None:
+    """Extract audio track from a video file for transcription."""
+    audio_path = video_path.rsplit(".", 1)[0] + "_audio.mp3"
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+        audio_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    if proc.returncode == 0 and Path(audio_path).exists():
+        return audio_path
+    return None
+
+
+async def transcribe_audio_with_grok(audio_path: str) -> str:
+    """Use ffmpeg to get audio duration then estimate narration from file size for context."""
+    cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(audio_path)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await proc.communicate()
+    duration = 0
+    if proc.returncode == 0:
+        try:
+            data = json.loads(stdout.decode())
+            duration = float(data.get("format", {}).get("duration", 0))
+        except Exception:
+            pass
+    return f"Audio duration: {duration:.1f}s"
+
+
+async def analyze_viral_video(topic: str, video_description: str, transcript_hint: str = "") -> dict:
+    user_parts = []
+    user_parts.append("Source viral video context: " + video_description)
+    if transcript_hint:
+        user_parts.append("Audio/timing info from source: " + transcript_hint)
+    user_parts.append("New topic to apply the viral formula to: " + topic)
+    user_msg = "\n\n".join(user_parts)
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-3-mini-fast",
+                "messages": [
+                    {"role": "system", "content": CLONE_ANALYSIS_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.6,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON in clone analysis response")
+        return json.loads(content[start:end])
+
+
+async def extract_video_metadata(file_path: str) -> dict:
+    """Extract basic metadata from uploaded video using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", str(file_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0:
+            data = json.loads(stdout.decode())
+            duration = float(data.get("format", {}).get("duration", 0))
+            streams = data.get("streams", [])
+            video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+            return {
+                "duration_sec": round(duration, 1),
+                "width": int(video_stream.get("width", 0)),
+                "height": int(video_stream.get("height", 0)),
+                "fps": video_stream.get("r_frame_rate", "30/1"),
+            }
+    except Exception as e:
+        log.warning(f"ffprobe metadata extraction failed: {e}")
+    return {}
+
+
+async def generate_clone_script(template: str, topic: str, viral_analysis: dict) -> dict:
+    """Generate a script that replicates the source video's exact formula on a new topic."""
+    base_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
+
+    hook_type = viral_analysis.get("hook_type", "claim")
+    pacing = viral_analysis.get("pacing", "fast")
+    avg_dur = viral_analysis.get("avg_scene_duration", 3.5)
+    scene_count = viral_analysis.get("scene_count", 10)
+    tone = viral_analysis.get("tone", "energetic and punchy")
+    tricks = viral_analysis.get("retention_tricks", [])
+    what_viral = viral_analysis.get("what_made_it_viral", "")
+
+    clone_override = (
+        "\n\nCRITICAL CLONE INSTRUCTIONS -- you MUST follow these EXACTLY:\n"
+        "You are cloning a proven viral video. Replicate its formula precisely.\n"
+        "- Hook type: " + str(hook_type) + " -- your opening MUST use this exact hook style\n"
+        "- Pacing: " + str(pacing) + " -- match this exact energy level\n"
+        "- Target scene count: " + str(scene_count) + " scenes\n"
+        "- Average scene duration: " + str(avg_dur) + " seconds\n"
+        "- Narration tone: " + str(tone) + "\n"
+        "- Retention tricks to replicate: " + ", ".join(tricks) + "\n"
+        "- Why the original went viral: " + str(what_viral) + "\n"
+        "\nDo NOT write generic content. Do NOT say things like 'dive into the world of' or "
+        "'buckle up'. Write EXACTLY like the source video's style -- punchy, direct, zero filler. "
+        "Every single word must earn its place. If the source was a skeleton comparing things, "
+        "YOU compare things the same way. Match the structure beat-for-beat.\n"
+        "\nNarration must be SHORT and PUNCHY -- 1-2 sentences max per scene. "
+        "No yapping. No fluff. Every sentence is a hook or a fact bomb."
+    )
+
+    full_prompt = base_prompt + clone_override
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-3-mini-fast",
+                "messages": [
+                    {"role": "system", "content": full_prompt},
+                    {"role": "user", "content": "Clone this viral formula onto new topic: " + topic},
+                ],
+                "temperature": 0.7,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON in clone script response")
+        return json.loads(content[start:end])
+
+
+async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, resolution: str = "720p"):
+    try:
+        jobs[job_id]["status"] = "analyzing"
+        jobs[job_id]["progress"] = 5
+        log.info(f"[{job_id}] Clone: analyzing viral video for topic '{topic}'")
+
+        video_context = topic
+        transcript_hint = ""
+        meta = {}
+        if video_path:
+            meta = await extract_video_metadata(video_path) or {}
+            if meta:
+                video_context = (
+                    "Source video file uploaded: "
+                    + str(meta.get("duration_sec", "?")) + "s long, "
+                    + str(meta.get("width", "?")) + "x" + str(meta.get("height", "?")) + " resolution"
+                )
+            audio_path = await extract_audio_from_video(video_path)
+            if audio_path:
+                transcript_hint = await transcribe_audio_with_grok(audio_path)
+                Path(audio_path).unlink(missing_ok=True)
+
+        analysis = await analyze_viral_video(topic, video_context, transcript_hint)
+        detected_template = analysis.get("detected_template", "random")
+        viral_info = analysis.get("viral_analysis", {})
+
+        jobs[job_id]["template"] = detected_template
+        jobs[job_id]["viral_analysis"] = viral_info
+        jobs[job_id]["progress"] = 12
+        log.info(f"[{job_id}] Clone analysis: template={detected_template}, hook={viral_info.get('hook_type', '?')}, scenes={viral_info.get('scene_count', '?')}")
+
+        if video_path:
+            Path(video_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "generating_script"
+        jobs[job_id]["progress"] = 15
+        script_data = await generate_clone_script(detected_template, topic, viral_info)
+        scenes = script_data.get("scenes", [])
+        if not scenes:
+            raise ValueError("Clone script generation returned no scenes")
+
+        use_kling = bool(FAL_AI_KEY)
+        use_video = use_kling or await check_wan22_available()
+        if detected_template == "reddit":
+            use_video = False
+        mode_label = "Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image")
+        jobs[job_id]["generation_mode"] = "kling" if use_kling else ("video" if use_video else "image")
+
+        jobs[job_id]["status"] = "generating_images"
+        jobs[job_id]["progress"] = 20
+        jobs[job_id]["total_scenes"] = len(scenes)
+        log.info(f"[{job_id}] Clone script ready: {len(scenes)} scenes. Mode: {mode_label}, {resolution}")
+
+        prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(detected_template, "")
+        neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(detected_template, NEGATIVE_PROMPT)
+        scene_assets = []
+        total_steps = len(scenes) * (2 if use_video else 1)
+        gen_ts = str(int(time.time() * 1000))
+
+        for i, scene in enumerate(scenes):
+            jobs[job_id]["current_scene"] = i + 1
+            step_base = i * (2 if use_video else 1)
+            jobs[job_id]["progress"] = 20 + int((step_base / total_steps) * 50)
+            jobs[job_id]["status"] = "generating_images"
+
+            full_prompt = prompt_prefix + scene.get("visual_description", "")
+            img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
+            img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=detected_template)
+            cdn_url = img_result.get("cdn_url")
+            engine_name = "Skeleton LoRA" if (detected_template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
+            log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
+
+            asset = {"image": img_path, "frames": None, "kling_clip": None}
+
+            if use_video:
+                jobs[job_id]["status"] = "animating_scenes"
+                jobs[job_id]["progress"] = 20 + int(((step_base + 1) / total_steps) * 50)
+                kling_motion = TEMPLATE_KLING_MOTION.get(detected_template, "Cinematic motion, smooth camera movement, subtle animation.")
+                anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                anim_result = await animate_scene(
+                    img_path, anim_prompt,
+                    str(TEMP_DIR), i, gen_ts,
+                    duration_sec=scene.get("duration_sec", 5),
+                    image_cdn_url=cdn_url,
+                )
+                if anim_result["type"] == "kling_clip":
+                    asset["kling_clip"] = anim_result["path"]
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Kling 2.1")
+                elif anim_result["type"] == "wan_frames":
+                    asset["frames"] = anim_result["paths"]
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Wan 2.2")
+                else:
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+
+            scene_assets.append(asset)
+
+        jobs[job_id]["status"] = "generating_voice"
+        jobs[job_id]["progress"] = 75
+        log.info(f"[{job_id}] Generating voiceover...")
+
+        full_narration = " ".join(s.get("narration", "") for s in scenes)
+        audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
+        vo_result = await generate_voiceover(full_narration, audio_path, template=detected_template)
+        audio_path = vo_result["audio_path"]
+        word_timings = vo_result.get("word_timings", [])
+
+        subtitle_path = None
+        if word_timings:
+            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+            log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
+
+        jobs[job_id]["status"] = "compositing"
+        jobs[job_id]["progress"] = 85
+        log.info(f"[{job_id}] Compositing final video at {resolution}...")
+
+        output_filename = detected_template + "_" + job_id + ".mp4"
+        output_path = str(OUTPUT_DIR / output_filename)
+        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+
+        for asset in scene_assets:
+            Path(asset["image"]).unlink(missing_ok=True)
+            if asset.get("kling_clip"):
+                Path(asset["kling_clip"]).unlink(missing_ok=True)
+            if asset.get("frames"):
+                for fp in asset["frames"]:
+                    Path(fp).unlink(missing_ok=True)
+                frame_dir = Path(asset["frames"][0]).parent
+                if frame_dir.exists():
+                    shutil.rmtree(frame_dir, ignore_errors=True)
+        Path(audio_path).unlink(missing_ok=True)
+        if subtitle_path:
+            Path(subtitle_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "complete"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["output_file"] = output_filename
+        jobs[job_id]["resolution"] = resolution
+        jobs[job_id]["metadata"] = {
+            "title": script_data.get("title", topic),
+            "description": script_data.get("description", ""),
+            "tags": script_data.get("tags", []),
+        }
+        log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
+
+    except Exception as e:
+        log.error(f"[{job_id}] Clone pipeline failed: {e}", exc_info=True)
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        if video_path:
+            Path(video_path).unlink(missing_ok=True)
+
+
+@app.post("/api/clone")
+async def clone_video(
+    topic: str = Form(...),
+    resolution: str = Form("720p"),
+    file: UploadFile = File(None),
+    background_tasks: BackgroundTasks = None,
+):
+    if not XAI_API_KEY or not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "API keys not configured")
+
+    res = resolution if resolution in RESOLUTION_CONFIGS else "720p"
+
+    video_path = None
+    if file and file.filename:
+        video_path = str(TEMP_DIR / f"clone_upload_{int(time.time())}.mp4")
+        with open(video_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+    job_id = f"clone_{int(time.time())}_{random.randint(1000, 9999)}"
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "template": "analyzing...",
+        "topic": topic,
+        "resolution": res,
+        "created_at": time.time(),
+    }
+
+    background_tasks.add_task(run_clone_pipeline, job_id, topic, video_path, res)
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    return {jid: {k: v for k, v in j.items() if k != "output_file"} for jid, j in jobs.items()}
+
+
+# ─── Stripe Payments ──────────────────────────────────────────────────────────
+
+class CheckoutRequest(BaseModel):
+    price_id: str
+
+
+@app.post("/api/checkout")
+async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    if req.price_id not in STRIPE_PRICE_TO_PLAN:
+        raise HTTPException(400, "Invalid price ID")
+
+    try:
+        session = stripe_lib.checkout.Session.create(
+            mode="subscription",
+            payment_method_types=["card"],
+            line_items=[{"price": req.price_id, "quantity": 1}],
+            success_url=f"{SITE_URL}?payment=success",
+            cancel_url=f"{SITE_URL}?payment=cancelled",
+            client_reference_id=user["id"],
+            customer_email=user["email"],
+            metadata={"user_id": user["id"], "plan": STRIPE_PRICE_TO_PLAN[req.price_id]},
+        )
+        return {"checkout_url": session.url}
+    except Exception as e:
+        log.error(f"Stripe checkout error: {e}")
+        raise HTTPException(500, f"Payment error: {str(e)}")
+
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            event = json.loads(payload)
+    except Exception as e:
+        log.error(f"Webhook signature verification failed: {e}")
+        raise HTTPException(400, "Invalid signature")
+
+    if event.get("type") == "checkout.session.completed":
+        session_data = event["data"]["object"]
+        user_id = session_data.get("client_reference_id") or session_data.get("metadata", {}).get("user_id")
+        plan = session_data.get("metadata", {}).get("plan", "starter")
+
+        if user_id and SUPABASE_URL:
+            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    await client.post(
+                        f"{SUPABASE_URL}/rest/v1/profiles",
+                        headers={
+                            "apikey": svc_key,
+                            "Authorization": f"Bearer {svc_key}",
+                            "Content-Type": "application/json",
+                            "Prefer": "resolution=merge-duplicates",
+                        },
+                        json={"id": user_id, "plan": plan},
+                    )
+                log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
+            except Exception as e:
+                log.error(f"Failed to update plan for {user_id}: {e}")
+
+    elif event.get("type") == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        customer_email = sub.get("customer_email", "")
+        log.info(f"Subscription cancelled for {customer_email}")
+
+    return {"status": "ok"}
+
+
+# ─── Admin: set plan for a user (admin-only) ─────────────────────────────────
+
+class SetPlanRequest(BaseModel):
+    email: str
+    plan: str
+
+
+@app.post("/api/admin/set-plan")
+async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
+    if user.get("email") not in ADMIN_EMAILS and user.get("plan") != "admin":
+        raise HTTPException(403, "Admin access required")
+    if req.plan not in list(PLAN_LIMITS.keys()) + ["admin"]:
+        raise HTTPException(400, f"Invalid plan. Options: {list(PLAN_LIMITS.keys())}")
+
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL:
+        raise HTTPException(500, "Supabase not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            users_resp = await client.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                },
+            )
+            target_id = None
+            if users_resp.status_code == 200:
+                users_data = users_resp.json()
+                user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+                for u in user_list:
+                    if u.get("email") == req.email:
+                        target_id = u["id"]
+                        break
+
+            if not target_id:
+                return {"error": f"User {req.email} not found in Supabase auth"}
+
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/profiles",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+                json={"id": target_id, "plan": req.plan, "role": "admin" if req.plan == "admin" else "user"},
+            )
+        return {"status": "ok", "email": req.email, "plan": req.plan}
+    except Exception as e:
+        log.error(f"Admin set-plan error: {e}")
+        raise HTTPException(500, str(e))
+
+
+# ─── Startup: seed accounts ──────────────────────────────────────────────────
+
+SEED_ACCOUNTS = {
+    "omatic657@gmail.com": {"plan": "admin", "role": "admin"},
+    "alwakmyhem@gmail.com": {"plan": "pro", "role": "user"},
+}
+
+
+@app.on_event("startup")
+async def seed_profiles():
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not svc_key:
+        log.warning("Supabase not configured, skipping profile seeding")
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            users_resp = await client.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if users_resp.status_code != 200:
+                log.warning(f"Could not list users for seeding (status {users_resp.status_code})")
+                return
+
+            users_data = users_resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+
+            for email, profile in SEED_ACCOUNTS.items():
+                user_id = None
+                for u in user_list:
+                    if u.get("email") == email:
+                        user_id = u["id"]
+                        break
+                if not user_id:
+                    log.info(f"Seed user {email} not found in auth yet (will be seeded on first login)")
+                    continue
+
+                resp = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/profiles",
+                    headers={
+                        "apikey": svc_key,
+                        "Authorization": f"Bearer {svc_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates",
+                    },
+                    json={"id": user_id, "plan": profile["plan"], "role": profile["role"]},
+                )
+                log.info(f"Seeded {email} -> {profile['plan']} (status {resp.status_code})")
+    except Exception as e:
+        log.warning(f"Profile seeding failed: {e}")
+
+
+# ─── Thumbnail System ─────────────────────────────────────────────────────────
+
+THUMBNAIL_DIR = Path("thumbnails")
+THUMBNAIL_DIR.mkdir(exist_ok=True)
+THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
+THUMBNAIL_UPLOAD_DIR.mkdir(exist_ok=True)
+THUMBNAIL_OUTPUT_DIR = THUMBNAIL_DIR / "generated"
+THUMBNAIL_OUTPUT_DIR.mkdir(exist_ok=True)
+
+RUNPOD_SSH = "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p 22092 root@69.30.85.41"
+RUNPOD_TRAINING_DIR = "/workspace/thumbnail_training/images"
+LORA_NAME = "nyptid_thumbnails.safetensors"
+
+
+async def sync_thumbnail_to_runpod(local_path: str):
+    """SCP a thumbnail to RunPod's training images directory."""
+    try:
+        cmd = f"scp -o StrictHostKeyChecking=no -P 22092 {local_path} root@69.30.85.41:{RUNPOD_TRAINING_DIR}/"
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            log.info(f"Synced {Path(local_path).name} to RunPod training dir")
+        else:
+            log.warning(f"RunPod sync failed: {stderr.decode()[:200]}")
+    except Exception as e:
+        log.warning(f"RunPod thumbnail sync error: {e}")
+
+
+async def check_lora_status() -> dict:
+    """Check if the LoRA trainer is running and if a trained LoRA exists on RunPod."""
+    try:
+        cmd = (
+            f"{RUNPOD_SSH} '"
+            "ls -la /workspace/ComfyUI/models/loras/nyptid_thumbnails.safetensors 2>/dev/null; "
+            "cat /workspace/thumbnail_training/output/training_state.json 2>/dev/null; "
+            "test -f /workspace/thumbnail_training/output/training.lock && echo TRAINING_ACTIVE || echo TRAINING_IDLE; "
+            "ls /workspace/thumbnail_training/images/ 2>/dev/null | wc -l"
+            "'"
+        )
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode()
+
+        has_lora = "nyptid_thumbnails.safetensors" in output and "No such file" not in output
+        is_training = "TRAINING_ACTIVE" in output
+        lines = output.strip().split("\n")
+        image_count = 0
+        for line in lines:
+            if line.strip().isdigit():
+                image_count = int(line.strip())
+
+        state = {}
+        try:
+            for line in lines:
+                if line.strip().startswith("{"):
+                    state = json.loads(line.strip())
+                    break
+        except Exception:
+            pass
+
+        return {
+            "lora_available": has_lora,
+            "is_training": is_training,
+            "total_images": image_count,
+            "trained_images": state.get("image_count", 0),
+            "version": state.get("version", 0),
+            "last_train": state.get("last_train", 0),
+        }
+    except Exception as e:
+        log.warning(f"LoRA status check failed: {e}")
+        return {"lora_available": False, "is_training": False, "total_images": 0, "trained_images": 0, "version": 0, "last_train": 0}
+
+
+@app.get("/api/thumbnails/training-status")
+async def training_status():
+    return await check_lora_status()
+
+
+@app.post("/api/thumbnails/upload")
+async def upload_thumbnails(files: list[UploadFile] = File(...), background_tasks: BackgroundTasks = None):
+    saved = []
+    for file in files:
+        if not file.filename:
+            continue
+        ext = Path(file.filename).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+        ts = int(time.time() * 1000)
+        safe_name = str(ts) + "_" + str(random.randint(1000, 9999)) + ext
+        dest = THUMBNAIL_UPLOAD_DIR / safe_name
+        content = await file.read()
+        with open(dest, "wb") as f:
+            f.write(content)
+        saved.append({
+            "id": safe_name,
+            "name": file.filename,
+            "size": len(content),
+            "url": "/api/thumbnails/library/" + safe_name,
+        })
+        if background_tasks:
+            background_tasks.add_task(sync_thumbnail_to_runpod, str(dest))
+    return {"uploaded": len(saved), "files": saved}
+
+
+@app.get("/api/thumbnails/library")
+async def list_thumbnails():
+    files = []
+    for f in sorted(THUMBNAIL_UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            files.append({
+                "id": f.name,
+                "name": f.name,
+                "size": f.stat().st_size,
+                "url": f"/api/thumbnails/library/{f.name}",
+                "created_at": f.stat().st_mtime,
+            })
+    return {"files": files, "total": len(files)}
+
+
+@app.get("/api/thumbnails/library/{filename}")
+async def serve_thumbnail(filename: str):
+    path = THUMBNAIL_UPLOAD_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "Thumbnail not found")
+    mime = "image/png" if path.suffix == ".png" else "image/jpeg" if path.suffix in (".jpg", ".jpeg") else "image/webp"
+    return FileResponse(str(path), media_type=mime)
+
+
+@app.delete("/api/thumbnails/library/{filename}")
+async def delete_thumbnail(filename: str):
+    path = THUMBNAIL_UPLOAD_DIR / filename
+    if path.exists():
+        path.unlink()
+    return {"status": "deleted"}
+
+
+@app.get("/api/thumbnails/generated/{filename}")
+async def serve_generated_thumbnail(filename: str):
+    path = THUMBNAIL_OUTPUT_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "Generated thumbnail not found")
+    mime = "image/png"
+    return FileResponse(str(path), media_type=mime)
+
+
+THUMBNAIL_ANALYSIS_PROMPT = """You are an elite YouTube thumbnail design strategist and art director. You analyze what makes thumbnails get clicks and generate precise SDXL image prompts to create thumbnails that outperform human designers.
+
+You understand:
+- Color psychology (red/yellow = urgency, blue = trust, contrast = attention)
+- Face/emotion science (shocked expressions get 2-3x CTR)
+- Text placement rules (big bold text, 3-5 words max, high contrast)
+- Composition (rule of thirds, leading lines, depth)
+- Platform-specific optimization (YouTube's 1280x720 standard, mobile-first)
+
+When given a video description, style reference, or sketch, you produce a detailed SDXL image generation prompt that will create a click-worthy thumbnail.
+
+Output MUST be valid JSON:
+{
+  "prompt": "Detailed SDXL prompt for the thumbnail image. Include: subject, composition, lighting, colors, text elements, style, camera angle. Be extremely specific about every visual element. 8k quality, professional YouTube thumbnail.",
+  "negative_prompt": "Elements to avoid in the generation",
+  "title_text": "The 3-5 word overlay text for the thumbnail (if applicable, empty string if none)",
+  "style_notes": "Brief description of the design strategy being used"
+}"""
+
+
+THUMBNAIL_STYLE_TRANSFER_PROMPT = """You are an elite YouTube thumbnail design strategist. You will receive:
+1. A description of the STYLE to emulate (from a reference thumbnail the user likes)
+2. A description of what the NEW thumbnail should show
+
+Your job: merge the visual style of the reference with the new content to create a prompt that produces a thumbnail in that exact style but with new content.
+
+Analyze the style reference for: color palette, composition style, lighting mood, text treatment, overall aesthetic.
+Then apply that exact style to the new content.
+
+Output MUST be valid JSON:
+{
+  "prompt": "Detailed SDXL prompt combining the reference style with new content. 8k quality, professional YouTube thumbnail, 1280x720 composition.",
+  "negative_prompt": "Elements to avoid",
+  "title_text": "The overlay text for this thumbnail (3-5 words, empty string if none)",
+  "style_notes": "How the reference style was adapted"
+}"""
+
+
+THUMBNAIL_SCREENSHOT_PROMPT = """You are an elite YouTube thumbnail analyst and designer. The user has provided a description of their YouTube channel's existing thumbnails (or a description of what has worked for them before).
+
+Your job: identify the patterns that made those thumbnails successful, then generate a NEW thumbnail prompt that follows the same winning formula but feels fresh and evolved.
+
+Analyze for: recurring color schemes, text styles, composition patterns, emotional triggers, branding elements.
+
+Output MUST be valid JSON:
+{
+  "prompt": "Detailed SDXL prompt for a new thumbnail following the user's proven style. 8k quality, professional YouTube thumbnail, 1280x720.",
+  "negative_prompt": "Elements to avoid",
+  "title_text": "Overlay text (3-5 words, empty if none)",
+  "style_notes": "Pattern analysis of what works for this channel",
+  "patterns_detected": ["pattern1", "pattern2", "pattern3"]
+}"""
+
+
+class ThumbnailGenerateRequest(BaseModel):
+    mode: str  # "describe", "style_transfer", "screenshot_analysis"
+    description: str
+    style_reference_id: str = ""
+    sketch_image_id: str = ""
+    screenshot_description: str = ""
+
+
+async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
+    if req.mode == "style_transfer":
+        system_prompt = THUMBNAIL_STYLE_TRANSFER_PROMPT
+        user_msg = f"STYLE REFERENCE: {req.description}\n\nNEW THUMBNAIL CONTENT: {req.screenshot_description or req.description}"
+    elif req.mode == "screenshot_analysis":
+        system_prompt = THUMBNAIL_SCREENSHOT_PROMPT
+        user_msg = f"CHANNEL THUMBNAIL ANALYSIS: {req.screenshot_description or req.description}\n\nNEW VIDEO TO MAKE THUMBNAIL FOR: {req.description}"
+    else:
+        system_prompt = THUMBNAIL_ANALYSIS_PROMPT
+        user_msg = f"Create a viral YouTube thumbnail for: {req.description}"
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-3-mini-fast",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.7,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON in thumbnail AI response")
+        return json.loads(content[start:end])
+
+
+async def _check_lora_exists() -> bool:
+    """Quick check if the trained LoRA file exists in ComfyUI."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(COMFYUI_URL + "/object_info/LoraLoader")
+            if resp.status_code == 200:
+                data = resp.json()
+                lora_info = data.get("LoraLoader", {}).get("input", {}).get("required", {})
+                lora_names = lora_info.get("lora_name", [[]])[0]
+                return LORA_NAME in lora_names
+    except Exception:
+        pass
+    return False
+
+
+async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_path: str, style_ref_path: str = "") -> str:
+    """Generate a 1280x720 thumbnail using SDXL via ComfyUI, with trained LoRA if available."""
+    use_lora = await _check_lora_exists()
+    if use_lora:
+        log.info("Using trained thumbnail LoRA for generation")
+
+    model_source = ["1", 0]
+    clip_source = ["1", 1]
+    if use_lora:
+        model_source = ["99", 0]
+        clip_source = ["99", 1]
+
+    lora_node = {}
+    if use_lora:
+        lora_node = {
+            "99": {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "lora_name": LORA_NAME,
+                    "strength_model": 0.75,
+                    "strength_clip": 0.75,
+                    "model": ["1", 0],
+                    "clip": ["1", 1],
+                },
+            },
+        }
+
+    if style_ref_path and Path(style_ref_path).exists():
+        uploaded_name = await _upload_image_to_comfyui(style_ref_path)
+        workflow = {
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+            },
+            **lora_node,
+            "2": {
+                "class_type": "LoadImage",
+                "inputs": {"image": uploaded_name},
+            },
+            "3": {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": ["2", 0], "vae": ["1", 2]},
+            },
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": clip_source},
+            },
+            "5": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": clip_source},
+            },
+            "6": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": 30,
+                    "cfg": 7.0,
+                    "sampler_name": "dpmpp_2m",
+                    "scheduler": "karras",
+                    "denoise": 0.65,
+                    "model": model_source,
+                    "positive": ["4", 0],
+                    "negative": ["5", 0],
+                    "latent_image": ["3", 0],
+                },
+            },
+            "7": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["6", 0], "vae": ["1", 2]},
+            },
+            "8": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_thumb", "images": ["7", 0]},
+            },
+        }
+    else:
+        workflow = {
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+            },
+            **lora_node,
+            "2": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": 1280, "height": 720, "batch_size": 1},
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": clip_source},
+            },
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": clip_source},
+            },
+            "5": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": 30,
+                    "cfg": 7.5,
+                    "sampler_name": "dpmpp_2m",
+                    "scheduler": "karras",
+                    "denoise": 1.0,
+                    "model": model_source,
+                    "positive": ["3", 0],
+                    "negative": ["4", 0],
+                    "latent_image": ["2", 0],
+                },
+            },
+            "6": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+            },
+            "7": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_thumb", "images": ["6", 0]},
+            },
+        }
+
+    result = await _run_comfyui_workflow(workflow, "8" if style_ref_path else "7", "images")
+    await _download_comfyui_file(result["images"][0], output_path)
+    return output_path
+
+
+@app.post("/api/thumbnails/generate")
+async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks):
+    if not XAI_API_KEY:
+        raise HTTPException(500, "XAI_API_KEY not configured")
+
+    job_id = f"thumb_{int(time.time())}_{random.randint(1000, 9999)}"
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "type": "thumbnail",
+        "mode": req.mode,
+        "created_at": time.time(),
+    }
+
+    async def _run_thumbnail_pipeline():
+        try:
+            jobs[job_id]["status"] = "analyzing"
+            jobs[job_id]["progress"] = 10
+            log.info(f"[{job_id}] Thumbnail gen: mode={req.mode}")
+
+            ai_result = await _generate_thumbnail_prompt(req)
+            thumb_prompt = ai_result.get("prompt", req.description)
+            thumb_negative = ai_result.get("negative_prompt", NEGATIVE_PROMPT)
+            title_text = ai_result.get("title_text", "")
+            style_notes = ai_result.get("style_notes", "")
+
+            jobs[job_id]["status"] = "generating"
+            jobs[job_id]["progress"] = 30
+            jobs[job_id]["ai_analysis"] = {
+                "title_text": title_text,
+                "style_notes": style_notes,
+                "patterns": ai_result.get("patterns_detected", []),
+            }
+
+            style_ref_path = ""
+            if req.style_reference_id:
+                ref_path = THUMBNAIL_UPLOAD_DIR / req.style_reference_id
+                if ref_path.exists():
+                    style_ref_path = str(ref_path)
+
+            output_name = f"{job_id}.png"
+            output_path = str(THUMBNAIL_OUTPUT_DIR / output_name)
+            await _generate_thumbnail_image(thumb_prompt, thumb_negative, output_path, style_ref_path)
+
+            if title_text:
+                try:
+                    safe_title = title_text.replace("'", "'\\''").replace(":", "\\:")
+                    titled_out = str(THUMBNAIL_OUTPUT_DIR / (job_id + "_titled.png"))
+                    vf_filter = (
+                        "drawtext=text='" + safe_title + "':"
+                        "fontsize=72:fontcolor=white:borderw=5:bordercolor=black:"
+                        "x=(w-text_w)/2:y=h*0.78:"
+                        "fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", output_path,
+                        "-vf", vf_filter,
+                        titled_out,
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    _, stderr = await proc.communicate()
+                    if proc.returncode == 0:
+                        titled_path = Path(titled_out)
+                        if titled_path.exists():
+                            Path(output_path).unlink(missing_ok=True)
+                            titled_path.rename(output_path)
+                except Exception as e:
+                    log.warning(f"[{job_id}] Title overlay failed, using without text: {e}")
+
+            jobs[job_id]["status"] = "complete"
+            jobs[job_id]["progress"] = 100
+            jobs[job_id]["output_file"] = output_name
+            jobs[job_id]["output_url"] = f"/api/thumbnails/generated/{output_name}"
+            log.info(f"[{job_id}] Thumbnail COMPLETE: {output_name}")
+
+        except Exception as e:
+            log.error(f"[{job_id}] Thumbnail pipeline failed: {e}", exc_info=True)
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = str(e)
+
+    background_tasks.add_task(_run_thumbnail_pipeline)
+    return {"status": "accepted", "job_id": job_id}
+
+
+# ─── Product Demo Video Pipeline ──────────────────────────────────────────────
+
+DEMO_DIR = Path("demo_uploads")
+DEMO_DIR.mkdir(exist_ok=True)
+
+DEMO_SYSTEM_PROMPT = """You are an expert product demo scriptwriter. You create engaging, professional voiceover scripts for software product demo videos.
+
+You will receive a description of what happens in a screen recording of a software product. Your job is to write a natural, enthusiastic, and clear voiceover script that explains what the viewer is seeing.
+
+RULES:
+- Write in second person ("you can see here...", "notice how...", "now watch as we...")
+- Be conversational and energetic, like a friendly SaaS founder showing their product
+- Break the script into timed segments that match the video sections
+- Each segment should be 3-8 seconds of speech
+- Include natural transitions ("and the best part is...", "but here's where it gets interesting...")
+- Highlight key features and benefits, not just what's on screen
+- Sound impressed by the product's capabilities
+- End with a strong call-to-action
+
+Output valid JSON:
+{
+  "title": "Product Demo Title",
+  "segments": [
+    {
+      "segment_num": 1,
+      "start_sec": 0.0,
+      "end_sec": 5.0,
+      "narration": "What the voiceover says during this segment",
+      "emphasis": "Key feature or benefit to highlight"
+    }
+  ],
+  "total_duration_sec": 60,
+  "cta": "Call to action text"
+}"""
+
+SADTALKER_REPLICATE_MODEL = "cjwbw/sadtalker:a519cc0cfebaaeade5f0f1a88b tried"
+
+
+async def analyze_screen_recording(video_path: str) -> dict:
+    """Extract frames from screen recording and analyze with Grok Vision."""
+    frames_dir = TEMP_DIR / f"demo_frames_{int(time.time()*1000)}"
+    frames_dir.mkdir(exist_ok=True)
+
+    probe_cmd = [
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await proc.communicate()
+    duration = float(stdout.decode().strip() or "30")
+
+    num_frames = min(int(duration / 3), 20)
+    if num_frames < 3:
+        num_frames = 3
+    interval = duration / num_frames
+
+    extract_cmd = [
+        "ffmpeg", "-i", video_path, "-vf", f"fps=1/{interval:.1f}",
+        "-frames:v", str(num_frames), "-q:v", "2",
+        str(frames_dir / "frame_%03d.jpg")
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *extract_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+
+    frame_files = sorted(frames_dir.glob("*.jpg"))
+    if not frame_files:
+        shutil.rmtree(frames_dir, ignore_errors=True)
+        return {"duration": duration, "description": "Software product demo", "frame_count": 0}
+
+    import base64
+    frame_descriptions = []
+    xai_key = os.environ.get("XAI_API_KEY", "")
+
+    for i, frame_path in enumerate(frame_files[:12]):
+        with open(frame_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+
+        timestamp = interval * i
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "grok-2-vision-latest",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                                {"type": "text", "text": "Describe what's shown on this software screen in 1-2 sentences. Focus on: what app/tool is this, what UI elements are visible, what action is being performed. Be specific about buttons, menus, text fields, data shown."}
+                            ]
+                        }],
+                        "max_tokens": 150
+                    }
+                )
+                if resp.status_code == 200:
+                    desc = resp.json()["choices"][0]["message"]["content"]
+                    frame_descriptions.append({"timestamp": round(timestamp, 1), "description": desc})
+        except Exception as e:
+            log.warning(f"Frame analysis failed for frame {i}: {e}")
+            frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
+
+    shutil.rmtree(frames_dir, ignore_errors=True)
+
+    return {
+        "duration": duration,
+        "frame_count": len(frame_descriptions),
+        "frames": frame_descriptions,
+        "description": " | ".join(f["description"] for f in frame_descriptions)
+    }
+
+
+async def generate_demo_script(analysis: dict, product_name: str = "", reference_notes: str = "") -> dict:
+    """Generate a timed voiceover script for the product demo."""
+    xai_key = os.environ.get("XAI_API_KEY", "")
+    duration = analysis.get("duration", 30)
+
+    frame_timeline = ""
+    for f in analysis.get("frames", []):
+        frame_timeline += f"\n- At {f['timestamp']}s: {f['description']}"
+
+    user_prompt = f"""Product: {product_name or 'Software Product'}
+Video duration: {duration:.1f} seconds
+{f'Style notes from reference: {reference_notes}' if reference_notes else ''}
+
+Frame-by-frame breakdown of the screen recording:
+{frame_timeline}
+
+Write a voiceover script with timed segments that perfectly sync to what's happening on screen. The script should cover the full {duration:.0f} seconds."""
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"},
+            json={
+                "model": "grok-3-mini",
+                "messages": [
+                    {"role": "system", "content": DEMO_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 2000
+            }
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Script generation failed: {resp.status_code}")
+
+    raw = resp.json()["choices"][0]["message"]["content"]
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+    return json.loads(raw)
+
+
+async def generate_ai_face(output_path: str) -> str:
+    """Generate a realistic AI male face photo using xAI Grok image generation."""
+    xai_key = os.environ.get("XAI_API_KEY", "")
+    ages = ["mid-20s", "late 20s", "early 30s", "mid-30s"]
+    styles = [
+        "clean-shaven with short brown hair, wearing a navy blue polo shirt",
+        "light stubble with dark hair swept to the side, wearing a black crew-neck t-shirt",
+        "clean-shaven with sandy blonde hair, wearing a gray henley shirt",
+        "trimmed beard with dark brown hair, wearing a white button-down shirt",
+        "clean-shaven with black hair, wearing a dark green quarter-zip pullover",
+    ]
+    import random as _rnd
+    age = _rnd.choice(ages)
+    style = _rnd.choice(styles)
+
+    prompt = (
+        f"Professional headshot portrait photo of a friendly, confident {age} male, {style}. "
+        "Looking directly at camera with a natural warm smile, slight head tilt. "
+        "Clean neutral background (soft gray or white gradient). "
+        "Shot on Canon EOS R5, 85mm f/1.4 lens, studio lighting with soft key light. "
+        "Sharp focus on eyes, natural skin texture, photorealistic. "
+        "Head and shoulders framing, centered composition."
+    )
+
+    headers = {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
+    payload = {"model": "grok-2-image", "prompt": prompt, "n": 1, "response_format": "url"}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
+        if resp.status_code in (200, 201):
+            data = resp.json().get("data", [])
+            if data and data[0].get("url"):
+                dl = await client.get(data[0]["url"], follow_redirects=True)
+                if dl.status_code == 200:
+                    with open(output_path, "wb") as f:
+                        f.write(dl.content)
+                    log.info(f"AI face generated: {output_path}")
+                    return output_path
+
+    raise RuntimeError(f"Failed to generate AI face: {resp.status_code}")
+
+
+async def generate_talking_head(face_image_path: str, audio_path: str, output_path: str) -> str:
+    """Generate a talking head video using SadTalker via Replicate API."""
+    import base64
+
+    with open(face_image_path, "rb") as f:
+        face_b64 = base64.b64encode(f.read()).decode()
+    with open(audio_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
+
+    face_ext = Path(face_image_path).suffix.lstrip(".")
+    audio_ext = Path(audio_path).suffix.lstrip(".")
+    face_uri = f"data:image/{face_ext};base64,{face_b64}"
+    audio_uri = f"data:audio/{audio_ext};base64,{audio_b64}"
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            "https://api.replicate.com/v1/predictions",
+            headers={
+                "Authorization": "Bearer r8_placeholder",
+                "Content-Type": "application/json",
+                "Prefer": "wait"
+            },
+            json={
+                "version": "a519cc0cfebaaeade5f0f1a88b4b75d9cba8b12e0e3b8d70e1e2b3b4c5d6e7f8",
+                "input": {
+                    "source_image": face_uri,
+                    "driven_audio": audio_uri,
+                    "enhancer": "gfpgan",
+                    "pose_style": 0,
+                    "facerender": "facevid2vid",
+                    "exp_scale": 1.0,
+                    "still_mode": False,
+                    "preprocess": "crop",
+                    "face_model_resolution": "512"
+                }
+            }
+        )
+
+        if resp.status_code in (200, 201):
+            result = resp.json()
+            output_url = result.get("output")
+            if output_url:
+                dl_resp = await client.get(output_url)
+                if dl_resp.status_code == 200:
+                    with open(output_path, "wb") as f:
+                        f.write(dl_resp.content)
+                    return output_path
+
+        log.warning(f"Replicate SadTalker returned {resp.status_code}, falling back to static face")
+
+    return await _static_face_fallback(face_image_path, audio_path, output_path)
+
+
+async def _static_face_fallback(face_image_path: str, audio_path: str, output_path: str) -> str:
+    """Fallback: create a video from the static face image with the audio, with subtle zoom."""
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", face_image_path,
+        "-i", audio_path,
+        "-vf", "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p,zoompan=z='1+0.001*on':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=512x512",
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-movflags", "+faststart",
+        output_path
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    return output_path
+
+
+async def composite_demo_video(
+    screen_recording: str, talking_head: str, audio_path: str,
+    output_path: str, subtitle_path: str = None,
+    pip_position: str = "bottom-right", pip_size: float = 0.25
+) -> str:
+    """Composite screen recording + talking head PiP + voiceover + captions."""
+    probe_cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x", screen_recording
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await proc.communicate()
+    dims = stdout.decode().strip().split("\n")[0]
+    if "x" in dims:
+        main_w, main_h = dims.split("x")[:2]
+        main_w, main_h = int(main_w), int(main_h)
+    else:
+        main_w, main_h = 1920, 1080
+
+    pip_w = int(main_w * pip_size)
+    margin = int(main_w * 0.02)
+
+    if pip_position == "bottom-right":
+        pip_x = f"main_w-overlay_w-{margin}"
+        pip_y = f"main_h-overlay_h-{margin}"
+    elif pip_position == "bottom-left":
+        pip_x = str(margin)
+        pip_y = f"main_h-overlay_h-{margin}"
+    elif pip_position == "top-right":
+        pip_x = f"main_w-overlay_w-{margin}"
+        pip_y = str(margin)
+    else:
+        pip_x = str(margin)
+        pip_y = str(margin)
+
+    vf = (
+        f"[1:v]scale={pip_w}:-1,format=yuva420p,"
+        f"geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
+        f"a='if(gt(abs(W/2-X)*abs(W/2-X)+abs(H/2-Y)*abs(H/2-Y),(W/2)*(W/2)),0,255)'[pip];"
+        f"[0:v][pip]overlay={pip_x}:{pip_y}"
+    )
+
+    if subtitle_path and Path(subtitle_path).exists():
+        safe_sub = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
+        vf += f",ass='{safe_sub}'"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", screen_recording,
+        "-i", talking_head,
+        "-i", audio_path,
+        "-filter_complex", vf,
+        "-map", "2:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest", "-movflags", "+faststart",
+        output_path
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        log.warning(f"PiP composite failed, trying without circular mask: {stderr.decode()[-200:]}")
+        cmd_simple = [
+            "ffmpeg", "-y",
+            "-i", screen_recording,
+            "-i", talking_head,
+            "-i", audio_path,
+            "-filter_complex",
+            f"[1:v]scale={pip_w}:-1[pip];[0:v][pip]overlay={pip_x}:{pip_y}",
+            "-map", "2:a",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            output_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_simple, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc.communicate()
+
+    return output_path
+
+
+async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_path: str,
+                            product_name: str, reference_notes: str,
+                            pip_position: str = "bottom-right"):
+    """Full product demo video generation pipeline."""
+    try:
+        ref_style = ""
+        if ref_path and Path(ref_path).exists():
+            jobs[job_id]["status"] = "analyzing_reference"
+            jobs[job_id]["progress"] = 3
+            log.info(f"[{job_id}] Analyzing reference video for style...")
+            ref_analysis = await analyze_screen_recording(ref_path)
+            ref_style = (
+                f"Match the style, pacing, and energy of this reference video: "
+                f"{ref_analysis.get('description', '')}. "
+                f"Duration: {ref_analysis.get('duration', 0):.0f}s, "
+                f"{ref_analysis.get('frame_count', 0)} key frames analyzed."
+            )
+            Path(ref_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "analyzing"
+        jobs[job_id]["progress"] = 5
+        log.info(f"[{job_id}] Demo pipeline: analyzing demo video...")
+
+        analysis = await analyze_screen_recording(demo_path)
+        jobs[job_id]["analysis"] = {
+            "duration": analysis["duration"],
+            "frame_count": analysis["frame_count"]
+        }
+        jobs[job_id]["progress"] = 20
+        log.info(f"[{job_id}] Screen analyzed: {analysis['frame_count']} frames, {analysis['duration']:.1f}s")
+
+        jobs[job_id]["status"] = "scripting"
+        jobs[job_id]["progress"] = 25
+        log.info(f"[{job_id}] Generating demo script...")
+
+        full_ref_notes = reference_notes
+        if ref_style:
+            full_ref_notes = ref_style + ("\n" + reference_notes if reference_notes else "")
+        script_data = await generate_demo_script(analysis, product_name, full_ref_notes)
+        jobs[job_id]["script"] = script_data
+        jobs[job_id]["progress"] = 40
+        log.info(f"[{job_id}] Script ready: {len(script_data.get('segments', []))} segments")
+
+        jobs[job_id]["status"] = "generating_voice"
+        jobs[job_id]["progress"] = 45
+        log.info(f"[{job_id}] Generating voiceover...")
+
+        full_narration = " ".join(seg["narration"] for seg in script_data.get("segments", []))
+        audio_path = str(TEMP_DIR / (job_id + "_demo_voice.mp3"))
+        vo_result = await generate_voiceover(full_narration, audio_path, template="motivation")
+        audio_path = vo_result["audio_path"]
+        word_timings = vo_result.get("word_timings", [])
+        jobs[job_id]["progress"] = 60
+
+        subtitle_path = None
+        if word_timings:
+            subtitle_path = str(TEMP_DIR / (job_id + "_demo_captions.ass"))
+            generate_ass_subtitles(word_timings, subtitle_path, resolution="1080p")
+
+        jobs[job_id]["status"] = "generating_face"
+        jobs[job_id]["progress"] = 65
+
+        if not face_path or not Path(face_path).exists():
+            log.info(f"[{job_id}] No face uploaded, generating AI male face...")
+            face_path = str(TEMP_DIR / (job_id + "_ai_face.png"))
+            await generate_ai_face(face_path)
+            log.info(f"[{job_id}] AI face generated")
+
+        log.info(f"[{job_id}] Generating talking head animation...")
+        talking_head_path = str(TEMP_DIR / (job_id + "_talking_head.mp4"))
+        await generate_talking_head(face_path, audio_path, talking_head_path)
+        jobs[job_id]["progress"] = 80
+        log.info(f"[{job_id}] Talking head generated")
+
+        jobs[job_id]["status"] = "compositing"
+        jobs[job_id]["progress"] = 85
+        log.info(f"[{job_id}] Compositing demo video...")
+
+        output_filename = f"demo_{job_id}.mp4"
+        output_path = str(OUTPUT_DIR / output_filename)
+        await composite_demo_video(
+            demo_path, talking_head_path, audio_path,
+            output_path, subtitle_path=subtitle_path,
+            pip_position=pip_position
+        )
+        jobs[job_id]["progress"] = 95
+
+        Path(talking_head_path).unlink(missing_ok=True)
+        Path(audio_path).unlink(missing_ok=True)
+        if subtitle_path:
+            Path(subtitle_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "complete"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["output_file"] = output_filename
+        jobs[job_id]["output_url"] = f"/api/download/{output_filename}"
+        log.info(f"[{job_id}] Demo COMPLETE: {output_filename}")
+
+    except Exception as e:
+        log.error(f"[{job_id}] Demo pipeline failed: {e}", exc_info=True)
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+
+    finally:
+        Path(demo_path).unlink(missing_ok=True)
+        if ref_path and Path(ref_path).exists():
+            Path(ref_path).unlink(missing_ok=True)
+        if face_path and Path(face_path).exists():
+            Path(face_path).unlink(missing_ok=True)
+
+
+@app.post("/api/demo")
+async def create_demo_video(
+    background_tasks: BackgroundTasks,
+    demo_video: UploadFile = File(...),
+    reference_video: Optional[UploadFile] = File(None),
+    face_image: Optional[UploadFile] = File(None),
+    product_name: str = Form(""),
+    reference_notes: str = Form(""),
+    pip_position: str = Form("bottom-right"),
+    request: Request = None,
+):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+
+    job_id = f"demo_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+
+    demo_ext = Path(demo_video.filename or "video.mp4").suffix or ".mp4"
+    demo_path = str(DEMO_DIR / (job_id + "_demo" + demo_ext))
+    with open(demo_path, "wb") as f:
+        content = await demo_video.read()
+        f.write(content)
+
+    ref_path = ""
+    if reference_video and reference_video.filename:
+        ref_ext = Path(reference_video.filename).suffix or ".mp4"
+        ref_path = str(DEMO_DIR / (job_id + "_reference" + ref_ext))
+        with open(ref_path, "wb") as f:
+            content = await reference_video.read()
+            f.write(content)
+
+    face_path = ""
+    if face_image and face_image.filename:
+        face_ext = Path(face_image.filename).suffix or ".png"
+        face_path = str(DEMO_DIR / (job_id + "_face" + face_ext))
+        with open(face_path, "wb") as f:
+            content = await face_image.read()
+            f.write(content)
+
+    jobs[job_id] = {
+        "status": "queued", "progress": 0, "type": "demo",
+        "product_name": product_name,
+        "created_at": time.time()
+    }
+
+    background_tasks.add_task(
+        run_demo_pipeline, job_id, demo_path, ref_path, face_path,
+        product_name, reference_notes, pip_position
+    )
+
+    return {"status": "accepted", "job_id": job_id}
+
+
+# ─── Static Files ─────────────────────────────────────────────────────────────
+
+dist_dir = Path("ViralShorts-App/dist")
+if dist_dir.exists():
+    app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+
+
+if __name__ == "__main__":
+    for f in OUTPUT_DIR.iterdir():
+        if f.suffix == ".mp4" and f.stat().st_mtime < time.time() - 86400:
+            f.unlink(missing_ok=True)
+    uvicorn.run("backend:app", host="0.0.0.0", port=8081, reload=True)
