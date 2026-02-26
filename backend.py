@@ -2955,8 +2955,8 @@ async def clone_video(
     if file and file.filename:
         video_path = str(TEMP_DIR / f"clone_upload_{int(time.time())}.mp4")
         with open(video_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
 
     job_id = f"clone_{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -3254,9 +3254,9 @@ async def upload_thumbnails(files: list[UploadFile] = File(...), background_task
         ts = int(time.time() * 1000)
         safe_name = str(ts) + "_" + str(random.randint(1000, 9999)) + ext
         dest = THUMBNAIL_UPLOAD_DIR / safe_name
-        content = await file.read()
         with open(dest, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
         saved.append({
             "id": safe_name,
             "name": file.filename,
@@ -4130,24 +4130,24 @@ async def create_demo_video(
     demo_ext = Path(demo_video.filename or "video.mp4").suffix or ".mp4"
     demo_path = str(DEMO_DIR / (job_id + "_demo" + demo_ext))
     with open(demo_path, "wb") as f:
-        content = await demo_video.read()
-        f.write(content)
+        while chunk := await demo_video.read(1024 * 1024):
+            f.write(chunk)
 
     ref_path = ""
     if reference_video and reference_video.filename:
         ref_ext = Path(reference_video.filename).suffix or ".mp4"
         ref_path = str(DEMO_DIR / (job_id + "_reference" + ref_ext))
         with open(ref_path, "wb") as f:
-            content = await reference_video.read()
-            f.write(content)
+            while chunk := await reference_video.read(1024 * 1024):
+                f.write(chunk)
 
     face_path = ""
     if face_image and face_image.filename:
         face_ext = Path(face_image.filename).suffix or ".png"
         face_path = str(DEMO_DIR / (job_id + "_face" + face_ext))
         with open(face_path, "wb") as f:
-            content = await face_image.read()
-            f.write(content)
+            while chunk := await face_image.read(1024 * 1024):
+                f.write(chunk)
 
     jobs[job_id] = {
         "status": "queued", "progress": 0, "type": "demo",
