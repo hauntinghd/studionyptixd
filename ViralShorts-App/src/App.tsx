@@ -1011,34 +1011,48 @@ function CreatePanel() {
     };
 
     const handleCreativeStart = async () => {
-        if (!prompt) return;
         setScriptLoading(true);
         try {
-            const res = await fetch(`${API}/api/creative/script`, {
+            const res = await fetch(`${API}/api/creative/session`, {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
                     template: selectedTemplate,
-                    prompt,
+                    topic: prompt || "Untitled",
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                 }),
             });
-            if (!res.ok) throw new Error("Script generation failed");
+            if (!res.ok) throw new Error("Failed to create session");
             const data = await res.json();
             setSessionId(data.session_id);
-            setCreativeTitle(data.title || prompt);
-            setCreativeScenes(data.scenes.map((s: any) => ({
-                ...s,
-                imageData: undefined,
-                imageLoading: false,
-            })));
+            setCreativeTitle(prompt || "Untitled Short");
+            setCreativeScenes([{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                duration_sec: 5,
+            }]);
             setCreativeStep('edit');
         } catch (e: any) {
-            alert(e.message || "Failed to generate script");
+            alert(e.message || "Failed to start creative session");
         } finally {
             setScriptLoading(false);
         }
+    };
+
+    const handleAddScene = () => {
+        setCreativeScenes(prev => [...prev, {
+            index: prev.length,
+            narration: "",
+            visual_description: "",
+            duration_sec: 5,
+        }]);
+    };
+
+    const handleRemoveScene = (index: number) => {
+        if (creativeScenes.length <= 1) return;
+        setCreativeScenes(prev => prev.filter((_, i) => i !== index).map((s, i) => ({ ...s, index: i })));
     };
 
     const handleGenerateSceneImage = async (sceneIndex: number) => {
@@ -1075,29 +1089,12 @@ function CreatePanel() {
         ));
     };
 
-    const handleSaveScene = async (index: number) => {
-        if (!sessionId) return;
-        const scene = creativeScenes[index];
-        await fetch(`${API}/api/creative/scene/${sessionId}/${index}`, {
-            method: "PUT",
-            headers: authHeaders(),
-            body: JSON.stringify({
-                narration: scene.narration,
-                visual_description: scene.visual_description,
-                duration_sec: scene.duration_sec,
-            }),
-        });
-    };
-
     const handleFinalize = async () => {
         if (!sessionId) return;
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
         setCreativeStep('generating');
-        for (let i = 0; i < creativeScenes.length; i++) {
-            await handleSaveScene(i);
-        }
         try {
             const res = await fetch(`${API}/api/creative/finalize`, {
                 method: "POST",
@@ -1107,6 +1104,11 @@ function CreatePanel() {
                     template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
                     language,
+                    scenes: creativeScenes.map(s => ({
+                        narration: s.narration,
+                        visual_description: s.visual_description,
+                        duration_sec: s.duration_sec,
+                    })),
                 }),
             });
             const data = await res.json();
@@ -1126,12 +1128,14 @@ function CreatePanel() {
     };
 
     if (creativeMode === 'creative' && creativeStep === 'edit') {
+    const hasNarration = creativeScenes.some(s => s.narration.trim());
+
         return (
             <div className="max-w-4xl mx-auto px-6 pb-10 space-y-6">
                 <div className="flex items-center justify-between">
                     <div>
                         <h1 className="text-xl font-bold text-white">{creativeTitle}</h1>
-                        <p className="text-sm text-gray-500">{creativeScenes.length} scenes &middot; Edit prompts, preview images, then render</p>
+                        <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; Write your script, generate images, then render</p>
                     </div>
                     <button onClick={handleResetCreative} className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-gray-400 transition flex items-center gap-2">
                         <ArrowRight className="w-4 h-4 rotate-180" /> Back
@@ -1143,31 +1147,54 @@ function CreatePanel() {
                         <div key={idx} className="rounded-xl border border-white/[0.08] bg-white/[0.02] overflow-hidden">
                             <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
                                 <span className="text-sm font-bold text-violet-400">Scene {idx + 1}</span>
-                                <span className="text-xs text-gray-600">{scene.duration_sec}s</span>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-1.5">
+                                        <label className="text-xs text-gray-600">Duration</label>
+                                        <select
+                                            value={scene.duration_sec}
+                                            onChange={(e) => handleUpdateScene(idx, 'duration_sec', Number(e.target.value))}
+                                            className="bg-black/30 border border-white/[0.08] rounded px-2 py-1 text-xs text-white focus:outline-none">
+                                            <option value={3}>3s</option>
+                                            <option value={4}>4s</option>
+                                            <option value={5}>5s</option>
+                                            <option value={6}>6s</option>
+                                            <option value={7}>7s</option>
+                                            <option value={8}>8s</option>
+                                            <option value={10}>10s</option>
+                                        </select>
+                                    </div>
+                                    {creativeScenes.length > 1 && (
+                                        <button onClick={() => handleRemoveScene(idx)} className="p-1 hover:bg-red-500/20 rounded transition" title="Remove scene">
+                                            <Trash2 className="w-4 h-4 text-red-400" />
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                             <div className="p-4 space-y-3">
                                 <div>
-                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Narration</label>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Narration (what the voiceover says)</label>
                                     <textarea
                                         value={scene.narration}
                                         onChange={(e) => handleUpdateScene(idx, 'narration', e.target.value)}
                                         rows={2}
+                                        placeholder="Write what the voiceover should say for this scene..."
                                         className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
                                     />
                                 </div>
                                 <div>
-                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt</label>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what the scene looks like)</label>
                                     <textarea
                                         value={scene.visual_description}
                                         onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
                                         rows={2}
+                                        placeholder="Describe the visual for this scene, e.g. 'A 3D skeleton wearing a doctor's coat in a hospital setting, dark moody lighting'"
                                         className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
                                     />
                                 </div>
                                 <div className="flex items-center gap-3">
                                     <button
                                         onClick={() => handleGenerateSceneImage(idx)}
-                                        disabled={scene.imageLoading}
+                                        disabled={scene.imageLoading || !scene.visual_description.trim()}
                                         className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2">
                                         {scene.imageLoading ? (
                                             <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
@@ -1191,9 +1218,14 @@ function CreatePanel() {
                     ))}
                 </div>
 
+                <button onClick={handleAddScene}
+                    className="w-full py-3 border-2 border-dashed border-white/[0.1] hover:border-violet-500/40 rounded-xl text-gray-500 hover:text-violet-400 font-medium transition flex items-center justify-center gap-2">
+                    <Plus className="w-4 h-4" /> Add Scene
+                </button>
+
                 <button
                     onClick={handleFinalize}
-                    disabled={loading}
+                    disabled={loading || !hasNarration}
                     className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
                     {loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
@@ -1201,6 +1233,10 @@ function CreatePanel() {
                         <><Film className="w-5 h-5" /> Animate &amp; Render Final Video</>
                     )}
                 </button>
+
+                {!hasNarration && (
+                    <p className="text-center text-sm text-gray-600">Write narration for at least one scene to render.</p>
+                )}
 
                 {jobStatus && (
                     <div className={`rounded-2xl border transition-all overflow-hidden ${
@@ -1393,14 +1429,14 @@ function CreatePanel() {
                 </div>
 
                 {/* GENERATE BUTTON */}
-                <button onClick={handleGenerate} disabled={loading || scriptLoading || !prompt}
+                <button onClick={handleGenerate} disabled={loading || scriptLoading || (creativeMode === 'auto' && !prompt)}
                     className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
                     {scriptLoading ? (
-                        <><Loader2 className="w-5 h-5 animate-spin" /> Generating script...</>
+                        <><Loader2 className="w-5 h-5 animate-spin" /> Setting up...</>
                     ) : loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
                     ) : creativeMode === 'creative' ? (
-                        <><Sliders className="w-5 h-5" /> Generate Script &amp; Edit Scenes</>
+                        <><Sliders className="w-5 h-5" /> Start Building Your Short</>
                     ) : (
                         <><Wand2 className="w-5 h-5" /> Generate at {canUse1080p ? resolution : '720p'}</>
                     )}

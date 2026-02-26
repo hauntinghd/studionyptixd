@@ -2633,6 +2633,7 @@ class FinalizeRequest(BaseModel):
     template: str = "skeleton"
     resolution: str = "720p"
     language: str = "en"
+    scenes: list = []
 
 
 _creative_sessions: dict = {}
@@ -2679,9 +2680,31 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     }
 
 
+@app.post("/api/creative/session")
+async def creative_create_session(body: dict, request: Request = None):
+    """Create an empty creative session (no script generation). User builds scenes manually."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
+    _creative_sessions[session_id] = {
+        "user_id": user["id"],
+        "template": body.get("template", "skeleton"),
+        "topic": body.get("topic", "Untitled"),
+        "resolution": body.get("resolution", "720p"),
+        "language": body.get("language", "en"),
+        "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
+        "scenes": [],
+        "scene_images": {},
+        "created_at": time.time(),
+    }
+    log.info(f"Creative session created: {session_id} for user {user['id']}")
+    return {"session_id": session_id}
+
+
 @app.post("/api/creative/scene-image")
 async def creative_scene_image(req: SceneImageRequest, request: Request = None):
-    """Phase 2: Generate (or regenerate) an image for a specific scene."""
+    """Generate (or regenerate) an image for a specific scene. Unlimited regenerations."""
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
@@ -2743,13 +2766,18 @@ async def creative_update_scene(session_id: str, scene_index: int, body: dict, r
 
 @app.post("/api/creative/finalize")
 async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTasks, request: Request = None):
-    """Phase 3: Run the full pipeline using the user's approved scenes + images."""
+    """Phase 3: Run the full pipeline using the user's scenes + images."""
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
     session = _creative_sessions.get(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
+
+    if req.scenes:
+        session["scenes"] = req.scenes
+    if not session["scenes"]:
+        raise HTTPException(400, "No scenes provided")
 
     user_plan = user.get("plan", "free")
     if user_plan == "admin":
