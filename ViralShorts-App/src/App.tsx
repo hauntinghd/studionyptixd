@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext, useCallback } from 'react';
+import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search, Star, Send } from 'lucide-react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
@@ -915,6 +915,7 @@ interface CreativeScene {
     imageData?: string;
     imageLoading?: boolean;
     generation_id?: string;
+    imageError?: string;
 }
 
 function CreatePanel() {
@@ -932,6 +933,8 @@ function CreatePanel() {
     const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
+    const creativeScenesRef = useRef<CreativeScene[]>([]);
+    creativeScenesRef.current = creativeScenes;
     const [scriptLoading, setScriptLoading] = useState(false);
     const [creativeTitle, setCreativeTitle] = useState("");
     const [creativeNarration, setCreativeNarration] = useState("");
@@ -1059,9 +1062,12 @@ function CreatePanel() {
 
     const handleGenerateSceneImage = async (sceneIndex: number) => {
         if (!sessionId) return;
-        setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true } : s));
+        const currentScenes = creativeScenesRef.current;
+        if (sceneIndex >= currentScenes.length || !currentScenes[sceneIndex]) return;
+        const scene = currentScenes[sceneIndex];
+        if (!scene.visual_description.trim()) return;
+        setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
-            const scene = creativeScenes[sceneIndex];
             const res = await fetch(`${API}/api/creative/scene-image`, {
                 method: "POST",
                 headers: authHeaders(),
@@ -1073,14 +1079,20 @@ function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                 }),
             });
-            if (!res.ok) throw new Error("Image gen failed");
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "Unknown error");
+                console.error(`Scene ${sceneIndex} image gen failed:`, res.status, errText);
+                throw new Error(errText);
+            }
             const data = await res.json();
             setCreativeScenes(prev => prev.map((s, i) =>
                 i === sceneIndex ? { ...s, imageData: data.image_data, imageLoading: false, generation_id: data.generation_id } : s
             ));
-        } catch {
+        } catch (err: any) {
+            const msg = err?.message || "Image generation failed";
+            console.error(`Scene ${sceneIndex} image gen error:`, msg);
             setCreativeScenes(prev => prev.map((s, i) =>
-                i === sceneIndex ? { ...s, imageLoading: false } : s
+                i === sceneIndex ? { ...s, imageLoading: false, imageError: msg } : s
             ));
         }
     };
@@ -1216,6 +1228,9 @@ function CreatePanel() {
                                         </span>
                                     )}
                                 </div>
+                                {scene.imageError && (
+                                    <p className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">Error: {scene.imageError}</p>
+                                )}
                                 {scene.imageData && (
                                     <img src={scene.imageData} alt={`Scene ${idx + 1}`} className="rounded-lg w-full max-h-48 object-contain bg-black/40" />
                                 )}
@@ -2062,6 +2077,7 @@ function DemoPanel() {
         analyzing: 'Analyzing screen recording frame-by-frame...',
         scripting: 'Writing voiceover script with AI...',
         generating_voice: 'Generating voiceover with ElevenLabs...',
+        generating_sfx: 'Generating sound effects...',
         generating_face: 'Generating AI presenter face...',
         compositing: 'Compositing final demo video...',
         complete: 'Done!',
@@ -2937,6 +2953,7 @@ function ProgressBar({ progress, status }: { progress: number; status: string })
         generating_images: "Generating scenes with Grok Imagine...",
         animating_scenes: "Animating with Kling 2.1 AI Video...",
         generating_voice: "Creating AI voiceover...",
+        generating_sfx: "Generating sound effects...",
         compositing: "Compositing final video...",
         complete: "Done!",
         error: "Error occurred",

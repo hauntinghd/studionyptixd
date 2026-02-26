@@ -1054,6 +1054,53 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
     return {"audio_path": output_path, "word_timings": word_timings}
 
 
+TEMPLATE_SFX_STYLES = {
+    "skeleton": "dark eerie ambient drone, subtle horror atmosphere",
+    "scary": "creepy horror atmosphere, tension building drone",
+    "objects": "mysterious discovery sound, wonder ambient",
+    "wyr": "dramatic suspense, game show tension",
+    "historical": "epic cinematic atmosphere, dramatic orchestra hint",
+}
+
+
+async def generate_scene_sfx(visual_description: str, duration_sec: float,
+                              output_path: str, template: str = "") -> str:
+    """Generate a sound effect for a scene using ElevenLabs Sound Effects API.
+    Returns the path to the generated SFX audio file, or empty string on failure."""
+    if not ELEVENLABS_API_KEY:
+        return ""
+
+    style_hint = TEMPLATE_SFX_STYLES.get(template, "cinematic ambient atmosphere")
+    sfx_prompt = f"{style_hint}, matching visual: {visual_description[:200]}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.elevenlabs.io/v1/sound-generation",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": sfx_prompt,
+                    "duration_seconds": min(duration_sec, 22.0),
+                    "prompt_influence": 0.4,
+                },
+            )
+            if resp.status_code != 200:
+                log.warning(f"ElevenLabs SFX failed ({resp.status_code}): {resp.text[:200]}")
+                return ""
+            with open(output_path, "wb") as f:
+                f.write(resp.content)
+            if Path(output_path).stat().st_size > 0:
+                log.info(f"SFX generated: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+                return output_path
+            return ""
+    except Exception as e:
+        log.warning(f"SFX generation failed (non-fatal): {e}")
+        return ""
+
+
 def _extract_word_timings(original_text: str, alignment: dict) -> list:
     """Convert ElevenLabs character-level alignment into word-level timings."""
     chars = alignment.get("characters", [])
@@ -1211,6 +1258,57 @@ TEMPLATE_KLING_MOTION = {
     "motivation": "Epic cinematic: slow-motion camera sweep across landscape, golden light shifts, silhouette figure in the distance, wind and weather movement, inspirational energy.",
     "whatif": "Scientific visualization: transformation from normal to hypothetical, dramatic scale changes, time-lapse effects, before-and-after morphing, epic camera pullback to show scale.",
 }
+
+TEMPLATE_SFX_PROMPTS = {
+    "skeleton": "Dark cinematic bass impact hit with eerie bone crack, dramatic low-end whoosh, horror tension riser",
+    "history": "Epic orchestral low brass stinger with battle drums, cinematic war ambience, ancient world atmosphere",
+    "story": "Emotional cinematic drone with subtle heartbeat, tension building string swell, dramatic mood shift",
+    "reddit": "Clean modern UI notification transition whoosh, subtle digital ambience, social media pop",
+    "top5": "Dramatic countdown reveal impact hit, deep bass drop, epic cinematic stinger with brass",
+    "random": "Chaotic glitch sound effect with bass drop, surreal warping transition, energetic impact hit",
+    "roblox": "Playful cartoon game sound effect, bouncy colorful pop, cheerful video game coin collect sound",
+    "objects": "Smooth cinematic swoosh transition, elegant product reveal shimmer, satisfying mechanical click",
+    "split": "Clean comparison split swoosh transition, dramatic side-by-side reveal impact, tension contrast hit",
+    "twitter": "Modern social media notification whoosh, clean digital text pop transition, subtle tech ambience",
+    "quiz": "Game show dramatic reveal stinger, suspenseful buzzer tension, audience gasps with anticipation",
+    "argument": "Intense debate tension riser, dramatic confrontation bass hit, aggressive argument impact stinger",
+    "wouldyourather": "Dramatic choice tension riser building to suspenseful reveal, decision point bass impact hit",
+    "scary": "Deep horror drone with creaking door, eerie whisper ambience, jump scare tension riser stinger",
+    "motivation": "Inspirational cinematic orchestra swell, uplifting epic brass rise, triumphant achievement stinger",
+    "whatif": "Mind-bending sci-fi transition whoosh, reality warping bass drop, cosmic scale reveal impact",
+}
+
+
+async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: float, output_path: str) -> str:
+    """Generate a sound effect for a scene using ElevenLabs Sound Effects API."""
+    if not ELEVENLABS_API_KEY:
+        return ""
+    base_sfx = TEMPLATE_SFX_PROMPTS.get(template, "Cinematic dramatic transition impact hit with bass")
+    sfx_prompt = f"{base_sfx}. Scene: {scene_desc[:150]}"
+    sfx_duration = min(max(duration_sec, 0.5), 22.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.elevenlabs.io/v1/sound-generation",
+                headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+                json={
+                    "text": sfx_prompt,
+                    "duration_seconds": sfx_duration,
+                    "prompt_influence": 0.4,
+                },
+            )
+            if resp.status_code not in (200, 201):
+                log.warning(f"SFX generation failed ({resp.status_code}): {resp.text[:200]}")
+                return ""
+            with open(output_path, "wb") as f:
+                f.write(resp.content)
+        log.info(f"SFX generated: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+        return output_path
+    except Exception as e:
+        log.warning(f"SFX generation error (non-fatal): {e}")
+        return ""
+
 
 SKELETON_NEGATIVE_PROMPT = (
     "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
@@ -2408,6 +2506,62 @@ async def kling_clip_to_scene(kling_clip: str, duration: float, output_clip: str
     return output_clip
 
 
+async def _merge_sfx_track(sfx_paths: list[str], scenes: list, output_path: str) -> str:
+    """Concatenate per-scene SFX clips into one continuous audio track.
+    Pads missing scenes with silence to keep timing aligned."""
+    job_ts = str(int(time.time() * 1000))
+    padded_clips = []
+
+    for i, scene in enumerate(scenes):
+        dur = scene.get("duration_sec", 5)
+        if i == len(scenes) - 1:
+            dur += 1.0
+        sfx = sfx_paths[i] if i < len(sfx_paths) else ""
+
+        padded_path = str(TEMP_DIR / f"sfx_pad_{i}_{job_ts}.mp3")
+        if sfx and Path(sfx).exists() and Path(sfx).stat().st_size > 0:
+            cmd = [
+                "ffmpeg", "-y", "-i", sfx,
+                "-af", f"apad=whole_dur={dur},afade=t=in:st=0:d=0.15,afade=t=out:st={max(dur - 0.3, 0)}:d=0.3",
+                "-t", str(dur), "-ar", "44100", "-ac", "1",
+                padded_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono",
+                "-t", str(dur), padded_path,
+            ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc.communicate()
+        padded_clips.append(padded_path)
+
+    concat_file = TEMP_DIR / f"sfx_concat_{job_ts}.txt"
+    with open(concat_file, "w") as f:
+        for p in padded_clips:
+            f.write(f"file '{Path(p).resolve()}'\n")
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(concat_file), "-c:a", "libmp3lame", "-ar", "44100",
+        output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+
+    for p in padded_clips:
+        Path(p).unlink(missing_ok=True)
+    concat_file.unlink(missing_ok=True)
+
+    if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+        log.info(f"SFX track merged: {output_path}")
+        return output_path
+    return ""
+
+
 async def composite_video(
     scenes: list,
     scene_assets: list,
@@ -2416,10 +2570,12 @@ async def composite_video(
     resolution: str = "720p",
     use_svd: bool = False,
     subtitle_path: str = None,
+    sfx_paths: list[str] = None,
 ) -> str:
-    """Composite scene clips into final MP4 with optional burned-in captions.
+    """Composite scene clips into final MP4 with optional burned-in captions and SFX.
     scene_assets: list of dicts with keys: image, frames, kling_clip
     subtitle_path: optional ASS subtitle file for word-synced captions
+    sfx_paths: optional per-scene SFX audio files to mix under voiceover
     """
     config = RESOLUTION_CONFIGS[resolution]
     out_w = config["output_width"]
@@ -2494,31 +2650,67 @@ async def composite_video(
     if not merged_video.exists() or merged_video.stat().st_size == 0:
         raise RuntimeError("FFmpeg concat produced no output file")
 
+    sfx_track = ""
+    if sfx_paths and any(sfx_paths):
+        sfx_track_path = str(TEMP_DIR / ("sfx_full_" + job_ts + ".mp3"))
+        sfx_track = await _merge_sfx_track(sfx_paths, scenes, sfx_track_path)
+
+    has_sfx = sfx_track and Path(sfx_track).exists()
+
     if subtitle_path and Path(subtitle_path).exists():
         sub_abs = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(merged_video),
-            "-i", audio_path,
-            "-vf", f"ass={sub_abs}",
-            "-af", "apad=pad_dur=0.8",
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
-            str(output_path),
-        ]
-        log.info(f"Burning captions from {subtitle_path}")
+        if has_sfx:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged_video),
+                "-i", audio_path,
+                "-i", sfx_track,
+                "-vf", f"ass={sub_abs}",
+                "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged_video),
+                "-i", audio_path,
+                "-vf", f"ass={sub_abs}",
+                "-af", "apad=pad_dur=0.8",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
+        log.info(f"Burning captions from {subtitle_path}" + (" + SFX" if has_sfx else ""))
     else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(merged_video),
-            "-i", audio_path,
-            "-af", "apad=pad_dur=0.8",
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
-            str(output_path),
-        ]
+        if has_sfx:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged_video),
+                "-i", audio_path,
+                "-i", sfx_track,
+                "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged_video),
+                "-i", audio_path,
+                "-af", "apad=pad_dur=0.8",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -2553,6 +2745,8 @@ async def composite_video(
         clip.unlink(missing_ok=True)
     concat_file.unlink(missing_ok=True)
     merged_video.unlink(missing_ok=True)
+    if sfx_track:
+        Path(sfx_track).unlink(missing_ok=True)
 
     log.info(f"Video composited successfully: {Path(output_path).stat().st_size / 1024 / 1024:.1f} MB")
     return str(output_path)
@@ -2645,14 +2839,28 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
+        jobs[job_id]["status"] = "generating_sfx"
+        jobs[job_id]["progress"] = 78
+        sfx_paths = []
+        for i, scene in enumerate(scenes):
+            sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
+            desc = scene.get("visual_description", "")
+            dur = scene.get("duration_sec", 5)
+            sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
+            sfx_paths.append(sfx_file)
+        log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+
         jobs[job_id]["status"] = "compositing"
         jobs[job_id]["progress"] = 82
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
 
         output_filename = template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path, sfx_paths=sfx_paths)
 
+        for sfx in sfx_paths:
+            if sfx:
+                Path(sfx).unlink(missing_ok=True)
         for asset in scene_assets:
             Path(asset["image"]).unlink(missing_ok=True)
             if asset.get("kling_clip"):
@@ -2790,7 +2998,13 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     if session["user_id"] != user["id"]:
         raise HTTPException(403, "Not your session")
 
-    prev_img = session.get("scene_images", {}).get(req.scene_index, {})
+    if "scene_images" not in session:
+        session["scene_images"] = {}
+
+    while len(session["scenes"]) <= req.scene_index:
+        session["scenes"].append({"visual_description": "", "narration": "", "duration_sec": 5})
+
+    prev_img = session["scene_images"].get(req.scene_index, {})
     prev_gen_id = prev_img.get("generation_id")
     if prev_gen_id:
         asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False))
@@ -2816,8 +3030,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "generation_id": gen_id,
     }
 
-    if req.scene_index < len(session["scenes"]):
-        session["scenes"][req.scene_index]["visual_description"] = req.prompt
+    session["scenes"][req.scene_index]["visual_description"] = req.prompt
 
     return {
         "scene_index": req.scene_index,
@@ -2979,12 +3192,26 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
 
+        jobs[job_id]["status"] = "generating_sfx"
+        jobs[job_id]["progress"] = 78
+        sfx_paths = []
+        for i, scene in enumerate(scenes):
+            sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
+            desc = scene.get("visual_description", "")
+            dur = scene.get("duration_sec", 5)
+            sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
+            sfx_paths.append(sfx_file)
+        log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+
         jobs[job_id]["status"] = "compositing"
         jobs[job_id]["progress"] = 82
         output_filename = template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path, sfx_paths=sfx_paths)
 
+        for sfx in sfx_paths:
+            if sfx:
+                Path(sfx).unlink(missing_ok=True)
         for asset in scene_assets:
             Path(asset["image"]).unlink(missing_ok=True)
             if asset.get("kling_clip"):
