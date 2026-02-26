@@ -1128,7 +1128,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Word,Arial Black,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,105,105,2,0,1,{outline},{shadow},2,20,20,{margin_v},1
+Style: Word,Noto Sans,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,105,105,2,0,1,{outline},{shadow},2,20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1557,49 +1557,88 @@ async def _download_comfyui_file(file_info: dict, output_path: str):
 GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 
 
+async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
+    """Generate image directly via xAI API (grok-2-image). No fal.ai needed.
+    Returns {"local_path": str, "cdn_url": str}.
+    """
+    if not XAI_API_KEY:
+        raise RuntimeError("XAI_API_KEY not configured")
+
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "grok-2-image", "prompt": prompt, "n": 1, "response_format": "url"}
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
+                if resp.status_code in (200, 201):
+                    data = resp.json().get("data", [])
+                    if data and data[0].get("url"):
+                        cdn_url = data[0]["url"]
+                        dl = await client.get(cdn_url, follow_redirects=True)
+                        if dl.status_code == 200:
+                            with open(output_path, "wb") as f:
+                                f.write(dl.content)
+                            log.info(f"xAI direct image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+                            return {"local_path": output_path, "cdn_url": cdn_url}
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    wait = (attempt + 1) * 5
+                    log.warning(f"xAI image gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(f"xAI image gen failed ({resp.status_code}): {resp.text[:200]}")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log.warning(f"xAI image gen attempt {attempt+1} error: {e}")
+            await asyncio.sleep((attempt + 1) * 3)
+
+    raise RuntimeError("xAI direct image generation failed after retries")
+
+
 async def generate_image_grok(prompt: str, output_path: str, resolution: str = "720p") -> dict:
-    """Generate an image using Grok Imagine via fal.ai.
+    """Generate an image using Grok Imagine. Tries fal.ai first, falls back to direct xAI API.
     Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
     """
-    if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY not configured")
+    if FAL_AI_KEY:
+        try:
+            aspect = "9:16"
+            headers = {
+                "Authorization": "Key " + FAL_AI_KEY,
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "prompt": prompt,
+                "num_images": 1,
+                "aspect_ratio": aspect,
+                "output_format": "png",
+            }
 
-    aspect = "9:16"
-    headers = {
-        "Authorization": "Key " + FAL_AI_KEY,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "prompt": prompt,
-        "num_images": 1,
-        "aspect_ratio": aspect,
-        "output_format": "png",
-    }
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
+                if resp.status_code not in (200, 201):
+                    raise RuntimeError("Grok Imagine via fal.ai failed (" + str(resp.status_code) + "): " + resp.text[:300])
+                data = resp.json()
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
-        if resp.status_code not in (200, 201):
-            raise RuntimeError("Grok Imagine failed (" + str(resp.status_code) + "): " + resp.text[:300])
-        data = resp.json()
+            images = data.get("images", [])
+            if not images:
+                raise RuntimeError("Grok Imagine returned no images")
 
-    images = data.get("images", [])
-    if not images:
-        raise RuntimeError("Grok Imagine returned no images: " + json.dumps(data)[:300])
+            cdn_url = images[0].get("url", "")
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                img_resp = await client.get(cdn_url)
+                if img_resp.status_code != 200:
+                    raise RuntimeError("Failed to download Grok image")
+                with open(output_path, "wb") as f:
+                    f.write(img_resp.content)
 
-    cdn_url = images[0].get("url", "")
-    revised = data.get("revised_prompt", "")
-    if revised:
-        log.info(f"Grok Imagine revised prompt: {revised[:120]}...")
+            log.info(f"Grok Imagine (fal.ai) saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+            return {"local_path": output_path, "cdn_url": cdn_url}
+        except Exception as e:
+            log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
 
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        img_resp = await client.get(cdn_url)
-        if img_resp.status_code != 200:
-            raise RuntimeError("Failed to download Grok image: " + str(img_resp.status_code))
-        with open(output_path, "wb") as f:
-            f.write(img_resp.content)
-
-    log.info(f"Grok Imagine image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB), CDN: {cdn_url[:80]}")
-    return {"local_path": output_path, "cdn_url": cdn_url}
+    log.info("Using direct xAI API for image generation")
+    return await _generate_image_xai_direct(prompt, output_path)
 
 
 SKELETON_LORA_NAME = "nyptid_skeleton_v1.safetensors"
@@ -1700,11 +1739,11 @@ async def generate_scene_image(prompt: str, output_path: str, resolution: str = 
         except Exception as e:
             log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
 
-    if FAL_AI_KEY:
+    if FAL_AI_KEY or XAI_API_KEY:
         try:
             return await generate_image_grok(prompt, output_path, resolution=resolution)
         except Exception as e:
-            log.warning(f"Grok Imagine failed, falling back to SDXL: {e}")
+            log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
 
     await generate_image_comfyui(prompt, output_path, resolution=resolution, negative_prompt=negative_prompt)
     return {"local_path": output_path, "cdn_url": None}
