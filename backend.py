@@ -59,6 +59,8 @@ OUTPUT_DIR = Path("generated_videos")
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR = Path("temp_assets")
 TEMP_DIR.mkdir(exist_ok=True)
+TRAINING_DATA_DIR = Path("training_data")
+TRAINING_DATA_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 
@@ -1564,6 +1566,38 @@ async def _download_comfyui_file(file_info: dict, output_path: str):
 GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 
 
+async def _save_training_pair(prompt: str, image_path: str, template: str = "", source: str = "grok"):
+    """Save a prompt+image pair for future LoRA training."""
+    try:
+        ts = int(time.time() * 1000)
+        safe_name = f"train_{ts}"
+        img_dest = TRAINING_DATA_DIR / f"{safe_name}.png"
+        txt_dest = TRAINING_DATA_DIR / f"{safe_name}.txt"
+        shutil.copy2(image_path, str(img_dest))
+        txt_dest.write_text(prompt, encoding="utf-8")
+        if SUPABASE_URL and SUPABASE_ANON_KEY:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"{SUPABASE_URL}/rest/v1/training_data",
+                    headers={
+                        "apikey": SUPABASE_ANON_KEY,
+                        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    json={
+                        "prompt": prompt[:2000],
+                        "image_filename": safe_name + ".png",
+                        "template": template,
+                        "source": source,
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                )
+        log.info(f"Training pair saved: {safe_name} ({template or 'generic'}/{source})")
+    except Exception as e:
+        log.warning(f"Training data save failed (non-fatal): {e}")
+
+
 async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
     """Generate image directly via xAI API (grok-2-image). No fal.ai needed.
     Returns {"local_path": str, "cdn_url": str}.
@@ -1587,6 +1621,7 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
                             with open(output_path, "wb") as f:
                                 f.write(dl.content)
                             log.info(f"xAI direct image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+                            asyncio.create_task(_save_training_pair(prompt, output_path, source="xai_direct"))
                             return {"local_path": output_path, "cdn_url": cdn_url}
                 if resp.status_code in (429, 500, 502, 503, 504):
                     wait = (attempt + 1) * 5
@@ -1640,6 +1675,7 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
                     f.write(img_resp.content)
 
             log.info(f"Grok Imagine (fal.ai) saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+            asyncio.create_task(_save_training_pair(prompt, output_path, source="grok_imagine"))
             return {"local_path": output_path, "cdn_url": cdn_url}
         except Exception as e:
             log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
@@ -2942,6 +2978,21 @@ async def set_comfyui_url(body: dict, user: dict = Depends(require_auth)):
     COMFYUI_URL = new_url
     wan_ready = await check_wan22_available()
     return {"ok": True, "comfyui_url": COMFYUI_URL, "wan22_ready": wan_ready}
+
+
+@app.get("/api/admin/training-stats")
+async def training_stats(user: dict = Depends(require_auth)):
+    """Admin: get training data collection stats."""
+    email = user.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+    pairs = list(TRAINING_DATA_DIR.glob("*.png"))
+    return {
+        "total_pairs": len(pairs),
+        "disk_mb": round(sum(p.stat().st_size for p in pairs) / (1024 * 1024), 1),
+        "oldest": min((p.stem for p in pairs), default=None),
+        "newest": max((p.stem for p in pairs), default=None),
+    }
 
 
 @app.get("/api/config")
