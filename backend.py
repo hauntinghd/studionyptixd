@@ -168,6 +168,19 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
         return None
 
 
+async def get_current_user_from_request(request: Request) -> Optional[dict]:
+    """Extract Bearer token from a raw Request and authenticate."""
+    auth_header = (request.headers.get("authorization") or "") if request else ""
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[7:]
+
+    class _FakeCred:
+        credentials = ""
+    fake = _FakeCred()
+    fake.credentials = token
+    return await get_current_user(fake)
+
 async def require_auth(cred: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """Require valid authentication."""
     user = await get_current_user(cred)
@@ -2541,7 +2554,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
     if not ELEVENLABS_API_KEY:
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
-    user = await get_current_user(request) if request else None
+    user = await get_current_user_from_request(request) if request else None
     user_plan = "free"
     if user:
         user_plan = user.get("plan", "free")
@@ -4121,7 +4134,7 @@ async def create_demo_video(
     pip_position: str = Form("bottom-right"),
     request: Request = None,
 ):
-    user = await get_current_user(request)
+    user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(401, "Authentication required")
 
