@@ -1361,6 +1361,7 @@ function DemoPanel() {
     }, [jobId]);
 
     const [demoError, setDemoError] = useState<string | null>(null);
+    const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
     const handleGenerate = async () => {
         if (!demoFile) return;
@@ -1368,6 +1369,7 @@ function DemoPanel() {
         setJobStatus(null);
         setJobId(null);
         setDemoError(null);
+        setUploadProgress(0);
 
         const formData = new FormData();
         formData.append('demo_video', demoFile);
@@ -1377,26 +1379,57 @@ function DemoPanel() {
         formData.append('reference_notes', referenceNotes);
         formData.append('pip_position', pipPosition);
 
-        const headers: Record<string, string> = {};
-        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+        const totalSize = (demoFile?.size || 0) + (referenceFile?.size || 0) + (faceFile?.size || 0);
+        const totalMB = (totalSize / (1024 * 1024)).toFixed(0);
 
         try {
-            const res = await fetch(`${API}/api/demo`, { method: "POST", headers, body: formData });
-            if (!res.ok) {
-                const errData = await res.json().catch(() => ({ detail: `Upload failed (${res.status})` }));
-                setDemoError(errData.detail || `Server error: ${res.status}`);
-                setLoading(false);
-                return;
-            }
-            const data = await res.json();
-            if (data.job_id) setJobId(data.job_id);
+            const result = await new Promise<any>((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${API}/api/demo`);
+                if (session) xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
+
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        setUploadProgress(Math.round((e.loaded / e.total) * 100));
+                    }
+                };
+
+                xhr.onload = () => {
+                    setUploadProgress(null);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try { resolve(JSON.parse(xhr.responseText)); }
+                        catch { reject(new Error('Invalid response from server')); }
+                    } else {
+                        try {
+                            const err = JSON.parse(xhr.responseText);
+                            reject(new Error(err.detail || `Server error: ${xhr.status}`));
+                        } catch { reject(new Error(`Upload failed (${xhr.status})`)); }
+                    }
+                };
+
+                xhr.onerror = () => {
+                    setUploadProgress(null);
+                    reject(new Error('Network error. Connection lost during upload.'));
+                };
+
+                xhr.ontimeout = () => {
+                    setUploadProgress(null);
+                    reject(new Error(`Upload timed out (${totalMB}MB is large -- try a shorter clip)`));
+                };
+
+                xhr.timeout = 600000;
+                xhr.send(formData);
+            });
+
+            if (result.job_id) setJobId(result.job_id);
             else {
                 setDemoError('No job ID returned -- server may have rejected the request');
                 setLoading(false);
             }
         } catch (e: any) {
-            setDemoError(`Upload failed: ${e?.message || 'Network error. File may be too large.'}`);
+            setDemoError(e?.message || 'Upload failed');
             setLoading(false);
+            setUploadProgress(null);
         }
     };
 
@@ -1561,6 +1594,29 @@ function DemoPanel() {
             {demoError && !jobStatus && (
                 <div className="bg-red-500/5 border border-red-500/20 rounded-xl px-5 py-4">
                     <p className="text-red-400 text-sm font-medium">{demoError}</p>
+                </div>
+            )}
+
+            {uploadProgress !== null && !jobStatus && (
+                <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl overflow-hidden">
+                    <div className="px-6 pt-5 pb-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <p className="text-sm font-medium flex items-center gap-2">
+                                <Loader2 className="w-4 h-4 animate-spin text-violet-400" />
+                                Uploading files to server...
+                            </p>
+                            <span className="text-xs text-gray-500">{uploadProgress}%</span>
+                        </div>
+                        <div className="w-full bg-white/[0.05] rounded-full h-2">
+                            <div className="bg-gradient-to-r from-blue-500 to-violet-500 h-2 rounded-full transition-all duration-300"
+                                style={{ width: `${uploadProgress}%` }} />
+                        </div>
+                        <p className="text-xs text-gray-600 mt-2">
+                            {uploadProgress < 100
+                                ? `Uploading ${((demoFile?.size || 0) / (1024*1024)).toFixed(0)}MB${referenceFile ? ` + ${((referenceFile.size) / (1024*1024)).toFixed(0)}MB` : ''} to server...`
+                                : 'Upload complete, server is processing...'}
+                        </p>
+                    </div>
                 </div>
             )}
 
