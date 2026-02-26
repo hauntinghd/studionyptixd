@@ -1065,17 +1065,32 @@ def _extract_word_timings(original_text: str, alignment: dict) -> list:
     return words
 
 
-def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str = "720p") -> str:
+def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str = "720p",
+                           video_width: int = 0, video_height: int = 0) -> str:
     """Generate an ASS subtitle file with rapid single-word captions.
     Each word appears individually, large and bold, changing rapidly with every spoken word.
     High-retention viral TikTok/Reels style -- one word at a time, rapid fire.
+    Supports both portrait (shorts) and landscape (product demo) layouts.
     """
-    res_w = 1080 if resolution == "1080p" else 720
-    res_h = 1920 if resolution == "1080p" else 1280
-    font_size = 72 if resolution == "1080p" else 52
-    outline = 5 if resolution == "1080p" else 4
-    shadow = 2
-    margin_v = int(res_h * 0.25)
+    if video_width and video_height:
+        res_w = video_width
+        res_h = video_height
+        is_landscape = res_w > res_h
+    else:
+        res_w = 1080 if resolution == "1080p" else 720
+        res_h = 1920 if resolution == "1080p" else 1280
+        is_landscape = False
+
+    if is_landscape:
+        font_size = max(36, int(res_h * 0.045))
+        outline = 3
+        shadow = 1
+        margin_v = int(res_h * 0.08)
+    else:
+        font_size = 72 if resolution == "1080p" else 52
+        outline = 5 if resolution == "1080p" else 4
+        shadow = 2
+        margin_v = int(res_h * 0.25)
 
     header = f"""[Script Info]
 Title: NYPTID Captions
@@ -4212,8 +4227,23 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
 
         subtitle_path = None
         if word_timings:
+            demo_w, demo_h = 1920, 1080
+            try:
+                probe_cmd = [
+                    "ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+                    "-of", "csv=p=0:s=x", demo_path
+                ]
+                p = await asyncio.create_subprocess_exec(
+                    *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                out, _ = await p.communicate()
+                dims = out.decode().strip().split("\n")[0]
+                if "x" in dims:
+                    demo_w, demo_h = int(dims.split("x")[0]), int(dims.split("x")[1])
+            except Exception:
+                pass
             subtitle_path = str(TEMP_DIR / (job_id + "_demo_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution="1080p")
+            generate_ass_subtitles(word_timings, subtitle_path, video_width=demo_w, video_height=demo_h)
 
         jobs[job_id]["status"] = "generating_face"
         jobs[job_id]["progress"] = 65
