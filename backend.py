@@ -839,8 +839,10 @@ Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual
 }
 
 
-async def generate_script(template: str, topic: str) -> dict:
+async def generate_script(template: str, topic: str, extra_instructions: str = "") -> dict:
     system_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
+    if extra_instructions:
+        system_prompt += extra_instructions
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             "https://api.x.ai/v1/chat/completions",
@@ -865,6 +867,28 @@ async def generate_script(template: str, topic: str) -> dict:
             raise ValueError("No JSON found in Grok response")
         return json.loads(content[start:end])
 
+
+SUPPORTED_LANGUAGES = {
+    "en": {"name": "English", "model": "eleven_turbo_v2_5"},
+    "hi": {"name": "Hindi", "model": "eleven_multilingual_v2"},
+    "ta": {"name": "Tamil", "model": "eleven_multilingual_v2"},
+    "te": {"name": "Telugu", "model": "eleven_multilingual_v2"},
+    "bn": {"name": "Bengali", "model": "eleven_multilingual_v2"},
+    "mr": {"name": "Marathi", "model": "eleven_multilingual_v2"},
+    "gu": {"name": "Gujarati", "model": "eleven_multilingual_v2"},
+    "kn": {"name": "Kannada", "model": "eleven_multilingual_v2"},
+    "ml": {"name": "Malayalam", "model": "eleven_multilingual_v2"},
+    "pa": {"name": "Punjabi", "model": "eleven_multilingual_v2"},
+    "ur": {"name": "Urdu", "model": "eleven_multilingual_v2"},
+    "es": {"name": "Spanish", "model": "eleven_multilingual_v2"},
+    "pt": {"name": "Portuguese", "model": "eleven_multilingual_v2"},
+    "de": {"name": "German", "model": "eleven_multilingual_v2"},
+    "fr": {"name": "French", "model": "eleven_multilingual_v2"},
+    "ja": {"name": "Japanese", "model": "eleven_multilingual_v2"},
+    "ko": {"name": "Korean", "model": "eleven_multilingual_v2"},
+    "ar": {"name": "Arabic", "model": "eleven_multilingual_v2"},
+    "id": {"name": "Indonesian", "model": "eleven_multilingual_v2"},
+}
 
 # ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
 
@@ -969,13 +993,16 @@ TEMPLATE_VOICE_SETTINGS = {
 }
 
 
-async def generate_voiceover(text: str, output_path: str, template: str = "random", override_voice_id: str = "") -> dict:
+async def generate_voiceover(text: str, output_path: str, template: str = "random",
+                             override_voice_id: str = "", language: str = "en") -> dict:
     """Generate voiceover with word-level timestamps for caption sync.
     Returns {"audio_path": str, "word_timings": list[dict]} where each timing is
     {"word": str, "start": float, "end": float}.
     """
     vs = TEMPLATE_VOICE_SETTINGS.get(template, {})
     voice_id = override_voice_id if override_voice_id else vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
+    lang_cfg = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"])
+    tts_model = lang_cfg["model"]
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -987,7 +1014,7 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
             },
             json={
                 "text": text,
-                "model_id": "eleven_turbo_v2_5",
+                "model_id": tts_model,
                 "voice_settings": {
                     "stability": vs.get("stability", 0.5),
                     "similarity_boost": vs.get("similarity_boost", 0.75),
@@ -1010,7 +1037,7 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
         fallback_resp = await httpx.AsyncClient(timeout=120).post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
             headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
-            json={"text": text, "model_id": "eleven_turbo_v2_5",
+            json={"text": text, "model_id": tts_model,
                   "voice_settings": {"stability": vs.get("stability", 0.5),
                                      "similarity_boost": vs.get("similarity_boost", 0.75),
                                      "style": vs.get("style", 0.3)}},
@@ -2402,13 +2429,17 @@ async def composite_video(
 
 # ─── Full Generation Pipeline ─────────────────────────────────────────────────
 
-async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p"):
+async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p", language: str = "en"):
     try:
         jobs[job_id]["status"] = "generating_script"
         jobs[job_id]["progress"] = 5
-        log.info(f"[{job_id}] Generating script for '{topic}' ({template}, {resolution})")
+        lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
+        log.info(f"[{job_id}] Generating script for '{topic}' ({template}, {resolution}, {lang_name})")
 
-        script_data = await generate_script(template, topic)
+        lang_instruction = ""
+        if language != "en":
+            lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
+        script_data = await generate_script(template, topic, extra_instructions=lang_instruction)
         scenes = script_data.get("scenes", [])
         if not scenes:
             raise ValueError("Script generation returned no scenes")
@@ -2474,7 +2505,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
 
         full_narration = " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(full_narration, audio_path, template=template)
+        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
 
@@ -2482,7 +2513,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if word_timings:
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
-            log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
+            log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
         jobs[job_id]["status"] = "compositing"
         jobs[job_id]["progress"] = 82
@@ -2529,6 +2560,12 @@ class GenerateRequest(BaseModel):
     template: str
     prompt: str
     resolution: str = "720p"
+    language: str = "en"
+
+
+@app.get("/api/languages")
+async def list_languages():
+    return {"languages": [{"code": k, "name": v["name"]} for k, v in SUPPORTED_LANGUAGES.items()]}
 
 
 @app.get("/api/health")
@@ -2612,15 +2649,17 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "created_at": time.time(),
     }
 
+    language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
+
     if is_priority:
-        background_tasks.add_task(run_generation_pipeline, job_id, req.template, req.prompt, resolution)
+        background_tasks.add_task(run_generation_pipeline, job_id, req.template, req.prompt, resolution, language)
     else:
         await _ensure_free_worker()
         _free_queue_list.append(job_id)
         jobs[job_id]["queue_position"] = len(_free_queue_list)
         jobs[job_id]["queue_total"] = len(_free_queue_list)
         _update_queue_positions()
-        await _get_free_queue().put((job_id, run_generation_pipeline, (job_id, req.template, req.prompt, resolution)))
+        await _get_free_queue().put((job_id, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language)))
 
     return {"status": "accepted", "job_id": job_id}
 

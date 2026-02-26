@@ -900,13 +900,28 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function CreatePanel() {
-    const { session, plan } = useContext(AuthContext);
+    const { session, plan, role } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
     const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
     const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
     const [jobId, setJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<any>(null);
     const [loading, setLoading] = useState(false);
+    const [language, setLanguage] = useState('en');
+    const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/languages`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setLanguages(data.languages || []);
+                }
+            } catch { /* silent */ }
+        })();
+    }, []);
 
     const canUse1080p = plan === 'creator' || plan === 'pro';
 
@@ -956,6 +971,7 @@ function CreatePanel() {
                     template: selectedTemplate,
                     prompt,
                     resolution: canUse1080p ? resolution : '720p',
+                    language,
                 }),
             });
             const data = await res.json();
@@ -970,17 +986,28 @@ function CreatePanel() {
                 <div>
                     <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Template</h2>
                     <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-                        {templates.map(t => (
-                            <button key={t.id} onClick={() => !loading && setSelectedTemplate(t.id)}
-                                className={`p-3 rounded-xl text-center transition-all border-2 ${
-                                    selectedTemplate === t.id
-                                        ? 'border-violet-500 bg-violet-500/10'
-                                        : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
-                                } ${loading ? 'opacity-50' : ''}`}>
-                                <div className="text-2xl mb-1">{t.icon}</div>
-                                <div className="text-xs font-medium truncate">{t.title}</div>
-                            </button>
-                        ))}
+                        {templates.map(t => {
+                            const isLocked = !isAdmin && t.id !== 'skeleton';
+                            return (
+                                <button key={t.id}
+                                    onClick={() => !loading && !isLocked && setSelectedTemplate(t.id)}
+                                    className={`p-3 rounded-xl text-center transition-all border-2 relative ${
+                                        isLocked
+                                            ? 'border-white/[0.04] bg-white/[0.01] opacity-50 cursor-not-allowed'
+                                            : selectedTemplate === t.id
+                                                ? 'border-violet-500 bg-violet-500/10'
+                                                : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                                    } ${loading ? 'opacity-50' : ''}`}>
+                                    <div className="text-2xl mb-1">{t.icon}</div>
+                                    <div className="text-xs font-medium truncate">{t.title}</div>
+                                    {isLocked && (
+                                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-xl">
+                                            <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Coming Soon</span>
+                                        </div>
+                                    )}
+                                </button>
+                            );
+                        })}
                     </div>
                 </div>
 
@@ -1016,6 +1043,28 @@ function CreatePanel() {
                         </button>
                     </div>
                 </div>
+
+                {/* LANGUAGE */}
+                {languages.length > 0 && (
+                    <div>
+                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Language</h2>
+                        <div className="flex flex-wrap gap-2">
+                            {languages.map(l => (
+                                <button key={l.code} onClick={() => !loading && setLanguage(l.code)}
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                                        language === l.code
+                                            ? 'border-violet-500 bg-violet-500/10 text-violet-300'
+                                            : 'border-white/[0.06] text-gray-500 hover:border-white/20'
+                                    } ${loading ? 'opacity-50' : ''}`}>
+                                    {l.name}
+                                </button>
+                            ))}
+                        </div>
+                        {language !== 'en' && (
+                            <p className="text-xs text-violet-400 mt-2">Script and voiceover will be generated in {languages.find(l => l.code === language)?.name}</p>
+                        )}
+                    </div>
+                )}
 
                 {/* PROMPT */}
                 <div>
