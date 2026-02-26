@@ -16,8 +16,8 @@ deploy_*.sh
 restart_be.sh
 agent-transcripts/
 terminals/
-build/
-dist/
+/build/
+/dist/
 *.mp4
 *.exe
 *.pkg
