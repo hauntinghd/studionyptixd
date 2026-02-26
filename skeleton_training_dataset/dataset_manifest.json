@@ -1,0 +1,12 @@
+{
+  "total_images": 115,
+  "trigger_token": "nyptid_skeleton",
+  "base_model": "stabilityai/stable-diffusion-xl-base-1.0",
+  "training_method": "DreamBooth LoRA",
+  "image_size": "9:16 portrait (1024x1824 for SDXL training)",
+  "style": "Photorealistic 3D skeleton, teal backdrop, UE5 quality",
+  "professions_covered": 30,
+  "vs_scenes": 10,
+  "close_ups": 10,
+  "extra_scenes": 5
+}

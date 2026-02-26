@@ -33,7 +33,7 @@ if env_path.exists():
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
+COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudflare.com")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
@@ -1521,25 +1521,32 @@ WAN22_I2V_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
 
 async def _run_comfyui_workflow(workflow: dict, output_node: str, output_type: str = "images") -> dict:
     """Submit a workflow to ComfyUI and wait for the specified output node to complete."""
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=900) as client:
         resp = await client.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow})
         if resp.status_code != 200:
             log.error(f"ComfyUI rejected workflow ({resp.status_code}): {resp.text[:1000]}")
         resp.raise_for_status()
         prompt_id = resp.json()["prompt_id"]
 
-        for _ in range(300):
+        for poll_i in range(450):
             await asyncio.sleep(2)
             history = await client.get(f"{COMFYUI_URL}/history/{prompt_id}")
             hist_data = history.json()
             if prompt_id in hist_data:
                 outputs = hist_data[prompt_id].get("outputs", {})
-                if output_node in outputs and outputs[output_node].get(output_type):
-                    return outputs[output_node]
+                if output_node in outputs:
+                    node_out = outputs[output_node]
+                    if node_out.get(output_type):
+                        return node_out
+                    for key in ("videos", "gifs", "images"):
+                        if node_out.get(key):
+                            return node_out
                 status = hist_data[prompt_id].get("status", {})
                 if status.get("status_str") == "error":
                     raise RuntimeError(f"ComfyUI workflow error: {status.get('messages', 'unknown')}")
-        raise TimeoutError("ComfyUI workflow timed out")
+                if poll_i % 30 == 0 and poll_i > 0:
+                    log.info(f"ComfyUI workflow still running... {poll_i * 2}s elapsed")
+        raise TimeoutError("ComfyUI workflow timed out after 900s")
 
 
 async def _download_comfyui_file(file_info: dict, output_path: str):
@@ -1841,7 +1848,7 @@ async def check_wan22_available() -> bool:
 
 
 RUNPOD_SSH_HOST = "root@69.30.85.41"
-RUNPOD_SSH_PORT = "22092"
+RUNPOD_SSH_PORT = "22118"
 COMFYUI_INPUT_DIR = "/workspace/ComfyUI/input"
 
 FAL_SUBMIT_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-to-video"
@@ -1993,9 +2000,9 @@ async def _download_url_to_file(url: str, output_path: str):
             f.write(resp.content)
 
 
-async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 33, image_cdn_url: str = None) -> dict:
+async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None) -> dict:
     """Animate a scene image. Tries Kling first (if FAL_AI_KEY set), falls back to Wan 2.2.
-    Returns {"type": "kling_clip", "path": str} or {"type": "wan_frames", "paths": list} or {"type": "static"}.
+    Returns {"type": "kling_clip"|"wan_clip", "path": str} or {"type": "static"}.
     """
     if FAL_AI_KEY:
         try:
@@ -2009,10 +2016,10 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
     try:
         wan_available = await check_wan22_available()
         if wan_available:
-            vid_frame_dir = Path(output_dir_path) / ("wan_" + str(scene_idx))
-            vid_frame_dir.mkdir(exist_ok=True)
-            frame_paths = await animate_image_wan22(image_path, prompt, str(vid_frame_dir), num_frames=num_frames)
-            return {"type": "wan_frames", "paths": frame_paths}
+            wan_clip = str(Path(output_dir_path) / ("wan_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            wan_frames = max(33, min(int(duration_sec * 16), 81))
+            await animate_image_wan22(image_path, prompt, wan_clip, num_frames=wan_frames)
+            return {"type": "wan_clip", "path": wan_clip}
     except Exception as e:
         log.warning(f"Wan 2.2 animation also failed for scene {scene_idx}: {e}")
 
@@ -2020,29 +2027,25 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
 
 
 async def _upload_image_to_comfyui(image_path: str) -> str:
-    """SCP an image directly into ComfyUI's input directory on RunPod."""
+    """Upload an image to ComfyUI's input directory via HTTP API."""
     filename = "nyptid_scene_" + str(int(time.time() * 1000)) + ".png"
-    remote_path = COMFYUI_INPUT_DIR + "/" + filename
-    scp_cmd = (
-        "scp -o StrictHostKeyChecking=no -o ConnectTimeout=15"
-        " -P " + RUNPOD_SSH_PORT
-        + " " + str(image_path)
-        + " " + RUNPOD_SSH_HOST + ":" + remote_path
-    )
-    proc = await asyncio.create_subprocess_shell(
-        scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        err = stderr.decode()[-200:]
-        log.error(f"SCP to ComfyUI input failed: {err}")
-        raise RuntimeError("Failed to upload image to ComfyUI: " + err[-100:])
-    log.info(f"Image uploaded to ComfyUI via SCP: {filename}")
-    return filename
+    img_bytes = Path(image_path).read_bytes()
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            f"{COMFYUI_URL}/upload/image",
+            files={"image": (filename, img_bytes, "image/png")},
+            data={"overwrite": "true"},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"ComfyUI image upload failed ({resp.status_code}): {resp.text[:200]}")
+        result = resp.json()
+        uploaded_name = result.get("name", filename)
+    log.info(f"Image uploaded to ComfyUI via HTTP: {uploaded_name}")
+    return uploaded_name
 
 
-async def animate_image_wan22(image_path: str, prompt: str, output_dir_path: str, num_frames: int = 33) -> list:
-    """Take a generated image and run Wan 2.2 I2V to produce animated video frames."""
+async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: str, num_frames: int = 81) -> str:
+    """Animate an image via Wan 2.2 I2V on ComfyUI. Returns path to downloaded MP4."""
     uploaded_name = await _upload_image_to_comfyui(image_path)
 
     workflow = {
@@ -2130,24 +2133,38 @@ async def animate_image_wan22(image_path: str, prompt: str, output_dir_path: str
                 "vae": ["5", 0],
             },
         },
-        "14": {
-            "class_type": "SaveImage",
+        "15": {
+            "class_type": "CreateVideo",
             "inputs": {
-                "filename_prefix": "nyptid_wan",
                 "images": ["13", 0],
+                "fps": 16.0,
+            },
+        },
+        "16": {
+            "class_type": "SaveVideo",
+            "inputs": {
+                "video": ["15", 0],
+                "filename_prefix": "nyptid_wan",
+                "format": "mp4",
+                "codec": "h264",
             },
         },
     }
 
-    result = await _run_comfyui_workflow(workflow, "14", "images")
+    result = await _run_comfyui_workflow(workflow, "16", "videos")
 
-    frame_paths = []
-    for i, frame_info in enumerate(result["images"]):
-        frame_path = str(Path(output_dir_path) / f"wan_frame_{i:04d}.png")
-        await _download_comfyui_file(frame_info, frame_path)
-        frame_paths.append(frame_path)
+    if not result.get("videos"):
+        result = await _run_comfyui_workflow(workflow, "16", "gifs")
+        if not result.get("gifs"):
+            raise RuntimeError("Wan 2.2 produced no video output")
+        vid_info = result["gifs"][0]
+    else:
+        vid_info = result["videos"][0]
 
-    return frame_paths
+    await _download_comfyui_file(vid_info, output_clip_path)
+    file_size = Path(output_clip_path).stat().st_size
+    log.info(f"Wan 2.2 video saved: {output_clip_path} ({file_size / 1024:.0f} KB)")
+    return output_clip_path
 
 
 # ─── FFmpeg Video Compositor ──────────────────────────────────────────────────
@@ -2483,12 +2500,13 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
+        wan_ready = await check_wan22_available()
         use_kling = bool(FAL_AI_KEY)
-        use_video = use_kling or await check_wan22_available()
+        use_video = use_kling or wan_ready
         if template == "reddit":
             use_video = False
-        mode_label = "Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image")
-        jobs[job_id]["generation_mode"] = "kling" if use_kling else ("video" if use_video else "image")
+        mode_label = "Wan 2.2" if wan_ready else ("Kling 2.1" if use_kling else "static image")
+        jobs[job_id]["generation_mode"] = "wan" if wan_ready else ("kling" if use_kling else "image")
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 10
@@ -2527,12 +2545,10 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     duration_sec=scene.get("duration_sec", 5),
                     image_cdn_url=cdn_url,
                 )
-                if anim_result["type"] == "kling_clip":
+                if anim_result["type"] in ("kling_clip", "wan_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Kling 2.1")
-                elif anim_result["type"] == "wan_frames":
-                    asset["frames"] = anim_result["paths"]
-                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Wan 2.2")
+                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
 
@@ -2600,6 +2616,270 @@ class GenerateRequest(BaseModel):
     prompt: str
     resolution: str = "720p"
     language: str = "en"
+    mode: str = "auto"
+    scenes: list = []
+
+
+class SceneImageRequest(BaseModel):
+    prompt: str
+    scene_index: int = 0
+    session_id: str = ""
+    template: str = "skeleton"
+    resolution: str = "720p"
+
+
+class FinalizeRequest(BaseModel):
+    session_id: str
+    template: str = "skeleton"
+    resolution: str = "720p"
+    language: str = "en"
+
+
+_creative_sessions: dict = {}
+
+
+@app.post("/api/creative/script")
+async def creative_generate_script(req: GenerateRequest, request: Request = None):
+    """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    lang_name = SUPPORTED_LANGUAGES.get(req.language, {}).get("name", "English")
+    lang_instruction = ""
+    if req.language != "en":
+        lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
+    script_data = await generate_script(req.template, req.prompt, extra_instructions=lang_instruction)
+    scenes = script_data.get("scenes", [])
+    if not scenes:
+        raise HTTPException(500, "Script generation returned no scenes")
+    session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
+    _creative_sessions[session_id] = {
+        "user_id": user["id"],
+        "template": req.template,
+        "topic": req.prompt,
+        "resolution": req.resolution,
+        "language": req.language,
+        "script_data": script_data,
+        "scenes": scenes,
+        "scene_images": {},
+        "created_at": time.time(),
+    }
+    return {
+        "session_id": session_id,
+        "title": script_data.get("title", req.prompt),
+        "scenes": [
+            {
+                "index": i,
+                "narration": s.get("narration", ""),
+                "visual_description": s.get("visual_description", ""),
+                "duration_sec": s.get("duration_sec", 5),
+            }
+            for i, s in enumerate(scenes)
+        ],
+    }
+
+
+@app.post("/api/creative/scene-image")
+async def creative_scene_image(req: SceneImageRequest, request: Request = None):
+    """Phase 2: Generate (or regenerate) an image for a specific scene."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _creative_sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(404, "Creative session not found")
+    if session["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your session")
+
+    template = session.get("template", req.template)
+    resolution = session.get("resolution", req.resolution)
+    prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+    neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+    full_prompt = prompt_prefix + req.prompt
+
+    img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
+    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+
+    import base64 as b64mod
+    img_bytes = Path(img_path).read_bytes()
+    img_b64 = b64mod.b64encode(img_bytes).decode()
+
+    session["scene_images"][req.scene_index] = {
+        "path": img_path,
+        "cdn_url": img_result.get("cdn_url"),
+        "prompt": req.prompt,
+    }
+
+    if req.scene_index < len(session["scenes"]):
+        session["scenes"][req.scene_index]["visual_description"] = req.prompt
+
+    return {
+        "scene_index": req.scene_index,
+        "image_data": f"data:image/png;base64,{img_b64}",
+        "prompt_used": req.prompt,
+    }
+
+
+@app.put("/api/creative/scene/{session_id}/{scene_index}")
+async def creative_update_scene(session_id: str, scene_index: int, body: dict, request: Request = None):
+    """Update a scene's narration or visual description."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _creative_sessions.get(session_id)
+    if not session or session["user_id"] != user["id"]:
+        raise HTTPException(404, "Session not found")
+    if scene_index >= len(session["scenes"]):
+        raise HTTPException(400, "Invalid scene index")
+    scene = session["scenes"][scene_index]
+    if "narration" in body:
+        scene["narration"] = body["narration"]
+    if "visual_description" in body:
+        scene["visual_description"] = body["visual_description"]
+    if "duration_sec" in body:
+        scene["duration_sec"] = body["duration_sec"]
+    return {"ok": True, "scene": scene}
+
+
+@app.post("/api/creative/finalize")
+async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTasks, request: Request = None):
+    """Phase 3: Run the full pipeline using the user's approved scenes + images."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _creative_sessions.get(req.session_id)
+    if not session or session["user_id"] != user["id"]:
+        raise HTTPException(404, "Session not found")
+
+    user_plan = user.get("plan", "free")
+    if user_plan == "admin":
+        user_plan = "pro"
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    is_priority = plan_limits.get("priority", False)
+    resolution = session.get("resolution", req.resolution)
+
+    job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "template": session["template"],
+        "topic": session["topic"],
+        "resolution": resolution,
+        "plan": user_plan,
+        "created_at": time.time(),
+    }
+
+    background_tasks.add_task(
+        _run_creative_pipeline, job_id, session, resolution
+    )
+    return {"job_id": job_id}
+
+
+async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
+    """Run generation using pre-approved creative session scenes."""
+    try:
+        template = session["template"]
+        scenes = session["scenes"]
+        language = session.get("language", "en")
+        scene_images = session.get("scene_images", {})
+        script_data = session.get("script_data", {})
+
+        wan_ready = await check_wan22_available()
+        use_kling = bool(FAL_AI_KEY)
+        use_video = use_kling or wan_ready
+        gen_ts = str(int(time.time() * 1000))
+
+        jobs[job_id]["status"] = "generating_images"
+        jobs[job_id]["progress"] = 10
+        jobs[job_id]["total_scenes"] = len(scenes)
+
+        prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+        neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+        scene_assets = []
+        total_steps = len(scenes) * (2 if use_video else 1)
+
+        for i, scene in enumerate(scenes):
+            jobs[job_id]["current_scene"] = i + 1
+            step_base = i * (2 if use_video else 1)
+            jobs[job_id]["progress"] = 10 + int((step_base / total_steps) * 55)
+
+            pre_gen = scene_images.get(i) or scene_images.get(str(i))
+            if pre_gen and Path(pre_gen["path"]).exists():
+                img_path = pre_gen["path"]
+                cdn_url = pre_gen.get("cdn_url")
+                log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using pre-approved image")
+            else:
+                full_prompt = prompt_prefix + scene.get("visual_description", "")
+                img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
+                img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+                cdn_url = img_result.get("cdn_url")
+                log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
+
+            asset = {"image": img_path, "frames": None, "kling_clip": None}
+
+            if use_video:
+                jobs[job_id]["status"] = "animating_scenes"
+                jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
+                kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
+                anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                anim_result = await animate_scene(
+                    img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
+                    duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
+                )
+                if anim_result["type"] in ("kling_clip", "wan_clip"):
+                    asset["kling_clip"] = anim_result["path"]
+                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
+                else:
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+
+            scene_assets.append(asset)
+
+        jobs[job_id]["status"] = "generating_voice"
+        jobs[job_id]["progress"] = 70
+        full_narration = " ".join(s.get("narration", "") for s in scenes)
+        audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
+        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
+        audio_path = vo_result["audio_path"]
+        word_timings = vo_result.get("word_timings", [])
+
+        subtitle_path = None
+        if word_timings:
+            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+
+        jobs[job_id]["status"] = "compositing"
+        jobs[job_id]["progress"] = 82
+        output_filename = template + "_" + job_id + ".mp4"
+        output_path = str(OUTPUT_DIR / output_filename)
+        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+
+        for asset in scene_assets:
+            Path(asset["image"]).unlink(missing_ok=True)
+            if asset.get("kling_clip"):
+                Path(asset["kling_clip"]).unlink(missing_ok=True)
+        Path(audio_path).unlink(missing_ok=True)
+        if subtitle_path:
+            Path(subtitle_path).unlink(missing_ok=True)
+
+        jobs[job_id]["status"] = "complete"
+        jobs[job_id]["progress"] = 100
+        jobs[job_id]["output_file"] = output_filename
+        jobs[job_id]["resolution"] = resolution
+        jobs[job_id]["metadata"] = {
+            "title": script_data.get("title", session.get("topic", "")),
+            "description": script_data.get("description", ""),
+            "tags": script_data.get("tags", []),
+        }
+        log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
+
+        if session.get("session_id") in _creative_sessions:
+            del _creative_sessions[session["session_id"]]
+
+    except Exception as e:
+        log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
 
 
 @app.get("/api/languages")
@@ -2610,14 +2890,32 @@ async def list_languages():
 @app.get("/api/health")
 async def health():
     skeleton_lora = await check_skeleton_lora_available()
+    wan_ready = await check_wan22_available()
     return {
         "status": "online",
         "engine": "NYPTID Studio Engine v3.0",
         "kling_enabled": bool(FAL_AI_KEY),
-        "video_engine": "Kling 2.1 Standard" if FAL_AI_KEY else "Wan 2.2 (local)",
+        "wan22_ready": wan_ready,
+        "video_engine": "Wan 2.2 (RunPod)" if wan_ready else ("Kling 2.1 Standard" if FAL_AI_KEY else "Static"),
+        "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": "Skeleton LoRA (local)" if skeleton_lora else ("Grok Imagine" if FAL_AI_KEY else "SDXL"),
     }
+
+
+@app.post("/api/admin/comfyui-url")
+async def set_comfyui_url(body: dict, user: dict = Depends(require_auth)):
+    """Admin-only: update the ComfyUI URL at runtime (e.g. after cloudflared restart)."""
+    email = user.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+    global COMFYUI_URL
+    new_url = body.get("url", "").strip().rstrip("/")
+    if not new_url:
+        raise HTTPException(400, "url required")
+    COMFYUI_URL = new_url
+    wan_ready = await check_wan22_available()
+    return {"ok": True, "comfyui_url": COMFYUI_URL, "wan22_ready": wan_ready}
 
 
 @app.get("/api/config")
@@ -2995,12 +3293,10 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                     duration_sec=scene.get("duration_sec", 5),
                     image_cdn_url=cdn_url,
                 )
-                if anim_result["type"] == "kling_clip":
+                if anim_result["type"] in ("kling_clip", "wan_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Kling 2.1")
-                elif anim_result["type"] == "wan_frames":
-                    asset["frames"] = anim_result["paths"]
-                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by Wan 2.2")
+                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
 

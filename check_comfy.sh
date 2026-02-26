@@ -1,0 +1,15 @@
+#!/bin/bash
+echo "=== Disk ==="
+df -h /workspace
+echo ""
+echo "=== ComfyUI input dir ==="
+ls -la /workspace/ComfyUI/input/ 2>/dev/null || echo "dir not found"
+echo ""
+echo "=== permissions ==="
+stat /workspace/ComfyUI/input/ 2>/dev/null || echo "cannot stat"
+echo ""
+echo "=== ComfyUI log tail ==="
+tail -30 /workspace/logs/comfyui.log 2>/dev/null || tail -30 /workspace/ComfyUI/comfyui.log 2>/dev/null || echo "no log found"
+echo ""
+echo "=== Test direct write ==="
+cp /tmp/test_upload.png /workspace/ComfyUI/input/test_direct.png 2>/dev/null && echo "WRITE OK" || echo "WRITE FAILED"

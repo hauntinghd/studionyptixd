@@ -907,6 +907,15 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
    CREATE PANEL (inside Dashboard)
    ═══════════════════════════════════════════════════════════════════════════ */
 
+interface CreativeScene {
+    index: number;
+    narration: string;
+    visual_description: string;
+    duration_sec: number;
+    imageData?: string;
+    imageLoading?: boolean;
+}
+
 function CreatePanel() {
     const { session, plan, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
@@ -918,6 +927,12 @@ function CreatePanel() {
     const [loading, setLoading] = useState(false);
     const [language, setLanguage] = useState('en');
     const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
+    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative'>('auto');
+    const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
+    const [sessionId, setSessionId] = useState<string | null>(null);
+    const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
+    const [scriptLoading, setScriptLoading] = useState(false);
+    const [creativeTitle, setCreativeTitle] = useState("");
 
     useEffect(() => {
         (async () => {
@@ -946,6 +961,12 @@ function CreatePanel() {
         { id: 'random', title: 'Chaos Mode', desc: 'Maximum retention', icon: '🌀' },
     ];
 
+    const authHeaders = (): Record<string, string> => {
+        const h: Record<string, string> = { "Content-Type": "application/json" };
+        if (session) h["Authorization"] = `Bearer ${session.access_token}`;
+        return h;
+    };
+
     useEffect(() => {
         if (!jobId) return;
         const interval = setInterval(async () => {
@@ -964,20 +985,126 @@ function CreatePanel() {
 
     const handleGenerate = async () => {
         if (!prompt) return;
+        if (creativeMode === 'creative') {
+            await handleCreativeStart();
+            return;
+        }
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
-
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
-
         try {
             const res = await fetch(`${API}/api/generate`, {
                 method: "POST",
-                headers,
+                headers: authHeaders(),
                 body: JSON.stringify({
                     template: selectedTemplate,
                     prompt,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: 'auto',
+                }),
+            });
+            const data = await res.json();
+            if (data.job_id) setJobId(data.job_id);
+            else { setLoading(false); }
+        } catch { setLoading(false); }
+    };
+
+    const handleCreativeStart = async () => {
+        if (!prompt) return;
+        setScriptLoading(true);
+        try {
+            const res = await fetch(`${API}/api/creative/script`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                }),
+            });
+            if (!res.ok) throw new Error("Script generation failed");
+            const data = await res.json();
+            setSessionId(data.session_id);
+            setCreativeTitle(data.title || prompt);
+            setCreativeScenes(data.scenes.map((s: any) => ({
+                ...s,
+                imageData: undefined,
+                imageLoading: false,
+            })));
+            setCreativeStep('edit');
+        } catch (e: any) {
+            alert(e.message || "Failed to generate script");
+        } finally {
+            setScriptLoading(false);
+        }
+    };
+
+    const handleGenerateSceneImage = async (sceneIndex: number) => {
+        if (!sessionId) return;
+        setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true } : s));
+        try {
+            const scene = creativeScenes[sceneIndex];
+            const res = await fetch(`${API}/api/creative/scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    prompt: scene.visual_description,
+                    scene_index: sceneIndex,
+                    session_id: sessionId,
+                    template: selectedTemplate,
+                    resolution: canUse1080p ? resolution : '720p',
+                }),
+            });
+            if (!res.ok) throw new Error("Image gen failed");
+            const data = await res.json();
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? { ...s, imageData: data.image_data, imageLoading: false } : s
+            ));
+        } catch {
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? { ...s, imageLoading: false } : s
+            ));
+        }
+    };
+
+    const handleUpdateScene = (index: number, field: keyof CreativeScene, value: string | number) => {
+        setCreativeScenes(prev => prev.map((s, i) =>
+            i === index ? { ...s, [field]: value } : s
+        ));
+    };
+
+    const handleSaveScene = async (index: number) => {
+        if (!sessionId) return;
+        const scene = creativeScenes[index];
+        await fetch(`${API}/api/creative/scene/${sessionId}/${index}`, {
+            method: "PUT",
+            headers: authHeaders(),
+            body: JSON.stringify({
+                narration: scene.narration,
+                visual_description: scene.visual_description,
+                duration_sec: scene.duration_sec,
+            }),
+        });
+    };
+
+    const handleFinalize = async () => {
+        if (!sessionId) return;
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        setCreativeStep('generating');
+        for (let i = 0; i < creativeScenes.length; i++) {
+            await handleSaveScene(i);
+        }
+        try {
+            const res = await fetch(`${API}/api/creative/finalize`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                 }),
@@ -987,6 +1114,149 @@ function CreatePanel() {
             else { setLoading(false); }
         } catch { setLoading(false); }
     };
+
+    const handleResetCreative = () => {
+        setCreativeStep('topic');
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("");
+        setJobId(null);
+        setJobStatus(null);
+        setLoading(false);
+    };
+
+    if (creativeMode === 'creative' && creativeStep === 'edit') {
+        return (
+            <div className="max-w-4xl mx-auto px-6 pb-10 space-y-6">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h1 className="text-xl font-bold text-white">{creativeTitle}</h1>
+                        <p className="text-sm text-gray-500">{creativeScenes.length} scenes &middot; Edit prompts, preview images, then render</p>
+                    </div>
+                    <button onClick={handleResetCreative} className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-gray-400 transition flex items-center gap-2">
+                        <ArrowRight className="w-4 h-4 rotate-180" /> Back
+                    </button>
+                </div>
+
+                <div className="space-y-4">
+                    {creativeScenes.map((scene, idx) => (
+                        <div key={idx} className="rounded-xl border border-white/[0.08] bg-white/[0.02] overflow-hidden">
+                            <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+                                <span className="text-sm font-bold text-violet-400">Scene {idx + 1}</span>
+                                <span className="text-xs text-gray-600">{scene.duration_sec}s</span>
+                            </div>
+                            <div className="p-4 space-y-3">
+                                <div>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Narration</label>
+                                    <textarea
+                                        value={scene.narration}
+                                        onChange={(e) => handleUpdateScene(idx, 'narration', e.target.value)}
+                                        rows={2}
+                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt</label>
+                                    <textarea
+                                        value={scene.visual_description}
+                                        onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
+                                        rows={2}
+                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        onClick={() => handleGenerateSceneImage(idx)}
+                                        disabled={scene.imageLoading}
+                                        className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2">
+                                        {scene.imageLoading ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
+                                        ) : scene.imageData ? (
+                                            <><Sparkles className="w-4 h-4" /> Regenerate</>
+                                        ) : (
+                                            <><Image className="w-4 h-4" /> Generate Image</>
+                                        )}
+                                    </button>
+                                    {scene.imageData && (
+                                        <span className="text-xs text-emerald-400 flex items-center gap-1">
+                                            <CheckCircle2 className="w-3 h-3" /> Image ready
+                                        </span>
+                                    )}
+                                </div>
+                                {scene.imageData && (
+                                    <img src={scene.imageData} alt={`Scene ${idx + 1}`} className="rounded-lg w-full max-h-48 object-contain bg-black/40" />
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                <button
+                    onClick={handleFinalize}
+                    disabled={loading}
+                    className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
+                    {loading ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
+                    ) : (
+                        <><Film className="w-5 h-5" /> Animate &amp; Render Final Video</>
+                    )}
+                </button>
+
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
+                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); setCreativeStep('edit'); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Back to Editor
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay className="w-full max-h-[500px] bg-black" src={`${API}/api/download/${jobStatus.output_file}`} />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                            <p className="text-gray-500 text-sm">
+                                                {jobStatus.resolution && <span className="text-violet-400 mr-2">{jobStatus.resolution}</span>}
+                                                {jobStatus.metadata?.tags?.map((t: string) => `#${t}`).join(' ')}
+                                            </p>
+                                        </div>
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                                    </div>
+                                    <a href={`${API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" /> Download MP4
+                                    </a>
+                                    <button onClick={handleResetCreative}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Create Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} template={selectedTemplate} feature="creative" language={language} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    }
 
     return (
             <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
@@ -1016,6 +1286,29 @@ function CreatePanel() {
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+
+                {/* MODE TOGGLE */}
+                <div>
+                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Creation Mode</h2>
+                    <div className="flex gap-3">
+                        <button onClick={() => !loading && setCreativeMode('auto')}
+                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                                creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Wand2 className="w-5 h-5 mx-auto mb-1 text-violet-400" />
+                            <div className="text-sm font-bold">Auto</div>
+                            <div className="text-xs text-gray-500 mt-0.5">AI handles everything</div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('creative')}
+                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                                creativeMode === 'creative' ? 'border-amber-500 bg-amber-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Sliders className="w-5 h-5 mx-auto mb-1 text-amber-400" />
+                            <div className="text-sm font-bold">Creative Control</div>
+                            <div className="text-xs text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
+                        </button>
                     </div>
                 </div>
 
@@ -1082,7 +1375,7 @@ function CreatePanel() {
                             type="text"
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
-                            disabled={loading}
+                            disabled={loading || scriptLoading}
                             placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
                                 : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
                                 : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
@@ -1094,16 +1387,20 @@ function CreatePanel() {
                                 : selectedTemplate === 'top5' ? "e.g., Top 5 most powerful ancient civilizations"
                                 : "Enter your video topic..."}
                             className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
-                            onKeyDown={(e) => e.key === 'Enter' && !loading && handleGenerate()}
+                            onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
                         />
                     </div>
                 </div>
 
                 {/* GENERATE BUTTON */}
-                <button onClick={handleGenerate} disabled={loading || !prompt}
-                    className="w-full py-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:hover:bg-violet-600 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-violet-600/20 active:scale-[0.99]">
-                    {loading ? (
+                <button onClick={handleGenerate} disabled={loading || scriptLoading || !prompt}
+                    className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
+                    {scriptLoading ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> Generating script...</>
+                    ) : loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
+                    ) : creativeMode === 'creative' ? (
+                        <><Sliders className="w-5 h-5" /> Generate Script &amp; Edit Scenes</>
                     ) : (
                         <><Wand2 className="w-5 h-5" /> Generate at {canUse1080p ? resolution : '720p'}</>
                     )}
@@ -1115,7 +1412,7 @@ function CreatePanel() {
                     </p>
                 )}
 
-                {/* JOB STATUS */}
+                {/* JOB STATUS (auto mode) */}
                 {jobStatus && (
                     <div className={`rounded-2xl border transition-all overflow-hidden ${
                         jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :

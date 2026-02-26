@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --color-terminal-bg: #0a0a0a;
+  --color-terminal-text: #00ff41;
+  --color-terminal-accent: #00cc33;
+  --color-terminal-border: #1a1a1a;
+
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-terminal-bg text-gray-300 font-sans selection:bg-terminal-text selection:text-black;
+  }
+}
+
+.terminal-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.terminal-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb {
+  @apply bg-terminal-border rounded-full hover:bg-terminal-accent/30;
+}
+
+.glow-text {
+  text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
+}
+
+.glow-border {
+  box-shadow: 0 0 15px rgba(0, 255, 65, 0.1);
+}

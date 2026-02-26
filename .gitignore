@@ -16,3 +16,11 @@ deploy_*.sh
 restart_be.sh
 agent-transcripts/
 terminals/
+build/
+dist/
+*.mp4
+*.exe
+*.pkg
+*.db
+shadow_data*
+client_secrets.json
