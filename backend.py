@@ -2716,12 +2716,11 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
 
     template = session.get("template", req.template)
     resolution = session.get("resolution", req.resolution)
-    prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
-    full_prompt = prompt_prefix + req.prompt
+    full_prompt = req.prompt
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
-    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template="")
 
     import base64 as b64mod
     img_bytes = Path(img_path).read_bytes()
@@ -2821,7 +2820,6 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         jobs[job_id]["progress"] = 10
         jobs[job_id]["total_scenes"] = len(scenes)
 
-        prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         total_steps = len(scenes) * (2 if use_video else 1)
@@ -2837,9 +2835,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                 cdn_url = pre_gen.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using pre-approved image")
             else:
-                full_prompt = prompt_prefix + scene.get("visual_description", "")
+                full_prompt = scene.get("visual_description", "")
                 img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
-                img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+                img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template="")
                 cdn_url = img_result.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
 
