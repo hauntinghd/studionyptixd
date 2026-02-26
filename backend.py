@@ -48,7 +48,10 @@ STRIPE_PRICE_TO_PLAN = {
     "price_1T4eT7BL8lRmwao2hHcUbcny": "starter",
     "price_1T4eTUBL8lRmwao2EK3JDOpy": "creator",
     "price_1T4eTjBL8lRmwao2q6WkoZLH": "pro",
+    "price_1T4wZLBL8lRmwao2SyYRfHdQ": "demo_pro",
 }
+
+DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
@@ -111,10 +114,11 @@ async def _ensure_free_worker():
         _asyncio.get_event_loop().create_task(_free_queue_worker())
 
 PLAN_LIMITS = {
-    "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False},
-    "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False},
-    "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True},
-    "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True},
+    "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
+    "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
+    "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
+    "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
+    "demo_pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": True},
 }
 
 RESOLUTION_CONFIGS = {
@@ -2533,17 +2537,22 @@ async def public_config():
 @app.get("/api/me")
 async def get_me(user: dict = Depends(require_auth)):
     plan = user.get("plan", "free")
+    email = user.get("email", "")
+    is_admin = email in ADMIN_EMAILS or plan == "admin"
     if plan == "admin":
         limits = PLAN_LIMITS["pro"]
         limits = {**limits, "videos_per_month": 9999}
     else:
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+    has_demo = plan == "demo_pro" or is_admin
     return {
         "id": user["id"],
-        "email": user["email"],
+        "email": email,
         "plan": plan if plan != "admin" else "pro",
-        "role": "admin" if plan == "admin" else "user",
+        "role": "admin" if is_admin else "user",
         "limits": limits,
+        "demo_access": has_demo,
+        "demo_price_id": DEMO_PRO_PRICE_ID,
     }
 
 
@@ -4367,6 +4376,13 @@ async def create_demo_video(
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(401, "Authentication required")
+
+    user_email = user.get("email", "")
+    user_plan = user.get("plan", "free")
+    is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
+    has_demo = user_plan == "demo_pro" or is_admin
+    if not has_demo:
+        raise HTTPException(403, "Product Demo requires the Demo Pro plan ($150/mo). Upgrade to access this feature.")
 
     job_id = f"demo_{int(time.time()*1000)}_{random.randint(1000,9999)}"
 

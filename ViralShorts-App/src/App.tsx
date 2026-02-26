@@ -20,16 +20,20 @@ interface AuthContextType {
     plan: Plan;
     role: string;
     loading: boolean;
+    demoAccess: boolean;
+    demoPriceId: string;
     signIn: (email: string, password: string) => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
     checkout: (plan: string) => Promise<void>;
+    checkoutDemo: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
     session: null, supabase: null, plan: 'free', role: 'user', loading: true,
+    demoAccess: false, demoPriceId: '',
     signIn: async () => null, signUp: async () => null, signOut: async () => {},
-    checkout: async () => {},
+    checkout: async () => {}, checkoutDemo: async () => {},
 });
 
 function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -38,6 +42,8 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const [plan, setPlan] = useState<Plan>('free');
     const [role, setRole] = useState<string>('user');
     const [loading, setLoading] = useState(true);
+    const [demoAccess, setDemoAccess] = useState(false);
+    const [demoPriceId, setDemoPriceId] = useState('');
 
     useEffect(() => {
         (async () => {
@@ -57,7 +63,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (!session) { setPlan('free'); setRole('user'); return; }
+        if (!session) { setPlan('free'); setRole('user'); setDemoAccess(false); return; }
         (async () => {
             try {
                 const res = await fetch(`${API}/api/me`, {
@@ -67,8 +73,10 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                     const data = await res.json();
                     setPlan(data.plan || 'free');
                     setRole(data.role || 'user');
+                    setDemoAccess(data.demo_access || false);
+                    if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
                 }
-            } catch { setPlan('free'); setRole('user'); }
+            } catch { setPlan('free'); setRole('user'); setDemoAccess(false); }
         })();
     }, [session]);
 
@@ -107,8 +115,24 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch (e) { console.error("Checkout failed", e); }
     }, [session]);
 
+    const checkoutDemo = useCallback(async () => {
+        if (!demoPriceId || !session) return;
+        try {
+            const res = await fetch(`${API}/api/checkout`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ price_id: demoPriceId }),
+            });
+            const data = await res.json();
+            if (data.checkout_url) window.location.href = data.checkout_url;
+        } catch (e) { console.error("Demo checkout failed", e); }
+    }, [session, demoPriceId]);
+
     return (
-        <AuthContext.Provider value={{ session, supabase, plan, role, loading, signIn, signUp, signOut, checkout }}>
+        <AuthContext.Provider value={{ session, supabase, plan, role, loading, demoAccess, demoPriceId, signIn, signUp, signOut, checkout, checkoutDemo }}>
             {children}
         </AuthContext.Provider>
     );
@@ -1332,7 +1356,7 @@ interface TrainingStatus {
 }
 
 function DemoPanel() {
-    const { session } = useContext(AuthContext);
+    const { session, demoAccess, checkoutDemo } = useContext(AuthContext);
     const [referenceFile, setReferenceFile] = useState<File | null>(null);
     const [demoFile, setDemoFile] = useState<File | null>(null);
     const [faceFile, setFaceFile] = useState<File | null>(null);
@@ -1612,6 +1636,50 @@ function DemoPanel() {
         complete: 'Done!',
         error: 'Generation failed'
     };
+
+    if (!demoAccess) {
+        return (
+            <div className="max-w-2xl mx-auto px-6 pb-10 pt-8">
+                <div className="text-center space-y-6">
+                    <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-600/20 to-purple-600/20 border border-violet-500/20">
+                        <Lock className="w-10 h-10 text-violet-400" />
+                    </div>
+                    <div>
+                        <h2 className="text-2xl font-bold mb-2">AI Product Demo Generator</h2>
+                        <p className="text-gray-400 text-sm max-w-md mx-auto">
+                            Transform raw screen recordings into polished, professional product demos with AI-generated voiceovers, talking head presenters, and synced captions.
+                        </p>
+                    </div>
+                    <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl p-6 space-y-4 text-left">
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Wand2 className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">AI Script Writing</p><p className="text-xs text-gray-500">Analyzes your screen recording and writes a professional voiceover script</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Volume2 className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">Choose Your Voice</p><p className="text-xs text-gray-500">Pick from dozens of premium ElevenLabs voices and preview before generating</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><User className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">AI Talking Head</p><p className="text-xs text-gray-500">Auto-generated presenter with lip-sync composited into your demo</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Film className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">Word-Synced Captions</p><p className="text-xs text-gray-500">Perfectly timed captions burned into the final video</p></div>
+                        </div>
+                    </div>
+                    <div className="bg-gradient-to-r from-violet-600/10 to-purple-600/10 border border-violet-500/20 rounded-2xl p-6">
+                        <p className="text-3xl font-bold text-white">$150<span className="text-base font-normal text-gray-400">/month</span></p>
+                        <p className="text-sm text-gray-400 mt-1">Unlimited product demo videos</p>
+                        <button onClick={checkoutDemo}
+                            className="mt-4 w-full py-3 rounded-xl font-semibold bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5 transition-all flex items-center justify-center gap-2">
+                            <Zap className="w-5 h-5" /> Upgrade to Demo Pro
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
