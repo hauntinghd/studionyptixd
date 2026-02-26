@@ -3231,6 +3231,96 @@ async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)
         raise HTTPException(500, str(e))
 
 
+# ─── User Feedback Collection ─────────────────────────────────────────────────
+
+class FeedbackRequest(BaseModel):
+    job_id: str = ""
+    rating: int
+    comment: str = ""
+    template: str = ""
+    language: str = ""
+    feature: str = ""
+
+
+@app.post("/api/feedback")
+async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
+    if req.rating < 1 or req.rating > 5:
+        raise HTTPException(400, "Rating must be 1-5")
+
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not svc_key:
+        raise HTTPException(500, "Feedback storage not configured")
+
+    feedback_data = {
+        "user_id": user["id"],
+        "email": user.get("email", ""),
+        "job_id": req.job_id,
+        "rating": req.rating,
+        "comment": req.comment[:2000] if req.comment else "",
+        "template": req.template,
+        "language": req.language,
+        "feature": req.feature or "general",
+        "plan": user.get("plan", "free"),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/feedback",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json=feedback_data,
+            )
+            if resp.status_code not in (200, 201, 204):
+                log.warning(f"Feedback insert failed ({resp.status_code}): {resp.text[:200]}")
+                raise HTTPException(500, "Failed to save feedback")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Feedback submit error: {e}")
+        raise HTTPException(500, "Failed to save feedback")
+
+    log.info(f"Feedback received: {req.rating}/5 from {user.get('email', '?')} for {req.feature} (job: {req.job_id[:20]})")
+    return {"status": "ok"}
+
+
+@app.get("/api/admin/feedback")
+async def get_all_feedback(user: dict = Depends(require_auth)):
+    if user.get("email") not in ADMIN_EMAILS and user.get("plan") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not svc_key:
+        return {"feedback": []}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/feedback?order=created_at.desc&limit=500",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                avg_rating = sum(f.get("rating", 0) for f in data) / len(data) if data else 0
+                return {
+                    "feedback": data,
+                    "total": len(data),
+                    "avg_rating": round(avg_rating, 2),
+                }
+    except Exception as e:
+        log.error(f"Feedback fetch error: {e}")
+
+    return {"feedback": [], "total": 0, "avg_rating": 0}
+
+
 # ─── Startup: seed accounts ──────────────────────────────────────────────────
 
 SEED_ACCOUNTS = {
