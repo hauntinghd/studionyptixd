@@ -3685,9 +3685,8 @@ SADTALKER_REPLICATE_MODEL = "cjwbw/sadtalker:a519cc0cfebaaeade5f0f1a88b tried"
 
 
 async def analyze_screen_recording(video_path: str) -> dict:
-    """Extract frames from screen recording and analyze with Grok Vision."""
-    frames_dir = TEMP_DIR / f"demo_frames_{int(time.time()*1000)}"
-    frames_dir.mkdir(exist_ok=True)
+    """Extract frames from screen recording and analyze with Grok Vision. Memory-optimized for 512MB."""
+    import base64, gc
 
     probe_cmd = [
         "ffprobe", "-v", "error", "-show_entries",
@@ -3700,60 +3699,62 @@ async def analyze_screen_recording(video_path: str) -> dict:
     stdout, _ = await proc.communicate()
     duration = float(stdout.decode().strip() or "30")
 
-    num_frames = min(int(duration / 3), 20)
+    num_frames = min(int(duration / 5), 6)
     if num_frames < 3:
         num_frames = 3
     interval = duration / num_frames
 
-    extract_cmd = [
-        "ffmpeg", "-i", video_path, "-vf", f"fps=1/{interval:.1f}",
-        "-frames:v", str(num_frames), "-q:v", "2",
-        str(frames_dir / "frame_%03d.jpg")
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *extract_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    await proc.communicate()
-
-    frame_files = sorted(frames_dir.glob("*.jpg"))
-    if not frame_files:
-        shutil.rmtree(frames_dir, ignore_errors=True)
-        return {"duration": duration, "description": "Software product demo", "frame_count": 0}
-
-    import base64
     frame_descriptions = []
     xai_key = os.environ.get("XAI_API_KEY", "")
 
-    for i, frame_path in enumerate(frame_files[:12]):
-        with open(frame_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i in range(num_frames):
+            timestamp = interval * i
+            frame_path = TEMP_DIR / f"demo_frame_{int(time.time()*1000)}_{i}.jpg"
 
-        timestamp = interval * i
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            extract_cmd = [
+                "ffmpeg", "-y", "-ss", f"{timestamp:.1f}", "-i", video_path,
+                "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "8",
+                str(frame_path)
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *extract_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+
+            if not frame_path.exists():
+                frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
+                continue
+
+            with open(frame_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            frame_path.unlink(missing_ok=True)
+
+            try:
                 resp = await client.post(
                     "https://api.x.ai/v1/chat/completions",
                     headers={"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"},
                     json={
                         "model": "grok-2-vision-latest",
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                                {"type": "text", "text": "Describe what's shown on this software screen in 1-2 sentences. Focus on: what app/tool is this, what UI elements are visible, what action is being performed. Be specific about buttons, menus, text fields, data shown."}
-                            ]
-                        }],
-                        "max_tokens": 150
+                        "messages": [{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                            {"type": "text", "text": "Describe this software screen in 1-2 sentences. What app, UI elements, and action is shown?"}
+                        ]}],
+                        "max_tokens": 100
                     }
                 )
+                del b64
+                gc.collect()
                 if resp.status_code == 200:
                     desc = resp.json()["choices"][0]["message"]["content"]
                     frame_descriptions.append({"timestamp": round(timestamp, 1), "description": desc})
-        except Exception as e:
-            log.warning(f"Frame analysis failed for frame {i}: {e}")
-            frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
-
-    shutil.rmtree(frames_dir, ignore_errors=True)
+                else:
+                    frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
+            except Exception as e:
+                log.warning(f"Frame analysis failed for frame {i}: {e}")
+                frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
+                del b64
+                gc.collect()
 
     return {
         "duration": duration,
