@@ -3358,8 +3358,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
-    if user:
-        _ensure_template_allowed(req.template, user)
+    _ensure_template_allowed(req.template, user)
     user_plan = "free"
     if user:
         user_plan = user.get("plan", "free")
