@@ -137,6 +137,19 @@ HARDCODED_PLANS = {
     "alwakmyhem@gmail.com": "pro",
 }
 
+PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "objects", "wouldyourather", "scary", "history"}
+
+def _is_admin_user(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    return user.get("email", "") in ADMIN_EMAILS or user.get("plan") == "admin"
+
+def _ensure_template_allowed(template: str, user: Optional[dict]):
+    if _is_admin_user(user):
+        return
+    if template not in PUBLIC_TEMPLATE_ALLOWLIST:
+        raise HTTPException(403, f"Template '{template}' is not available on your plan yet.")
+
 async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)) -> Optional[dict]:
     if cred is None:
         return None
@@ -1058,8 +1071,8 @@ TEMPLATE_SFX_STYLES = {
     "skeleton": "dark eerie ambient drone, subtle horror atmosphere",
     "scary": "creepy horror atmosphere, tension building drone",
     "objects": "mysterious discovery sound, wonder ambient",
-    "wyr": "dramatic suspense, game show tension",
-    "historical": "epic cinematic atmosphere, dramatic orchestra hint",
+    "wouldyourather": "dramatic suspense, game show tension",
+    "history": "epic cinematic atmosphere, dramatic orchestra hint",
 }
 
 
@@ -2929,6 +2942,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    _ensure_template_allowed(req.template, user)
     lang_name = SUPPORTED_LANGUAGES.get(req.language, {}).get("name", "English")
     lang_instruction = ""
     if req.language != "en":
@@ -2970,10 +2984,12 @@ async def creative_create_session(body: dict, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    template = body.get("template", "skeleton")
+    _ensure_template_allowed(template, user)
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
     _creative_sessions[session_id] = {
         "user_id": user["id"],
-        "template": body.get("template", "skeleton"),
+        "template": template,
         "topic": body.get("topic", "Untitled"),
         "resolution": body.get("resolution", "720p"),
         "language": body.get("language", "en"),
@@ -3085,6 +3101,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     session = _creative_sessions.get(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
+    _ensure_template_allowed(session.get("template", req.template), user)
 
     if req.narration:
         session["narration"] = req.narration
@@ -3341,6 +3358,8 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
+    if user:
+        _ensure_template_allowed(req.template, user)
     user_plan = "free"
     if user:
         user_plan = user.get("plan", "free")
@@ -4127,12 +4146,20 @@ async def check_lora_status() -> dict:
 
 
 @app.get("/api/thumbnails/training-status")
-async def training_status():
+async def training_status(user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     return await check_lora_status()
 
 
 @app.post("/api/thumbnails/upload")
-async def upload_thumbnails(files: list[UploadFile] = File(...), background_tasks: BackgroundTasks = None):
+async def upload_thumbnails(
+    files: list[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = None,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     saved = []
     for file in files:
         if not file.filename:
@@ -4158,7 +4185,9 @@ async def upload_thumbnails(files: list[UploadFile] = File(...), background_task
 
 
 @app.get("/api/thumbnails/library")
-async def list_thumbnails():
+async def list_thumbnails(user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     files = []
     for f in sorted(THUMBNAIL_UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -4173,7 +4202,9 @@ async def list_thumbnails():
 
 
 @app.get("/api/thumbnails/library/{filename}")
-async def serve_thumbnail(filename: str):
+async def serve_thumbnail(filename: str, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     path = THUMBNAIL_UPLOAD_DIR / filename
     if not path.exists():
         raise HTTPException(404, "Thumbnail not found")
@@ -4182,7 +4213,9 @@ async def serve_thumbnail(filename: str):
 
 
 @app.delete("/api/thumbnails/library/{filename}")
-async def delete_thumbnail(filename: str):
+async def delete_thumbnail(filename: str, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     path = THUMBNAIL_UPLOAD_DIR / filename
     if path.exists():
         path.unlink()
@@ -4190,7 +4223,9 @@ async def delete_thumbnail(filename: str):
 
 
 @app.get("/api/thumbnails/generated/{filename}")
-async def serve_generated_thumbnail(filename: str):
+async def serve_generated_thumbnail(filename: str, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     path = THUMBNAIL_OUTPUT_DIR / filename
     if not path.exists():
         raise HTTPException(404, "Generated thumbnail not found")
@@ -4436,7 +4471,9 @@ async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_pa
 
 
 @app.post("/api/thumbnails/generate")
-async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks):
+async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
 
@@ -5262,6 +5299,8 @@ async def create_demo_video(
     user_email = user.get("email", "")
     user_plan = user.get("plan", "free")
     is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
+    if not is_admin:
+        raise HTTPException(403, "Product Demo is admin-only right now.")
     has_demo = user_plan == "demo_pro" or is_admin
     if not has_demo:
         raise HTTPException(403, "Product Demo requires the Demo Pro plan ($150/mo). Upgrade to access this feature.")
