@@ -2708,6 +2708,7 @@ class FinalizeRequest(BaseModel):
     template: str = "skeleton"
     resolution: str = "720p"
     language: str = "en"
+    narration: str = ""
     scenes: list = []
 
 
@@ -2870,6 +2871,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
 
+    if req.narration:
+        session["narration"] = req.narration
     if req.scenes:
         session["scenes"] = req.scenes
     if not session["scenes"]:
@@ -2965,7 +2968,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
 
         jobs[job_id]["status"] = "generating_voice"
         jobs[job_id]["progress"] = 70
-        full_narration = " ".join(s.get("narration", "") for s in scenes)
+        full_narration = session.get("narration", "") or " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
         vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
         audio_path = vo_result["audio_path"]

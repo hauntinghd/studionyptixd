@@ -934,6 +934,7 @@ function CreatePanel() {
     const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
     const [scriptLoading, setScriptLoading] = useState(false);
     const [creativeTitle, setCreativeTitle] = useState("");
+    const [creativeNarration, setCreativeNarration] = useState("");
 
     useEffect(() => {
         (async () => {
@@ -1105,8 +1106,9 @@ function CreatePanel() {
                     template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
                     language,
+                    narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
-                        narration: s.narration,
+                        narration: "",
                         visual_description: s.visual_description,
                         duration_sec: s.duration_sec,
                     })),
@@ -1123,13 +1125,14 @@ function CreatePanel() {
         setSessionId(null);
         setCreativeScenes([]);
         setCreativeTitle("");
+        setCreativeNarration("");
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
     };
 
     if (creativeMode === 'creative' && creativeStep === 'edit') {
-    const hasNarration = creativeScenes.some(s => s.narration.trim());
+    const hasNarration = creativeNarration.trim().length > 0;
 
         return (
             <div className="max-w-4xl mx-auto px-6 pb-10 space-y-6">
@@ -1141,6 +1144,18 @@ function CreatePanel() {
                     <button onClick={handleResetCreative} className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-gray-400 transition flex items-center gap-2">
                         <ArrowRight className="w-4 h-4 rotate-180" /> Back
                     </button>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-2">
+                    <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Script / Narration (voiceover for the entire short)</label>
+                    <textarea
+                        value={creativeNarration}
+                        onChange={(e) => setCreativeNarration(e.target.value)}
+                        rows={4}
+                        placeholder="Write the full voiceover script for your short here. This narration will play across all scenes..."
+                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y"
+                    />
+                    <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
                 </div>
 
                 <div className="space-y-4">
@@ -1173,17 +1188,7 @@ function CreatePanel() {
                             </div>
                             <div className="p-4 space-y-3">
                                 <div>
-                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Narration (what the voiceover says)</label>
-                                    <textarea
-                                        value={scene.narration}
-                                        onChange={(e) => handleUpdateScene(idx, 'narration', e.target.value)}
-                                        rows={2}
-                                        placeholder="Write what the voiceover should say for this scene..."
-                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what the scene looks like)</label>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what this scene looks like)</label>
                                     <textarea
                                         value={scene.visual_description}
                                         onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
@@ -1236,7 +1241,7 @@ function CreatePanel() {
                 </button>
 
                 {!hasNarration && (
-                    <p className="text-center text-sm text-gray-600">Write narration for at least one scene to render.</p>
+                    <p className="text-center text-sm text-gray-600">Write your script above to render.</p>
                 )}
 
                 {jobStatus && (
