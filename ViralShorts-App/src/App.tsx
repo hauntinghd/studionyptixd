@@ -390,7 +390,7 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, checkout } = useContext(AuthContext);
+    const { session, checkout, checkoutDemo } = useContext(AuthContext);
 
     return (
         <>
@@ -672,7 +672,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-gray-400 text-lg">Start free. No credit card required. Upgrade when you're ready to scale.</p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                         {/* FREE */}
                         <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
                             <h3 className="text-lg font-bold mb-1">Free</h3>
@@ -756,6 +756,39 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <button onClick={() => session ? checkout('pro') : onNavigate('auth')}
                                 className="w-full py-2.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all border border-white/10">
                                 {session ? 'Choose Pro' : 'Sign Up to Subscribe'}
+                            </button>
+                        </div>
+
+                        {/* DEMO PRO */}
+                        <div className="relative p-6 rounded-2xl bg-gradient-to-b from-amber-500/[0.06] to-white/[0.02] border-2 border-amber-500/30 shadow-xl shadow-amber-500/5">
+                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-amber-500 text-black text-[10px] font-bold rounded-full tracking-wide">
+                                FOR BUSINESSES
+                            </span>
+                            <h3 className="text-lg font-bold mb-1">Demo Pro</h3>
+                            <p className="text-gray-500 text-xs mb-5">Product demos, not YouTube</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">$150</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    'AI Product Demo Generator',
+                                    'Upload screen recordings',
+                                    'AI writes voiceover scripts',
+                                    'Choose from 50+ voices',
+                                    'AI talking head presenter',
+                                    'Word-synced captions',
+                                    'Built for SaaS & startups',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-300">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <p className="text-[10px] text-gray-600 mb-3 text-center">Not for YouTube/TikTok creators. For software teams turning screen recordings into polished product demos.</p>
+                            <button onClick={() => session ? checkoutDemo() : onNavigate('auth')}
+                                className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black text-sm font-bold transition-all shadow-lg shadow-amber-500/25">
+                                {session ? 'Choose Demo Pro' : 'Sign Up to Subscribe'}
                             </button>
                         </div>
                     </div>
