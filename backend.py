@@ -3851,19 +3851,32 @@ async def generate_ai_face(output_path: str) -> str:
     headers = {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
     payload = {"model": "grok-2-image", "prompt": prompt, "n": 1, "response_format": "url"}
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
-        if resp.status_code in (200, 201):
-            data = resp.json().get("data", [])
-            if data and data[0].get("url"):
-                dl = await client.get(data[0]["url"], follow_redirects=True)
-                if dl.status_code == 200:
-                    with open(output_path, "wb") as f:
-                        f.write(dl.content)
-                    log.info(f"AI face generated: {output_path}")
-                    return output_path
+    last_status = 0
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
+                last_status = resp.status_code
+                if resp.status_code in (200, 201):
+                    data = resp.json().get("data", [])
+                    if data and data[0].get("url"):
+                        dl = await client.get(data[0]["url"], follow_redirects=True)
+                        if dl.status_code == 200:
+                            with open(output_path, "wb") as f:
+                                f.write(dl.content)
+                            log.info(f"AI face generated: {output_path}")
+                            return output_path
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    wait = (attempt + 1) * 5
+                    log.warning(f"AI face gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                break
+        except Exception as e:
+            log.warning(f"AI face gen attempt {attempt+1} failed: {e}")
+            await asyncio.sleep((attempt + 1) * 3)
 
-    raise RuntimeError(f"Failed to generate AI face: {resp.status_code}")
+    raise RuntimeError(f"Failed to generate AI face: {last_status}")
 
 
 async def generate_talking_head(face_image_path: str, audio_path: str, output_path: str) -> str:
