@@ -402,47 +402,55 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <div className="absolute top-20 left-1/2 -translate-x-1/2 w-[800px] h-[800px] bg-violet-600/5 rounded-full blur-[120px]" />
 
                 <div className="relative max-w-5xl mx-auto px-6 text-center">
-                    <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-violet-500/10 border border-violet-500/20 text-violet-300 text-sm font-medium mb-8">
+                    <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-sm font-medium mb-8">
                         <Zap className="w-4 h-4" />
-                        NVIDIA A40 GPU-Powered Generation
+                        42K Views in 28 Days -- Real Results Below
                     </div>
 
                     <h1 className="text-6xl md:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6">
-                        Create Viral Shorts<br />
+                        AI That Makes<br />
                         <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 via-purple-400 to-indigo-400">
-                            Like Zach D Films
+                            Viral Shorts For You
                         </span>
                     </h1>
 
                     <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-                        Pixar-quality 3D animated shorts, cinematic AI stories, viral debates, and more.
-                        Generate professional short-form videos in minutes, not hours. Up to 1080p.
+                        Real 3D animated scenes. Premium AI voiceovers in 19 languages. 1080p output.
+                        Type a topic, pick a style, and get a scroll-stopping short in minutes.
                     </p>
 
-                    <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+                    <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
                         <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
                             className="group px-8 py-4 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl text-lg transition-all flex items-center gap-2 shadow-lg shadow-violet-600/25">
-                            {session ? 'Open Studio' : 'Get Started Free'}
+                            {session ? 'Open Studio' : 'Start Creating Free'}
                             <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                         </button>
                         <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
                             className="px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-medium rounded-xl text-lg transition-all border border-white/10">
-                            Clone a Viral Short
+                            See Pricing
                         </button>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-6 max-w-xl mx-auto">
+                    <div className="grid grid-cols-4 gap-6 max-w-xl mx-auto mb-16">
                         {[
-                            { val: '10', label: 'Templates' },
+                            { val: '42.3K', label: 'Views in 28 Days' },
                             { val: '1080p', label: 'Max Quality' },
-                            { val: '48GB', label: 'GPU VRAM' },
-                            { val: '<5 min', label: 'Generation' },
+                            { val: '19', label: 'Languages' },
+                            { val: '<5 min', label: 'Per Video' },
                         ].map((s, i) => (
                             <div key={i}>
                                 <div className="text-2xl md:text-3xl font-bold text-white">{s.val}</div>
                                 <div className="text-xs md:text-sm text-gray-500">{s.label}</div>
                             </div>
                         ))}
+                    </div>
+
+                    <div className="max-w-3xl mx-auto">
+                        <p className="text-xs text-gray-600 uppercase tracking-wider mb-3 text-center">Real YouTube Analytics</p>
+                        <div className="rounded-2xl overflow-hidden border border-white/[0.08] shadow-2xl shadow-violet-600/5">
+                            <img src="/social-proof.png" alt="YouTube Studio analytics showing 42.3K views, 155 subscribers, 75.4% average watch percentage from NYPTID Studio generated content" className="w-full" />
+                        </div>
+                        <p className="text-xs text-gray-600 mt-3 text-center">155 subscribers. 42.3K views. 75.4% average watch. All from AI-generated shorts.</p>
                     </div>
                 </div>
             </section>
@@ -497,7 +505,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                         {[
                             { step: '01', title: 'Choose Template & Topic', desc: 'Pick a template style and enter your topic. Our AI scriptwriter crafts hook-optimized scenes instantly.' },
-                            { step: '02', title: 'AI Generates Everything', desc: 'Self-hosted NVIDIA A40 GPU renders 3D scenes. ElevenLabs creates the voiceover. All fully automated.' },
+                            { step: '02', title: 'AI Generates Everything', desc: 'Dedicated GPU renders real 3D scenes. Premium AI voiceover in your chosen language. All fully automated.' },
                             { step: '03', title: 'Download & Post', desc: 'Get a production-ready MP4 with text overlays, voiceover, and optimized SEO metadata. Upload and watch it go viral.' },
                         ].map((s, i) => (
                             <div key={i} className="relative p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
@@ -546,11 +554,11 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <ul className="space-y-3">
                                 {[
-                                    'Real 3D rendered scenes via SDXL on dedicated GPU',
+                                    'Real 3D rendered scenes -- not slideshows',
                                     'Flat monthly pricing -- no credit anxiety',
-                                    'Self-hosted NVIDIA A40 (48GB VRAM) -- consistently fast',
-                                    'Up to 1080p output with latent upscaling',
-                                    'Clone any viral short and remake it on your topic',
+                                    'Dedicated GPU infrastructure -- consistently fast',
+                                    'Up to 1080p output with AI upscaling',
+                                    '19 languages including Hindi, Spanish, Japanese',
                                 ].map((item, i) => (
                                     <li key={i} className="flex items-start gap-2 text-sm text-gray-300">
                                         <CheckCircle2 className="w-4 h-4 text-violet-400 shrink-0 mt-0.5" />{item}
@@ -567,7 +575,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <h3 className="text-xl font-bold mb-3">Dedicated GPU Power</h3>
                             <p className="text-gray-500 leading-relaxed">
-                                NVIDIA A40 with 48GB VRAM renders every frame. No shared infrastructure, no throttling. Your generation gets the full GPU.
+                                Dedicated high-VRAM GPUs render every frame. No shared infrastructure, no throttling, no queue. Your generation gets full priority.
                             </p>
                         </div>
                         <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
