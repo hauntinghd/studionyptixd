@@ -3030,6 +3030,8 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "generation_id": gen_id,
     }
 
+    while len(session["scenes"]) <= req.scene_index:
+        session["scenes"].append({"narration": "", "visual_description": "", "duration_sec": 5})
     session["scenes"][req.scene_index]["visual_description"] = req.prompt
 
     return {
