@@ -3809,6 +3809,21 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
 
     import re
 
+    def _normalize_script(data: dict) -> dict:
+        """Normalize field names so the rest of the pipeline always sees start_time/end_time/text."""
+        if "segments" in data and isinstance(data["segments"], list):
+            for seg in data["segments"]:
+                if "start_sec" in seg and "start_time" not in seg:
+                    seg["start_time"] = seg.pop("start_sec")
+                if "end_sec" in seg and "end_time" not in seg:
+                    seg["end_time"] = seg.pop("end_sec")
+                if "narration" in seg and "text" not in seg:
+                    seg["text"] = seg.pop("narration")
+                for k in ["start_time", "end_time"]:
+                    if k in seg:
+                        seg[k] = float(seg[k])
+        return data
+
     def _try_parse_json(text: str) -> dict:
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -3819,15 +3834,16 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
         text = re.sub(r'//[^\n]*', '', text)
         text = re.sub(r',\s*([}\]])', r'\1', text)
         text = re.sub(r'[\x00-\x1f]+', ' ', text)
+        text = text.replace('\u2013', '-').replace('\u2014', '-').replace('\u2018', "'").replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
 
         try:
-            return json.loads(text)
+            return _normalize_script(json.loads(text))
         except json.JSONDecodeError:
             pass
 
         text2 = text.replace("'", '"')
         try:
-            return json.loads(text2)
+            return _normalize_script(json.loads(text2))
         except json.JSONDecodeError:
             pass
 
@@ -3836,18 +3852,20 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
             return prefix + '"' + inner.replace('"', '\\"') + '"'
         text3 = re.sub(r'(:\s*)"(.*?)"(?=\s*[,}\]])', _fix_inner_quotes, text, flags=re.DOTALL)
         try:
-            return json.loads(text3)
+            return _normalize_script(json.loads(text3))
         except json.JSONDecodeError:
             pass
 
         segments = []
-        seg_pattern = re.findall(
-            r'"start_time"\s*:\s*([\d.]+).*?"end_time"\s*:\s*([\d.]+).*?"text"\s*:\s*"((?:[^"\\]|\\.)*)?"',
-            text, re.DOTALL
-        )
-        if seg_pattern:
-            for s, e, t in seg_pattern:
-                segments.append({"start_time": float(s), "end_time": float(e), "text": t.replace('\\"', '"')})
+        for pattern in [
+            r'"start_sec"\s*:\s*([\d.]+).*?"end_sec"\s*:\s*([\d.]+).*?"narration"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            r'"start_time"\s*:\s*([\d.]+).*?"end_time"\s*:\s*([\d.]+).*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        ]:
+            seg_pattern = re.findall(pattern, text, re.DOTALL)
+            if seg_pattern:
+                for s, e, t in seg_pattern:
+                    segments.append({"start_time": float(s), "end_time": float(e), "text": t.replace('\\"', '"')})
+                break
 
         title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
         title = title_match.group(1) if title_match else "Product Demo"
@@ -4122,7 +4140,7 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
         jobs[job_id]["progress"] = 45
         log.info(f"[{job_id}] Generating voiceover...")
 
-        full_narration = " ".join(seg["narration"] for seg in script_data.get("segments", []))
+        full_narration = " ".join(seg.get("text", seg.get("narration", "")) for seg in script_data.get("segments", []))
         audio_path = str(TEMP_DIR / (job_id + "_demo_voice.mp3"))
         vo_result = await generate_voiceover(full_narration, audio_path, template="motivation")
         audio_path = vo_result["audio_path"]
