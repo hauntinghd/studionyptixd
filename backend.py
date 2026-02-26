@@ -4093,11 +4093,65 @@ async def composite_demo_video(
     return output_path
 
 
+COMPRESS_THRESHOLD_MB = 50
+
+
+async def compress_video_if_needed(video_path: str, job_id: str, label: str = "demo") -> str:
+    """Compress video to 720p if file exceeds COMPRESS_THRESHOLD_MB. Returns path (possibly new)."""
+    file_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
+    if file_size_mb <= COMPRESS_THRESHOLD_MB:
+        return video_path
+
+    log.info(f"[{job_id}] {label} video is {file_size_mb:.0f}MB (>{COMPRESS_THRESHOLD_MB}MB), compressing to 720p...")
+    jobs[job_id]["status"] = f"compressing_{label}"
+    jobs[job_id]["progress"] = jobs[job_id].get("progress", 0)
+    jobs[job_id]["compress_info"] = {
+        "label": label,
+        "original_size_mb": round(file_size_mb, 1),
+        "target": "720p",
+    }
+
+    compressed_path = video_path.rsplit(".", 1)[0] + "_compressed.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", "scale=-2:720",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        compressed_path
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+
+    _, stderr_data = await proc.communicate()
+
+    if proc.returncode == 0 and Path(compressed_path).exists():
+        new_size_mb = Path(compressed_path).stat().st_size / (1024 * 1024)
+        log.info(f"[{job_id}] {label} compressed: {file_size_mb:.0f}MB -> {new_size_mb:.0f}MB")
+        jobs[job_id]["compress_info"]["compressed_size_mb"] = round(new_size_mb, 1)
+        Path(video_path).unlink(missing_ok=True)
+        return compressed_path
+    else:
+        log.warning(f"[{job_id}] {label} compression failed, using original. stderr: {stderr_data.decode()[-300:]}")
+        Path(compressed_path).unlink(missing_ok=True)
+        return video_path
+
+
 async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_path: str,
                             product_name: str, reference_notes: str,
                             pip_position: str = "bottom-right"):
     """Full product demo video generation pipeline."""
     try:
+        jobs[job_id]["status"] = "compressing"
+        jobs[job_id]["progress"] = 1
+
+        demo_path = await compress_video_if_needed(demo_path, job_id, "demo")
+        jobs[job_id]["progress"] = 2
+
+        if ref_path and Path(ref_path).exists():
+            ref_path = await compress_video_if_needed(ref_path, job_id, "reference")
+
         ref_style = ""
         if ref_path and Path(ref_path).exists():
             jobs[job_id]["status"] = "analyzing_reference"
