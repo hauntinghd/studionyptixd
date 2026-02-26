@@ -914,6 +914,7 @@ interface CreativeScene {
     duration_sec: number;
     imageData?: string;
     imageLoading?: boolean;
+    generation_id?: string;
 }
 
 function CreatePanel() {
@@ -1074,7 +1075,7 @@ function CreatePanel() {
             if (!res.ok) throw new Error("Image gen failed");
             const data = await res.json();
             setCreativeScenes(prev => prev.map((s, i) =>
-                i === sceneIndex ? { ...s, imageData: data.image_data, imageLoading: false } : s
+                i === sceneIndex ? { ...s, imageData: data.image_data, imageLoading: false, generation_id: data.generation_id } : s
             ));
         } catch {
             setCreativeScenes(prev => prev.map((s, i) =>

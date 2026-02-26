@@ -1566,16 +1566,54 @@ async def _download_comfyui_file(file_info: dict, output_path: str):
 GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 
 
-async def _save_training_pair(prompt: str, image_path: str, template: str = "", source: str = "grok"):
-    """Save a prompt+image pair for future LoRA training."""
+_pending_training: dict[str, dict] = {}
+
+async def _save_training_candidate(prompt: str, image_path: str, template: str = "", source: str = "grok") -> str:
+    """Stage a prompt+image pair as a training candidate. Returns generation_id.
+    Image is saved immediately but only promoted to 'accepted' via feedback."""
+    gen_id = f"gen_{int(time.time() * 1000)}_{id(image_path) % 9999:04d}"
     try:
-        ts = int(time.time() * 1000)
-        safe_name = f"train_{ts}"
-        img_dest = TRAINING_DATA_DIR / f"{safe_name}.png"
-        txt_dest = TRAINING_DATA_DIR / f"{safe_name}.txt"
+        img_dest = TRAINING_DATA_DIR / f"{gen_id}.png"
+        txt_dest = TRAINING_DATA_DIR / f"{gen_id}.txt"
         shutil.copy2(image_path, str(img_dest))
         txt_dest.write_text(prompt, encoding="utf-8")
-        if SUPABASE_URL and SUPABASE_ANON_KEY:
+        _pending_training[gen_id] = {
+            "prompt": prompt,
+            "image_path": str(img_dest),
+            "txt_path": str(txt_dest),
+            "template": template,
+            "source": source,
+            "status": "pending",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        log.info(f"Training candidate staged: {gen_id} ({template or 'generic'}/{source})")
+    except Exception as e:
+        log.warning(f"Training candidate save failed (non-fatal): {e}")
+    return gen_id
+
+
+async def _mark_training_feedback(gen_id: str, accepted: bool):
+    """Mark a training candidate as accepted or rejected.
+    Accepted pairs are logged to Supabase for LoRA training.
+    Rejected pairs are cleaned up from disk."""
+    entry = _pending_training.get(gen_id)
+    if not entry:
+        return
+    status = "accepted" if accepted else "rejected"
+    entry["status"] = status
+
+    if not accepted:
+        for p in [entry.get("image_path"), entry.get("txt_path")]:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception:
+                pass
+        _pending_training.pop(gen_id, None)
+        log.info(f"Training candidate {gen_id} REJECTED and cleaned up")
+        return
+
+    if SUPABASE_URL and SUPABASE_ANON_KEY:
+        try:
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.post(
                     f"{SUPABASE_URL}/rest/v1/training_data",
@@ -1586,16 +1624,17 @@ async def _save_training_pair(prompt: str, image_path: str, template: str = "", 
                         "Prefer": "return=minimal",
                     },
                     json={
-                        "prompt": prompt[:2000],
-                        "image_filename": safe_name + ".png",
-                        "template": template,
-                        "source": source,
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "prompt": entry["prompt"][:2000],
+                        "image_filename": gen_id + ".png",
+                        "template": entry.get("template", ""),
+                        "source": entry.get("source", "grok"),
+                        "status": "accepted",
+                        "created_at": entry["created_at"],
                     },
                 )
-        log.info(f"Training pair saved: {safe_name} ({template or 'generic'}/{source})")
-    except Exception as e:
-        log.warning(f"Training data save failed (non-fatal): {e}")
+        except Exception as e:
+            log.warning(f"Supabase training log failed (non-fatal): {e}")
+    log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
 
 
 async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
@@ -1621,8 +1660,8 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
                             with open(output_path, "wb") as f:
                                 f.write(dl.content)
                             log.info(f"xAI direct image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
-                            asyncio.create_task(_save_training_pair(prompt, output_path, source="xai_direct"))
-                            return {"local_path": output_path, "cdn_url": cdn_url}
+                            gen_id = await _save_training_candidate(prompt, output_path, source="xai_direct")
+                            return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
                 if resp.status_code in (429, 500, 502, 503, 504):
                     wait = (attempt + 1) * 5
                     log.warning(f"xAI image gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
@@ -1675,8 +1714,8 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
                     f.write(img_resp.content)
 
             log.info(f"Grok Imagine (fal.ai) saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
-            asyncio.create_task(_save_training_pair(prompt, output_path, source="grok_imagine"))
-            return {"local_path": output_path, "cdn_url": cdn_url}
+            gen_id = await _save_training_candidate(prompt, output_path, source="grok_imagine")
+            return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
         except Exception as e:
             log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
 
@@ -2750,6 +2789,11 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     if session["user_id"] != user["id"]:
         raise HTTPException(403, "Not your session")
 
+    prev_img = session.get("scene_images", {}).get(req.scene_index, {})
+    prev_gen_id = prev_img.get("generation_id")
+    if prev_gen_id:
+        asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False))
+
     template = session.get("template", req.template)
     resolution = session.get("resolution", req.resolution)
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
@@ -2757,6 +2801,8 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
     img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template="")
+
+    gen_id = img_result.get("generation_id", "")
 
     import base64 as b64mod
     img_bytes = Path(img_path).read_bytes()
@@ -2766,6 +2812,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "path": img_path,
         "cdn_url": img_result.get("cdn_url"),
         "prompt": req.prompt,
+        "generation_id": gen_id,
     }
 
     if req.scene_index < len(session["scenes"]):
@@ -2775,7 +2822,21 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "scene_index": req.scene_index,
         "image_data": f"data:image/png;base64,{img_b64}",
         "prompt_used": req.prompt,
+        "generation_id": gen_id,
     }
+
+
+@app.post("/api/creative/scene-feedback")
+async def creative_scene_feedback(body: dict, request: Request = None):
+    """Mark a generated image as accepted (user moved on) or rejected (user regenerated)."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    gen_id = body.get("generation_id", "")
+    accepted = body.get("accepted", True)
+    if gen_id:
+        await _mark_training_feedback(gen_id, accepted=accepted)
+    return {"ok": True, "generation_id": gen_id, "status": "accepted" if accepted else "rejected"}
 
 
 @app.put("/api/creative/scene/{session_id}/{scene_index}")
@@ -2831,6 +2892,11 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "plan": user_plan,
         "created_at": time.time(),
     }
+
+    for si_data in session.get("scene_images", {}).values():
+        gen_id = si_data.get("generation_id")
+        if gen_id:
+            asyncio.create_task(_mark_training_feedback(gen_id, accepted=True))
 
     background_tasks.add_task(
         _run_creative_pipeline, job_id, session, resolution
@@ -2987,11 +3053,15 @@ async def training_stats(user: dict = Depends(require_auth)):
     if email not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin only")
     pairs = list(TRAINING_DATA_DIR.glob("*.png"))
+    accepted = sum(1 for e in _pending_training.values() if e["status"] == "accepted")
+    rejected = sum(1 for e in _pending_training.values() if e["status"] == "rejected")
+    pending = sum(1 for e in _pending_training.values() if e["status"] == "pending")
     return {
-        "total_pairs": len(pairs),
+        "total_on_disk": len(pairs),
+        "accepted": accepted,
+        "rejected": rejected,
+        "pending_review": pending,
         "disk_mb": round(sum(p.stat().st_size for p in pairs) / (1024 * 1024), 1),
-        "oldest": min((p.stem for p in pairs), default=None),
-        "newest": max((p.stem for p in pairs), default=None),
     }
 
 
