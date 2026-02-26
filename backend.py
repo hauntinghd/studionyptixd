@@ -3807,21 +3807,54 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
             raw = raw[:-3]
         raw = raw.strip()
 
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("No JSON found in demo script response")
-    raw = raw[start:end]
-
     import re
-    raw = re.sub(r',\s*([}\]])', r'\1', raw)
-    raw = re.sub(r'//[^\n]*', '', raw)
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        raw2 = re.sub(r"(?<!\\)'", '"', raw)
-        return json.loads(raw2)
+    def _try_parse_json(text: str) -> dict:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON object found in response")
+        text = text[start:end]
+
+        text = re.sub(r'//[^\n]*', '', text)
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        text = re.sub(r'[\x00-\x1f]+', ' ', text)
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        text2 = re.sub(r"(?<!\\)'", '"', text)
+        try:
+            return json.loads(text2)
+        except json.JSONDecodeError:
+            pass
+
+        text3 = re.sub(r'(?<=:\s*)"([^"]*)"([^",\}\]]*)"', lambda m: '"' + m.group(1) + m.group(2).replace('"', '\\"') + '"', text)
+        try:
+            return json.loads(text3)
+        except json.JSONDecodeError:
+            pass
+
+        segments = []
+        seg_pattern = re.findall(
+            r'"start_time"\s*:\s*([\d.]+).*?"end_time"\s*:\s*([\d.]+).*?"text"\s*:\s*"((?:[^"\\]|\\.)*)?"',
+            text, re.DOTALL
+        )
+        if seg_pattern:
+            for s, e, t in seg_pattern:
+                segments.append({"start_time": float(s), "end_time": float(e), "text": t.replace('\\"', '"')})
+
+        title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        title = title_match.group(1) if title_match else "Product Demo"
+
+        if segments:
+            return {"title": title, "segments": segments}
+
+        raise ValueError(f"Could not parse script JSON after all attempts. Raw start: {text[:300]}")
+
+    return _try_parse_json(raw)
 
 
 async def generate_ai_face(output_path: str) -> str:
