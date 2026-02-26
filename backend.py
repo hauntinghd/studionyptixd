@@ -4101,17 +4101,27 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
         jobs[job_id]["status"] = "generating_face"
         jobs[job_id]["progress"] = 65
 
-        if not face_path or not Path(face_path).exists():
-            log.info(f"[{job_id}] No face uploaded, generating AI male face...")
-            face_path = str(TEMP_DIR / (job_id + "_ai_face.png"))
-            await generate_ai_face(face_path)
-            log.info(f"[{job_id}] AI face generated")
+        talking_head_path = None
+        has_face = False
 
-        log.info(f"[{job_id}] Generating talking head animation...")
-        talking_head_path = str(TEMP_DIR / (job_id + "_talking_head.mp4"))
-        await generate_talking_head(face_path, audio_path, talking_head_path)
-        jobs[job_id]["progress"] = 80
-        log.info(f"[{job_id}] Talking head generated")
+        try:
+            if not face_path or not Path(face_path).exists():
+                log.info(f"[{job_id}] No face uploaded, generating AI male face...")
+                face_path = str(TEMP_DIR / (job_id + "_ai_face.png"))
+                await generate_ai_face(face_path)
+                log.info(f"[{job_id}] AI face generated")
+
+            log.info(f"[{job_id}] Generating talking head animation...")
+            talking_head_path = str(TEMP_DIR / (job_id + "_talking_head.mp4"))
+            await generate_talking_head(face_path, audio_path, talking_head_path)
+            has_face = True
+            jobs[job_id]["progress"] = 80
+            log.info(f"[{job_id}] Talking head generated")
+        except Exception as face_err:
+            log.warning(f"[{job_id}] AI face/talking head failed ({face_err}), continuing without face PiP")
+            talking_head_path = None
+            has_face = False
+            jobs[job_id]["progress"] = 80
 
         jobs[job_id]["status"] = "compositing"
         jobs[job_id]["progress"] = 85
@@ -4119,14 +4129,44 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
 
         output_filename = f"demo_{job_id}.mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_demo_video(
-            demo_path, talking_head_path, audio_path,
-            output_path, subtitle_path=subtitle_path,
-            pip_position=pip_position
-        )
+
+        if has_face and talking_head_path and Path(talking_head_path).exists():
+            await composite_demo_video(
+                demo_path, talking_head_path, audio_path,
+                output_path, subtitle_path=subtitle_path,
+                pip_position=pip_position
+            )
+        else:
+            sub_filter = ""
+            if subtitle_path and Path(subtitle_path).exists():
+                sub_abs = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
+                sub_filter = f"-vf ass={sub_abs}"
+            cmd = ["ffmpeg", "-y", "-i", demo_path, "-i", audio_path]
+            if sub_filter:
+                cmd += ["-vf", f"ass={sub_abs}"]
+            cmd += [
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart",
+                output_path
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            if not Path(output_path).exists():
+                cmd_simple = ["ffmpeg", "-y", "-i", demo_path, "-i", audio_path,
+                              "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                              "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_simple, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc.communicate()
+
         jobs[job_id]["progress"] = 95
 
-        Path(talking_head_path).unlink(missing_ok=True)
+        if talking_head_path:
+            Path(talking_head_path).unlink(missing_ok=True)
         Path(audio_path).unlink(missing_ok=True)
         if subtitle_path:
             Path(subtitle_path).unlink(missing_ok=True)
