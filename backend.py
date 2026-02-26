@@ -3825,13 +3825,16 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
         except json.JSONDecodeError:
             pass
 
-        text2 = re.sub(r"(?<!\\)'", '"', text)
+        text2 = text.replace("'", '"')
         try:
             return json.loads(text2)
         except json.JSONDecodeError:
             pass
 
-        text3 = re.sub(r'(?<=:\s*)"([^"]*)"([^",\}\]]*)"', lambda m: '"' + m.group(1) + m.group(2).replace('"', '\\"') + '"', text)
+        def _fix_inner_quotes(m):
+            prefix, inner = m.group(1), m.group(2)
+            return prefix + '"' + inner.replace('"', '\\"') + '"'
+        text3 = re.sub(r'(:\s*)"(.*?)"(?=\s*[,}\]])', _fix_inner_quotes, text, flags=re.DOTALL)
         try:
             return json.loads(text3)
         except json.JSONDecodeError:
