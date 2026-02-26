@@ -1,5 +1,5 @@
 import { useState, useEffect, createContext, useContext, useCallback } from 'react';
-import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X } from 'lucide-react';
+import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search } from 'lucide-react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const API = "";
@@ -1364,6 +1364,75 @@ function DemoPanel() {
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
     const [compressStatus, setCompressStatus] = useState<string | null>(null);
 
+    const [voices, setVoices] = useState<any[]>([]);
+    const [voicesLoading, setVoicesLoading] = useState(false);
+    const [selectedVoiceId, setSelectedVoiceId] = useState('');
+    const [voiceSearch, setVoiceSearch] = useState('');
+    const [previewAudio, setPreviewAudio] = useState<HTMLAudioElement | null>(null);
+    const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+    const [previewLoading, setPreviewLoading] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setVoicesLoading(true);
+            try {
+                const res = await fetch(`${API}/api/voices`, {
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (!cancelled) setVoices(data.voices || []);
+                }
+            } catch { /* silent */ }
+            if (!cancelled) setVoicesLoading(false);
+        })();
+        return () => { cancelled = true; };
+    }, [session]);
+
+    const handlePreviewVoice = async (voiceId: string, previewUrl?: string) => {
+        if (previewAudio) {
+            previewAudio.pause();
+            previewAudio.currentTime = 0;
+            setPreviewAudio(null);
+        }
+        if (playingVoiceId === voiceId) {
+            setPlayingVoiceId(null);
+            return;
+        }
+        if (previewUrl) {
+            const audio = new Audio(previewUrl);
+            audio.onended = () => { setPlayingVoiceId(null); setPreviewAudio(null); };
+            setPreviewAudio(audio);
+            setPlayingVoiceId(voiceId);
+            audio.play();
+            return;
+        }
+        setPreviewLoading(voiceId);
+        try {
+            const res = await fetch(`${API}/api/voices/preview`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+                body: JSON.stringify({ voice_id: voiceId }),
+            });
+            if (!res.ok) throw new Error('Preview failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => { setPlayingVoiceId(null); setPreviewAudio(null); URL.revokeObjectURL(url); };
+            setPreviewAudio(audio);
+            setPlayingVoiceId(voiceId);
+            audio.play();
+        } catch { /* silent */ }
+        setPreviewLoading(null);
+    };
+
+    const filteredVoices = voices.filter(v => {
+        if (!voiceSearch) return true;
+        const q = voiceSearch.toLowerCase();
+        return v.name?.toLowerCase().includes(q) || v.gender?.toLowerCase().includes(q) || v.accent?.toLowerCase().includes(q) || v.description?.toLowerCase().includes(q);
+    });
+
     const MAX_FILE_MB = 50;
 
     const compressVideoInBrowser = async (file: File, label: string): Promise<File> => {
@@ -1474,6 +1543,7 @@ function DemoPanel() {
             formData.append('product_name', productName);
             formData.append('reference_notes', referenceNotes);
             formData.append('pip_position', pipPosition);
+            if (selectedVoiceId) formData.append('voice_id', selectedVoiceId);
 
             const totalSize = (finalDemo?.size || 0) + (finalRef?.size || 0) + (faceFile?.size || 0);
             const totalMB = (totalSize / (1024 * 1024)).toFixed(0);
@@ -1650,6 +1720,74 @@ function DemoPanel() {
                         disabled={loading} placeholder="Describe the style you want: e.g., 'Energetic and fast-paced like a YC demo day pitch' or 'Calm and professional like an Apple keynote'"
                         rows={2}
                         className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50 resize-none" />
+                </div>
+
+                <div>
+                    <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">Voice</h3>
+                    {voicesLoading ? (
+                        <div className="flex items-center gap-2 text-gray-500 text-sm py-3">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Loading voices from ElevenLabs...
+                        </div>
+                    ) : voices.length === 0 ? (
+                        <p className="text-gray-600 text-sm py-2">No voices found. Using default.</p>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                <input type="text" value={voiceSearch} onChange={(e) => setVoiceSearch(e.target.value)}
+                                    placeholder="Search voices by name, gender, accent..."
+                                    className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all" />
+                            </div>
+                            <div className="max-h-48 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
+                                <button onClick={() => setSelectedVoiceId('')}
+                                    className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-all ${
+                                        !selectedVoiceId ? 'bg-violet-500/10 text-violet-300' : 'text-gray-400 hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Volume2 className="w-4 h-4 flex-shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-medium truncate">Default Voice</p>
+                                        <p className="text-xs text-gray-600">Auto-selected based on template</p>
+                                    </div>
+                                </button>
+                                {filteredVoices.map(v => (
+                                    <div key={v.voice_id}
+                                        className={`flex items-center gap-3 px-4 py-2.5 transition-all ${
+                                            selectedVoiceId === v.voice_id ? 'bg-violet-500/10' : 'hover:bg-white/[0.03]'
+                                        }`}>
+                                        <button onClick={() => handlePreviewVoice(v.voice_id, v.preview_url)}
+                                            className="flex-shrink-0 w-8 h-8 rounded-full bg-white/[0.05] hover:bg-violet-500/20 flex items-center justify-center transition-all"
+                                            title="Preview voice">
+                                            {previewLoading === v.voice_id ? (
+                                                <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" />
+                                            ) : playingVoiceId === v.voice_id ? (
+                                                <Pause className="w-3.5 h-3.5 text-violet-400" />
+                                            ) : (
+                                                <Play className="w-3.5 h-3.5 text-gray-400" />
+                                            )}
+                                        </button>
+                                        <button onClick={() => setSelectedVoiceId(v.voice_id)}
+                                            className="flex-1 min-w-0 text-left">
+                                            <div className="flex items-center gap-2">
+                                                <p className={`text-sm font-medium truncate ${selectedVoiceId === v.voice_id ? 'text-violet-300' : 'text-gray-300'}`}>{v.name}</p>
+                                                {v.gender && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.05] text-gray-500 flex-shrink-0">{v.gender}</span>}
+                                            </div>
+                                            <p className="text-xs text-gray-600 truncate">
+                                                {[v.accent, v.age, v.description].filter(Boolean).join(' · ') || v.category || 'ElevenLabs voice'}
+                                            </p>
+                                        </button>
+                                        {selectedVoiceId === v.voice_id && (
+                                            <CheckCircle2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                            {selectedVoiceId && (
+                                <p className="text-xs text-violet-400">
+                                    Selected: {voices.find(v => v.voice_id === selectedVoiceId)?.name || selectedVoiceId}
+                                </p>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 <div>

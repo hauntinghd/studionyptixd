@@ -965,13 +965,13 @@ TEMPLATE_VOICE_SETTINGS = {
 }
 
 
-async def generate_voiceover(text: str, output_path: str, template: str = "random") -> dict:
+async def generate_voiceover(text: str, output_path: str, template: str = "random", override_voice_id: str = "") -> dict:
     """Generate voiceover with word-level timestamps for caption sync.
     Returns {"audio_path": str, "word_timings": list[dict]} where each timing is
     {"word": str, "start": float, "end": float}.
     """
     vs = TEMPLATE_VOICE_SETTINGS.get(template, {})
-    voice_id = vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
+    voice_id = override_voice_id if override_voice_id else vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -4149,7 +4149,7 @@ async def compress_video_if_needed(video_path: str, job_id: str, label: str = "d
 
 async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_path: str,
                             product_name: str, reference_notes: str,
-                            pip_position: str = "bottom-right"):
+                            pip_position: str = "bottom-right", voice_id: str = ""):
     """Full product demo video generation pipeline."""
     try:
         ref_style = ""
@@ -4196,7 +4196,7 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
 
         full_narration = " ".join(seg.get("text", seg.get("narration", "")) for seg in script_data.get("segments", []))
         audio_path = str(TEMP_DIR / (job_id + "_demo_voice.mp3"))
-        vo_result = await generate_voiceover(full_narration, audio_path, template="motivation")
+        vo_result = await generate_voiceover(full_narration, audio_path, template="motivation", override_voice_id=voice_id)
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
         jobs[job_id]["progress"] = 60
@@ -4298,6 +4298,60 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
             Path(face_path).unlink(missing_ok=True)
 
 
+@app.get("/api/voices")
+async def list_voices():
+    """List available ElevenLabs voices for the user to choose from."""
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ElevenLabs API key not configured")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            "https://api.elevenlabs.io/v1/voices",
+            headers={"xi-api-key": ELEVENLABS_API_KEY},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    voices = []
+    for v in data.get("voices", []):
+        voices.append({
+            "voice_id": v["voice_id"],
+            "name": v.get("name", "Unknown"),
+            "category": v.get("category", ""),
+            "description": v.get("labels", {}).get("description", ""),
+            "gender": v.get("labels", {}).get("gender", ""),
+            "accent": v.get("labels", {}).get("accent", ""),
+            "age": v.get("labels", {}).get("age", ""),
+            "preview_url": v.get("preview_url", ""),
+        })
+    return {"voices": voices}
+
+
+@app.post("/api/voices/preview")
+async def preview_voice(request: Request):
+    """Generate a short voice preview with a given voice_id."""
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ElevenLabs API key not configured")
+    body = await request.json()
+    voice_id = body.get("voice_id", "")
+    if not voice_id:
+        raise HTTPException(400, "voice_id required")
+    preview_text = body.get("text", "Hey there! This is a quick preview of what I sound like. Pretty cool, right?")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+            json={
+                "text": preview_text,
+                "model_id": "eleven_turbo_v2_5",
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3},
+            },
+        )
+        if resp.status_code != 200:
+            raise HTTPException(resp.status_code, f"ElevenLabs error: {resp.text[:200]}")
+    from fastapi.responses import Response
+    return Response(content=resp.content, media_type="audio/mpeg",
+                    headers={"Content-Disposition": f"inline; filename=preview_{voice_id}.mp3"})
+
+
 @app.post("/api/demo")
 async def create_demo_video(
     background_tasks: BackgroundTasks,
@@ -4307,6 +4361,7 @@ async def create_demo_video(
     product_name: str = Form(""),
     reference_notes: str = Form(""),
     pip_position: str = Form("bottom-right"),
+    voice_id: str = Form(""),
     request: Request = None,
 ):
     user = await get_current_user_from_request(request)
@@ -4345,7 +4400,7 @@ async def create_demo_video(
 
     background_tasks.add_task(
         run_demo_pipeline, job_id, demo_path, ref_path, face_path,
-        product_name, reference_notes, pip_position
+        product_name, reference_notes, pip_position, voice_id
     )
 
     return {"status": "accepted", "job_id": job_id}
