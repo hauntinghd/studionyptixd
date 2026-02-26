@@ -3807,7 +3807,21 @@ Write a voiceover script with timed segments that perfectly sync to what's happe
             raw = raw[:-3]
         raw = raw.strip()
 
-    return json.loads(raw)
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON found in demo script response")
+    raw = raw[start:end]
+
+    import re
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r'//[^\n]*', '', raw)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raw2 = re.sub(r"(?<!\\)'", '"', raw)
+        return json.loads(raw2)
 
 
 async def generate_ai_face(output_path: str) -> str:
