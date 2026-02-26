@@ -4143,15 +4143,6 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
                             pip_position: str = "bottom-right"):
     """Full product demo video generation pipeline."""
     try:
-        jobs[job_id]["status"] = "compressing"
-        jobs[job_id]["progress"] = 1
-
-        demo_path = await compress_video_if_needed(demo_path, job_id, "demo")
-        jobs[job_id]["progress"] = 2
-
-        if ref_path and Path(ref_path).exists():
-            ref_path = await compress_video_if_needed(ref_path, job_id, "reference")
-
         ref_style = ""
         if ref_path and Path(ref_path).exists():
             jobs[job_id]["status"] = "analyzing_reference"

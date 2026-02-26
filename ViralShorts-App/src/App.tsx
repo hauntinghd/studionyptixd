@@ -1362,6 +1362,89 @@ function DemoPanel() {
 
     const [demoError, setDemoError] = useState<string | null>(null);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+    const [compressStatus, setCompressStatus] = useState<string | null>(null);
+
+    const MAX_FILE_MB = 50;
+
+    const compressVideoInBrowser = async (file: File, label: string): Promise<File> => {
+        const sizeMB = file.size / (1024 * 1024);
+        if (sizeMB <= MAX_FILE_MB) return file;
+
+        setCompressStatus(`Compressing ${label} (${sizeMB.toFixed(0)}MB → ~${Math.round(sizeMB * 0.15)}MB)...`);
+
+        return new Promise<File>((resolve, reject) => {
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+
+            const url = URL.createObjectURL(file);
+            video.src = url;
+
+            video.onloadedmetadata = () => {
+                const scale = Math.min(1, 720 / video.videoHeight);
+                const w = Math.round(video.videoWidth * scale / 2) * 2;
+                const h = Math.round(video.videoHeight * scale / 2) * 2;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d')!;
+
+                const targetBitrate = Math.min(1500000, Math.round((MAX_FILE_MB * 8_000_000) / (video.duration || 60)));
+                const stream = canvas.captureStream(24);
+
+                let recorder: MediaRecorder;
+                try {
+                    recorder = new MediaRecorder(stream, {
+                        mimeType: 'video/webm;codecs=vp8',
+                        videoBitsPerSecond: targetBitrate
+                    });
+                } catch {
+                    recorder = new MediaRecorder(stream, { videoBitsPerSecond: targetBitrate });
+                }
+
+                const chunks: Blob[] = [];
+                recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+                recorder.onstop = () => {
+                    URL.revokeObjectURL(url);
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    const compressed = new File([blob], file.name.replace(/\.\w+$/, '.webm'), { type: 'video/webm' });
+                    setCompressStatus(`Compressed ${label}: ${sizeMB.toFixed(0)}MB → ${(compressed.size / (1024*1024)).toFixed(0)}MB`);
+                    resolve(compressed);
+                };
+
+                recorder.onerror = () => {
+                    URL.revokeObjectURL(url);
+                    reject(new Error(`Browser compression failed for ${label}`));
+                };
+
+                recorder.start(100);
+                video.play();
+
+                const dur = video.duration;
+                const draw = () => {
+                    if (video.ended || video.paused) {
+                        recorder.stop();
+                        return;
+                    }
+                    ctx.drawImage(video, 0, 0, w, h);
+                    const pct = Math.round((video.currentTime / dur) * 100);
+                    setCompressStatus(`Compressing ${label}: ${pct}% (${sizeMB.toFixed(0)}MB → 720p)`);
+                    requestAnimationFrame(draw);
+                };
+                draw();
+
+                video.onended = () => { recorder.stop(); };
+            };
+
+            video.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error(`Could not load ${label} video for compression`));
+            };
+        });
+    };
 
     const handleGenerate = async () => {
         if (!demoFile) return;
@@ -1370,19 +1453,31 @@ function DemoPanel() {
         setJobId(null);
         setDemoError(null);
         setUploadProgress(0);
-
-        const formData = new FormData();
-        formData.append('demo_video', demoFile);
-        if (referenceFile) formData.append('reference_video', referenceFile);
-        if (!autoFace && faceFile) formData.append('face_image', faceFile);
-        formData.append('product_name', productName);
-        formData.append('reference_notes', referenceNotes);
-        formData.append('pip_position', pipPosition);
-
-        const totalSize = (demoFile?.size || 0) + (referenceFile?.size || 0) + (faceFile?.size || 0);
-        const totalMB = (totalSize / (1024 * 1024)).toFixed(0);
+        setCompressStatus(null);
 
         try {
+            let finalDemo: File = demoFile;
+            let finalRef: File | null = referenceFile;
+
+            if (demoFile.size / (1024 * 1024) > MAX_FILE_MB) {
+                finalDemo = await compressVideoInBrowser(demoFile, 'demo video');
+            }
+            if (referenceFile && referenceFile.size / (1024 * 1024) > MAX_FILE_MB) {
+                finalRef = await compressVideoInBrowser(referenceFile, 'reference video');
+            }
+            setCompressStatus(null);
+
+            const formData = new FormData();
+            formData.append('demo_video', finalDemo);
+            if (finalRef) formData.append('reference_video', finalRef);
+            if (!autoFace && faceFile) formData.append('face_image', faceFile);
+            formData.append('product_name', productName);
+            formData.append('reference_notes', referenceNotes);
+            formData.append('pip_position', pipPosition);
+
+            const totalSize = (finalDemo?.size || 0) + (finalRef?.size || 0) + (faceFile?.size || 0);
+            const totalMB = (totalSize / (1024 * 1024)).toFixed(0);
+
             const result = await new Promise<any>((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
                 xhr.open('POST', `${API}/api/demo`);
@@ -1597,7 +1692,19 @@ function DemoPanel() {
                 </div>
             )}
 
-            {uploadProgress !== null && !jobStatus && (
+            {compressStatus && !jobStatus && (
+                <div className="bg-white/[0.02] border border-amber-500/20 rounded-2xl overflow-hidden">
+                    <div className="px-6 pt-5 pb-4">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                            <p className="text-sm font-medium text-amber-300">{compressStatus}</p>
+                        </div>
+                        <p className="text-xs text-gray-600">Compressing in your browser to reduce upload size. This may take a moment...</p>
+                    </div>
+                </div>
+            )}
+
+            {uploadProgress !== null && !compressStatus && !jobStatus && (
                 <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl overflow-hidden">
                     <div className="px-6 pt-5 pb-4">
                         <div className="flex items-center justify-between mb-3">
