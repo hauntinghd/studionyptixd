@@ -1114,17 +1114,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cs = int((seconds % 1) * 100)
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-    events = []
-    for i, wt in enumerate(word_timings):
+    MIN_DISPLAY = 0.25
+
+    timed = []
+    for wt in word_timings:
         word = wt["word"].strip()
         if not word:
             continue
-        start = wt["start"]
-        end = wt["end"]
-        if end - start < 0.08:
-            end = start + 0.12
+        timed.append({"word": word, "start": wt["start"], "end": wt["end"]})
 
-        safe_word = word.upper().replace("\\", "").replace("{", "").replace("}", "")
+    events = []
+    for i, wt in enumerate(timed):
+        start = wt["start"]
+        natural_end = wt["end"]
+        next_start = timed[i + 1]["start"] if i + 1 < len(timed) else natural_end + 0.5
+        end = max(natural_end, start + MIN_DISPLAY)
+        end = min(end, next_start)
+        if end - start < MIN_DISPLAY:
+            end = start + MIN_DISPLAY
+
+        safe_word = wt["word"].upper().replace("\\", "").replace("{", "").replace("}", "")
 
         pop_in = r"{\fscx130\fscy130\t(0,60,\fscx105\fscy105)}"
         events.append(
