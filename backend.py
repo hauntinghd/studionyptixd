@@ -3688,16 +3688,24 @@ async def analyze_screen_recording(video_path: str) -> dict:
     """Extract frames from screen recording and analyze with Grok Vision. Memory-optimized for 512MB."""
     import base64, gc
 
-    probe_cmd = [
-        "ffprobe", "-v", "error", "-show_entries",
-        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await proc.communicate()
-    duration = float(stdout.decode().strip() or "30")
+    duration = 30.0
+    for probe_args in [
+        ["-show_entries", "format=duration"],
+        ["-show_entries", "stream=duration", "-select_streams", "v:0"],
+    ]:
+        probe_cmd = ["ffprobe", "-v", "error"] + probe_args + ["-of", "default=noprint_wrappers=1:nokey=1", video_path]
+        proc = await asyncio.create_subprocess_exec(
+            *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        raw_dur = stdout.decode().strip().split("\n")[0]
+        try:
+            duration = float(raw_dur)
+            if duration > 0:
+                break
+        except (ValueError, TypeError):
+            continue
+    log.info(f"Video duration: {duration:.1f}s")
 
     num_frames = min(int(duration / 5), 6)
     if num_frames < 3:
