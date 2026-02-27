@@ -1242,6 +1242,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 SKELETON_IMAGE_PROMPT_PREFIX = ""
 
+SKELETON_IMAGE_STYLE_PREFIX = (
+    "Photorealistic 3D studio render. Unreal Engine 5 quality. "
+    "No illustration, no comic art, no anime, no drawing, no sketch."
+)
+
 SKELETON_IMAGE_SUFFIX = (
     "Photorealistic 3D render, Unreal Engine 5, octane render, NOT illustration, NOT cartoon, NOT comic art. "
     "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
@@ -2817,7 +2822,10 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
 
             if template == "skeleton":
                 vis_desc = scene.get("visual_description", "")
-                full_prompt = skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+                full_prompt = (
+                    SKELETON_IMAGE_STYLE_PREFIX + " "
+                    + skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+                )
             else:
                 full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
@@ -3043,7 +3051,10 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     full_prompt = req.prompt
 
     if template == "skeleton":
-        full_prompt = full_prompt + " " + SKELETON_IMAGE_SUFFIX
+        full_prompt = (
+            SKELETON_IMAGE_STYLE_PREFIX + " "
+            + full_prompt + " " + SKELETON_IMAGE_SUFFIX
+        )
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
     img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
@@ -3694,7 +3705,10 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
 
             if detected_template == "skeleton":
                 vis_desc = scene.get("visual_description", "")
-                full_prompt = clone_skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+                full_prompt = (
+                    SKELETON_IMAGE_STYLE_PREFIX + " "
+                    + clone_skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+                )
             else:
                 full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
