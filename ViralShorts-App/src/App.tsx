@@ -90,7 +90,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {
         if (!supabase) return "Auth not configured yet";
-        const { error } = await supabase.auth.signUp({ email, password });
+        const { error } = await supabase.auth.signUp({
+            email,
+            password,
+            options: { emailRedirectTo: window.location.origin },
+        });
         return error ? error.message : null;
     }, [supabase]);
 
@@ -1035,6 +1039,7 @@ function CreatePanel() {
     const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
     const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
+    const [finalizeError, setFinalizeError] = useState<string | null>(null);
     const restoreDoneRef = useRef(false);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
@@ -1345,7 +1350,15 @@ function CreatePanel() {
     };
 
     const handleFinalize = async () => {
-        if (!sessionId) return;
+        setFinalizeError(null);
+        if (!sessionId) {
+            setFinalizeError("No active session. Please go back and start a new project.");
+            return;
+        }
+        if (!creativeNarration.trim()) {
+            setFinalizeError("Please write a script / narration before rendering.");
+            return;
+        }
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
@@ -1367,10 +1380,27 @@ function CreatePanel() {
                     })),
                 }),
             });
+            if (!res.ok) {
+                const errData = await res.json().catch(() => null);
+                const msg = errData?.detail || `Server error (${res.status}). The backend may be overloaded — try again in a moment.`;
+                setFinalizeError(msg);
+                setLoading(false);
+                setCreativeStep('edit');
+                return;
+            }
             const data = await res.json();
-            if (data.job_id) setJobId(data.job_id);
-            else { setLoading(false); }
-        } catch { setLoading(false); }
+            if (data.job_id) {
+                setJobId(data.job_id);
+            } else {
+                setFinalizeError("Server returned no job ID. Please try again.");
+                setLoading(false);
+                setCreativeStep('edit');
+            }
+        } catch (err: any) {
+            setFinalizeError(err?.message || "Network error — the server may be down or overloaded. Please try again.");
+            setLoading(false);
+            setCreativeStep('edit');
+        }
     };
 
     const handleResetCreative = () => {
@@ -1384,6 +1414,7 @@ function CreatePanel() {
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
+        setFinalizeError(null);
         try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
     };
 
@@ -1517,6 +1548,13 @@ function CreatePanel() {
                     className="w-full py-3 border-2 border-dashed border-white/[0.1] hover:border-violet-500/40 rounded-xl text-gray-500 hover:text-violet-400 font-medium transition flex items-center justify-center gap-2">
                     <Plus className="w-4 h-4" /> Add Scene
                 </button>
+
+                {finalizeError && (
+                    <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 flex items-start gap-3">
+                        <X className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5 cursor-pointer" onClick={() => setFinalizeError(null)} />
+                        <p className="text-sm text-red-300">{finalizeError}</p>
+                    </div>
+                )}
 
                 <button
                     onClick={handleFinalize}
