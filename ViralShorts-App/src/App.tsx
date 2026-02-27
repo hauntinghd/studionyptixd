@@ -2940,6 +2940,7 @@ function ThumbnailPanel() {
     const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
     const [thumbFeedbackSent, setThumbFeedbackSent] = useState<Record<string, boolean>>({});
     const [syncingLibrary, setSyncingLibrary] = useState(false);
+    const [syncMessage, setSyncMessage] = useState('');
     const withThumbToken = useCallback((path: string) => {
         if (!session?.access_token) return `${API}${path}`;
         const sep = path.includes('?') ? '&' : '?';
@@ -3018,14 +3019,31 @@ function ThumbnailPanel() {
     const handleSyncLibrary = useCallback(async () => {
         if (!session) return;
         setSyncingLibrary(true);
+        setSyncMessage('');
         try {
-            await fetch(`${API}/api/thumbnails/sync-library`, {
+            const res = await fetch(`${API}/api/thumbnails/sync-library`, {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${session.access_token}` },
             });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setSyncMessage(data?.detail || `Sync failed (${res.status})`);
+                setSyncingLibrary(false);
+                return;
+            }
+            const synced = Number(data?.synced || 0);
+            const failed = Number(data?.failed || 0);
+            const total = Number(data?.queued || 0);
+            if (data?.status === 'no_files') {
+                setSyncMessage('No local library files found on this server instance.');
+            } else if (failed > 0) {
+                setSyncMessage(`Synced ${synced}/${total}. ${failed} failed; check server logs.`);
+            } else {
+                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed to RunPod.`);
+            }
             await fetchTrainingStatus();
         } catch {
-            // ignore
+            setSyncMessage('Sync request failed. Please try again.');
         }
         setSyncingLibrary(false);
     }, [session, fetchTrainingStatus]);
@@ -3153,13 +3171,18 @@ function ThumbnailPanel() {
                                     }
                                 </p>
                                 {canSyncNow && (
-                                    <button
-                                        onClick={handleSyncLibrary}
-                                        disabled={syncingLibrary}
-                                        className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
-                                    >
-                                        {syncingLibrary ? 'Syncing to RunPod...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
-                                    </button>
+                                    <>
+                                        <button
+                                            onClick={handleSyncLibrary}
+                                            disabled={syncingLibrary}
+                                            className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
+                                        >
+                                            {syncingLibrary ? 'Syncing to RunPod...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
+                                        </button>
+                                        {syncMessage && (
+                                            <p className="text-[11px] text-gray-500 mt-1">{syncMessage}</p>
+                                        )}
+                                    </>
                                 )}
                                         </>
                                     );

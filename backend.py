@@ -4853,7 +4853,7 @@ def _thumbnail_scp_cmd(local_path: str, remote_path: str) -> str:
     )
 
 
-async def sync_thumbnail_to_runpod(local_path: str):
+async def sync_thumbnail_to_runpod(local_path: str) -> tuple[bool, str]:
     """SCP a thumbnail to RunPod's training images directory."""
     try:
         cmd = _thumbnail_scp_cmd(local_path, f"{RUNPOD_TRAINING_DIR}/")
@@ -4863,10 +4863,15 @@ async def sync_thumbnail_to_runpod(local_path: str):
         _, stderr = await proc.communicate()
         if proc.returncode == 0:
             log.info(f"Synced {Path(local_path).name} to RunPod training dir")
+            return True, ""
         else:
-            log.warning(f"RunPod sync failed: {stderr.decode()[:200]}")
+            err = stderr.decode()[:300]
+            log.warning(f"RunPod sync failed: {err}")
+            return False, err
     except Exception as e:
-        log.warning(f"RunPod thumbnail sync error: {e}")
+        err = str(e)
+        log.warning(f"RunPod thumbnail sync error: {err}")
+        return False, err
 
 
 async def check_lora_status() -> dict:
@@ -4934,26 +4939,41 @@ async def training_status(user: dict = Depends(require_auth)):
 
 
 @app.post("/api/thumbnails/sync-library")
-async def sync_thumbnail_library(background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
+async def sync_thumbnail_library(user: dict = Depends(require_auth)):
     if not _is_admin_user(user):
         raise HTTPException(403, "Admin only")
     files = [p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+    if not files:
+        return {"status": "no_files", "queued": 0, "synced": 0, "failed": 0}
 
-    async def _run_sync():
-        try:
-            mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
-            proc = await asyncio.create_subprocess_shell(
-                mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
-            for p in files:
-                await sync_thumbnail_to_runpod(str(p))
-            log.info(f"Thumbnail library sync complete: {len(files)} files pushed to RunPod training dir")
-        except Exception as e:
-            log.warning(f"Thumbnail library sync failed: {e}")
+    mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
+    proc = await asyncio.create_subprocess_shell(
+        mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, mkdir_err = await proc.communicate()
+    if proc.returncode != 0:
+        raise HTTPException(500, f"RunPod mkdir failed: {mkdir_err.decode()[:300]}")
 
-    background_tasks.add_task(_run_sync)
-    return {"status": "started", "queued": len(files)}
+    synced = 0
+    failed = 0
+    failed_files = []
+    for p in files:
+        ok, err = await sync_thumbnail_to_runpod(str(p))
+        if ok:
+            synced += 1
+        else:
+            failed += 1
+            failed_files.append({"file": p.name, "error": err[:180]})
+
+    status = "complete" if failed == 0 else ("partial" if synced > 0 else "failed")
+    log.info(f"Thumbnail library sync finished: status={status}, synced={synced}, failed={failed}, total={len(files)}")
+    return {
+        "status": status,
+        "queued": len(files),
+        "synced": synced,
+        "failed": failed,
+        "failed_files": failed_files[:10],
+    }
 
 
 @app.post("/api/thumbnails/upload")
