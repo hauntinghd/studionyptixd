@@ -3341,6 +3341,26 @@ async def creative_reference_image(
     return {"ok": True}
 
 
+@app.get("/api/creative/session/{session_id}/status")
+async def creative_session_status(session_id: str, request: Request = None):
+    """Return lightweight status for restoring Creative Control UI state after refresh."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _creative_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Creative session not found")
+    if session["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your session")
+    return {
+        "session_id": session_id,
+        "has_reference_image": bool(session.get("reference_image_url") or session.get("skeleton_reference_image")),
+        "template": session.get("template", ""),
+        "topic": session.get("topic", ""),
+        "scene_count": len(session.get("scenes", [])),
+    }
+
+
 @app.post("/api/creative/scene-image")
 async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     """Generate (or regenerate) an image for a specific scene. Unlimited regenerations."""

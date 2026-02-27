@@ -1009,6 +1009,7 @@ function CreatePanel() {
     const [creativeNarration, setCreativeNarration] = useState("");
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+    const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
     const restoreDoneRef = useRef(false);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
@@ -1134,6 +1135,28 @@ function CreatePanel() {
         jobId,
     ]);
 
+    useEffect(() => {
+        if (!sessionId || creativeMode !== 'creative' || !session) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/creative/session/${sessionId}/status`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (cancelled) return;
+                setCreativeReferenceAttached(Boolean(data?.has_reference_image));
+                if (data?.has_reference_image && !creativeReferenceImage) {
+                    setCreativeReferenceStatus('ready');
+                }
+            } catch {
+                // ignore restore status errors
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeReferenceImage]);
+
     const handleGenerate = async () => {
         if (!prompt) return;
         if (creativeMode === 'creative') {
@@ -1193,6 +1216,7 @@ function CreatePanel() {
                     throw new Error(errText || "Failed to upload reference style image");
                 }
                 setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
             }
 
             setCreativeTitle(prompt || "Untitled Short");
@@ -1304,6 +1328,7 @@ function CreatePanel() {
         setCreativeTitle("");
         setCreativeNarration("");
         setCreativeReferenceStatus(creativeReferenceImage ? 'ready' : 'idle');
+        setCreativeReferenceAttached(false);
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
@@ -1628,19 +1653,24 @@ function CreatePanel() {
                                     const f = e.target.files?.[0] || null;
                                     setCreativeReferenceImage(f);
                                     setCreativeReferenceStatus(f ? 'ready' : 'idle');
+                                    if (f) setCreativeReferenceAttached(false);
                                 }}
                             />
                             <div className="flex items-center justify-between gap-4">
                                 <div>
                                     <p className="text-sm text-white font-medium">
-                                        {creativeReferenceImage ? creativeReferenceImage.name : 'Upload reference style image'}
+                                        {creativeReferenceImage
+                                            ? creativeReferenceImage.name
+                                            : creativeReferenceAttached
+                                                ? 'Reference image already attached for this project'
+                                                : 'Upload reference style image'}
                                     </p>
                                     <p className="text-xs text-gray-500 mt-1">
                                         Applied persistently to all Creative Control image generations in this short.
                                     </p>
                                 </div>
                                 <span className="px-3 py-1 rounded-md bg-violet-600/20 text-violet-300 text-xs font-semibold">
-                                    {creativeReferenceImage ? 'Ready' : 'Recommended'}
+                                    {creativeReferenceImage || creativeReferenceAttached ? 'Attached' : 'Recommended'}
                                 </span>
                             </div>
                         </label>
