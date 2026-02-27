@@ -78,6 +78,7 @@ TRAINING_DATA_DIR = Path("training_data")
 TRAINING_DATA_DIR.mkdir(exist_ok=True)
 CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
 CREATIVE_SESSION_PERSISTENCE_ENABLED = False
+PROJECTS_STORE_FILE = TEMP_DIR / "projects_store.json"
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 
@@ -90,6 +91,8 @@ app.add_middleware(
 
 jobs: dict = {}
 security = HTTPBearer(auto_error=False)
+_projects: dict = {}
+_projects_lock = asyncio.Lock()
 
 import asyncio as _asyncio
 _job_queue: _asyncio.PriorityQueue = None
@@ -2478,15 +2481,6 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
     except Exception as e:
         log.warning(f"Wan 2.2 animation also failed for scene {scene_idx}: {e}")
 
-    if FAL_AI_KEY and prefer_wan:
-        try:
-            clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            kling_dur = "5" if duration_sec <= 6 else "10"
-            await animate_image_kling(image_path, prompt, clip_path, duration=kling_dur, aspect_ratio="9:16", image_cdn_url=image_cdn_url)
-            return {"type": "kling_clip", "path": clip_path}
-        except Exception as e:
-            log.warning(f"Kling animation fallback failed for scene {scene_idx}: {e}")
-
     return {"type": "static"}
 
 
@@ -3204,12 +3198,18 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             "description": script_data.get("description", ""),
             "tags": script_data.get("tags", []),
         }
+        await _update_project_by_job(job_id, {
+            "status": "rendered",
+            "output_file": output_filename,
+            "title": script_data.get("title", topic),
+        })
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
     except Exception as e:
         log.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+        await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
 # ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -3285,6 +3285,73 @@ def _save_creative_sessions_to_disk():
 _load_creative_sessions_from_disk()
 
 
+def _load_projects_store():
+    if not PROJECTS_STORE_FILE.exists():
+        return
+    try:
+        data = json.loads(PROJECTS_STORE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _projects.clear()
+            _projects.update(data)
+            log.info(f"Loaded {len(_projects)} projects from disk")
+    except Exception as e:
+        log.warning(f"Failed to load projects store: {e}")
+
+
+def _save_projects_store():
+    try:
+        tmp_path = PROJECTS_STORE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(_projects, ensure_ascii=True), encoding="utf-8")
+        tmp_path.replace(PROJECTS_STORE_FILE)
+    except Exception as e:
+        log.warning(f"Failed to persist projects store: {e}")
+
+
+def _new_project_id() -> str:
+    return f"prj_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+
+async def _create_or_update_project(project_id: str, data: dict):
+    async with _projects_lock:
+        existing = _projects.get(project_id, {})
+        merged = {**existing, **data}
+        merged["project_id"] = project_id
+        merged["updated_at"] = time.time()
+        if "created_at" not in merged:
+            merged["created_at"] = time.time()
+        _projects[project_id] = merged
+        _save_projects_store()
+
+
+async def _update_project_by_job(job_id: str, fields: dict):
+    async with _projects_lock:
+        target_id = None
+        for pid, p in _projects.items():
+            if p.get("job_id") == job_id:
+                target_id = pid
+                break
+        if not target_id:
+            return
+        _projects[target_id] = {**_projects[target_id], **fields, "updated_at": time.time()}
+        _save_projects_store()
+
+
+async def _update_project_by_session(user_id: str, session_id: str, fields: dict):
+    async with _projects_lock:
+        target_id = None
+        for pid, p in _projects.items():
+            if p.get("user_id") == user_id and p.get("session_id") == session_id:
+                target_id = pid
+                break
+        if not target_id:
+            return
+        _projects[target_id] = {**_projects[target_id], **fields, "updated_at": time.time()}
+        _save_projects_store()
+
+
+_load_projects_store()
+
+
 @app.post("/api/creative/script")
 async def creative_generate_script(req: GenerateRequest, request: Request = None):
     """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
@@ -3354,8 +3421,20 @@ async def creative_create_session(body: dict, request: Request = None):
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
+    project_id = _new_project_id()
+    await _create_or_update_project(project_id, {
+        "user_id": user["id"],
+        "template": template,
+        "topic": body.get("topic", "Untitled"),
+        "mode": "creative",
+        "status": "draft",
+        "resolution": body.get("resolution", "720p"),
+        "language": body.get("language", "en"),
+        "session_id": session_id,
+        "scene_count": 0,
+    })
     log.info(f"Creative session created: {session_id} for user {user['id']}")
-    return {"session_id": session_id}
+    return {"session_id": session_id, "project_id": project_id}
 
 
 @app.post("/api/creative/reference-image")
@@ -3486,6 +3565,12 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     session["scenes"][req.scene_index]["visual_description"] = req.prompt
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
+    await _update_project_by_session(user.get("id", ""), req.session_id, {
+        "status": "draft",
+        "scene_count": len(session["scenes"]),
+        "scenes": session.get("scenes", []),
+        "narration": session.get("narration", ""),
+    })
 
     return {
         "scene_index": req.scene_index,
@@ -3528,6 +3613,12 @@ async def creative_update_scene(session_id: str, scene_index: int, body: dict, r
         scene["duration_sec"] = body["duration_sec"]
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
+    await _update_project_by_session(user.get("id", ""), session_id, {
+        "status": "draft",
+        "scene_count": len(session["scenes"]),
+        "scenes": session.get("scenes", []),
+        "narration": session.get("narration", ""),
+    })
     return {"ok": True, "scene": scene}
 
 
@@ -3556,6 +3647,11 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         user_plan = "pro"
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
     resolution = session.get("resolution", req.resolution)
+    total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
+    if total_duration > float(plan_limits.get("max_duration_sec", 60)):
+        raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
+    if session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
+        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes for stable WAN compositing.")
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -3568,6 +3664,13 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "user_id": user.get("id"),
         "created_at": time.time(),
     }
+    await _update_project_by_session(user.get("id", ""), req.session_id, {
+        "status": "rendering",
+        "job_id": job_id,
+        "scene_count": len(session.get("scenes", [])),
+        "scenes": session.get("scenes", []),
+        "narration": session.get("narration", ""),
+    })
 
     for si_data in session.get("scene_images", {}).values():
         gen_id = si_data.get("generation_id")
@@ -3705,6 +3808,11 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             "description": script_data.get("description", ""),
             "tags": script_data.get("tags", []),
         }
+        await _update_project_by_job(job_id, {
+            "status": "rendered",
+            "output_file": output_filename,
+            "title": script_data.get("title", session.get("topic", "")),
+        })
         log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
 
         sid = session.get("session_id")
@@ -3717,6 +3825,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
+        await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
 @app.get("/api/languages")
@@ -3941,8 +4050,20 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "user_id": user.get("id") if user else None,
         "created_at": time.time(),
     }
-
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
+    if user:
+        project_id = _new_project_id()
+        await _create_or_update_project(project_id, {
+            "user_id": user.get("id"),
+            "template": req.template,
+            "topic": req.prompt,
+            "mode": "auto",
+            "status": "rendering",
+            "resolution": resolution,
+            "language": language,
+            "job_id": job_id,
+        })
+        jobs[job_id]["project_id"] = project_id
 
     await _enqueue_generation_job(job_id, user_plan, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language))
 
@@ -4371,6 +4492,30 @@ async def clone_video(
 @app.get("/api/jobs")
 async def list_jobs():
     return {jid: {k: v for k, v in j.items() if k != "output_file"} for jid, j in jobs.items()}
+
+
+@app.get("/api/projects")
+async def list_projects(request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    uid = user.get("id", "")
+    rows = [p for p in _projects.values() if p.get("user_id") == uid]
+    rows.sort(key=lambda p: p.get("updated_at", 0), reverse=True)
+    drafts = [p for p in rows if p.get("status") in ("draft", "rendering")]
+    renders = [p for p in rows if p.get("status") in ("rendered", "error")]
+    return {"drafts": drafts, "renders": renders, "total": len(rows)}
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    proj = _projects.get(project_id)
+    if not proj or proj.get("user_id") != user.get("id"):
+        raise HTTPException(404, "Project not found")
+    return {"project": proj}
 
 
 # ─── Stripe Payments ──────────────────────────────────────────────────────────

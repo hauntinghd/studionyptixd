@@ -988,6 +988,26 @@ interface CreatePanelPersistedState {
     ts: number;
 }
 
+interface ProjectRow {
+    project_id: string;
+    template: string;
+    topic: string;
+    mode: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+    scene_count?: number;
+    session_id?: string;
+    job_id?: string;
+    output_file?: string;
+    title?: string;
+    resolution?: string;
+    language?: string;
+    scenes?: CreativeScene[];
+    narration?: string;
+    error?: string;
+}
+
 function CreatePanel() {
     const { session, plan, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
@@ -1011,6 +1031,10 @@ function CreatePanel() {
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
+    const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
+    const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
+    const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
+    const [projectsLoading, setProjectsLoading] = useState(false);
     const restoreDoneRef = useRef(false);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
@@ -1160,6 +1184,30 @@ function CreatePanel() {
         })();
         return () => { cancelled = true; };
     }, [sessionId, creativeMode, session, creativeReferenceImage]);
+
+    const loadProjects = useCallback(async () => {
+        if (!session) return;
+        setProjectsLoading(true);
+        try {
+            const res = await fetch(`${API}/api/projects`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to load projects");
+            const data = await res.json();
+            setProjectDrafts(data.drafts || []);
+            setProjectRenders(data.renders || []);
+        } catch {
+            setProjectDrafts([]);
+            setProjectRenders([]);
+        } finally {
+            setProjectsLoading(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        if (createSubTab !== 'projects') return;
+        loadProjects();
+    }, [createSubTab, loadProjects]);
 
     const handleGenerate = async () => {
         if (!prompt) return;
@@ -1339,6 +1387,36 @@ function CreatePanel() {
         try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
     };
 
+    const openDraftProject = async (projectId: string) => {
+        if (!session) return;
+        try {
+            const res = await fetch(`${API}/api/projects/${projectId}`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to open draft");
+            const data = await res.json();
+            const p: ProjectRow = data.project;
+            setCreateSubTab('builder');
+            setSelectedTemplate(p.template || 'skeleton');
+            setPrompt(p.topic || '');
+            if (p.resolution === '720p' || p.resolution === '1080p') setResolution(p.resolution);
+            if (p.language) setLanguage(p.language);
+            setCreativeMode(p.mode === 'creative' ? 'creative' : 'auto');
+            if (p.mode === 'creative') {
+                setCreativeStep('edit');
+                setSessionId(p.session_id || null);
+                setCreativeScenes(Array.isArray(p.scenes) && p.scenes.length > 0 ? p.scenes : [{ index: 0, narration: "", visual_description: "", duration_sec: 5 }]);
+                setCreativeTitle(p.title || p.topic || 'Untitled Short');
+                setCreativeNarration(p.narration || "");
+            } else if (p.job_id) {
+                setJobId(p.job_id);
+                setLoading(true);
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to open project");
+        }
+    };
+
     if (creativeMode === 'creative' && creativeStep === 'edit') {
     const hasNarration = creativeNarration.trim().length > 0;
 
@@ -1513,6 +1591,78 @@ function CreatePanel() {
 
     return (
             <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
+                <div className="grid grid-cols-2 gap-2 p-1 rounded-xl border border-white/[0.06] bg-white/[0.02]">
+                    <button
+                        onClick={() => setCreateSubTab('builder')}
+                        className={`py-2.5 rounded-lg text-sm font-medium transition ${
+                            createSubTab === 'builder'
+                                ? 'bg-violet-600 text-white'
+                                : 'text-gray-400 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                    >
+                        Create
+                    </button>
+                    <button
+                        onClick={() => setCreateSubTab('projects')}
+                        className={`py-2.5 rounded-lg text-sm font-medium transition ${
+                            createSubTab === 'projects'
+                                ? 'bg-violet-600 text-white'
+                                : 'text-gray-400 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                    >
+                        Projects
+                    </button>
+                </div>
+
+                {createSubTab === 'projects' && (
+                    <div className="space-y-6">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-white">Your Projects</h2>
+                            <button onClick={loadProjects} className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300">Refresh</button>
+                        </div>
+                        {projectsLoading && <p className="text-sm text-gray-500">Loading projects...</p>}
+                        {!projectsLoading && (
+                            <>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Drafts</h3>
+                                    {projectDrafts.length === 0 && <p className="text-sm text-gray-500">No drafts yet.</p>}
+                                    {projectDrafts.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.topic || 'Untitled'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.mode} • {p.status} • {p.scene_count || 0} scenes</p>
+                                            </div>
+                                            <button onClick={() => openDraftProject(p.project_id)} className="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white">
+                                                Open
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-emerald-300 uppercase tracking-wider">Renders</h3>
+                                    {projectRenders.length === 0 && <p className="text-sm text-gray-500">No renders yet.</p>}
+                                    {projectRenders.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.title || p.topic || 'Untitled Render'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
+                                            </div>
+                                            {p.output_file ? (
+                                                <a href={`${API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
+                                            ) : (
+                                                <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {createSubTab !== 'builder' && null}
+                {createSubTab !== 'builder' ? null : (
+                <>
                 {/* TEMPLATE PICKER */}
                 <div>
                     <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Template</h2>
@@ -1769,6 +1919,8 @@ function CreatePanel() {
                             </div>
                         )}
                     </div>
+                )}
+                </>
                 )}
             </div>
     );
