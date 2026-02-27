@@ -2546,44 +2546,21 @@ async def animate_image_grok_video(image_path: str, prompt: str, output_clip_pat
 
 
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
-    """Animate a scene image. Tries Kling first (if FAL_AI_KEY set), falls back to Wan 2.2.
-    Returns {"type": "kling_clip"|"wan_clip", "path": str} or {"type": "static"}.
+    """Animate a scene image using Grok Video only.
+    Returns {"type": "grok_clip", "path": str}. Raises on failure.
     """
-    if USE_XAI_VIDEO and XAI_API_KEY:
-        try:
-            clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            await animate_image_grok_video(
-                image_path,
-                prompt,
-                clip_path,
-                duration_sec=duration_sec,
-                aspect_ratio="9:16",
-                image_cdn_url=image_cdn_url,
-            )
-            return {"type": "grok_clip", "path": clip_path}
-        except Exception as e:
-            log.warning(f"Grok video animation failed for scene {scene_idx}, trying other engines: {e}")
-
-    if FAL_AI_KEY and not prefer_wan:
-        try:
-            clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            kling_dur = "5" if duration_sec <= 6 else "10"
-            await animate_image_kling(image_path, prompt, clip_path, duration=kling_dur, aspect_ratio="9:16", image_cdn_url=image_cdn_url)
-            return {"type": "kling_clip", "path": clip_path}
-        except Exception as e:
-            log.warning(f"Kling animation failed for scene {scene_idx}, trying Wan 2.2 fallback: {e}")
-
-    try:
-        wan_available = await check_wan22_available()
-        if wan_available:
-            wan_clip = str(Path(output_dir_path) / ("wan_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            wan_frames = max(33, min(int(duration_sec * 16), 81))
-            await animate_image_wan22(image_path, prompt, wan_clip, num_frames=wan_frames)
-            return {"type": "wan_clip", "path": wan_clip}
-    except Exception as e:
-        log.warning(f"Wan 2.2 animation also failed for scene {scene_idx}: {e}")
-
-    return {"type": "static"}
+    if not (USE_XAI_VIDEO and XAI_API_KEY):
+        raise RuntimeError("Grok video is not configured (USE_XAI_VIDEO/XAI_API_KEY)")
+    clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+    await animate_image_grok_video(
+        image_path,
+        prompt,
+        clip_path,
+        duration_sec=duration_sec,
+        aspect_ratio="9:16",
+        image_cdn_url=image_cdn_url,
+    )
+    return {"type": "grok_clip", "path": clip_path}
 
 
 async def _upload_image_to_comfyui(image_path: str) -> str:
@@ -3334,16 +3311,14 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
-        wan_ready = await check_wan22_available()
         use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_kling = bool(FAL_AI_KEY)
-        if template == "skeleton":
-            use_kling = False
-        use_video = use_grok_video or use_kling or wan_ready
+        use_video = use_grok_video
         if template == "reddit":
             use_video = False
-        mode_label = "Grok Imagine Video" if use_grok_video else ("Wan 2.2" if wan_ready else ("Kling 2.1" if use_kling else "static image"))
-        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else ("wan" if wan_ready else ("kling" if use_kling else "image"))
+        if template != "reddit" and not use_grok_video:
+            raise RuntimeError("Grok video is required but not configured")
+        mode_label = "Grok Imagine Video" if use_grok_video else "static image"
+        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else "image"
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 10
@@ -3971,12 +3946,10 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
 
-        wan_ready = await check_wan22_available()
         use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_kling = bool(FAL_AI_KEY)
-        if template == "skeleton":
-            use_kling = False
-        use_video = use_grok_video or use_kling or wan_ready
+        use_video = use_grok_video
+        if not use_grok_video:
+            raise RuntimeError("Grok video is required but not configured")
         gen_ts = str(int(time.time() * 1000))
 
         jobs[job_id]["status"] = "generating_images"
@@ -4602,14 +4575,13 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             raise ValueError("Clone script generation returned no scenes")
 
         use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_kling = bool(FAL_AI_KEY)
-        if detected_template == "skeleton":
-            use_kling = False
-        use_video = use_grok_video or use_kling or await check_wan22_available()
+        use_video = use_grok_video
         if detected_template == "reddit":
             use_video = False
-        mode_label = "Grok Imagine Video" if use_grok_video else ("Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image"))
-        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else ("kling" if use_kling else ("video" if use_video else "image"))
+        if detected_template != "reddit" and not use_grok_video:
+            raise RuntimeError("Grok video is required but not configured")
+        mode_label = "Grok Imagine Video" if use_grok_video else "static image"
+        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else "image"
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 20
