@@ -108,10 +108,9 @@ _job_queue: _asyncio.PriorityQueue = None
 _queued_job_meta: dict = {}
 _job_workers_started = False
 _job_seq = 0
-try:
-    JOB_QUEUE_WORKERS = max(1, int(os.getenv("JOB_QUEUE_WORKERS", "3")))
-except Exception:
-    JOB_QUEUE_WORKERS = 3
+# Enforce one active generation job at a time globally.
+# Additional jobs remain queued until the active job completes.
+JOB_QUEUE_WORKERS = 1
 
 def _get_job_queue():
     global _job_queue
