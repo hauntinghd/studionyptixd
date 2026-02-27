@@ -50,6 +50,9 @@ SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
+RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY", "")
+RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4.5")
+RUNWAY_API_VERSION = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
@@ -2017,10 +2020,14 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
     log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
 
 
-def _file_to_data_image_url(image_path: str) -> str:
+def _file_to_data_image_url(image_path: str, max_bytes: int = 8 * 1024 * 1024) -> str:
     """Encode a local image file as a data URL for xAI image reference conditioning."""
     p = Path(image_path)
     if not p.exists() or p.stat().st_size == 0:
+        return ""
+    file_size = p.stat().st_size
+    if file_size > max_bytes:
+        log.warning(f"Skipping data URI encode for {p.name}: {file_size} bytes exceeds limit {max_bytes}")
         return ""
     ext = p.suffix.lower()
     mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
@@ -2486,13 +2493,15 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
 
 
 async def _download_url_to_file(url: str, output_path: str):
-    """Download a file from a URL to a local path."""
+    """Download a file from a URL to a local path using streaming writes."""
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            raise RuntimeError("Download failed (" + str(resp.status_code) + ") from " + url[:100])
-        with open(output_path, "wb") as f:
-            f.write(resp.content)
+        async with client.stream("GET", url) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError("Download failed (" + str(resp.status_code) + ") from " + url[:100])
+            with open(output_path, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                    if chunk:
+                        f.write(chunk)
 
 
 async def animate_image_grok_video(image_path: str, prompt: str, output_clip_path: str, duration_sec: float = 5, aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
@@ -2545,22 +2554,116 @@ async def animate_image_grok_video(image_path: str, prompt: str, output_clip_pat
     raise TimeoutError("Grok video timed out")
 
 
+def _aspect_ratio_to_runway_ratio(aspect_ratio: str) -> str:
+    if aspect_ratio == "9:16":
+        return "720:1280"
+    if aspect_ratio == "16:9":
+        return "1280:720"
+    allowed = {"1280:720", "720:1280", "1104:832", "960:960", "832:1104", "1584:672"}
+    return aspect_ratio if aspect_ratio in allowed else "720:1280"
+
+
+async def animate_image_runway_video(image_path: str, prompt: str, output_clip_path: str, duration_sec: float = 5, aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
+    """Animate an image via Runway image-to-video and download resulting MP4."""
+    if not RUNWAY_API_KEY:
+        raise RuntimeError("RUNWAY_API_KEY not configured")
+    headers = {
+        "Authorization": f"Bearer {RUNWAY_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Runway-Version": RUNWAY_API_VERSION,
+    }
+    duration = max(2, min(int(round(float(duration_sec))), 10))
+    image_url = image_cdn_url or _file_to_data_image_url(image_path, max_bytes=3_700_000)
+    if not image_url:
+        raise RuntimeError("No source image URL for Runway video (image too large for inline data URI; provide CDN URL)")
+
+    payload = {
+        "model": RUNWAY_VIDEO_MODEL,
+        "promptText": prompt,
+        "promptImage": image_url,
+        "ratio": _aspect_ratio_to_runway_ratio(aspect_ratio),
+        "duration": duration,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        submit = await client.post("https://api.dev.runwayml.com/v1/image_to_video", headers=headers, json=payload)
+        if submit.status_code not in (200, 201):
+            raise RuntimeError(f"Runway submit failed ({submit.status_code}): {submit.text[:300]}")
+        submit_data = submit.json()
+    task_id = submit_data.get("id")
+    if not task_id:
+        raise RuntimeError("Runway submit returned no task id")
+
+    poll_url = f"https://api.dev.runwayml.com/v1/tasks/{task_id}"
+    max_wait = 900
+    elapsed = 0
+    while elapsed < max_wait:
+        await asyncio.sleep(5)
+        elapsed += 5
+        async with httpx.AsyncClient(timeout=30) as client:
+            status_resp = await client.get(poll_url, headers=headers)
+            if status_resp.status_code != 200:
+                continue
+            status_data = status_resp.json()
+        status = str(status_data.get("status", "")).upper()
+        if status == "SUCCEEDED":
+            output = status_data.get("output")
+            video_url = None
+            if isinstance(output, list) and output:
+                first = output[0]
+                if isinstance(first, str):
+                    video_url = first
+                elif isinstance(first, dict):
+                    video_url = first.get("url") or first.get("uri")
+            elif isinstance(output, dict):
+                video_url = output.get("url") or output.get("uri") or output.get("video")
+            if not video_url:
+                raise RuntimeError("Runway done status missing output URL")
+            await _download_url_to_file(video_url, output_clip_path)
+            return output_clip_path
+        if status in ("FAILED", "CANCELLED"):
+            raise RuntimeError("Runway task failed: " + json.dumps(status_data)[:300])
+    raise TimeoutError("Runway video timed out")
+
+
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
-    """Animate a scene image using Grok Video only.
-    Returns {"type": "grok_clip", "path": str}. Raises on failure.
-    """
-    if not (USE_XAI_VIDEO and XAI_API_KEY):
-        raise RuntimeError("Grok video is not configured (USE_XAI_VIDEO/XAI_API_KEY)")
-    clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-    await animate_image_grok_video(
-        image_path,
-        prompt,
-        clip_path,
-        duration_sec=duration_sec,
-        aspect_ratio="9:16",
-        image_cdn_url=image_cdn_url,
-    )
-    return {"type": "grok_clip", "path": clip_path}
+    """Animate a scene image using Runway first, then Grok as fallback."""
+    provider_errors = []
+
+    if RUNWAY_API_KEY:
+        runway_clip_path = str(Path(output_dir_path) / ("runway_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+        try:
+            await animate_image_runway_video(
+                image_path,
+                prompt,
+                runway_clip_path,
+                duration_sec=duration_sec,
+                aspect_ratio="9:16",
+                image_cdn_url=image_cdn_url,
+            )
+            return {"type": "runway_clip", "path": runway_clip_path}
+        except Exception as e:
+            provider_errors.append("runway: " + str(e))
+            log.warning(f"Runway scene animation failed, falling back to Grok: {e}")
+
+    if USE_XAI_VIDEO and XAI_API_KEY:
+        grok_clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+        try:
+            await animate_image_grok_video(
+                image_path,
+                prompt,
+                grok_clip_path,
+                duration_sec=duration_sec,
+                aspect_ratio="9:16",
+                image_cdn_url=image_cdn_url,
+            )
+            return {"type": "grok_clip", "path": grok_clip_path}
+        except Exception as e:
+            provider_errors.append("grok: " + str(e))
+            log.warning(f"Grok scene animation failed: {e}")
+
+    if not provider_errors:
+        raise RuntimeError("No video engine configured (set RUNWAY_API_KEY and/or XAI_API_KEY)")
+    raise RuntimeError("All video providers failed: " + " | ".join(provider_errors))
 
 
 async def _upload_image_to_comfyui(image_path: str) -> str:
@@ -3311,14 +3414,21 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
-        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video = use_grok_video
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
+        use_video_engine = runway_video_enabled or grok_video_enabled
+        use_video = use_video_engine
         if template == "reddit":
             use_video = False
-        if template != "reddit" and not use_grok_video:
-            raise RuntimeError("Grok video is required but not configured")
-        mode_label = "Grok Imagine Video" if use_grok_video else "static image"
-        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else "image"
+        if template != "reddit" and not use_video_engine:
+            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
+        if runway_video_enabled:
+            mode_label = "Runway Image-to-Video"
+        elif grok_video_enabled:
+            mode_label = "Grok Imagine Video"
+        else:
+            mode_label = "static image"
+        jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 10
@@ -3383,9 +3493,16 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     image_cdn_url=cdn_url,
                     prefer_wan=(template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
+                    if anim_result["type"] == "runway_clip":
+                        engine = "Runway"
+                    elif anim_result["type"] == "grok_clip":
+                        engine = "Grok Imagine Video"
+                    elif anim_result["type"] == "kling_clip":
+                        engine = "Kling 2.1"
+                    else:
+                        engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
@@ -3946,10 +4063,12 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
 
-        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video = use_grok_video
-        if not use_grok_video:
-            raise RuntimeError("Grok video is required but not configured")
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
+        use_video_engine = runway_video_enabled or grok_video_enabled
+        use_video = use_video_engine
+        if not use_video_engine:
+            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
         gen_ts = str(int(time.time() * 1000))
 
         jobs[job_id]["status"] = "generating_images"
@@ -4003,9 +4122,16 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
                     prefer_wan=(template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
+                    if anim_result["type"] == "runway_clip":
+                        engine = "Runway"
+                    elif anim_result["type"] == "grok_clip":
+                        engine = "Grok Imagine Video"
+                    elif anim_result["type"] == "kling_clip":
+                        engine = "Kling 2.1"
+                    else:
+                        engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
@@ -4092,13 +4218,26 @@ async def list_languages():
 async def health():
     skeleton_lora = await check_skeleton_lora_available()
     wan_ready = await check_wan22_available()
+    runway_video_enabled = bool(RUNWAY_API_KEY)
     grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
+    if runway_video_enabled and grok_video_enabled:
+        video_engine = "Runway (primary) + Grok fallback"
+    elif runway_video_enabled:
+        video_engine = "Runway Image-to-Video"
+    elif grok_video_enabled:
+        video_engine = "Grok Imagine Video"
+    elif wan_ready:
+        video_engine = "Wan 2.2 (RunPod)"
+    elif FAL_AI_KEY:
+        video_engine = "Kling 2.1 Standard"
+    else:
+        video_engine = "Static"
     return {
         "status": "online",
         "engine": "NYPTID Studio Engine v3.0",
         "kling_enabled": bool(FAL_AI_KEY),
         "wan22_ready": wan_ready,
-        "video_engine": "Grok Imagine Video" if grok_video_enabled else ("Wan 2.2 (RunPod)" if wan_ready else ("Kling 2.1 Standard" if FAL_AI_KEY else "Static")),
+        "video_engine": video_engine,
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": (
@@ -4574,14 +4713,21 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 
-        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video = use_grok_video
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
+        use_video_engine = runway_video_enabled or grok_video_enabled
+        use_video = use_video_engine
         if detected_template == "reddit":
             use_video = False
-        if detected_template != "reddit" and not use_grok_video:
-            raise RuntimeError("Grok video is required but not configured")
-        mode_label = "Grok Imagine Video" if use_grok_video else "static image"
-        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else "image"
+        if detected_template != "reddit" and not use_video_engine:
+            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
+        if runway_video_enabled:
+            mode_label = "Runway Image-to-Video"
+        elif grok_video_enabled:
+            mode_label = "Grok Imagine Video"
+        else:
+            mode_label = "static image"
+        jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 20
@@ -4646,9 +4792,16 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                     image_cdn_url=cdn_url,
                     prefer_wan=(detected_template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
+                    if anim_result["type"] == "runway_clip":
+                        engine = "Runway"
+                    elif anim_result["type"] == "grok_clip":
+                        engine = "Grok Imagine Video"
+                    elif anim_result["type"] == "kling_clip":
+                        engine = "Kling 2.1"
+                    else:
+                        engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
