@@ -1959,7 +1959,7 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
                     )
                     await proc_mkdir.communicate()
                     ext = Path(img_path).suffix.lower() or ".png"
-                    scp_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{img_path}\" root@69.30.85.41:{reject_dir}/{gen_id}{ext}"
+                    scp_cmd = _thumbnail_scp_cmd(img_path, f"{reject_dir}/{gen_id}{ext}")
                     proc_scp = await asyncio.create_subprocess_shell(
                         scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                     )
@@ -2009,7 +2009,7 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
                 )
                 await proc_mkdir.communicate()
                 ext = Path(img_path).suffix.lower() or ".png"
-                scp_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{img_path}\" root@69.30.85.41:{RUNPOD_TRAINING_DIR}/{gen_id}{ext}"
+                scp_cmd = _thumbnail_scp_cmd(img_path, f"{RUNPOD_TRAINING_DIR}/{gen_id}{ext}")
                 proc_scp = await asyncio.create_subprocess_shell(
                     scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
@@ -4839,15 +4839,24 @@ THUMBNAIL_UPLOAD_DIR.mkdir(exist_ok=True)
 THUMBNAIL_OUTPUT_DIR = THUMBNAIL_DIR / "generated"
 THUMBNAIL_OUTPUT_DIR.mkdir(exist_ok=True)
 
-RUNPOD_SSH = "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p 22092 root@69.30.85.41"
+THUMBNAIL_RUNPOD_HOST = os.getenv("THUMBNAIL_RUNPOD_HOST", "root@69.30.85.41")
+THUMBNAIL_RUNPOD_SSH_PORT = os.getenv("THUMBNAIL_RUNPOD_SSH_PORT", "22118")
+RUNPOD_SSH = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p {THUMBNAIL_RUNPOD_SSH_PORT} {THUMBNAIL_RUNPOD_HOST}"
 RUNPOD_TRAINING_DIR = "/workspace/thumbnail_training/images"
 LORA_NAME = "nyptid_thumbnails.safetensors"
+
+
+def _thumbnail_scp_cmd(local_path: str, remote_path: str) -> str:
+    return (
+        f"scp -o StrictHostKeyChecking=no -P {THUMBNAIL_RUNPOD_SSH_PORT} "
+        f"\"{local_path}\" {THUMBNAIL_RUNPOD_HOST}:{remote_path}"
+    )
 
 
 async def sync_thumbnail_to_runpod(local_path: str):
     """SCP a thumbnail to RunPod's training images directory."""
     try:
-        cmd = f"scp -o StrictHostKeyChecking=no -P 22092 {local_path} root@69.30.85.41:{RUNPOD_TRAINING_DIR}/"
+        cmd = _thumbnail_scp_cmd(local_path, f"{RUNPOD_TRAINING_DIR}/")
         proc = await asyncio.create_subprocess_shell(
             cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -4862,6 +4871,7 @@ async def sync_thumbnail_to_runpod(local_path: str):
 
 async def check_lora_status() -> dict:
     """Check if the LoRA trainer is running and if a trained LoRA exists on RunPod."""
+    local_count = len([p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]) if THUMBNAIL_UPLOAD_DIR.exists() else 0
     try:
         cmd = (
             f"{RUNPOD_SSH} '"
@@ -4898,13 +4908,22 @@ async def check_lora_status() -> dict:
             "lora_available": has_lora,
             "is_training": is_training,
             "total_images": image_count,
+            "local_library_images": local_count,
             "trained_images": state.get("image_count", 0),
             "version": state.get("version", 0),
             "last_train": state.get("last_train", 0),
         }
     except Exception as e:
         log.warning(f"LoRA status check failed: {e}")
-        return {"lora_available": False, "is_training": False, "total_images": 0, "trained_images": 0, "version": 0, "last_train": 0}
+        return {
+            "lora_available": False,
+            "is_training": False,
+            "total_images": 0,
+            "local_library_images": local_count,
+            "trained_images": 0,
+            "version": 0,
+            "last_train": 0,
+        }
 
 
 @app.get("/api/thumbnails/training-status")
@@ -4912,6 +4931,29 @@ async def training_status(user: dict = Depends(require_auth)):
     if not _is_admin_user(user):
         raise HTTPException(403, "Admin only")
     return await check_lora_status()
+
+
+@app.post("/api/thumbnails/sync-library")
+async def sync_thumbnail_library(background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
+    files = [p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+
+    async def _run_sync():
+        try:
+            mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
+            proc = await asyncio.create_subprocess_shell(
+                mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            for p in files:
+                await sync_thumbnail_to_runpod(str(p))
+            log.info(f"Thumbnail library sync complete: {len(files)} files pushed to RunPod training dir")
+        except Exception as e:
+            log.warning(f"Thumbnail library sync failed: {e}")
+
+    background_tasks.add_task(_run_sync)
+    return {"status": "started", "queued": len(files)}
 
 
 @app.post("/api/thumbnails/upload")

@@ -2180,6 +2180,7 @@ interface TrainingStatus {
     lora_available: boolean;
     is_training: boolean;
     total_images: number;
+    local_library_images?: number;
     trained_images: number;
     version: number;
     last_train: number;
@@ -2938,6 +2939,7 @@ function ThumbnailPanel() {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
     const [thumbFeedbackSent, setThumbFeedbackSent] = useState<Record<string, boolean>>({});
+    const [syncingLibrary, setSyncingLibrary] = useState(false);
     const withThumbToken = useCallback((path: string) => {
         if (!session?.access_token) return `${API}${path}`;
         const sep = path.includes('?') ? '&' : '?';
@@ -3012,6 +3014,21 @@ function ThumbnailPanel() {
         setLibrary(prev => prev.filter(f => f.id !== id));
         if (selectedStyleRef === id) setSelectedStyleRef('');
     };
+
+    const handleSyncLibrary = useCallback(async () => {
+        if (!session) return;
+        setSyncingLibrary(true);
+        try {
+            await fetch(`${API}/api/thumbnails/sync-library`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            await fetchTrainingStatus();
+        } catch {
+            // ignore
+        }
+        setSyncingLibrary(false);
+    }, [session, fetchTrainingStatus]);
 
     const sendThumbFeedback = useCallback(async (generationId: string, accepted: boolean) => {
         if (!generationId || !session) return;
@@ -3109,6 +3126,13 @@ function ThumbnailPanel() {
                                 }
                             </div>
                             <div className="flex-1">
+                                {(() => {
+                                    const remoteCount = Number(trainingStatus.total_images || 0);
+                                    const localCount = Number(trainingStatus.local_library_images || 0);
+                                    const pendingSync = remoteCount === 0 && localCount > 0;
+                                    const canSyncNow = localCount > remoteCount;
+                                    return (
+                                        <>
                                 <p className={`text-sm font-medium ${
                                     trainingStatus.is_training ? 'text-amber-300' : trainingStatus.lora_available ? 'text-emerald-300' : 'text-gray-400'
                                 }`}>
@@ -3116,15 +3140,30 @@ function ThumbnailPanel() {
                                         ? 'AI is training on your thumbnails...'
                                         : trainingStatus.lora_available
                                             ? `Thumbnail AI trained (v${trainingStatus.version}, ${trainingStatus.trained_images} images)`
-                                            : `Upload ${Math.max(0, 5 - trainingStatus.total_images)} more thumbnails to start training`
+                                            : pendingSync
+                                                ? `Syncing ${localCount} uploaded thumbnails to RunPod training set...`
+                                                : `Upload ${Math.max(0, 5 - remoteCount)} more thumbnails to start training`
                                     }
                                 </p>
                                 <p className="text-gray-600 text-xs mt-0.5">
-                                    {trainingStatus.total_images} images in training set
+                                    {remoteCount} images in RunPod training set
+                                    {localCount > remoteCount ? ` (${localCount} in local library)` : ''}
                                     {trainingStatus.lora_available && trainingStatus.total_images > trainingStatus.trained_images &&
                                         ` (${trainingStatus.total_images - trainingStatus.trained_images} new, will retrain soon)`
                                     }
                                 </p>
+                                {canSyncNow && (
+                                    <button
+                                        onClick={handleSyncLibrary}
+                                        disabled={syncingLibrary}
+                                        className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
+                                    >
+                                        {syncingLibrary ? 'Syncing to RunPod...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
+                                    </button>
+                                )}
+                                        </>
+                                    );
+                                })()}
                             </div>
                         </div>
                     )}
