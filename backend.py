@@ -1243,13 +1243,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 SKELETON_IMAGE_PROMPT_PREFIX = ""
 
 SKELETON_IMAGE_SUFFIX = (
+    "Photorealistic 3D render, Unreal Engine 5, octane render, NOT illustration, NOT cartoon, NOT comic art. "
     "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
     "but the entire body from neck to feet is FULLY COVERED by the outfit described above. "
     "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
-    "It looks like a real person in the outfit but with a clean white skull instead of a face. "
-    "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull. "
-    "Solid clean teal-blue (#5AC8B8) studio backdrop. Studio photography lighting. "
-    "4K, Unreal Engine 5, photorealistic 3D render."
+    "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face. "
+    "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
+    "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting."
 )
 
 TEMPLATE_KLING_MOTION = {
