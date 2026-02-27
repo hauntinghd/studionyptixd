@@ -76,6 +76,7 @@ TEMP_DIR = Path("temp_assets")
 TEMP_DIR.mkdir(exist_ok=True)
 TRAINING_DATA_DIR = Path("training_data")
 TRAINING_DATA_DIR.mkdir(exist_ok=True)
+CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 
@@ -3239,6 +3240,44 @@ class FinalizeRequest(BaseModel):
 
 
 _creative_sessions: dict = {}
+_creative_sessions_lock = asyncio.Lock()
+
+
+def _prune_creative_sessions(max_age_seconds: int = 72 * 3600):
+    now = time.time()
+    stale_ids = [
+        sid for sid, sess in _creative_sessions.items()
+        if now - float(sess.get("created_at", now)) > max_age_seconds
+    ]
+    for sid in stale_ids:
+        _creative_sessions.pop(sid, None)
+
+
+def _load_creative_sessions_from_disk():
+    if not CREATIVE_SESSIONS_FILE.exists():
+        return
+    try:
+        data = json.loads(CREATIVE_SESSIONS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _creative_sessions.clear()
+            _creative_sessions.update(data)
+            _prune_creative_sessions()
+            log.info(f"Loaded {len(_creative_sessions)} creative sessions from disk")
+    except Exception as e:
+        log.warning(f"Failed to load creative sessions store: {e}")
+
+
+def _save_creative_sessions_to_disk():
+    try:
+        _prune_creative_sessions()
+        tmp_path = CREATIVE_SESSIONS_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(_creative_sessions, ensure_ascii=True), encoding="utf-8")
+        tmp_path.replace(CREATIVE_SESSIONS_FILE)
+    except Exception as e:
+        log.warning(f"Failed to persist creative sessions store: {e}")
+
+
+_load_creative_sessions_from_disk()
 
 
 @app.post("/api/creative/script")
@@ -3257,17 +3296,20 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     if not scenes:
         raise HTTPException(500, "Script generation returned no scenes")
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
-    _creative_sessions[session_id] = {
-        "user_id": user["id"],
-        "template": req.template,
-        "topic": req.prompt,
-        "resolution": req.resolution,
-        "language": req.language,
-        "script_data": script_data,
-        "scenes": scenes,
-        "scene_images": {},
-        "created_at": time.time(),
-    }
+    async with _creative_sessions_lock:
+        _creative_sessions[session_id] = {
+            "session_id": session_id,
+            "user_id": user["id"],
+            "template": req.template,
+            "topic": req.prompt,
+            "resolution": req.resolution,
+            "language": req.language,
+            "script_data": script_data,
+            "scenes": scenes,
+            "scene_images": {},
+            "created_at": time.time(),
+        }
+        _save_creative_sessions_to_disk()
     return {
         "session_id": session_id,
         "title": script_data.get("title", req.prompt),
@@ -3292,18 +3334,21 @@ async def creative_create_session(body: dict, request: Request = None):
     template = body.get("template", "skeleton")
     _ensure_template_allowed(template, user)
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
-    _creative_sessions[session_id] = {
-        "user_id": user["id"],
-        "template": template,
-        "topic": body.get("topic", "Untitled"),
-        "resolution": body.get("resolution", "720p"),
-        "language": body.get("language", "en"),
-        "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
-        "scenes": [],
-        "scene_images": {},
-        "reference_image_url": "",
-        "created_at": time.time(),
-    }
+    async with _creative_sessions_lock:
+        _creative_sessions[session_id] = {
+            "session_id": session_id,
+            "user_id": user["id"],
+            "template": template,
+            "topic": body.get("topic", "Untitled"),
+            "resolution": body.get("resolution", "720p"),
+            "language": body.get("language", "en"),
+            "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
+            "scenes": [],
+            "scene_images": {},
+            "reference_image_url": "",
+            "created_at": time.time(),
+        }
+        _save_creative_sessions_to_disk()
     log.info(f"Creative session created: {session_id} for user {user['id']}")
     return {"session_id": session_id}
 
@@ -3338,6 +3383,8 @@ async def creative_reference_image(
     if session.get("template") == "skeleton":
         # Keep legacy skeleton key in sync for downstream compatibility.
         session["skeleton_reference_image"] = data_url
+    async with _creative_sessions_lock:
+        _save_creative_sessions_to_disk()
     return {"ok": True}
 
 
@@ -3432,6 +3479,8 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     while len(session["scenes"]) <= req.scene_index:
         session["scenes"].append({"narration": "", "visual_description": "", "duration_sec": 5})
     session["scenes"][req.scene_index]["visual_description"] = req.prompt
+    async with _creative_sessions_lock:
+        _save_creative_sessions_to_disk()
 
     return {
         "scene_index": req.scene_index,
@@ -3472,6 +3521,8 @@ async def creative_update_scene(session_id: str, scene_index: int, body: dict, r
         scene["visual_description"] = body["visual_description"]
     if "duration_sec" in body:
         scene["duration_sec"] = body["duration_sec"]
+    async with _creative_sessions_lock:
+        _save_creative_sessions_to_disk()
     return {"ok": True, "scene": scene}
 
 
@@ -3490,6 +3541,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         session["narration"] = req.narration
     if req.scenes:
         session["scenes"] = req.scenes
+    async with _creative_sessions_lock:
+        _save_creative_sessions_to_disk()
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
 
@@ -3649,8 +3702,11 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         }
         log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
 
-        if session.get("session_id") in _creative_sessions:
-            del _creative_sessions[session["session_id"]]
+        sid = session.get("session_id")
+        if sid:
+            async with _creative_sessions_lock:
+                _creative_sessions.pop(sid, None)
+                _save_creative_sessions_to_disk()
 
     except Exception as e:
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
