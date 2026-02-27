@@ -3,6 +3,7 @@ import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Sh
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const API = "";
+const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
 const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
 const Logo = ({ size = 24 }: { size?: number }) => (
     <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
@@ -1063,6 +1064,7 @@ function CreatePanel() {
     }, [jobId]);
 
     useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
         if (!session || restoreDoneRef.current) return;
         restoreDoneRef.current = true;
         try {
@@ -1089,6 +1091,7 @@ function CreatePanel() {
     }, [session, persistKey]);
 
     useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
         if (!session || !restoreDoneRef.current) return;
         const safeScenes = creativeScenes.map((s) => ({
             index: s.index,
@@ -1136,6 +1139,7 @@ function CreatePanel() {
     ]);
 
     useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
         if (!sessionId || creativeMode !== 'creative' || !session) return;
         let cancelled = false;
         (async () => {

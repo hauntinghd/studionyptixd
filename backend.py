@@ -77,6 +77,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 TRAINING_DATA_DIR = Path("training_data")
 TRAINING_DATA_DIR.mkdir(exist_ok=True)
 CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
+CREATIVE_SESSION_PERSISTENCE_ENABLED = False
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 
@@ -3254,6 +3255,8 @@ def _prune_creative_sessions(max_age_seconds: int = 72 * 3600):
 
 
 def _load_creative_sessions_from_disk():
+    if not CREATIVE_SESSION_PERSISTENCE_ENABLED:
+        return
     if not CREATIVE_SESSIONS_FILE.exists():
         return
     try:
@@ -3268,6 +3271,8 @@ def _load_creative_sessions_from_disk():
 
 
 def _save_creative_sessions_to_disk():
+    if not CREATIVE_SESSION_PERSISTENCE_ENABLED:
+        return
     try:
         _prune_creative_sessions()
         tmp_path = CREATIVE_SESSIONS_FILE.with_suffix(".tmp")
