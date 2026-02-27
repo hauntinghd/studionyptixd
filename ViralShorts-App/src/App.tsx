@@ -2733,8 +2733,8 @@ function DemoPanel() {
                             ) : (
                                 <div className="text-center">
                                     <User className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-                                    <p className="text-sm text-gray-400">Upload face photo</p>
-                                    <p className="text-xs text-gray-600 mt-1">Clear, front-facing portrait</p>
+                                    <p className="text-sm text-gray-400">Upload face photo (optional)</p>
+                                    <p className="text-xs text-gray-600 mt-1">Leave empty to render without talking-head face</p>
                                 </div>
                             )}
                         </label>
@@ -2847,9 +2847,9 @@ function DemoPanel() {
             </div>
 
             <button onClick={handleGenerate}
-                disabled={loading || !demoFile || (!autoFace && !faceFile)}
+                disabled={loading || !demoFile}
                 className={`w-full py-4 rounded-xl font-semibold text-lg transition-all flex items-center justify-center gap-3 ${
-                    loading || !demoFile || (!autoFace && !faceFile)
+                    loading || !demoFile
                         ? 'bg-gray-700/50 text-gray-500 cursor-not-allowed'
                         : 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5'
                 }`}>
