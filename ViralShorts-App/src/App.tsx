@@ -972,6 +972,21 @@ interface CreativeScene {
     imageError?: string;
 }
 
+interface CreatePanelPersistedState {
+    selectedTemplate: string;
+    resolution: '720p' | '1080p';
+    language: string;
+    creativeMode: 'auto' | 'creative';
+    creativeStep: 'topic' | 'edit' | 'generating';
+    prompt: string;
+    sessionId: string | null;
+    creativeScenes: CreativeScene[];
+    creativeTitle: string;
+    creativeNarration: string;
+    jobId: string | null;
+    ts: number;
+}
+
 function CreatePanel() {
     const { session, plan, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
@@ -994,6 +1009,8 @@ function CreatePanel() {
     const [creativeNarration, setCreativeNarration] = useState("");
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+    const restoreDoneRef = useRef(false);
+    const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
     useEffect(() => {
         (async () => {
@@ -1043,6 +1060,79 @@ function CreatePanel() {
         }, 2000);
         return () => clearInterval(interval);
     }, [jobId]);
+
+    useEffect(() => {
+        if (!session || restoreDoneRef.current) return;
+        restoreDoneRef.current = true;
+        try {
+            const raw = localStorage.getItem(persistKey);
+            if (!raw) return;
+            const saved = JSON.parse(raw) as Partial<CreatePanelPersistedState>;
+            if (saved.selectedTemplate) setSelectedTemplate(saved.selectedTemplate);
+            if (saved.resolution === '720p' || saved.resolution === '1080p') setResolution(saved.resolution);
+            if (typeof saved.language === 'string' && saved.language) setLanguage(saved.language);
+            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative') setCreativeMode(saved.creativeMode);
+            if (saved.creativeStep === 'topic' || saved.creativeStep === 'edit' || saved.creativeStep === 'generating') setCreativeStep(saved.creativeStep);
+            if (typeof saved.prompt === 'string') setPrompt(saved.prompt);
+            if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null);
+            if (Array.isArray(saved.creativeScenes)) setCreativeScenes(saved.creativeScenes);
+            if (typeof saved.creativeTitle === 'string') setCreativeTitle(saved.creativeTitle);
+            if (typeof saved.creativeNarration === 'string') setCreativeNarration(saved.creativeNarration);
+            if (typeof saved.jobId === 'string' && saved.jobId) {
+                setJobId(saved.jobId);
+                setLoading(true);
+            }
+        } catch {
+            // ignore malformed saved state
+        }
+    }, [session, persistKey]);
+
+    useEffect(() => {
+        if (!session || !restoreDoneRef.current) return;
+        const safeScenes = creativeScenes.map((s) => ({
+            index: s.index,
+            narration: s.narration,
+            visual_description: s.visual_description,
+            duration_sec: s.duration_sec,
+            imageData: s.imageData,
+            generation_id: s.generation_id,
+            imageError: s.imageError,
+            imageLoading: s.imageLoading,
+        }));
+        const snapshot: CreatePanelPersistedState = {
+            selectedTemplate,
+            resolution,
+            language,
+            creativeMode,
+            creativeStep,
+            prompt,
+            sessionId,
+            creativeScenes: safeScenes,
+            creativeTitle,
+            creativeNarration,
+            jobId,
+            ts: Date.now(),
+        };
+        try {
+            localStorage.setItem(persistKey, JSON.stringify(snapshot));
+        } catch {
+            // ignore storage quota failures
+        }
+    }, [
+        session,
+        persistKey,
+        selectedTemplate,
+        resolution,
+        language,
+        creativeMode,
+        creativeStep,
+        prompt,
+        sessionId,
+        creativeScenes,
+        creativeTitle,
+        creativeNarration,
+        jobId,
+    ]);
 
     const handleGenerate = async () => {
         if (!prompt) return;
@@ -1217,6 +1307,7 @@ function CreatePanel() {
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
+        try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
     };
 
     if (creativeMode === 'creative' && creativeStep === 'edit') {

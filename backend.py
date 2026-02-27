@@ -50,6 +50,12 @@ XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
 # Keep this off by default to avoid external proxy/account lock issues.
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
+RUNPOD_IMAGE_FEEDBACK_ENABLED = os.getenv("RUNPOD_IMAGE_FEEDBACK_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+RUNPOD_IMAGE_FEEDBACK_SSH = os.getenv(
+    "RUNPOD_IMAGE_FEEDBACK_SSH",
+    "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p 22092 root@69.30.85.41",
+)
+RUNPOD_IMAGE_FEEDBACK_BASE_DIR = os.getenv("RUNPOD_IMAGE_FEEDBACK_BASE_DIR", "/workspace/image_training")
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 
@@ -1820,7 +1826,7 @@ GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 
 _pending_training: dict[str, dict] = {}
 
-async def _save_training_candidate(prompt: str, image_path: str, template: str = "", source: str = "grok") -> str:
+async def _save_training_candidate(prompt: str, image_path: str, template: str = "", source: str = "grok", metadata: Optional[dict] = None) -> str:
     """Stage a prompt+image pair as a training candidate. Returns generation_id.
     Image is saved immediately but only promoted to 'accepted' via feedback."""
     gen_id = f"gen_{int(time.time() * 1000)}_{id(image_path) % 9999:04d}"
@@ -1837,6 +1843,7 @@ async def _save_training_candidate(prompt: str, image_path: str, template: str =
             "source": source,
             "status": "pending",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "metadata": metadata or {},
         }
         log.info(f"Training candidate staged: {gen_id} ({template or 'generic'}/{source})")
     except Exception as e:
@@ -1844,7 +1851,80 @@ async def _save_training_candidate(prompt: str, image_path: str, template: str =
     return gen_id
 
 
-async def _mark_training_feedback(gen_id: str, accepted: bool):
+async def _sync_training_feedback_to_runpod(gen_id: str, entry: dict, status: str):
+    """Sync accepted/rejected training examples to RunPod for continuous dataset growth."""
+    if not RUNPOD_IMAGE_FEEDBACK_ENABLED:
+        return
+    image_path = entry.get("image_path", "")
+    txt_path = entry.get("txt_path", "")
+    if not image_path or not txt_path or not Path(image_path).exists() or not Path(txt_path).exists():
+        return
+    try:
+        remote_root = RUNPOD_IMAGE_FEEDBACK_BASE_DIR.rstrip("/")
+        remote_img_dir = f"{remote_root}/{status}/images"
+        remote_txt_dir = f"{remote_root}/{status}/prompts"
+        remote_meta_dir = f"{remote_root}/{status}/metadata"
+        mkdir_cmd = (
+            f"{RUNPOD_IMAGE_FEEDBACK_SSH} "
+            f"'mkdir -p {remote_img_dir} {remote_txt_dir} {remote_meta_dir}'"
+        )
+        proc_mkdir = await asyncio.create_subprocess_shell(
+            mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc_mkdir.communicate()
+        if proc_mkdir.returncode != 0:
+            log.warning(f"RunPod training mkdir failed for {gen_id}")
+            return
+
+        img_ext = Path(image_path).suffix.lower() or ".png"
+        remote_img = f"{remote_img_dir}/{gen_id}{img_ext}"
+        remote_txt = f"{remote_txt_dir}/{gen_id}.txt"
+        scp_img_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{image_path}\" root@69.30.85.41:{remote_img}"
+        scp_txt_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{txt_path}\" root@69.30.85.41:{remote_txt}"
+        proc_img = await asyncio.create_subprocess_shell(
+            scp_img_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, img_err = await proc_img.communicate()
+        if proc_img.returncode != 0:
+            log.warning(f"RunPod image sync failed for {gen_id}: {img_err.decode()[:200]}")
+            return
+        proc_txt = await asyncio.create_subprocess_shell(
+            scp_txt_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, txt_err = await proc_txt.communicate()
+        if proc_txt.returncode != 0:
+            log.warning(f"RunPod prompt sync failed for {gen_id}: {txt_err.decode()[:200]}")
+            return
+
+        meta = {
+            "generation_id": gen_id,
+            "status": status,
+            "template": entry.get("template", ""),
+            "source": entry.get("source", ""),
+            "created_at": entry.get("created_at", ""),
+            "feedback_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "metadata": entry.get("metadata", {}),
+        }
+        meta_path = TEMP_DIR / f"{gen_id}_feedback.json"
+        meta_path.write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
+        try:
+            remote_meta = f"{remote_meta_dir}/{gen_id}.json"
+            scp_meta_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{str(meta_path)}\" root@69.30.85.41:{remote_meta}"
+            proc_meta = await asyncio.create_subprocess_shell(
+                scp_meta_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            _, meta_err = await proc_meta.communicate()
+            if proc_meta.returncode != 0:
+                log.warning(f"RunPod metadata sync failed for {gen_id}: {meta_err.decode()[:200]}")
+        finally:
+            meta_path.unlink(missing_ok=True)
+
+        log.info(f"RunPod training sync complete: {gen_id} [{status}]")
+    except Exception as e:
+        log.warning(f"RunPod training feedback sync error for {gen_id}: {e}")
+
+
+async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = "", event: str = ""):
     """Mark a training candidate as accepted or rejected.
     Accepted pairs are logged to Supabase for LoRA training.
     Rejected pairs are cleaned up from disk."""
@@ -1853,8 +1933,13 @@ async def _mark_training_feedback(gen_id: str, accepted: bool):
         return
     status = "accepted" if accepted else "rejected"
     entry["status"] = status
+    if user_id:
+        entry.setdefault("metadata", {})["user_id"] = user_id
+    if event:
+        entry.setdefault("metadata", {})["event"] = event
 
     if not accepted:
+        await _sync_training_feedback_to_runpod(gen_id, entry, status="rejected")
         for p in [entry.get("image_path"), entry.get("txt_path")]:
             try:
                 Path(p).unlink(missing_ok=True)
@@ -1886,6 +1971,7 @@ async def _mark_training_feedback(gen_id: str, accepted: bool):
                 )
         except Exception as e:
             log.warning(f"Supabase training log failed (non-fatal): {e}")
+    await _sync_training_feedback_to_runpod(gen_id, entry, status="accepted")
     log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
 
 
@@ -3276,7 +3362,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     prev_img = session["scene_images"].get(req.scene_index, {})
     prev_gen_id = prev_img.get("generation_id")
     if prev_gen_id:
-        asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False))
+        asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False, user_id=user.get("id", ""), event="regenerate"))
 
     template = session.get("template", req.template)
     resolution = session.get("resolution", req.resolution)
@@ -3344,7 +3430,7 @@ async def creative_scene_feedback(body: dict, request: Request = None):
     gen_id = body.get("generation_id", "")
     accepted = body.get("accepted", True)
     if gen_id:
-        await _mark_training_feedback(gen_id, accepted=accepted)
+        await _mark_training_feedback(gen_id, accepted=accepted, user_id=user.get("id", ""), event="scene_feedback")
     return {"ok": True, "generation_id": gen_id, "status": "accepted" if accepted else "rejected"}
 
 
@@ -3408,7 +3494,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     for si_data in session.get("scene_images", {}).values():
         gen_id = si_data.get("generation_id")
         if gen_id:
-            asyncio.create_task(_mark_training_feedback(gen_id, accepted=True))
+            asyncio.create_task(_mark_training_feedback(gen_id, accepted=True, user_id=user.get("id", ""), event="finalize"))
 
     await _enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
     return {"job_id": job_id}
