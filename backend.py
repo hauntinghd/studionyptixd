@@ -1221,7 +1221,7 @@ def _extract_word_timings(original_text: str, alignment: dict) -> list:
 
 
 def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str = "720p",
-                           video_width: int = 0, video_height: int = 0) -> str:
+                           video_width: int = 0, video_height: int = 0, template: str = "") -> str:
     """Generate an ASS subtitle file with rapid single-word captions.
     Each word appears individually, large and bold, changing rapidly with every spoken word.
     High-retention viral TikTok/Reels style -- one word at a time, rapid fire.
@@ -1236,16 +1236,41 @@ def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str
         res_h = 1920 if resolution == "1080p" else 1280
         is_landscape = False
 
-    if is_landscape:
+    skeleton_pro_style = (template == "skeleton" and not is_landscape)
+
+    if skeleton_pro_style:
+        font_size = 84 if resolution == "1080p" else 60
+        outline = 3 if resolution == "1080p" else 2
+        shadow = 2
+        margin_v = int(res_h * 0.14)
+        spacing = 0
+        scale_xy = 100
+        primary = "&H00FFFFFF"
+        secondary = "&H00E7F4FF"
+        outline_color = "&H00303030"
+        back_color = "&H70000000"
+    elif is_landscape:
         font_size = max(36, int(res_h * 0.045))
         outline = 3
         shadow = 1
         margin_v = int(res_h * 0.08)
+        spacing = 2
+        scale_xy = 105
+        primary = "&H00FFFFFF"
+        secondary = "&H000000FF"
+        outline_color = "&H00000000"
+        back_color = "&H96000000"
     else:
         font_size = 72 if resolution == "1080p" else 52
         outline = 5 if resolution == "1080p" else 4
         shadow = 2
         margin_v = int(res_h * 0.25)
+        spacing = 2
+        scale_xy = 105
+        primary = "&H00FFFFFF"
+        secondary = "&H000000FF"
+        outline_color = "&H00000000"
+        back_color = "&H96000000"
 
     header = f"""[Script Info]
 Title: NYPTID Captions
@@ -1256,7 +1281,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Word,Noto Sans,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,105,105,2,0,1,{outline},{shadow},2,20,20,{margin_v},1
+Style: Word,Noto Sans,{font_size},{primary},{secondary},{outline_color},{back_color},-1,0,0,0,{scale_xy},{scale_xy},{spacing},0,1,{outline},{shadow},2,20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1288,9 +1313,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if end - start < MIN_DISPLAY:
             end = start + MIN_DISPLAY
 
-        safe_word = wt["word"].upper().replace("\\", "").replace("{", "").replace("}", "")
+        # Preserve natural casing for skeleton "editorial" look, keep uppercase for other templates.
+        clean_word = wt["word"].replace("\\", "").replace("{", "").replace("}", "")
+        safe_word = clean_word if skeleton_pro_style else clean_word.upper()
 
-        pop_in = r"{\fscx130\fscy130\t(0,60,\fscx105\fscy105)}"
+        if skeleton_pro_style:
+            # Subtle pop/fade reads closer to hand-edited NLE captions.
+            pop_in = r"{\blur0.6\fad(35,45)\fscx100\fscy100\t(0,90,\fscx104\fscy104)\t(90,170,\fscx100\fscy100)}"
+        else:
+            pop_in = r"{\fscx130\fscy130\t(0,60,\fscx105\fscy105)}"
         events.append(
             f"Dialogue: 0,{ts_to_ass(start)},{ts_to_ass(end)},Word,,0,0,0,,{pop_in}{safe_word}"
         )
@@ -3009,7 +3040,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         subtitle_path = None
         if word_timings:
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
         jobs[job_id]["status"] = "generating_sfx"
@@ -3405,7 +3436,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         subtitle_path = None
         if word_timings:
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
 
         jobs[job_id]["status"] = "generating_sfx"
         jobs[job_id]["progress"] = 78
@@ -3941,7 +3972,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         subtitle_path = None
         if word_timings:
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution)
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=detected_template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
 
         jobs[job_id]["status"] = "compositing"
