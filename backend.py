@@ -103,6 +103,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _disable_html_cache(request: Request, call_next):
+    """Prevent stale frontend shell caching so new dist bundles load immediately."""
+    response = await call_next(request)
+    path = request.url.path or ""
+    if path == "/" or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 jobs: dict = {}
 security = HTTPBearer(auto_error=False)
 _projects: dict = {}
