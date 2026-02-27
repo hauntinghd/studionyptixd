@@ -6792,9 +6792,13 @@ async def create_demo_video(
 
 # ─── Static Files ─────────────────────────────────────────────────────────────
 
-dist_dir = Path("ViralShorts-App/dist")
+_default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
+dist_dir = Path(os.getenv("FRONTEND_DIST_DIR", str(_default_dist_dir))).resolve()
 if dist_dir.exists():
+    log.info(f"Serving frontend dist from: {dist_dir}")
     app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+else:
+    log.warning(f"Frontend dist directory not found: {dist_dir}")
 
 
 if __name__ == "__main__":
