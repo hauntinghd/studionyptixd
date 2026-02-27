@@ -1196,6 +1196,22 @@ def _probe_audio_duration_seconds(audio_path: str) -> float:
         return 0.0
 
 
+def _build_atempo_filter_chain(speed: float) -> str:
+    """Build an ffmpeg atempo chain for any positive speed ratio."""
+    if speed <= 0:
+        return "atempo=1.0"
+    parts = []
+    remaining = float(speed)
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    parts.append(f"atempo={remaining:.6f}")
+    return ",".join(parts)
+
+
 async def _quintuple_check_scene_sfx(
     scenes: list,
     sfx_paths: list[str],
@@ -1349,7 +1365,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cs = int((seconds % 1) * 100)
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-    MIN_DISPLAY = 0.25
+    # Landscape demos often have faster narration pacing than shorts.
+    # Use shorter per-word minimum display to keep captions visually in sync.
+    MIN_DISPLAY = 0.12 if is_landscape else 0.25
 
     timed = []
     for wt in word_timings:
@@ -1364,9 +1382,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         natural_end = wt["end"]
         next_start = timed[i + 1]["start"] if i + 1 < len(timed) else natural_end + 0.5
         end = max(natural_end, start + MIN_DISPLAY)
-        end = min(end, next_start)
-        if end - start < MIN_DISPLAY:
-            end = start + MIN_DISPLAY
+        # Prevent overlap with the next word so captions don't visually trail speech.
+        max_end = (next_start - 0.01) if (i + 1 < len(timed)) else (natural_end + 0.5)
+        end = min(end, max_end)
+        # If speech is very fast, allow shorter windows rather than forcing laggy overlap.
+        if end <= start:
+            end = start + 0.04
 
         # Preserve natural casing for skeleton "editorial" look, keep uppercase for other templates.
         clean_word = wt["word"].replace("\\", "").replace("{", "").replace("}", "")
@@ -3486,13 +3507,18 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                 jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
-                anim_result = await animate_scene(
-                    img_path, anim_prompt,
-                    str(TEMP_DIR), i, gen_ts,
-                    duration_sec=scene.get("duration_sec", 5),
-                    image_cdn_url=cdn_url,
-                    prefer_wan=(template == "skeleton"),
-                )
+                try:
+                    anim_result = await animate_scene(
+                        img_path, anim_prompt,
+                        str(TEMP_DIR), i, gen_ts,
+                        duration_sec=scene.get("duration_sec", 5),
+                        image_cdn_url=cdn_url,
+                        prefer_wan=(template == "skeleton"),
+                    )
+                except Exception as anim_err:
+                    jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
+                    log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
                     if anim_result["type"] == "runway_clip":
@@ -4023,8 +4049,10 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
     if total_duration > float(plan_limits.get("max_duration_sec", 60)):
         raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
-    if session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
-        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes for stable WAN compositing.")
+    # The 12-scene cap was for legacy WAN-heavy skeleton renders.
+    # With Runway as primary, allow longer skeleton projects.
+    if (not RUNWAY_API_KEY) and session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
+        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes when Runway is unavailable.")
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -4117,11 +4145,16 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                 jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
-                anim_result = await animate_scene(
-                    img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
-                    duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
-                    prefer_wan=(template == "skeleton"),
-                )
+                try:
+                    anim_result = await animate_scene(
+                        img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
+                        duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
+                        prefer_wan=(template == "skeleton"),
+                    )
+                except Exception as anim_err:
+                    jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
+                    log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
                     if anim_result["type"] == "runway_clip":
@@ -4785,13 +4818,18 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                 jobs[job_id]["progress"] = 20 + int(((step_base + 1) / total_steps) * 50)
                 kling_motion = TEMPLATE_KLING_MOTION.get(detected_template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
-                anim_result = await animate_scene(
-                    img_path, anim_prompt,
-                    str(TEMP_DIR), i, gen_ts,
-                    duration_sec=scene.get("duration_sec", 5),
-                    image_cdn_url=cdn_url,
-                    prefer_wan=(detected_template == "skeleton"),
-                )
+                try:
+                    anim_result = await animate_scene(
+                        img_path, anim_prompt,
+                        str(TEMP_DIR), i, gen_ts,
+                        duration_sec=scene.get("duration_sec", 5),
+                        image_cdn_url=cdn_url,
+                        prefer_wan=(detected_template == "skeleton"),
+                    )
+                except Exception as anim_err:
+                    jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
+                    log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
                     if anim_result["type"] == "runway_clip":
@@ -6447,7 +6485,10 @@ async def composite_demo_video(
             "-i", talking_head,
             "-i", audio_path,
             "-filter_complex",
-            f"[1:v]scale={pip_w}:-1[pip];[0:v][pip]overlay={pip_x}:{pip_y}",
+            (
+                f"[1:v]scale={pip_w}:-1[pip];[0:v][pip]overlay={pip_x}:{pip_y}"
+                + (f",ass='{safe_sub}'" if (subtitle_path and Path(subtitle_path).exists()) else "")
+            ),
             "-map", "2:a",
             "-c:v", "libx264", "-preset", "fast", "-crf", "20",
             "-c:a", "aac", "-b:a", "192k",
@@ -6561,6 +6602,49 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
         word_timings = vo_result.get("word_timings", [])
         jobs[job_id]["progress"] = 60
 
+        # Keep demo narration tightly aligned to the uploaded recording duration.
+        target_demo_dur = float(analysis.get("duration", 0.0) or 0.0)
+        source_audio_dur = _probe_audio_duration_seconds(audio_path)
+        if target_demo_dur > 0.2 and source_audio_dur > 0.2:
+            speed_ratio = source_audio_dur / target_demo_dur
+            if abs(source_audio_dur - target_demo_dur) > 0.08:
+                fit_audio_path = str(TEMP_DIR / (job_id + "_demo_voice_fit.mp3"))
+                atempo_chain = _build_atempo_filter_chain(speed_ratio)
+                fit_cmd = [
+                    "ffmpeg", "-y", "-i", audio_path,
+                    "-af", atempo_chain,
+                    "-t", f"{target_demo_dur:.3f}",
+                    "-c:a", "libmp3lame", "-b:a", "192k",
+                    fit_audio_path,
+                ]
+                fit_proc = await asyncio.create_subprocess_exec(
+                    *fit_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _, fit_err = await fit_proc.communicate()
+                if fit_proc.returncode == 0 and Path(fit_audio_path).exists():
+                    Path(audio_path).unlink(missing_ok=True)
+                    audio_path = fit_audio_path
+                    if word_timings:
+                        remapped = []
+                        for wt in word_timings:
+                            start = max(0.0, float(wt.get("start", 0.0)) / speed_ratio)
+                            end = max(start + 0.01, float(wt.get("end", start)) / speed_ratio)
+                            if start <= target_demo_dur + 0.15:
+                                remapped.append({
+                                    "word": wt.get("word", ""),
+                                    "start": start,
+                                    "end": min(end, target_demo_dur + 0.15),
+                                })
+                        word_timings = remapped
+                    jobs[job_id]["audio_sync"] = {
+                        "source_duration": round(source_audio_dur, 3),
+                        "target_duration": round(target_demo_dur, 3),
+                        "speed_ratio": round(speed_ratio, 5),
+                    }
+                    log.info(f"[{job_id}] Demo voiceover fit to video duration ({source_audio_dur:.2f}s -> {target_demo_dur:.2f}s)")
+                else:
+                    log.warning(f"[{job_id}] Demo voiceover duration-fit failed, using original audio: {(fit_err.decode(errors='ignore')[-200:])}")
+
         subtitle_path = None
         if word_timings:
             demo_w, demo_h = 1920, 1080
@@ -6588,20 +6672,19 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
         has_face = False
 
         try:
-            if not face_path or not Path(face_path).exists():
-                log.info(f"[{job_id}] No face uploaded, generating AI male face...")
-                face_path = str(TEMP_DIR / (job_id + "_ai_face.png"))
-                await generate_ai_face(face_path)
-                log.info(f"[{job_id}] AI face generated")
-
-            log.info(f"[{job_id}] Generating talking head animation...")
-            talking_head_path = str(TEMP_DIR / (job_id + "_talking_head.mp4"))
-            await generate_talking_head(face_path, audio_path, talking_head_path)
-            has_face = True
+            if face_path and Path(face_path).exists():
+                log.info(f"[{job_id}] Generating talking head animation...")
+                talking_head_path = str(TEMP_DIR / (job_id + "_talking_head.mp4"))
+                await generate_talking_head(face_path, audio_path, talking_head_path)
+                has_face = True
+                log.info(f"[{job_id}] Talking head generated")
+            else:
+                log.info(f"[{job_id}] Face PiP disabled (no face image uploaded)")
+                talking_head_path = None
+                has_face = False
             jobs[job_id]["progress"] = 80
-            log.info(f"[{job_id}] Talking head generated")
         except Exception as face_err:
-            log.warning(f"[{job_id}] AI face/talking head failed ({face_err}), continuing without face PiP")
+            log.warning(f"[{job_id}] Talking head failed ({face_err}), continuing without face PiP")
             talking_head_path = None
             has_face = False
             jobs[job_id]["progress"] = 80
@@ -6628,6 +6711,8 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
             if sub_filter:
                 cmd += ["-vf", f"ass={sub_abs}"]
             cmd += [
+                "-map", "0:v:0",
+                "-map", "1:a:0",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "20",
                 "-c:a", "aac", "-b:a", "192k",
                 "-shortest", "-movflags", "+faststart",
