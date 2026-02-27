@@ -3,6 +3,7 @@ import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Sh
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const API = "";
+const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
 const Logo = ({ size = 24 }: { size?: number }) => (
     <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
 );
@@ -139,17 +140,49 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
-    const [page, setPage] = useState<'landing' | 'dashboard' | 'auth' | 'account'>('landing');
-
     return (
         <AuthProvider>
-            <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
-                {page === 'landing' && <LandingPage onNavigate={setPage} />}
-                {page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
-                {page === 'auth' && <AuthPage onNavigate={setPage} />}
-                {page === 'account' && <AccountPage onNavigate={setPage} />}
-            </div>
+            <AppShell />
         </AuthProvider>
+    );
+}
+
+function AppShell() {
+    const { session, loading } = useContext(AuthContext);
+    const [page, setPage] = useState<'landing' | 'dashboard' | 'auth' | 'account'>(() => {
+        try {
+            const saved = localStorage.getItem('nyptid_page');
+            if (saved === 'landing' || saved === 'dashboard' || saved === 'auth' || saved === 'account') {
+                return saved;
+            }
+        } catch {
+            // ignore storage errors and fall back
+        }
+        return 'landing';
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem('nyptid_page', page);
+        } catch {
+            // ignore storage errors
+        }
+    }, [page]);
+
+    useEffect(() => {
+        if (loading) return;
+        // Keep logged-in users in studio on hard refresh.
+        if (session && (page === 'landing' || page === 'auth')) setPage('dashboard');
+        if (!session && page === 'account') setPage('auth');
+    }, [session, loading, page]);
+
+    return (
+        <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
+            {page === 'landing' && <LandingPage onNavigate={setPage} />}
+            {page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
+            {page === 'auth' && <AuthPage onNavigate={setPage} />}
+            {page === 'account' && <AccountPage onNavigate={setPage} />}
+        </div>
     );
 }
 
@@ -886,6 +919,7 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         Thumbnails
                     </button>
                     )}
+                    {isAdmin && (
                     <button onClick={() => setTab('demo')}
                         className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
                             tab === 'demo'
@@ -895,6 +929,7 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         <Monitor className="w-4 h-4" />
                         Product Demo
                     </button>
+                    )}
                 </div>
             </div>
 
@@ -1322,7 +1357,7 @@ function CreatePanel() {
                     <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Template</h2>
                     <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
                         {templates.map(t => {
-                            const isLocked = !isAdmin && t.id !== 'skeleton';
+                            const isLocked = !isAdmin && !PUBLIC_TEMPLATE_IDS.has(t.id);
                             return (
                                 <button key={t.id}
                                     onClick={() => !loading && !isLocked && setSelectedTemplate(t.id)}
