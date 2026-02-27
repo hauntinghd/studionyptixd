@@ -42,6 +42,9 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
+XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
+# Keep this off by default to avoid external proxy/account lock issues.
+USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 
@@ -1247,6 +1250,17 @@ SKELETON_IMAGE_STYLE_PREFIX = (
     "No illustration, no comic art, no anime, no drawing, no sketch."
 )
 
+SKELETON_MASTER_CONSISTENCY_PROMPT = (
+    "MASTER CONSISTENCY RULES (apply to every scene): "
+    "Keep one continuous visual universe across all scenes. Keep the same skeleton character identity, "
+    "same skull shape, same limb proportions, same bone material, same eye style, same color grade, and same camera language. "
+    "For VS videos, lock two identities and keep both stable scene-to-scene: Driver A = Formula 1, Driver B = Super Formula. "
+    "Never swap identities. Never change art style. Never switch to illustration/comic/anime. "
+    "Maintain photoreal cinematic studio quality in every frame. "
+    "Outfits must remain role-accurate and fully opaque with realistic fabric folds and stitching. "
+    "If a visual detail is missing, infer from topic role while preserving the same identity lock."
+)
+
 SKELETON_IMAGE_SUFFIX = (
     "Photorealistic 3D render, Unreal Engine 5, octane render, NOT illustration, NOT cartoon, NOT comic art. "
     "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
@@ -1755,14 +1769,14 @@ async def _mark_training_feedback(gen_id: str, accepted: bool):
 
 
 async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
-    """Generate image directly via xAI API (grok-2-image). No fal.ai needed.
+    """Generate image directly via xAI API. No fal.ai needed.
     Returns {"local_path": str, "cdn_url": str}.
     """
     if not XAI_API_KEY:
         raise RuntimeError("XAI_API_KEY not configured")
 
     headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "grok-2-image", "prompt": prompt, "n": 1, "response_format": "url"}
+    payload = {"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": 1, "response_format": "url"}
 
     for attempt in range(3):
         try:
@@ -1798,7 +1812,7 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
     """Generate an image using Grok Imagine. Tries fal.ai first, falls back to direct xAI API.
     Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
     """
-    if FAL_AI_KEY:
+    if USE_FAL_GROK_IMAGE and FAL_AI_KEY:
         try:
             aspect = "9:16"
             headers = {
@@ -1836,7 +1850,7 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
         except Exception as e:
             log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
 
-    log.info("Using direct xAI API for image generation")
+    log.info(f"Using direct xAI API image generation model={XAI_IMAGE_MODEL}")
     return await _generate_image_xai_direct(prompt, output_path)
 
 
@@ -2824,6 +2838,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                 vis_desc = scene.get("visual_description", "")
                 full_prompt = (
                     SKELETON_IMAGE_STYLE_PREFIX + " "
+                    + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
                     + skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
                 )
             else:
@@ -3053,6 +3068,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     if template == "skeleton":
         full_prompt = (
             SKELETON_IMAGE_STYLE_PREFIX + " "
+            + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
             + full_prompt + " " + SKELETON_IMAGE_SUFFIX
         )
 
@@ -3302,7 +3318,11 @@ async def health():
         "video_engine": "Wan 2.2 (RunPod)" if wan_ready else ("Kling 2.1 Standard" if FAL_AI_KEY else "Static"),
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
-        "image_engine_skeleton": "Skeleton LoRA (local)" if skeleton_lora else ("Grok Imagine" if FAL_AI_KEY else "SDXL"),
+        "image_engine_skeleton": (
+            "Skeleton LoRA (local)"
+            if skeleton_lora
+            else (f"xAI {XAI_IMAGE_MODEL}" if XAI_API_KEY else "SDXL")
+        ),
     }
 
 
@@ -3707,6 +3727,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                 vis_desc = scene.get("visual_description", "")
                 full_prompt = (
                     SKELETON_IMAGE_STYLE_PREFIX + " "
+                    + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
                     + clone_skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
                 )
             else:
@@ -4864,7 +4885,7 @@ async def generate_ai_face(output_path: str) -> str:
     )
 
     headers = {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
-    payload = {"model": "grok-2-image", "prompt": prompt, "n": 1, "response_format": "url"}
+    payload = {"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": 1, "response_format": "url"}
 
     last_status = 0
     for attempt in range(4):
