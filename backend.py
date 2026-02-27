@@ -91,7 +91,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 TRAINING_DATA_DIR = Path("training_data")
 TRAINING_DATA_DIR.mkdir(exist_ok=True)
 CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
-CREATIVE_SESSION_PERSISTENCE_ENABLED = False
+CREATIVE_SESSION_PERSISTENCE_ENABLED = os.getenv("CREATIVE_SESSION_PERSISTENCE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 PROJECTS_STORE_FILE = TEMP_DIR / "projects_store.json"
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
@@ -3697,6 +3697,17 @@ def _save_creative_sessions_to_disk():
 _load_creative_sessions_from_disk()
 
 
+def _get_creative_session(session_id: str):
+    """Fetch a creative session; on miss, refresh from disk and retry."""
+    session = _creative_sessions.get(session_id)
+    if session is not None:
+        return session
+    if CREATIVE_SESSION_PERSISTENCE_ENABLED:
+        _load_creative_sessions_from_disk()
+        session = _creative_sessions.get(session_id)
+    return session
+
+
 def _load_projects_store():
     if not PROJECTS_STORE_FILE.exists():
         return
@@ -3859,7 +3870,7 @@ async def creative_reference_image(
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _creative_sessions.get(session_id)
+    session = _get_creative_session(session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -3890,7 +3901,7 @@ async def creative_session_status(session_id: str, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _creative_sessions.get(session_id)
+    session = _get_creative_session(session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -3910,7 +3921,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _creative_sessions.get(req.session_id)
+    session = _get_creative_session(req.session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -4011,7 +4022,7 @@ async def creative_update_scene(session_id: str, scene_index: int, body: dict, r
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _creative_sessions.get(session_id)
+    session = _get_creative_session(session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
     if scene_index >= len(session["scenes"]):
@@ -4040,7 +4051,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _creative_sessions.get(req.session_id)
+    session = _get_creative_session(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
     _ensure_template_allowed(session.get("template", req.template), user)
