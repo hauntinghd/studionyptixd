@@ -49,8 +49,10 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
+XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
+USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
 SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
 # Keep this off by default to avoid external proxy/account lock issues.
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
@@ -2493,10 +2495,75 @@ async def _download_url_to_file(url: str, output_path: str):
             f.write(resp.content)
 
 
+async def animate_image_grok_video(image_path: str, prompt: str, output_clip_path: str, duration_sec: float = 5, aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
+    """Animate an image via xAI Grok Imagine Video and download resulting MP4."""
+    if not XAI_API_KEY:
+        raise RuntimeError("XAI_API_KEY not configured")
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    duration = max(1, min(int(round(float(duration_sec))), 15))
+    image_url = image_cdn_url or _file_to_data_image_url(image_path)
+    if not image_url:
+        raise RuntimeError("No source image URL for Grok video")
+
+    payload = {
+        "model": XAI_VIDEO_MODEL,
+        "prompt": prompt,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "resolution": "720p",
+        "image": {"url": image_url},
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        submit = await client.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload)
+        if submit.status_code not in (200, 201):
+            raise RuntimeError(f"Grok video submit failed ({submit.status_code}): {submit.text[:300]}")
+        submit_data = submit.json()
+    request_id = submit_data.get("request_id")
+    if not request_id:
+        raise RuntimeError("Grok video submit returned no request_id")
+
+    poll_url = f"https://api.x.ai/v1/videos/{request_id}"
+    max_wait = 900
+    elapsed = 0
+    while elapsed < max_wait:
+        await asyncio.sleep(4)
+        elapsed += 4
+        async with httpx.AsyncClient(timeout=30) as client:
+            status_resp = await client.get(poll_url, headers={"Authorization": f"Bearer {XAI_API_KEY}"})
+            if status_resp.status_code != 200:
+                continue
+            status_data = status_resp.json()
+        status = str(status_data.get("status", "")).lower()
+        if status == "done":
+            video_url = status_data.get("video", {}).get("url")
+            if not video_url:
+                raise RuntimeError("Grok video done status missing video URL")
+            await _download_url_to_file(video_url, output_clip_path)
+            return output_clip_path
+        if status == "expired":
+            raise RuntimeError("Grok video request expired")
+    raise TimeoutError("Grok video timed out")
+
+
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
     """Animate a scene image. Tries Kling first (if FAL_AI_KEY set), falls back to Wan 2.2.
     Returns {"type": "kling_clip"|"wan_clip", "path": str} or {"type": "static"}.
     """
+    if USE_XAI_VIDEO and XAI_API_KEY:
+        try:
+            clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            await animate_image_grok_video(
+                image_path,
+                prompt,
+                clip_path,
+                duration_sec=duration_sec,
+                aspect_ratio="9:16",
+                image_cdn_url=image_cdn_url,
+            )
+            return {"type": "grok_clip", "path": clip_path}
+        except Exception as e:
+            log.warning(f"Grok video animation failed for scene {scene_idx}, trying other engines: {e}")
+
     if FAL_AI_KEY and not prefer_wan:
         try:
             clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
@@ -3268,14 +3335,15 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             raise ValueError("Script generation returned no scenes")
 
         wan_ready = await check_wan22_available()
+        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
         use_kling = bool(FAL_AI_KEY)
         if template == "skeleton":
             use_kling = False
-        use_video = use_kling or wan_ready
+        use_video = use_grok_video or use_kling or wan_ready
         if template == "reddit":
             use_video = False
-        mode_label = "Wan 2.2" if wan_ready else ("Kling 2.1" if use_kling else "static image")
-        jobs[job_id]["generation_mode"] = "wan" if wan_ready else ("kling" if use_kling else "image")
+        mode_label = "Grok Imagine Video" if use_grok_video else ("Wan 2.2" if wan_ready else ("Kling 2.1" if use_kling else "static image"))
+        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else ("wan" if wan_ready else ("kling" if use_kling else "image"))
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 10
@@ -3340,9 +3408,9 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     image_cdn_url=cdn_url,
                     prefer_wan=(template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
@@ -3904,10 +3972,11 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         script_data = session.get("script_data", {})
 
         wan_ready = await check_wan22_available()
+        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
         use_kling = bool(FAL_AI_KEY)
         if template == "skeleton":
             use_kling = False
-        use_video = use_kling or wan_ready
+        use_video = use_grok_video or use_kling or wan_ready
         gen_ts = str(int(time.time() * 1000))
 
         jobs[job_id]["status"] = "generating_images"
@@ -3961,9 +4030,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
                     prefer_wan=(template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
@@ -4050,12 +4119,13 @@ async def list_languages():
 async def health():
     skeleton_lora = await check_skeleton_lora_available()
     wan_ready = await check_wan22_available()
+    grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
     return {
         "status": "online",
         "engine": "NYPTID Studio Engine v3.0",
         "kling_enabled": bool(FAL_AI_KEY),
         "wan22_ready": wan_ready,
-        "video_engine": "Wan 2.2 (RunPod)" if wan_ready else ("Kling 2.1 Standard" if FAL_AI_KEY else "Static"),
+        "video_engine": "Grok Imagine Video" if grok_video_enabled else ("Wan 2.2 (RunPod)" if wan_ready else ("Kling 2.1 Standard" if FAL_AI_KEY else "Static")),
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": (
@@ -4531,14 +4601,15 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 
+        use_grok_video = USE_XAI_VIDEO and bool(XAI_API_KEY)
         use_kling = bool(FAL_AI_KEY)
         if detected_template == "skeleton":
             use_kling = False
-        use_video = use_kling or await check_wan22_available()
+        use_video = use_grok_video or use_kling or await check_wan22_available()
         if detected_template == "reddit":
             use_video = False
-        mode_label = "Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image")
-        jobs[job_id]["generation_mode"] = "kling" if use_kling else ("video" if use_video else "image")
+        mode_label = "Grok Imagine Video" if use_grok_video else ("Kling 2.1" if use_kling else ("Wan 2.2" if use_video else "static image"))
+        jobs[job_id]["generation_mode"] = "grok_video" if use_grok_video else ("kling" if use_kling else ("video" if use_video else "image"))
 
         jobs[job_id]["status"] = "generating_images"
         jobs[job_id]["progress"] = 20
@@ -4603,9 +4674,9 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                     image_cdn_url=cdn_url,
                     prefer_wan=(detected_template == "skeleton"),
                 )
-                if anim_result["type"] in ("kling_clip", "wan_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    engine = "Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2"
+                    engine = "Grok Imagine Video" if anim_result["type"] == "grok_clip" else ("Kling 2.1" if anim_result["type"] == "kling_clip" else "Wan 2.2")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
