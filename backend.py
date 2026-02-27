@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import shutil
 import random
 import asyncio
@@ -45,6 +46,7 @@ FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
+SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
 # Keep this off by default to avoid external proxy/account lock issues.
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
 
@@ -1119,6 +1121,65 @@ async def generate_scene_sfx(visual_description: str, duration_sec: float,
         return ""
 
 
+def _probe_audio_duration_seconds(audio_path: str) -> float:
+    """Best-effort audio duration probe using ffprobe."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return float((proc.stdout or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+async def _quintuple_check_scene_sfx(
+    scenes: list,
+    sfx_paths: list[str],
+    template: str,
+    job_id: str = "",
+) -> list[str]:
+    """Quintuple-check scene SFX alignment and retry mismatched clips once."""
+    fixed = list(sfx_paths or [])
+    while len(fixed) < len(scenes):
+        fixed.append("")
+
+    for i, scene in enumerate(scenes):
+        expected = float(scene.get("duration_sec", 5) or 5)
+        sfx = fixed[i] if i < len(fixed) else ""
+        ok_exists = bool(sfx and Path(sfx).exists() and Path(sfx).stat().st_size > 0)
+        actual = _probe_audio_duration_seconds(sfx) if ok_exists else 0.0
+        ok_duration = ok_exists and abs(actual - expected) <= 1.5
+        ok_order = i < len(fixed)
+        ok_scene = bool(scene.get("visual_description", "").strip())
+        ok_nonempty_prompt = ok_scene
+
+        if ok_exists and ok_duration and ok_order and ok_scene and ok_nonempty_prompt:
+            continue
+
+        retry_out = str(TEMP_DIR / (f"{job_id}_sfx_retry_{i}.mp3" if job_id else f"sfx_retry_{i}_{int(time.time()*1000)}.mp3"))
+        desc = scene.get("visual_description", "")
+        retry = await generate_scene_sfx(desc, expected, retry_out, template=template)
+        retry_ok = bool(retry and Path(retry).exists() and Path(retry).stat().st_size > 0)
+        retry_dur = _probe_audio_duration_seconds(retry) if retry_ok else 0.0
+        if retry_ok and abs(retry_dur - expected) <= 1.5:
+            fixed[i] = retry
+            log.info(f"[{job_id}] SFX scene {i+1} realigned on retry ({retry_dur:.2f}s vs expected {expected:.2f}s)")
+        else:
+            fixed[i] = ""
+            log.warning(f"[{job_id}] SFX scene {i+1} failed alignment checks; using silence pad")
+
+    return fixed
+
+
 def _extract_word_timings(original_text: str, alignment: dict) -> list:
     """Convert ElevenLabs character-level alignment into word-level timings."""
     chars = alignment.get("characters", [])
@@ -1770,7 +1831,18 @@ async def _mark_training_feedback(gen_id: str, accepted: bool):
     log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
 
 
-async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
+def _file_to_data_image_url(image_path: str) -> str:
+    """Encode a local image file as a data URL for xAI image reference conditioning."""
+    p = Path(image_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return ""
+    ext = p.suffix.lower()
+    mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
+    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+async def _generate_image_xai_direct(prompt: str, output_path: str, reference_image_url: str = "") -> dict:
     """Generate image directly via xAI API. No fal.ai needed.
     Returns {"local_path": str, "cdn_url": str}.
     """
@@ -1786,6 +1858,8 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
         "aspect_ratio": XAI_IMAGE_ASPECT_RATIO,
         "resolution": XAI_IMAGE_RESOLUTION,
     }
+    if reference_image_url:
+        payload["image_url"] = reference_image_url
 
     for attempt in range(3):
         try:
@@ -1807,6 +1881,12 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
                     log.warning(f"xAI image gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
                     await asyncio.sleep(wait)
                     continue
+                # If reference-conditioning payload is rejected by provider, retry once without reference.
+                if reference_image_url and resp.status_code in (400, 404, 422):
+                    payload.pop("image_url", None)
+                    reference_image_url = ""
+                    log.warning("xAI image reference payload rejected; retrying without reference image")
+                    continue
                 raise RuntimeError(f"xAI image gen failed ({resp.status_code}): {resp.text[:200]}")
         except RuntimeError:
             raise
@@ -1817,7 +1897,7 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
     raise RuntimeError("xAI direct image generation failed after retries")
 
 
-async def generate_image_grok(prompt: str, output_path: str, resolution: str = "720p") -> dict:
+async def generate_image_grok(prompt: str, output_path: str, resolution: str = "720p", reference_image_url: str = "") -> dict:
     """Generate an image using Grok Imagine. Tries fal.ai first, falls back to direct xAI API.
     Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
     """
@@ -1834,6 +1914,8 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
                 "aspect_ratio": aspect,
                 "output_format": "png",
             }
+            if reference_image_url:
+                payload["image_url"] = reference_image_url
 
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
@@ -1860,7 +1942,7 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
             log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
 
     log.info(f"Using direct xAI API image generation model={XAI_IMAGE_MODEL}")
-    return await _generate_image_xai_direct(prompt, output_path)
+    return await _generate_image_xai_direct(prompt, output_path, reference_image_url=reference_image_url)
 
 
 SKELETON_LORA_NAME = "nyptid_skeleton_v1.safetensors"
@@ -1946,7 +2028,14 @@ async def generate_image_skeleton_lora(prompt: str, output_path: str, resolution
     return output_path
 
 
-async def generate_scene_image(prompt: str, output_path: str, resolution: str = "720p", negative_prompt: str = "", template: str = "") -> dict:
+async def generate_scene_image(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    template: str = "",
+    reference_image_url: str = "",
+) -> dict:
     """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
     For other templates: Grok Imagine > SDXL.
     Returns {"local_path": str, "cdn_url": str | None}.
@@ -1963,7 +2052,12 @@ async def generate_scene_image(prompt: str, output_path: str, resolution: str = 
 
     if FAL_AI_KEY or XAI_API_KEY:
         try:
-            return await generate_image_grok(prompt, output_path, resolution=resolution)
+            return await generate_image_grok(
+                prompt,
+                output_path,
+                resolution=resolution,
+                reference_image_url=reference_image_url,
+            )
         except Exception as e:
             log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
 
@@ -2842,6 +2936,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         gen_ts = str(int(time.time() * 1000))
 
         skeleton_anchor = ""
+        skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL if template == "skeleton" else ""
         if template == "skeleton" and scenes:
             s1_desc = scenes[0].get("visual_description", "")
             outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
@@ -2864,7 +2959,16 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             else:
                 full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
-            img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+            img_result = await generate_scene_image(
+                full_prompt,
+                img_path,
+                resolution=resolution,
+                negative_prompt=neg_prompt,
+                template=template,
+                reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+            )
+            if template == "skeleton" and not skeleton_reference_image_url and i == 0:
+                skeleton_reference_image_url = _file_to_data_image_url(img_path)
             cdn_url = img_result.get("cdn_url")
             engine_name = "Skeleton LoRA" if (template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
@@ -2917,6 +3021,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             dur = scene.get("duration_sec", 5)
             sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
             sfx_paths.append(sfx_file)
+        sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
         log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
 
         jobs[job_id]["status"] = "compositing"
@@ -3085,6 +3190,9 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     resolution = session.get("resolution", req.resolution)
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     full_prompt = req.prompt
+    skeleton_reference_image_url = session.get("skeleton_reference_image", "")
+    if template == "skeleton" and not skeleton_reference_image_url:
+        skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
 
     if template == "skeleton":
         full_prompt = (
@@ -3094,7 +3202,16 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         )
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
-    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
+    img_result = await generate_scene_image(
+        full_prompt,
+        img_path,
+        resolution=resolution,
+        negative_prompt=neg_prompt,
+        template=template,
+        reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+    )
+    if template == "skeleton" and req.scene_index == 0 and not session.get("skeleton_reference_image"):
+        session["skeleton_reference_image"] = _file_to_data_image_url(img_path)
 
     gen_id = img_result.get("generation_id", "")
 
@@ -3225,6 +3342,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         total_steps = len(scenes) * (2 if use_video else 1)
+        skeleton_reference_image_url = session.get("skeleton_reference_image", "")
+        if template == "skeleton" and not skeleton_reference_image_url:
+            skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -3239,7 +3359,17 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             else:
                 full_prompt = scene.get("visual_description", "")
                 img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
-                img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template="")
+                img_result = await generate_scene_image(
+                    full_prompt,
+                    img_path,
+                    resolution=resolution,
+                    negative_prompt=neg_prompt,
+                    template=template,
+                    reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+                )
+                if template == "skeleton" and not skeleton_reference_image_url and i == 0:
+                    skeleton_reference_image_url = _file_to_data_image_url(img_path)
+                    session["skeleton_reference_image"] = skeleton_reference_image_url
                 cdn_url = img_result.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
 
@@ -3286,6 +3416,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             dur = scene.get("duration_sec", 5)
             sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
             sfx_paths.append(sfx_file)
+        sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
         log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
 
         jobs[job_id]["status"] = "compositing"
@@ -3737,6 +3868,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         gen_ts = str(int(time.time() * 1000))
 
         clone_skeleton_anchor = ""
+        clone_skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL if detected_template == "skeleton" else ""
         if detected_template == "skeleton" and scenes:
             s1_desc = scenes[0].get("visual_description", "")
             outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
@@ -3759,7 +3891,16 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             else:
                 full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
-            img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=detected_template)
+            img_result = await generate_scene_image(
+                full_prompt,
+                img_path,
+                resolution=resolution,
+                negative_prompt=neg_prompt,
+                template=detected_template,
+                reference_image_url=clone_skeleton_reference_image_url if detected_template == "skeleton" else "",
+            )
+            if detected_template == "skeleton" and not clone_skeleton_reference_image_url and i == 0:
+                clone_skeleton_reference_image_url = _file_to_data_image_url(img_path)
             cdn_url = img_result.get("cdn_url")
             engine_name = "Skeleton LoRA" if (detected_template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
