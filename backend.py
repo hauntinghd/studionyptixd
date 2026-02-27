@@ -22,6 +22,10 @@ from pydantic import BaseModel
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
+try:
+    import paramiko
+except Exception:
+    paramiko = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
@@ -1953,17 +1957,11 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
                 img_path = entry.get("image_path", "")
                 if img_path and Path(img_path).exists():
                     reject_dir = "/workspace/thumbnail_training/rejected"
-                    mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {reject_dir}'"
-                    proc_mkdir = await asyncio.create_subprocess_shell(
-                        mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await proc_mkdir.communicate()
                     ext = Path(img_path).suffix.lower() or ".png"
-                    scp_cmd = _thumbnail_scp_cmd(img_path, f"{reject_dir}/{gen_id}{ext}")
-                    proc_scp = await asyncio.create_subprocess_shell(
-                        scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await proc_scp.communicate()
+                    remote_path = f"{reject_dir}/{gen_id}{ext}"
+                    ok, err = await asyncio.to_thread(_sync_file_to_runpod_blocking, img_path, remote_path)
+                    if not ok:
+                        log.warning(f"Thumbnail reject sync file failed for {gen_id}: {err}")
             except Exception as e:
                 log.warning(f"Thumbnail reject sync failed for {gen_id}: {e}")
         await _sync_training_feedback_to_runpod(gen_id, entry, status="rejected")
@@ -2003,17 +2001,11 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
         try:
             img_path = entry.get("image_path", "")
             if img_path and Path(img_path).exists():
-                mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
-                proc_mkdir = await asyncio.create_subprocess_shell(
-                    mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                await proc_mkdir.communicate()
                 ext = Path(img_path).suffix.lower() or ".png"
-                scp_cmd = _thumbnail_scp_cmd(img_path, f"{RUNPOD_TRAINING_DIR}/{gen_id}{ext}")
-                proc_scp = await asyncio.create_subprocess_shell(
-                    scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                await proc_scp.communicate()
+                remote_path = f"{RUNPOD_TRAINING_DIR}/{gen_id}{ext}"
+                ok, err = await asyncio.to_thread(_sync_file_to_runpod_blocking, img_path, remote_path)
+                if not ok:
+                    log.warning(f"Thumbnail accept sync file failed for {gen_id}: {err}")
         except Exception as e:
             log.warning(f"Thumbnail accept sync failed for {gen_id}: {e}")
     log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
@@ -4853,21 +4845,79 @@ def _thumbnail_scp_cmd(local_path: str, remote_path: str) -> str:
     )
 
 
+def _thumbnail_target_user_host() -> tuple[str, str]:
+    if "@" in THUMBNAIL_RUNPOD_HOST:
+        user, host = THUMBNAIL_RUNPOD_HOST.split("@", 1)
+        return user, host
+    return "root", THUMBNAIL_RUNPOD_HOST
+
+
+def _sftp_mkdir_p(sftp, remote_dir: str):
+    parts = [p for p in remote_dir.strip("/").split("/") if p]
+    cur = "/"
+    for part in parts:
+        cur = f"{cur}{part}/"
+        try:
+            sftp.stat(cur)
+        except Exception:
+            sftp.mkdir(cur)
+
+
+def _sync_file_to_runpod_blocking(local_path: str, remote_path: str) -> tuple[bool, str]:
+    if not Path(local_path).exists():
+        return False, "local file missing"
+
+    if paramiko is not None:
+        user, host = _thumbnail_target_user_host()
+        client = None
+        sftp = None
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                port=int(THUMBNAIL_RUNPOD_SSH_PORT),
+                username=user,
+                timeout=20,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            sftp = client.open_sftp()
+            remote_parent = str(Path(remote_path).parent).replace("\\", "/")
+            _sftp_mkdir_p(sftp, remote_parent)
+            sftp.put(local_path, remote_path)
+            return True, ""
+        except Exception as e:
+            log.warning(f"Paramiko thumbnail sync failed, falling back to scp: {e}")
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+    cmd = _thumbnail_scp_cmd(local_path, remote_path)
+    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, ""
+    return False, (proc.stderr or proc.stdout or "scp failed")[:300]
+
+
 async def sync_thumbnail_to_runpod(local_path: str) -> tuple[bool, str]:
     """SCP a thumbnail to RunPod's training images directory."""
     try:
-        cmd = _thumbnail_scp_cmd(local_path, f"{RUNPOD_TRAINING_DIR}/")
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode == 0:
+        remote_path = f"{RUNPOD_TRAINING_DIR.rstrip('/')}/{Path(local_path).name}"
+        ok, err = await asyncio.to_thread(_sync_file_to_runpod_blocking, local_path, remote_path)
+        if ok:
             log.info(f"Synced {Path(local_path).name} to RunPod training dir")
             return True, ""
-        else:
-            err = stderr.decode()[:300]
-            log.warning(f"RunPod sync failed: {err}")
-            return False, err
+        log.warning(f"RunPod sync failed: {err}")
+        return False, err
     except Exception as e:
         err = str(e)
         log.warning(f"RunPod thumbnail sync error: {err}")
@@ -4945,14 +4995,6 @@ async def sync_thumbnail_library(user: dict = Depends(require_auth)):
     files = [p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
     if not files:
         return {"status": "no_files", "queued": 0, "synced": 0, "failed": 0}
-
-    mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
-    proc = await asyncio.create_subprocess_shell(
-        mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, mkdir_err = await proc.communicate()
-    if proc.returncode != 0:
-        raise HTTPException(500, f"RunPod mkdir failed: {mkdir_err.decode()[:300]}")
 
     synced = 0
     failed = 0

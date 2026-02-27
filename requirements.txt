@@ -5,3 +5,4 @@ stripe
 PyJWT
 pydantic
 python-multipart
+paramiko
