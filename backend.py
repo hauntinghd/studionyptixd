@@ -6187,6 +6187,9 @@ async def generate_demo_script(analysis: dict, product_name: str = "", reference
     """Generate a timed voiceover script for the product demo."""
     xai_key = os.environ.get("XAI_API_KEY", "")
     duration = analysis.get("duration", 30)
+    target_words_min = max(40, int(duration * 2.0))
+    target_words_ideal = max(55, int(duration * 2.25))
+    target_words_max = max(70, int(duration * 2.6))
 
     frame_timeline = ""
     for f in analysis.get("frames", []):
@@ -6199,7 +6202,9 @@ Video duration: {duration:.1f} seconds
 Frame-by-frame breakdown of the screen recording:
 {frame_timeline}
 
-Write a voiceover script with timed segments that perfectly sync to what's happening on screen. The script should cover the full {duration:.0f} seconds."""
+Write a voiceover script with timed segments that perfectly sync to what's happening on screen.
+The narration must naturally cover the full {duration:.0f} seconds at a calm, professional pace (not rushed).
+Target total narration length around {target_words_ideal} words (acceptable range: {target_words_min}-{target_words_max})."""
 
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
@@ -6615,17 +6620,19 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
         word_timings = vo_result.get("word_timings", [])
         jobs[job_id]["progress"] = 60
 
-        # Keep demo narration tightly aligned to the uploaded recording duration.
+        # Keep demo narration aligned to the uploaded recording duration without rushed speech.
         target_demo_dur = float(analysis.get("duration", 0.0) or 0.0)
         source_audio_dur = _probe_audio_duration_seconds(audio_path)
         if target_demo_dur > 0.2 and source_audio_dur > 0.2:
             speed_ratio = source_audio_dur / target_demo_dur
-            if abs(source_audio_dur - target_demo_dur) > 0.08:
+            if source_audio_dur < (target_demo_dur - 0.08):
                 fit_audio_path = str(TEMP_DIR / (job_id + "_demo_voice_fit.mp3"))
-                atempo_chain = _build_atempo_filter_chain(speed_ratio)
+                # Only slow down short narration; never speed up long narration (sounds rushed).
+                gentle_ratio = max(speed_ratio, 0.88)
+                atempo_chain = _build_atempo_filter_chain(gentle_ratio)
                 fit_cmd = [
                     "ffmpeg", "-y", "-i", audio_path,
-                    "-af", atempo_chain,
+                    "-af", f"{atempo_chain},apad=pad_dur={target_demo_dur + 0.25:.3f}",
                     "-t", f"{target_demo_dur:.3f}",
                     "-c:a", "libmp3lame", "-b:a", "192k",
                     fit_audio_path,
@@ -6640,8 +6647,8 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
                     if word_timings:
                         remapped = []
                         for wt in word_timings:
-                            start = max(0.0, float(wt.get("start", 0.0)) / speed_ratio)
-                            end = max(start + 0.01, float(wt.get("end", start)) / speed_ratio)
+                            start = max(0.0, float(wt.get("start", 0.0)) / gentle_ratio)
+                            end = max(start + 0.01, float(wt.get("end", start)) / gentle_ratio)
                             if start <= target_demo_dur + 0.15:
                                 remapped.append({
                                     "word": wt.get("word", ""),
@@ -6652,11 +6659,19 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
                     jobs[job_id]["audio_sync"] = {
                         "source_duration": round(source_audio_dur, 3),
                         "target_duration": round(target_demo_dur, 3),
-                        "speed_ratio": round(speed_ratio, 5),
+                        "speed_ratio": round(gentle_ratio, 5),
+                        "mode": "slowdown_and_pad",
                     }
                     log.info(f"[{job_id}] Demo voiceover fit to video duration ({source_audio_dur:.2f}s -> {target_demo_dur:.2f}s)")
                 else:
                     log.warning(f"[{job_id}] Demo voiceover duration-fit failed, using original audio: {(fit_err.decode(errors='ignore')[-200:])}")
+            else:
+                jobs[job_id]["audio_sync"] = {
+                    "source_duration": round(source_audio_dur, 3),
+                    "target_duration": round(target_demo_dur, 3),
+                    "speed_ratio": 1.0,
+                    "mode": "no_speedup",
+                }
 
         subtitle_path = None
         if word_timings:
