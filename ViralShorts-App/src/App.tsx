@@ -2937,20 +2937,25 @@ function ThumbnailPanel() {
     const [loading, setLoading] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+    const [thumbFeedbackSent, setThumbFeedbackSent] = useState<Record<string, boolean>>({});
 
     const fetchLibrary = useCallback(async () => {
         try {
-            const res = await fetch(`${API}/api/thumbnails/library`);
+            const res = await fetch(`${API}/api/thumbnails/library`, {
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+            });
             if (res.ok) { const data = await res.json(); setLibrary(data.files || []); }
         } catch { /* ignore */ }
-    }, []);
+    }, [session]);
 
     const fetchTrainingStatus = useCallback(async () => {
         try {
-            const res = await fetch(`${API}/api/thumbnails/training-status`);
+            const res = await fetch(`${API}/api/thumbnails/training-status`, {
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+            });
             if (res.ok) { const data = await res.json(); setTrainingStatus(data); }
         } catch { /* ignore */ }
-    }, []);
+    }, [session]);
 
     useEffect(() => { fetchLibrary(); fetchTrainingStatus(); }, [fetchLibrary, fetchTrainingStatus]);
 
@@ -2980,20 +2985,51 @@ function ThumbnailPanel() {
         const formData = new FormData();
         Array.from(files).forEach(f => formData.append('files', f));
         try {
-            const res = await fetch(`${API}/api/thumbnails/upload`, { method: 'POST', body: formData });
+            const res = await fetch(`${API}/api/thumbnails/upload`, {
+                method: 'POST',
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                body: formData,
+            });
             if (res.ok) await fetchLibrary();
+            else {
+                const txt = await res.text().catch(() => "");
+                alert(txt || `Upload failed (${res.status})`);
+            }
         } catch { /* ignore */ }
         setUploading(false);
     };
 
     const handleDelete = async (id: string) => {
-        await fetch(`${API}/api/thumbnails/library/${id}`, { method: 'DELETE' });
+        await fetch(`${API}/api/thumbnails/library/${id}`, {
+            method: 'DELETE',
+            headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+        });
         setLibrary(prev => prev.filter(f => f.id !== id));
         if (selectedStyleRef === id) setSelectedStyleRef('');
     };
 
+    const sendThumbFeedback = useCallback(async (generationId: string, accepted: boolean) => {
+        if (!generationId || !session) return;
+        if (thumbFeedbackSent[generationId]) return;
+        try {
+            const res = await fetch(`${API}/api/thumbnails/feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+                body: JSON.stringify({ generation_id: generationId, accepted }),
+            });
+            if (res.ok) {
+                setThumbFeedbackSent(prev => ({ ...prev, [generationId]: true }));
+            }
+        } catch {
+            // ignore feedback send failures
+        }
+    }, [session, thumbFeedbackSent]);
+
     const handleGenerate = async () => {
         if (!description && mode === 'describe') return;
+        if (jobStatus?.status === 'complete' && jobStatus?.generation_id) {
+            await sendThumbFeedback(jobStatus.generation_id, false);
+        }
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
@@ -3287,10 +3323,14 @@ function ThumbnailPanel() {
                                         </div>
                                         <div className="flex gap-3">
                                             <a href={`${API}${jobStatus.output_url}`} download
+                                                onClick={() => { if (jobStatus.generation_id) void sendThumbFeedback(jobStatus.generation_id, true); }}
                                                 className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                                 <Download className="w-5 h-5" /> Download PNG
                                             </a>
-                                            <button onClick={() => { setJobStatus(null); setJobId(null); }}
+                                            <button onClick={() => {
+                                                if (jobStatus.generation_id) void sendThumbFeedback(jobStatus.generation_id, false);
+                                                setJobStatus(null); setJobId(null);
+                                            }}
                                                 className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
                                                 Generate Another
                                             </button>

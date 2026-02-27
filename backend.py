@@ -1944,6 +1944,24 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
         entry.setdefault("metadata", {})["event"] = event
 
     if not accepted:
+        if entry.get("source") == "thumbnail_ai":
+            try:
+                img_path = entry.get("image_path", "")
+                if img_path and Path(img_path).exists():
+                    reject_dir = "/workspace/thumbnail_training/rejected"
+                    mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {reject_dir}'"
+                    proc_mkdir = await asyncio.create_subprocess_shell(
+                        mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc_mkdir.communicate()
+                    ext = Path(img_path).suffix.lower() or ".png"
+                    scp_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{img_path}\" root@69.30.85.41:{reject_dir}/{gen_id}{ext}"
+                    proc_scp = await asyncio.create_subprocess_shell(
+                        scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc_scp.communicate()
+            except Exception as e:
+                log.warning(f"Thumbnail reject sync failed for {gen_id}: {e}")
         await _sync_training_feedback_to_runpod(gen_id, entry, status="rejected")
         for p in [entry.get("image_path"), entry.get("txt_path")]:
             try:
@@ -1977,6 +1995,23 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
         except Exception as e:
             log.warning(f"Supabase training log failed (non-fatal): {e}")
     await _sync_training_feedback_to_runpod(gen_id, entry, status="accepted")
+    if entry.get("source") == "thumbnail_ai":
+        try:
+            img_path = entry.get("image_path", "")
+            if img_path and Path(img_path).exists():
+                mkdir_cmd = f"{RUNPOD_SSH} 'mkdir -p {RUNPOD_TRAINING_DIR}'"
+                proc_mkdir = await asyncio.create_subprocess_shell(
+                    mkdir_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc_mkdir.communicate()
+                ext = Path(img_path).suffix.lower() or ".png"
+                scp_cmd = f"scp -o StrictHostKeyChecking=no -P 22092 \"{img_path}\" root@69.30.85.41:{RUNPOD_TRAINING_DIR}/{gen_id}{ext}"
+                proc_scp = await asyncio.create_subprocess_shell(
+                    scp_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc_scp.communicate()
+        except Exception as e:
+            log.warning(f"Thumbnail accept sync failed for {gen_id}: {e}")
     log.info(f"Training candidate {gen_id} ACCEPTED -> training dataset")
 
 
@@ -4899,7 +4934,7 @@ async def upload_thumbnails(
         saved.append({
             "id": safe_name,
             "name": file.filename,
-            "size": len(content),
+            "size": dest.stat().st_size,
             "url": "/api/thumbnails/library/" + safe_name,
         })
         if background_tasks:
@@ -4922,6 +4957,24 @@ async def list_thumbnails(user: dict = Depends(require_auth)):
                 "created_at": f.stat().st_mtime,
             })
     return {"files": files, "total": len(files)}
+
+
+class ThumbnailFeedbackRequest(BaseModel):
+    generation_id: str
+    accepted: bool
+
+
+@app.post("/api/thumbnails/feedback")
+async def thumbnail_feedback(req: ThumbnailFeedbackRequest, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
+    await _mark_training_feedback(
+        req.generation_id,
+        accepted=req.accepted,
+        user_id=user.get("id", ""),
+        event="thumbnail_feedback",
+    )
+    return {"ok": True, "generation_id": req.generation_id, "status": "accepted" if req.accepted else "rejected"}
 
 
 @app.get("/api/thumbnails/library/{filename}")
@@ -4963,7 +5016,7 @@ You understand:
 - Face/emotion science (shocked expressions get 2-3x CTR)
 - Text placement rules (big bold text, 3-5 words max, high contrast)
 - Composition (rule of thirds, leading lines, depth)
-- Platform-specific optimization (YouTube's 1280x720 standard, mobile-first)
+- Platform-specific optimization (1920x1080 output, mobile-first readability)
 
 When given a video description, style reference, or sketch, you produce a detailed SDXL image generation prompt that will create a click-worthy thumbnail.
 
@@ -4987,7 +5040,7 @@ Then apply that exact style to the new content.
 
 Output MUST be valid JSON:
 {
-  "prompt": "Detailed SDXL prompt combining the reference style with new content. 8k quality, professional YouTube thumbnail, 1280x720 composition.",
+  "prompt": "Detailed SDXL prompt combining the reference style with new content. 8k quality, professional YouTube thumbnail, 1920x1080 composition.",
   "negative_prompt": "Elements to avoid",
   "title_text": "The overlay text for this thumbnail (3-5 words, empty string if none)",
   "style_notes": "How the reference style was adapted"
@@ -5002,7 +5055,7 @@ Analyze for: recurring color schemes, text styles, composition patterns, emotion
 
 Output MUST be valid JSON:
 {
-  "prompt": "Detailed SDXL prompt for a new thumbnail following the user's proven style. 8k quality, professional YouTube thumbnail, 1280x720.",
+  "prompt": "Detailed SDXL prompt for a new thumbnail following the user's proven style. 8k quality, professional YouTube thumbnail, 1920x1080.",
   "negative_prompt": "Elements to avoid",
   "title_text": "Overlay text (3-5 words, empty if none)",
   "style_notes": "Pattern analysis of what works for this channel",
@@ -5069,8 +5122,31 @@ async def _check_lora_exists() -> bool:
     return False
 
 
+async def _enforce_thumbnail_1080(output_path: str) -> str:
+    """Force final thumbnail image to exactly 1920x1080."""
+    fixed_out = str(Path(output_path).with_name(Path(output_path).stem + "_1920x1080.png"))
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", output_path,
+        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1",
+        fixed_out,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError("Failed to enforce 1920x1080 thumbnail: " + stderr.decode()[-200:])
+    fixed = Path(fixed_out)
+    if not fixed.exists() or fixed.stat().st_size == 0:
+        raise RuntimeError("1920x1080 thumbnail output missing")
+    Path(output_path).unlink(missing_ok=True)
+    fixed.rename(output_path)
+    return output_path
+
+
 async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_path: str, style_ref_path: str = "") -> str:
-    """Generate a 1280x720 thumbnail using SDXL via ComfyUI, with trained LoRA if available."""
+    """Generate a thumbnail using SDXL via ComfyUI, with trained LoRA if available."""
     use_lora = await _check_lora_exists()
     if use_lora:
         log.info("Using trained thumbnail LoRA for generation")
@@ -5153,7 +5229,7 @@ async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_pa
             **lora_node,
             "2": {
                 "class_type": "EmptyLatentImage",
-                "inputs": {"width": 1280, "height": 720, "batch_size": 1},
+                "inputs": {"width": 1920, "height": 1080, "batch_size": 1},
             },
             "3": {
                 "class_type": "CLIPTextEncode",
@@ -5267,10 +5343,24 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
                 except Exception as e:
                     log.warning(f"[{job_id}] Title overlay failed, using without text: {e}")
 
+            await _enforce_thumbnail_1080(output_path)
+            thumb_gen_id = await _save_training_candidate(
+                thumb_prompt,
+                output_path,
+                template="thumbnail",
+                source="thumbnail_ai",
+                metadata={
+                    "mode": req.mode,
+                    "title_text": title_text,
+                    "user_id": user.get("id", ""),
+                },
+            )
+
             jobs[job_id]["status"] = "complete"
             jobs[job_id]["progress"] = 100
             jobs[job_id]["output_file"] = output_name
             jobs[job_id]["output_url"] = f"/api/thumbnails/generated/{output_name}"
+            jobs[job_id]["generation_id"] = thumb_gen_id
             log.info(f"[{job_id}] Thumbnail COMPLETE: {output_name}")
 
         except Exception as e:
