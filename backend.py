@@ -11,6 +11,7 @@ import tempfile
 import logging
 import httpx
 import jwt
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,28 +84,40 @@ jobs: dict = {}
 security = HTTPBearer(auto_error=False)
 
 import asyncio as _asyncio
-_free_queue: _asyncio.Queue = None
-_free_queue_list: list = []
-_free_worker_started = False
+_job_queue: _asyncio.PriorityQueue = None
+_queued_job_meta: dict = {}
+_job_workers_started = False
+_job_seq = 0
+try:
+    JOB_QUEUE_WORKERS = max(1, int(os.getenv("JOB_QUEUE_WORKERS", "3")))
+except Exception:
+    JOB_QUEUE_WORKERS = 3
 
-def _get_free_queue():
-    global _free_queue
-    if _free_queue is None:
-        _free_queue = _asyncio.Queue()
-    return _free_queue
+def _get_job_queue():
+    global _job_queue
+    if _job_queue is None:
+        _job_queue = _asyncio.PriorityQueue()
+    return _job_queue
 
-async def _free_queue_worker():
-    """Processes free-plan jobs one at a time."""
-    q = _get_free_queue()
+def _plan_queue_priority(plan: str) -> int:
+    # Lower number runs first.
+    if plan in ("creator", "pro", "demo_pro", "admin"):
+        return 0
+    if plan == "starter":
+        return 1
+    return 2
+
+async def _job_queue_worker(worker_idx: int):
+    """Processes queued jobs with plan-aware priority."""
+    q = _get_job_queue()
     while True:
-        job_id, coro_func, args = await q.get()
+        _priority, _seq, job_id, coro_func, args = await q.get()
         try:
-            if job_id in _free_queue_list:
-                _free_queue_list.remove(job_id)
+            _queued_job_meta.pop(job_id, None)
             _update_queue_positions()
             await coro_func(*args)
         except Exception as e:
-            log.error(f"[{job_id}] Free queue worker error: {e}", exc_info=True)
+            log.error(f"[{job_id}] Queue worker {worker_idx} error: {e}", exc_info=True)
             if job_id in jobs:
                 jobs[job_id]["status"] = "error"
                 jobs[job_id]["error"] = str(e)
@@ -112,16 +125,30 @@ async def _free_queue_worker():
             q.task_done()
 
 def _update_queue_positions():
-    for i, qjid in enumerate(_free_queue_list):
+    ordered = sorted(_queued_job_meta.items(), key=lambda item: (item[1][0], item[1][1]))
+    total = len(ordered)
+    for i, (qjid, _meta) in enumerate(ordered):
         if qjid in jobs:
             jobs[qjid]["queue_position"] = i + 1
-            jobs[qjid]["queue_total"] = len(_free_queue_list)
+            jobs[qjid]["queue_total"] = total
 
-async def _ensure_free_worker():
-    global _free_worker_started
-    if not _free_worker_started:
-        _free_worker_started = True
-        _asyncio.get_event_loop().create_task(_free_queue_worker())
+async def _ensure_job_workers():
+    global _job_workers_started
+    if _job_workers_started:
+        return
+    _job_workers_started = True
+    for i in range(JOB_QUEUE_WORKERS):
+        _asyncio.get_event_loop().create_task(_job_queue_worker(i + 1))
+
+async def _enqueue_generation_job(job_id: str, plan: str, coro_func, args):
+    global _job_seq
+    await _ensure_job_workers()
+    priority = _plan_queue_priority(plan)
+    _job_seq += 1
+    _queued_job_meta[job_id] = (priority, _job_seq)
+    jobs[job_id]["queue_priority"] = priority
+    _update_queue_positions()
+    await _get_job_queue().put((priority, _job_seq, job_id, coro_func, args))
 
 PLAN_LIMITS = {
     "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
@@ -3188,10 +3215,44 @@ async def creative_create_session(body: dict, request: Request = None):
         "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
         "scenes": [],
         "scene_images": {},
+        "reference_image_url": "",
         "created_at": time.time(),
     }
     log.info(f"Creative session created: {session_id} for user {user['id']}")
     return {"session_id": session_id}
+
+
+@app.post("/api/creative/reference-image")
+async def creative_reference_image(
+    session_id: str = Form(...),
+    reference_image: UploadFile = File(...),
+    request: Request = None,
+):
+    """Upload optional creative reference style image and persist it for all scene generations."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _creative_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Creative session not found")
+    if session["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your session")
+    if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
+        raise HTTPException(400, "Reference file must be an image")
+
+    raw = await reference_image.read()
+    if not raw:
+        raise HTTPException(400, "Reference image is empty")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(400, "Reference image must be <= 8MB")
+
+    mime = reference_image.content_type or "image/png"
+    data_url = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+    session["reference_image_url"] = data_url
+    if session.get("template") == "skeleton":
+        # Keep legacy skeleton key in sync for downstream compatibility.
+        session["skeleton_reference_image"] = data_url
+    return {"ok": True}
 
 
 @app.post("/api/creative/scene-image")
@@ -3221,8 +3282,9 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     resolution = session.get("resolution", req.resolution)
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     full_prompt = req.prompt
+    reference_image_url = session.get("reference_image_url", "")
     skeleton_reference_image_url = session.get("skeleton_reference_image", "")
-    if template == "skeleton" and not skeleton_reference_image_url:
+    if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url):
         skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
 
     if template == "skeleton":
@@ -3232,6 +3294,10 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
             + full_prompt + " " + SKELETON_IMAGE_SUFFIX
         )
 
+    scene_reference = reference_image_url
+    if template == "skeleton" and not scene_reference:
+        scene_reference = skeleton_reference_image_url
+
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
     img_result = await generate_scene_image(
         full_prompt,
@@ -3239,9 +3305,9 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         resolution=resolution,
         negative_prompt=neg_prompt,
         template=template,
-        reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+        reference_image_url=scene_reference,
     )
-    if template == "skeleton" and req.scene_index == 0 and not session.get("skeleton_reference_image"):
+    if template == "skeleton" and req.scene_index == 0 and not (session.get("skeleton_reference_image") or session.get("reference_image_url")):
         session["skeleton_reference_image"] = _file_to_data_image_url(img_path)
 
     gen_id = img_result.get("generation_id", "")
@@ -3325,7 +3391,6 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     if user_plan == "admin":
         user_plan = "pro"
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
-    is_priority = plan_limits.get("priority", False)
     resolution = session.get("resolution", req.resolution)
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
@@ -3336,6 +3401,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "topic": session["topic"],
         "resolution": resolution,
         "plan": user_plan,
+        "user_id": user.get("id"),
         "created_at": time.time(),
     }
 
@@ -3344,9 +3410,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         if gen_id:
             asyncio.create_task(_mark_training_feedback(gen_id, accepted=True))
 
-    background_tasks.add_task(
-        _run_creative_pipeline, job_id, session, resolution
-    )
+    await _enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
     return {"job_id": job_id}
 
 
@@ -3373,8 +3437,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         total_steps = len(scenes) * (2 if use_video else 1)
+        reference_image_url = session.get("reference_image_url", "")
         skeleton_reference_image_url = session.get("skeleton_reference_image", "")
-        if template == "skeleton" and not skeleton_reference_image_url:
+        if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url):
             skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
 
         for i, scene in enumerate(scenes):
@@ -3396,9 +3461,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     resolution=resolution,
                     negative_prompt=neg_prompt,
                     template=template,
-                    reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+                    reference_image_url=(reference_image_url or skeleton_reference_image_url) if template == "skeleton" else reference_image_url,
                 )
-                if template == "skeleton" and not skeleton_reference_image_url and i == 0:
+                if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url) and i == 0:
                     skeleton_reference_image_url = _file_to_data_image_url(img_path)
                     session["skeleton_reference_image"] = skeleton_reference_image_url
                 cdn_url = img_result.get("cdn_url")
@@ -3546,6 +3611,101 @@ async def training_stats(user: dict = Depends(require_auth)):
     }
 
 
+@app.get("/api/admin/analytics")
+async def admin_analytics(user: dict = Depends(require_auth)):
+    """Admin dashboard analytics: active usage + paid tier totals + monthly revenue estimate."""
+    email = user.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+
+    active_job_statuses = {"queued", "generating_script", "generating_images", "animating_scenes", "generating_voice", "generating_sfx", "compositing", "analyzing"}
+    active_jobs = [j for j in jobs.values() if j.get("status") in active_job_statuses]
+    active_generations = len(active_jobs)
+    active_generating_users = len({j.get("user_id") for j in active_jobs if j.get("user_id")})
+
+    tier_counts = {"starter": 0, "creator": 0, "pro": 0, "demo_pro": 0}
+    monthly_revenue_usd = 0.0
+    revenue_source = "none"
+
+    if STRIPE_SECRET_KEY:
+        try:
+            subs = stripe_lib.Subscription.list(status="all", limit=100, expand=["data.items.data.price"])
+            for sub in subs.auto_paging_iter():
+                sub_status = sub.get("status")
+                if sub_status not in ("active", "trialing", "past_due", "unpaid"):
+                    continue
+                for item in sub.get("items", {}).get("data", []):
+                    price = item.get("price", {}) or {}
+                    price_id = price.get("id", "")
+                    plan = STRIPE_PRICE_TO_PLAN.get(price_id)
+                    if plan in tier_counts:
+                        qty = int(item.get("quantity", 1) or 1)
+                        tier_counts[plan] += qty
+                        monthly_revenue_usd += ((price.get("unit_amount") or 0) / 100.0) * qty
+            revenue_source = "stripe"
+        except Exception as e:
+            log.warning(f"Admin analytics stripe read failed: {e}")
+
+    if revenue_source != "stripe" and SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
+        # Fallback: infer subscriber counts from profile plans if Stripe is unavailable.
+        try:
+            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/profiles?select=plan&limit=5000",
+                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+                )
+                if resp.status_code == 200:
+                    for row in resp.json():
+                        p = row.get("plan")
+                        if p in tier_counts:
+                            tier_counts[p] += 1
+                    revenue_source = "profiles"
+        except Exception as e:
+            log.warning(f"Admin analytics profiles fallback failed: {e}")
+
+    active_users_signins_15m = 0
+    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
+        try:
+            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+            now_utc = datetime.now(timezone.utc)
+            async with httpx.AsyncClient(timeout=20) as client:
+                users_resp = await client.get(
+                    f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+                )
+                if users_resp.status_code == 200:
+                    users_data = users_resp.json()
+                    user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+                    for u in user_list:
+                        ts = u.get("last_sign_in_at")
+                        if not ts:
+                            continue
+                        try:
+                            signed_in_at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            if (now_utc - signed_in_at).total_seconds() <= 15 * 60:
+                                active_users_signins_15m += 1
+                        except Exception:
+                            continue
+        except Exception as e:
+            log.warning(f"Admin analytics active-users fetch failed: {e}")
+
+    return {
+        "active_generations": active_generations,
+        "queue_depth": len(_queued_job_meta),
+        "queue_workers": JOB_QUEUE_WORKERS,
+        "active_users_generating": active_generating_users,
+        "active_users_signins_15m": active_users_signins_15m,
+        "active_users_estimate": max(active_generating_users, active_users_signins_15m),
+        "subscribers_by_tier": tier_counts,
+        "total_paid_subscribers": sum(tier_counts.values()),
+        "monthly_revenue_usd": round(monthly_revenue_usd, 2),
+        # We currently expose gross subscription revenue as a profit proxy.
+        "monthly_profit_usd": round(monthly_revenue_usd, 2),
+        "revenue_source": revenue_source,
+    }
+
+
 @app.get("/api/config")
 async def public_config():
     return {
@@ -3598,10 +3758,9 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
             user_plan = "pro"
 
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
-    is_priority = plan_limits.get("priority", False)
 
     resolution = req.resolution if req.resolution in RESOLUTION_CONFIGS else "720p"
-    if not is_priority and resolution == "1080p":
+    if not plan_limits.get("priority", False) and resolution == "1080p":
         resolution = "720p"
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
@@ -3612,20 +3771,13 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "topic": req.prompt,
         "resolution": resolution,
         "plan": user_plan,
+        "user_id": user.get("id") if user else None,
         "created_at": time.time(),
     }
 
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
 
-    if is_priority:
-        background_tasks.add_task(run_generation_pipeline, job_id, req.template, req.prompt, resolution, language)
-    else:
-        await _ensure_free_worker()
-        _free_queue_list.append(job_id)
-        jobs[job_id]["queue_position"] = len(_free_queue_list)
-        jobs[job_id]["queue_total"] = len(_free_queue_list)
-        _update_queue_positions()
-        await _get_free_queue().put((job_id, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language)))
+    await _enqueue_generation_job(job_id, user_plan, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language))
 
     return {"status": "accepted", "job_id": job_id}
 
@@ -4045,7 +4197,7 @@ async def clone_video(
         "created_at": time.time(),
     }
 
-    background_tasks.add_task(run_clone_pipeline, job_id, topic, video_path, res)
+    await _enqueue_generation_job(job_id, "free", run_clone_pipeline, (job_id, topic, video_path, res))
     return {"status": "accepted", "job_id": job_id}
 
 

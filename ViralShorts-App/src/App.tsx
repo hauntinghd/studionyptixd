@@ -858,7 +858,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, plan, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
-    const [tab, setTab] = useState<'create' | 'clone' | 'thumbnails' | 'demo'>('create');
+    const [tab, setTab] = useState<'create' | 'clone' | 'thumbnails' | 'demo' | 'analytics'>('create');
 
     useEffect(() => {
         if (!session) onNavigate('auth');
@@ -930,10 +930,29 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         Product Demo
                     </button>
                     )}
+                    {isAdmin && (
+                    <button onClick={() => setTab('analytics')}
+                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
+                            tab === 'analytics'
+                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                        }`}>
+                        <Eye className="w-4 h-4" />
+                        Product Analytics
+                    </button>
+                    )}
                 </div>
             </div>
 
-            {tab === 'create' ? <CreatePanel /> : tab === 'clone' ? <ClonePanel /> : tab === 'demo' ? <DemoPanel /> : <ThumbnailPanel />}
+            {tab === 'create'
+                ? <CreatePanel />
+                : tab === 'clone'
+                    ? <ClonePanel />
+                    : tab === 'demo'
+                        ? <DemoPanel />
+                        : tab === 'analytics'
+                            ? <AdminAnalyticsPanel />
+                            : <ThumbnailPanel />}
         </div>
     );
 }
@@ -973,6 +992,8 @@ function CreatePanel() {
     const [scriptLoading, setScriptLoading] = useState(false);
     const [creativeTitle, setCreativeTitle] = useState("");
     const [creativeNarration, setCreativeNarration] = useState("");
+    const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
+    const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
 
     useEffect(() => {
         (async () => {
@@ -1052,6 +1073,7 @@ function CreatePanel() {
 
     const handleCreativeStart = async () => {
         setScriptLoading(true);
+        setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
             const res = await fetch(`${API}/api/creative/session`, {
                 method: "POST",
@@ -1066,6 +1088,23 @@ function CreatePanel() {
             if (!res.ok) throw new Error("Failed to create session");
             const data = await res.json();
             setSessionId(data.session_id);
+
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                const refRes = await fetch(`${API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(errText || "Failed to upload reference style image");
+                }
+                setCreativeReferenceStatus('ready');
+            }
+
             setCreativeTitle(prompt || "Untitled Short");
             setCreativeScenes([{
                 index: 0,
@@ -1075,6 +1114,7 @@ function CreatePanel() {
             }]);
             setCreativeStep('edit');
         } catch (e: any) {
+            setCreativeReferenceStatus(creativeReferenceImage ? 'error' : 'idle');
             alert(e.message || "Failed to start creative session");
         } finally {
             setScriptLoading(false);
@@ -1173,6 +1213,7 @@ function CreatePanel() {
         setCreativeScenes([]);
         setCreativeTitle("");
         setCreativeNarration("");
+        setCreativeReferenceStatus(creativeReferenceImage ? 'ready' : 'idle');
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
@@ -1484,11 +1525,42 @@ function CreatePanel() {
                     </div>
                 </div>
 
+                {creativeMode === 'creative' && (
+                    <div>
+                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Style Reference (Optional, Recommended)</h2>
+                        <label className="block rounded-xl border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-4 cursor-pointer transition">
+                            <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                    const f = e.target.files?.[0] || null;
+                                    setCreativeReferenceImage(f);
+                                    setCreativeReferenceStatus(f ? 'ready' : 'idle');
+                                }}
+                            />
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <p className="text-sm text-white font-medium">
+                                        {creativeReferenceImage ? creativeReferenceImage.name : 'Upload reference style image'}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        Applied persistently to all Creative Control image generations in this short.
+                                    </p>
+                                </div>
+                                <span className="px-3 py-1 rounded-md bg-violet-600/20 text-violet-300 text-xs font-semibold">
+                                    {creativeReferenceImage ? 'Ready' : 'Recommended'}
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+                )}
+
                 {/* GENERATE BUTTON */}
                 <button onClick={handleGenerate} disabled={loading || scriptLoading || (creativeMode === 'auto' && !prompt)}
                     className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
                     {scriptLoading ? (
-                        <><Loader2 className="w-5 h-5 animate-spin" /> Setting up...</>
+                        <><Loader2 className="w-5 h-5 animate-spin" /> {creativeReferenceStatus === 'uploading' ? 'Uploading reference style...' : 'Setting up...'}</>
                     ) : loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
                     ) : creativeMode === 'creative' ? (
@@ -1834,6 +1906,104 @@ interface TrainingStatus {
     trained_images: number;
     version: number;
     last_train: number;
+}
+
+function AdminAnalyticsPanel() {
+    const { session } = useContext(AuthContext);
+    const [data, setData] = useState<any>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
+
+    const loadAnalytics = useCallback(async () => {
+        if (!session) return;
+        setLoading(true);
+        setError("");
+        try {
+            const res = await fetch(`${API}/api/admin/analytics`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error(`Failed to load analytics (${res.status})`);
+            setData(await res.json());
+        } catch (e: any) {
+            setError(e?.message || "Failed to load analytics");
+        } finally {
+            setLoading(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        loadAnalytics();
+        const id = setInterval(loadAnalytics, 15000);
+        return () => clearInterval(id);
+    }, [loadAnalytics]);
+
+    const subscribers = data?.subscribers_by_tier || {};
+    const formatUsd = (v: number) => `$${Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    return (
+        <div className="max-w-5xl mx-auto px-6 pb-10 space-y-6">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h2 className="text-xl font-bold text-white">Product Analytics</h2>
+                    <p className="text-sm text-gray-500">Live admin metrics for usage, queue load, and paid tiers.</p>
+                </div>
+                <button onClick={loadAnalytics} className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300 transition">
+                    Refresh
+                </button>
+            </div>
+
+            {loading && <p className="text-gray-500 text-sm">Loading analytics...</p>}
+            {error && <p className="text-red-400 text-sm">{error}</p>}
+
+            {data && (
+                <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Active Users (est.)</p>
+                            <p className="text-2xl font-bold text-white mt-1">{data.active_users_estimate || 0}</p>
+                            <p className="text-xs text-gray-500 mt-1">Sign-ins (15m): {data.active_users_signins_15m || 0}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Active Generations</p>
+                            <p className="text-2xl font-bold text-white mt-1">{data.active_generations || 0}</p>
+                            <p className="text-xs text-gray-500 mt-1">Queue depth: {data.queue_depth || 0}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Monthly Profit (proxy)</p>
+                            <p className="text-2xl font-bold text-emerald-400 mt-1">{formatUsd(data.monthly_profit_usd || 0)}</p>
+                            <p className="text-xs text-gray-500 mt-1">Source: {data.revenue_source || 'none'}</p>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">Paid Tiers</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Starter</p>
+                                <p className="text-lg font-bold text-white">{subscribers.starter || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Creator</p>
+                                <p className="text-lg font-bold text-white">{subscribers.creator || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Pro</p>
+                                <p className="text-lg font-bold text-white">{subscribers.pro || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Demo Pro</p>
+                                <p className="text-lg font-bold text-white">{subscribers.demo_pro || 0}</p>
+                            </div>
+                        </div>
+                        <p className="text-sm text-gray-400">
+                            Total paid subscribers: <span className="text-violet-300 font-semibold">{data.total_paid_subscribers || 0}</span>
+                            {" "}• Monthly revenue: <span className="text-emerald-300 font-semibold">{formatUsd(data.monthly_revenue_usd || 0)}</span>
+                        </p>
+                    </div>
+                </>
+            )}
+        </div>
+    );
 }
 
 function DemoPanel() {
