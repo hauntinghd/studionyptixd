@@ -43,6 +43,8 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
+XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
+XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 # Keep this off by default to avoid external proxy/account lock issues.
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
 
@@ -1776,7 +1778,14 @@ async def _generate_image_xai_direct(prompt: str, output_path: str) -> dict:
         raise RuntimeError("XAI_API_KEY not configured")
 
     headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": 1, "response_format": "url"}
+    payload = {
+        "model": XAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": 1,
+        "response_format": "url",
+        "aspect_ratio": XAI_IMAGE_ASPECT_RATIO,
+        "resolution": XAI_IMAGE_RESOLUTION,
+    }
 
     for attempt in range(3):
         try:
@@ -2206,11 +2215,11 @@ async def _download_url_to_file(url: str, output_path: str):
             f.write(resp.content)
 
 
-async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None) -> dict:
+async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
     """Animate a scene image. Tries Kling first (if FAL_AI_KEY set), falls back to Wan 2.2.
     Returns {"type": "kling_clip"|"wan_clip", "path": str} or {"type": "static"}.
     """
-    if FAL_AI_KEY:
+    if FAL_AI_KEY and not prefer_wan:
         try:
             clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
             kling_dur = "5" if duration_sec <= 6 else "10"
@@ -2228,6 +2237,15 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
             return {"type": "wan_clip", "path": wan_clip}
     except Exception as e:
         log.warning(f"Wan 2.2 animation also failed for scene {scene_idx}: {e}")
+
+    if FAL_AI_KEY and prefer_wan:
+        try:
+            clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            kling_dur = "5" if duration_sec <= 6 else "10"
+            await animate_image_kling(image_path, prompt, clip_path, duration=kling_dur, aspect_ratio="9:16", image_cdn_url=image_cdn_url)
+            return {"type": "kling_clip", "path": clip_path}
+        except Exception as e:
+            log.warning(f"Kling animation fallback failed for scene {scene_idx}: {e}")
 
     return {"type": "static"}
 
@@ -2804,6 +2822,8 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
 
         wan_ready = await check_wan22_available()
         use_kling = bool(FAL_AI_KEY)
+        if template == "skeleton":
+            use_kling = False
         use_video = use_kling or wan_ready
         if template == "reddit":
             use_video = False
@@ -2861,6 +2881,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     str(TEMP_DIR), i, gen_ts,
                     duration_sec=scene.get("duration_sec", 5),
                     image_cdn_url=cdn_url,
+                    prefer_wan=(template == "skeleton"),
                 )
                 if anim_result["type"] in ("kling_clip", "wan_clip"):
                     asset["kling_clip"] = anim_result["path"]
@@ -3192,6 +3213,8 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
 
         wan_ready = await check_wan22_available()
         use_kling = bool(FAL_AI_KEY)
+        if template == "skeleton":
+            use_kling = False
         use_video = use_kling or wan_ready
         gen_ts = str(int(time.time() * 1000))
 
@@ -3230,6 +3253,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                 anim_result = await animate_scene(
                     img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
                     duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
+                    prefer_wan=(template == "skeleton"),
                 )
                 if anim_result["type"] in ("kling_clip", "wan_clip"):
                     asset["kling_clip"] = anim_result["path"]
@@ -3693,6 +3717,8 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             raise ValueError("Clone script generation returned no scenes")
 
         use_kling = bool(FAL_AI_KEY)
+        if detected_template == "skeleton":
+            use_kling = False
         use_video = use_kling or await check_wan22_available()
         if detected_template == "reddit":
             use_video = False
@@ -3750,6 +3776,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                     str(TEMP_DIR), i, gen_ts,
                     duration_sec=scene.get("duration_sec", 5),
                     image_cdn_url=cdn_url,
+                    prefer_wan=(detected_template == "skeleton"),
                 )
                 if anim_result["type"] in ("kling_clip", "wan_clip"):
                     asset["kling_clip"] = anim_result["path"]
