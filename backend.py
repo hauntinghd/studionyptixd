@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import random
 import asyncio
@@ -299,7 +300,7 @@ Output valid JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "1-2 sentence narration with real facts",
-      "visual_description": "Photorealistic 3D render: single glossy ivory-white anatomical human skeleton with clean polished bones, subtle metallic reflections, and a transparent/translucent body silhouette outline around the bones. The skeleton has highly detailed realistic human-looking eyeballs with iris color, natural wet shine, and lifelike reflections in the orbital sockets. Wearing [EXACT detailed outfit with colors and logos] -- all clothing must be fully OPAQUE solid fabric with visible texture, stitching, folds, and wrinkles, absolutely NO transparency or see-through material. [EXACT pose with hand/arm positions], [holding SPECIFIC prop], standing on solid clean light teal-blue studio backdrop. [Camera angle]. Professional studio photography lighting with strong rim light on bone edges. [Motion cue: ultra-smooth human-like natural movement with realistic weight and momentum]. 4K ultra HD, Unreal Engine 5, octane render, masterpiece.",
+      "visual_description": "A skeleton character wearing [EXACT DETAILED OUTFIT: e.g. navy blue F1 racing suit with Red Bull logos, white racing boots, fireproof gloves] -- clothing is fully opaque solid fabric with realistic stitching and folds. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed, leaning on a race car] and holding [SPECIFIC PROP: e.g. a racing helmet in right hand]. [Camera angle: e.g. medium shot, slight low angle]. Background: solid clean teal-blue studio. [Motion cue: e.g. skeleton gestures with right hand, head turns to face camera].",
       "text_overlay": "ONE_WORD"
     }
   ],
@@ -307,7 +308,7 @@ Output valid JSON:
   "tags": ["tag1", "tag2"]
 }
 
-Generate exactly 10 scenes. EVERY visual_description must be 2-3 sentences minimum describing the EXACT outfit, pose, props, camera angle, and motion.""",
+Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with the outfit description FIRST (e.g. "A skeleton character wearing a full navy surgeon's scrubs with stethoscope..."). The outfit is the MOST IMPORTANT part -- it defines WHO the skeleton represents. Never write a bare skeleton without clothing. 2-3 sentences minimum per visual_description covering outfit, pose, props, camera angle, and motion.""",
 
     "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
 
@@ -1240,17 +1241,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ─── ComfyUI Image Generation with Upscaling ─────────────────────────────────
 
-SKELETON_IMAGE_PROMPT_PREFIX = (
-    "Photorealistic 3D render of a glossy white anatomical human skeleton with clean polished bone surfaces "
-    "and subtle metallic reflections, visible transparent/translucent body silhouette outline around the bones. "
-    "The skeleton has highly detailed realistic human-looking eyeballs with iris color, natural wet shine, "
-    "subtle veining, and lifelike reflections sitting perfectly in the orbital sockets. "
-    "All clothing and accessories must be fully opaque, solid fabric with visible texture, stitching, folds, "
-    "and wrinkles -- absolutely NO transparency, NO see-through material, NO x-ray effect on clothes. "
-    "Clothes fit the skeleton naturally as if worn by a real person with proper draping and weight. "
-    "Standing on a solid clean light teal-blue studio backdrop. Professional studio photography lighting with "
-    "strong rim light on bone edges. 4K ultra HD, Unreal Engine 5 quality, octane render, masterpiece. "
-    "The skeleton must look exactly like a premium medical anatomy model with ivory-white chrome bones. "
+SKELETON_IMAGE_PROMPT_PREFIX = ""
+
+SKELETON_IMAGE_SUFFIX = (
+    "The character is a glossy ivory-white anatomical human skeleton (premium medical anatomy model quality) "
+    "with polished bone surfaces, subtle metallic reflections, and highly detailed realistic human-looking "
+    "eyeballs with colored iris, natural wet shine, and lifelike reflections in the orbital sockets. "
+    "CRITICAL: the skeleton MUST be wearing the outfit described above -- all clothing is fully OPAQUE solid "
+    "fabric with visible texture, stitching, folds, and wrinkles. Absolutely NO naked skeleton, NO bare bones "
+    "without clothes. Clothes drape naturally with realistic weight and fabric physics. "
+    "Standing on solid clean light teal-blue (#5AC8B8) studio backdrop. Professional studio photography "
+    "lighting with rim light on bone edges. 4K ultra HD, Unreal Engine 5, octane render, masterpiece."
 )
 
 TEMPLATE_KLING_MOTION = {
@@ -1324,13 +1325,15 @@ async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: f
 
 
 SKELETON_NEGATIVE_PROMPT = (
+    "bare skeleton without clothes, naked skeleton, unclothed skeleton, skeleton with no outfit, "
+    "anatomy model only, medical skeleton display, skeleton without accessories, "
     "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
     "skin, flesh, muscles, human face, realistic person, "
     "outdoor scene, room, environment, landscape, nature, buildings, "
     "dark background, black background, white background, "
     "blurry, low quality, watermark, text artifacts, deformed, "
     "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
-    "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, naked skeleton, "
+    "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, "
     "sheer material, translucent clothing, ghostly clothes, glass clothes, "
     "jpeg artifacts, pixelated, ugly, low resolution, "
     "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
@@ -2801,13 +2804,24 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         total_steps = len(scenes) * (2 if use_video else 1)
         gen_ts = str(int(time.time() * 1000))
 
+        skeleton_anchor = ""
+        if template == "skeleton" and scenes:
+            s1_desc = scenes[0].get("visual_description", "")
+            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
+            if outfit_match:
+                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
             step_base = i * (2 if use_video else 1)
             jobs[job_id]["progress"] = 10 + int((step_base / total_steps) * 55)
             jobs[job_id]["status"] = "generating_images"
 
-            full_prompt = prompt_prefix + scene.get("visual_description", "")
+            if template == "skeleton":
+                vis_desc = scene.get("visual_description", "")
+                full_prompt = skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+            else:
+                full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
             img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
             cdn_url = img_result.get("cdn_url")
@@ -3030,8 +3044,11 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     full_prompt = req.prompt
 
+    if template == "skeleton":
+        full_prompt = full_prompt + " " + SKELETON_IMAGE_SUFFIX
+
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
-    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template="")
+    img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=template)
 
     gen_id = img_result.get("generation_id", "")
 
@@ -3664,13 +3681,24 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         total_steps = len(scenes) * (2 if use_video else 1)
         gen_ts = str(int(time.time() * 1000))
 
+        clone_skeleton_anchor = ""
+        if detected_template == "skeleton" and scenes:
+            s1_desc = scenes[0].get("visual_description", "")
+            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
+            if outfit_match:
+                clone_skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
             step_base = i * (2 if use_video else 1)
             jobs[job_id]["progress"] = 20 + int((step_base / total_steps) * 50)
             jobs[job_id]["status"] = "generating_images"
 
-            full_prompt = prompt_prefix + scene.get("visual_description", "")
+            if detected_template == "skeleton":
+                vis_desc = scene.get("visual_description", "")
+                full_prompt = clone_skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+            else:
+                full_prompt = prompt_prefix + scene.get("visual_description", "")
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
             img_result = await generate_scene_image(full_prompt, img_path, resolution=resolution, negative_prompt=neg_prompt, template=detected_template)
             cdn_url = img_result.get("cdn_url")
