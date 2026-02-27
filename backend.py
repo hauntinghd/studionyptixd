@@ -240,15 +240,14 @@ TEMPLATE_SYSTEM_PROMPTS = {
 CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Write visual descriptions as if directing a cinematographer and VFX artist -- describe exactly what the camera sees, the character's pose, outfit details, what they're holding, and the motion/action happening.
 
 THE SKELETON CHARACTER RULES (STRICT):
-- Photorealistic anatomical human skeleton rendered in Unreal Engine 5 / octane render quality, 4K ultra HD
-- Glossy ivory/chrome white bones with subtle metallic reflections, clean and polished, highly detailed bone texture
-- EYES: The skeleton MUST have highly detailed, realistic human-looking EYEBALLS sitting in the orbital sockets. Each eyeball has a colored iris, natural wet shine, subtle veining, and lifelike light reflections. Eyes should look alive and expressive. NEVER empty eye sockets or hollow dark holes.
-- CLOTHING (CRITICAL -- ZERO TRANSPARENCY): ALWAYS wearing a COMPLETE head-to-toe outfit specific to what it represents:
-  * If it's an F1 driver: full F1 racing suit with team colors, gloves, boots, sponsor patches
-  * If it's a doctor: white lab coat, stethoscope around neck, scrubs underneath
-  * ALL clothing and accessories MUST be fully OPAQUE, SOLID fabric with visible realistic texture, stitching, seams, folds, and wrinkles
-  * Clothes fit the skeleton naturally as if worn by a real person with proper draping and fabric weight
-  * ABSOLUTELY NO transparent, see-through, x-ray, ghostly, or sheer clothing. NEVER show bones through clothes.
+- Think of it as a REAL PERSON wearing a full outfit, but with a SKULL for a head and SKELETON HANDS. The body under the clothes is NOT visible -- clothes cover everything from neck to feet.
+- The skull is glossy ivory-white with detailed bone texture. Realistic human eyeballs in the sockets with colored iris and wet shine.
+- CLOTHING (CRITICAL -- THIS IS THE MOST IMPORTANT RULE): The skeleton MUST be wearing a COMPLETE outfit that COVERS THE ENTIRE BODY from neck to feet:
+  * If it's a pilot: full navy pilot uniform with epaulettes, tie, pants, shoes -- NO bare ribcage showing
+  * If it's a doctor: full white lab coat BUTTONED UP over scrubs, stethoscope, dress pants, shoes -- NO bare spine showing
+  * If it's an F1 driver: full racing suit zipped to the collar, gloves, boots -- NO bare bones showing
+  * ONLY the skull face and bony hands should be visible. The rest of the body is HIDDEN by opaque clothes.
+  * Clothes fit like on a real person with proper draping, wrinkles, and fabric weight.
 - ONE skeleton per scene unless it's a VS/comparison shot (max 2)
 - Always FULL BODY visible from head to toe, centered in frame
 - EVERY scene the skeleton must be DOING something with ultra-smooth human-like natural motion -- fluid arm gestures, natural head turns, realistic weight and momentum. Zach D Films quality movement. NEVER stiff, robotic, or jerky motion.
@@ -300,7 +299,7 @@ Output valid JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "1-2 sentence narration with real facts",
-      "visual_description": "A skeleton character wearing [EXACT DETAILED OUTFIT: e.g. navy blue F1 racing suit with Red Bull logos, white racing boots, fireproof gloves] -- clothing is fully opaque solid fabric with realistic stitching and folds. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed, leaning on a race car] and holding [SPECIFIC PROP: e.g. a racing helmet in right hand]. [Camera angle: e.g. medium shot, slight low angle]. Background: solid clean teal-blue studio. [Motion cue: e.g. skeleton gestures with right hand, head turns to face camera].",
+      "visual_description": "A skeleton character (skull head, skeleton hands, but body fully covered by clothes) wearing [EXACT DETAILED OUTFIT that covers the ENTIRE body: e.g. a navy blue pilot uniform with gold epaulettes, navy tie, pressed navy pants, black dress shoes -- no bare bones visible except skull and hands]. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed] and holding [SPECIFIC PROP: e.g. a pilot helmet in right hand]. [Camera angle: e.g. medium shot, slight low angle]. Background: solid clean teal-blue studio. [Motion cue: e.g. skeleton gestures with right hand].",
       "text_overlay": "ONE_WORD"
     }
   ],
@@ -1244,14 +1243,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 SKELETON_IMAGE_PROMPT_PREFIX = ""
 
 SKELETON_IMAGE_SUFFIX = (
-    "The character is a glossy ivory-white anatomical human skeleton (premium medical anatomy model quality) "
-    "with polished bone surfaces, subtle metallic reflections, and highly detailed realistic human-looking "
-    "eyeballs with colored iris, natural wet shine, and lifelike reflections in the orbital sockets. "
-    "CRITICAL: the skeleton MUST be wearing the outfit described above -- all clothing is fully OPAQUE solid "
-    "fabric with visible texture, stitching, folds, and wrinkles. Absolutely NO naked skeleton, NO bare bones "
-    "without clothes. Clothes drape naturally with realistic weight and fabric physics. "
-    "Standing on solid clean light teal-blue (#5AC8B8) studio backdrop. Professional studio photography "
-    "lighting with rim light on bone edges. 4K ultra HD, Unreal Engine 5, octane render, masterpiece."
+    "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
+    "but the entire body from neck to feet is FULLY COVERED by the outfit described above. "
+    "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
+    "It looks like a real person in the outfit but with a clean white skull instead of a face. "
+    "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull. "
+    "Solid clean teal-blue (#5AC8B8) studio backdrop. Studio photography lighting. "
+    "4K, Unreal Engine 5, photorealistic 3D render."
 )
 
 TEMPLATE_KLING_MOTION = {
