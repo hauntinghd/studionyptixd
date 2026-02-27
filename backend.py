@@ -60,6 +60,11 @@ RUNPOD_IMAGE_FEEDBACK_SSH = os.getenv(
     "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p 22092 root@69.30.85.41",
 )
 RUNPOD_IMAGE_FEEDBACK_BASE_DIR = os.getenv("RUNPOD_IMAGE_FEEDBACK_BASE_DIR", "/workspace/image_training")
+RUNPOD_COMPOSITOR_ENABLED = os.getenv("RUNPOD_COMPOSITOR_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+RUNPOD_COMPOSITOR_FALLBACK_LOCAL = os.getenv("RUNPOD_COMPOSITOR_FALLBACK_LOCAL", "1").lower() in ("1", "true", "yes", "on")
+RUNPOD_COMPOSITOR_HOST = os.getenv("RUNPOD_COMPOSITOR_HOST", "root@69.30.85.41")
+RUNPOD_COMPOSITOR_SSH_PORT = os.getenv("RUNPOD_COMPOSITOR_SSH_PORT", "22118")
+RUNPOD_COMPOSITOR_BASE_DIR = os.getenv("RUNPOD_COMPOSITOR_BASE_DIR", "/workspace/nyptid_compositor")
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 
@@ -2878,6 +2883,164 @@ async def _merge_sfx_track(sfx_paths: list[str], scenes: list, output_path: str)
     return ""
 
 
+async def _composite_video_on_runpod(scene_clips: list[Path], audio_path: str, output_path: str, subtitle_path: str = None, sfx_track: str = "") -> str:
+    """Run final concat + merge on RunPod to reduce Render RAM pressure."""
+    run_id = f"cmp_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+    remote_dir = f"{RUNPOD_COMPOSITOR_BASE_DIR.rstrip('/')}/{run_id}"
+    remote_merged = f"{remote_dir}/merged.mp4"
+    remote_output = f"{remote_dir}/final.mp4"
+
+    ok, err = await asyncio.to_thread(
+        _run_remote_cmd_blocking,
+        RUNPOD_COMPOSITOR_HOST,
+        RUNPOD_COMPOSITOR_SSH_PORT,
+        f"mkdir -p '{remote_dir}'",
+    )
+    if not ok:
+        raise RuntimeError(f"RunPod mkdir failed: {err}")
+
+    local_concat = TEMP_DIR / f"remote_concat_{run_id}.txt"
+    local_concat.write_text("", encoding="utf-8")
+    uploaded_remote_files = []
+    try:
+        for i, clip in enumerate(scene_clips):
+            remote_clip = f"{remote_dir}/scene_{i}.mp4"
+            up_ok, up_err = await asyncio.to_thread(
+                _upload_file_to_runpod_blocking,
+                RUNPOD_COMPOSITOR_HOST,
+                RUNPOD_COMPOSITOR_SSH_PORT,
+                str(clip),
+                remote_clip,
+            )
+            if not up_ok:
+                raise RuntimeError(f"RunPod clip upload failed ({clip.name}): {up_err}")
+            uploaded_remote_files.append(remote_clip)
+
+        remote_audio = f"{remote_dir}/voice.mp3"
+        up_ok, up_err = await asyncio.to_thread(
+            _upload_file_to_runpod_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            audio_path,
+            remote_audio,
+        )
+        if not up_ok:
+            raise RuntimeError(f"RunPod audio upload failed: {up_err}")
+
+        remote_sub = ""
+        if subtitle_path and Path(subtitle_path).exists():
+            remote_sub = f"{remote_dir}/captions.ass"
+            up_ok, up_err = await asyncio.to_thread(
+                _upload_file_to_runpod_blocking,
+                RUNPOD_COMPOSITOR_HOST,
+                RUNPOD_COMPOSITOR_SSH_PORT,
+                subtitle_path,
+                remote_sub,
+            )
+            if not up_ok:
+                raise RuntimeError(f"RunPod subtitle upload failed: {up_err}")
+
+        remote_sfx = ""
+        if sfx_track and Path(sfx_track).exists():
+            remote_sfx = f"{remote_dir}/sfx.mp3"
+            up_ok, up_err = await asyncio.to_thread(
+                _upload_file_to_runpod_blocking,
+                RUNPOD_COMPOSITOR_HOST,
+                RUNPOD_COMPOSITOR_SSH_PORT,
+                sfx_track,
+                remote_sfx,
+            )
+            if not up_ok:
+                raise RuntimeError(f"RunPod sfx upload failed: {up_err}")
+
+        concat_lines = "".join([f"file '{p}'\n" for p in uploaded_remote_files])
+        local_concat.write_text(concat_lines, encoding="utf-8")
+        remote_concat = f"{remote_dir}/concat.txt"
+        up_ok, up_err = await asyncio.to_thread(
+            _upload_file_to_runpod_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            str(local_concat),
+            remote_concat,
+        )
+        if not up_ok:
+            raise RuntimeError(f"RunPod concat upload failed: {up_err}")
+
+        concat_cmd = (
+            f"ffmpeg -y -f concat -safe 0 -i '{remote_concat}' "
+            f"-c:v libx264 -preset fast -pix_fmt yuv420p '{remote_merged}'"
+        )
+        ok, err = await asyncio.to_thread(
+            _run_remote_cmd_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            concat_cmd,
+        )
+        if not ok:
+            raise RuntimeError(f"RunPod concat failed: {err}")
+
+        if remote_sub and remote_sfx:
+            merge_cmd = (
+                f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' -i '{remote_sfx}' "
+                f"-vf \"ass={remote_sub}\" "
+                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];"
+                f"[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]\" "
+                f"-map 0:v -map \"[aout]\" -c:v libx264 -preset fast -pix_fmt yuv420p "
+                f"-c:a aac -b:a 192k -shortest '{remote_output}'"
+            )
+        elif remote_sub:
+            merge_cmd = (
+                f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' "
+                f"-vf \"ass={remote_sub}\" -af apad=pad_dur=0.8 "
+                f"-c:v libx264 -preset fast -pix_fmt yuv420p -c:a aac -b:a 192k -shortest '{remote_output}'"
+            )
+        elif remote_sfx:
+            merge_cmd = (
+                f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' -i '{remote_sfx}' "
+                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];"
+                f"[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]\" "
+                f"-map 0:v -map \"[aout]\" -c:v libx264 -preset fast -pix_fmt yuv420p "
+                f"-c:a aac -b:a 192k -shortest '{remote_output}'"
+            )
+        else:
+            merge_cmd = (
+                f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' "
+                f"-af apad=pad_dur=0.8 -c:v libx264 -preset fast -pix_fmt yuv420p "
+                f"-c:a aac -b:a 192k -shortest '{remote_output}'"
+            )
+
+        ok, err = await asyncio.to_thread(
+            _run_remote_cmd_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            merge_cmd,
+        )
+        if not ok:
+            raise RuntimeError(f"RunPod final merge failed: {err}")
+
+        dl_ok, dl_err = await asyncio.to_thread(
+            _download_file_from_runpod_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            remote_output,
+            output_path,
+        )
+        if not dl_ok:
+            raise RuntimeError(f"RunPod output download failed: {dl_err}")
+
+        if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
+            raise RuntimeError("RunPod output file missing after download")
+        return output_path
+    finally:
+        local_concat.unlink(missing_ok=True)
+        await asyncio.to_thread(
+            _run_remote_cmd_blocking,
+            RUNPOD_COMPOSITOR_HOST,
+            RUNPOD_COMPOSITOR_SSH_PORT,
+            f"rm -rf '{remote_dir}'",
+        )
+
+
 async def composite_video(
     scenes: list,
     scene_assets: list,
@@ -2943,6 +3106,31 @@ async def composite_video(
         raise RuntimeError("No scene clips were created -- nothing to composite")
     log.info(f"Compositing {len(existing_clips)} scene clips into video")
 
+    sfx_track = ""
+    if sfx_paths and any(sfx_paths):
+        sfx_track_path = str(TEMP_DIR / ("sfx_full_" + job_ts + ".mp3"))
+        sfx_track = await _merge_sfx_track(sfx_paths, scenes, sfx_track_path)
+
+    if RUNPOD_COMPOSITOR_ENABLED:
+        try:
+            await _composite_video_on_runpod(
+                existing_clips,
+                audio_path,
+                output_path,
+                subtitle_path=subtitle_path,
+                sfx_track=sfx_track,
+            )
+            for clip in scene_clips:
+                clip.unlink(missing_ok=True)
+            if sfx_track:
+                Path(sfx_track).unlink(missing_ok=True)
+            log.info("Final compositing offloaded to RunPod")
+            return str(output_path)
+        except Exception as e:
+            if not RUNPOD_COMPOSITOR_FALLBACK_LOCAL:
+                raise
+            log.warning(f"RunPod compositing failed, falling back local: {e}")
+
     with open(concat_file, "w") as f:
         for clip in existing_clips:
             f.write("file '" + str(clip.resolve()) + "'\n")
@@ -2965,11 +3153,6 @@ async def composite_video(
 
     if not merged_video.exists() or merged_video.stat().st_size == 0:
         raise RuntimeError("FFmpeg concat produced no output file")
-
-    sfx_track = ""
-    if sfx_paths and any(sfx_paths):
-        sfx_track_path = str(TEMP_DIR / ("sfx_full_" + job_ts + ".mp3"))
-        sfx_track = await _merge_sfx_track(sfx_paths, scenes, sfx_track_path)
 
     has_sfx = sfx_track and Path(sfx_track).exists()
 
@@ -4906,6 +5089,148 @@ def _sync_file_to_runpod_blocking(local_path: str, remote_path: str) -> tuple[bo
     if proc.returncode == 0:
         return True, ""
     return False, (proc.stderr or proc.stdout or "scp failed")[:300]
+
+
+def _runpod_target_user_host(host_value: str) -> tuple[str, str]:
+    if "@" in host_value:
+        user, host = host_value.split("@", 1)
+        return user, host
+    return "root", host_value
+
+
+def _run_remote_cmd_blocking(host_value: str, port_value: str, remote_cmd: str) -> tuple[bool, str]:
+    user, host = _runpod_target_user_host(host_value)
+    if paramiko is not None:
+        client = None
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                port=int(port_value),
+                username=user,
+                timeout=30,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            _, stdout, stderr = client.exec_command(remote_cmd, timeout=1800)
+            out = stdout.read().decode(errors="ignore")
+            err = stderr.read().decode(errors="ignore")
+            code = stdout.channel.recv_exit_status()
+            if code == 0:
+                return True, out
+            return False, (err or out or f"remote exit {code}")[:500]
+        except Exception as e:
+            return False, str(e)[:500]
+        finally:
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+    ssh_cmd = (
+        f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p {port_value} "
+        f"{host_value} \"{remote_cmd}\""
+    )
+    proc = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, proc.stdout[:500]
+    return False, (proc.stderr or proc.stdout or "ssh failed")[:500]
+
+
+def _download_file_from_runpod_blocking(host_value: str, port_value: str, remote_path: str, local_path: str) -> tuple[bool, str]:
+    local_parent = Path(local_path).parent
+    local_parent.mkdir(parents=True, exist_ok=True)
+    user, host = _runpod_target_user_host(host_value)
+
+    if paramiko is not None:
+        client = None
+        sftp = None
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                port=int(port_value),
+                username=user,
+                timeout=30,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            sftp = client.open_sftp()
+            sftp.get(remote_path, local_path)
+            return True, ""
+        except Exception as e:
+            return False, str(e)[:500]
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+    scp_cmd = (
+        f"scp -o StrictHostKeyChecking=no -P {port_value} "
+        f"{host_value}:{remote_path} \"{local_path}\""
+    )
+    proc = subprocess.run(scp_cmd, shell=True, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, ""
+    return False, (proc.stderr or proc.stdout or "scp download failed")[:500]
+
+
+def _upload_file_to_runpod_blocking(host_value: str, port_value: str, local_path: str, remote_path: str) -> tuple[bool, str]:
+    if not Path(local_path).exists():
+        return False, "local file missing"
+    user, host = _runpod_target_user_host(host_value)
+
+    if paramiko is not None:
+        client = None
+        sftp = None
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                port=int(port_value),
+                username=user,
+                timeout=30,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            sftp = client.open_sftp()
+            remote_parent = str(Path(remote_path).parent).replace("\\", "/")
+            _sftp_mkdir_p(sftp, remote_parent)
+            sftp.put(local_path, remote_path)
+            return True, ""
+        except Exception as e:
+            return False, str(e)[:500]
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+    scp_cmd = (
+        f"scp -o StrictHostKeyChecking=no -P {port_value} "
+        f"\"{local_path}\" {host_value}:{remote_path}"
+    )
+    proc = subprocess.run(scp_cmd, shell=True, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, ""
+    return False, (proc.stderr or proc.stdout or "scp upload failed")[:500]
 
 
 async def sync_thumbnail_to_runpod(local_path: str) -> tuple[bool, str]:
