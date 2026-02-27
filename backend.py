@@ -236,9 +236,13 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
 async def get_current_user_from_request(request: Request) -> Optional[dict]:
     """Extract Bearer token from a raw Request and authenticate."""
     auth_header = (request.headers.get("authorization") or "") if request else ""
-    if not auth_header.startswith("Bearer "):
+    token = ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    elif request:
+        token = request.query_params.get("access_token", "") or request.query_params.get("token", "")
+    if not token:
         return None
-    token = auth_header[7:]
 
     class _FakeCred:
         credentials = ""
@@ -4978,7 +4982,10 @@ async def thumbnail_feedback(req: ThumbnailFeedbackRequest, user: dict = Depends
 
 
 @app.get("/api/thumbnails/library/{filename}")
-async def serve_thumbnail(filename: str, user: dict = Depends(require_auth)):
+async def serve_thumbnail(filename: str, request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Authentication required")
     if not _is_admin_user(user):
         raise HTTPException(403, "Admin only")
     path = THUMBNAIL_UPLOAD_DIR / filename
@@ -4999,7 +5006,10 @@ async def delete_thumbnail(filename: str, user: dict = Depends(require_auth)):
 
 
 @app.get("/api/thumbnails/generated/{filename}")
-async def serve_generated_thumbnail(filename: str, user: dict = Depends(require_auth)):
+async def serve_generated_thumbnail(filename: str, request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Authentication required")
     if not _is_admin_user(user):
         raise HTTPException(403, "Admin only")
     path = THUMBNAIL_OUTPUT_DIR / filename

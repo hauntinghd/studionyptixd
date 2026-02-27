@@ -2938,6 +2938,11 @@ function ThumbnailPanel() {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
     const [thumbFeedbackSent, setThumbFeedbackSent] = useState<Record<string, boolean>>({});
+    const withThumbToken = useCallback((path: string) => {
+        if (!session?.access_token) return `${API}${path}`;
+        const sep = path.includes('?') ? '&' : '?';
+        return `${API}${path}${sep}access_token=${encodeURIComponent(session.access_token)}`;
+    }, [session]);
 
     const fetchLibrary = useCallback(async () => {
         try {
@@ -3142,11 +3147,11 @@ function ThumbnailPanel() {
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                             {library.map(f => (
                                 <div key={f.id} className="group relative rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.02] hover:border-violet-500/30 transition-all">
-                                    <img src={`${API}${f.url}`} alt={f.name}
+                                    <img src={withThumbToken(f.url)} alt={f.name}
                                         className="w-full aspect-video object-cover cursor-pointer"
-                                        onClick={() => setPreviewUrl(`${API}${f.url}`)} />
+                                        onClick={() => setPreviewUrl(withThumbToken(f.url))} />
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
-                                        <button onClick={() => setPreviewUrl(`${API}${f.url}`)}
+                                        <button onClick={() => setPreviewUrl(withThumbToken(f.url))}
                                             className="p-2 bg-white/10 rounded-lg mr-2 hover:bg-white/20 transition">
                                             <Eye className="w-4 h-4" />
                                         </button>
@@ -3216,7 +3221,7 @@ function ThumbnailPanel() {
                                                 className={`rounded-lg overflow-hidden border-2 transition-all ${
                                                     selectedStyleRef === f.id ? 'border-violet-500 ring-2 ring-violet-500/30' : 'border-white/[0.06] hover:border-white/20'
                                                 }`}>
-                                                <img src={`${API}${f.url}`} alt={f.name} className="w-full aspect-video object-cover" />
+                                                <img src={withThumbToken(f.url)} alt={f.name} className="w-full aspect-video object-cover" />
                                             </button>
                                         ))}
                                     </div>
@@ -3313,26 +3318,23 @@ function ThumbnailPanel() {
                                 </div>
                             ) : jobStatus.status === 'complete' ? (
                                 <div>
-                                    <img src={`${API}${jobStatus.output_url}`} alt="Generated Thumbnail"
+                                    <img src={withThumbToken(jobStatus.output_url)} alt="Generated Thumbnail"
                                         className="w-full cursor-pointer"
-                                        onClick={() => setPreviewUrl(`${API}${jobStatus.output_url}`)} />
+                                        onClick={() => setPreviewUrl(withThumbToken(jobStatus.output_url))} />
                                     <div className="p-6 space-y-3">
                                         <div className="flex items-center gap-2">
                                             <CheckCircle2 className="w-5 h-5 text-emerald-400" />
                                             <span className="text-emerald-400 font-bold">Thumbnail Ready</span>
                                         </div>
                                         <div className="flex gap-3">
-                                            <a href={`${API}${jobStatus.output_url}`} download
+                                            <a href={withThumbToken(jobStatus.output_url)} download
                                                 onClick={() => { if (jobStatus.generation_id) void sendThumbFeedback(jobStatus.generation_id, true); }}
                                                 className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                                 <Download className="w-5 h-5" /> Download PNG
                                             </a>
-                                            <button onClick={() => {
-                                                if (jobStatus.generation_id) void sendThumbFeedback(jobStatus.generation_id, false);
-                                                setJobStatus(null); setJobId(null);
-                                            }}
+                                            <button onClick={() => { void handleGenerate(); }}
                                                 className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
-                                                Generate Another
+                                                Regenerate Thumbnail
                                             </button>
                                         </div>
                                     </div>
