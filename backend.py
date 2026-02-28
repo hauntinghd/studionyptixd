@@ -18,10 +18,93 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
+from backend_settings import (
+    XAI_API_KEY,
+    ELEVENLABS_API_KEY,
+    COMFYUI_URL,
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    SUPABASE_JWT_SECRET,
+    STRIPE_SECRET_KEY,
+    STRIPE_WEBHOOK_SECRET,
+    SITE_URL,
+    FAL_AI_KEY,
+    XAI_IMAGE_MODEL,
+    XAI_VIDEO_MODEL,
+    RUNWAY_API_KEY,
+    RUNWAY_VIDEO_MODEL,
+    RUNWAY_API_VERSION,
+    XAI_IMAGE_ASPECT_RATIO,
+    XAI_IMAGE_RESOLUTION,
+    USE_XAI_VIDEO,
+    SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
+    USE_FAL_GROK_IMAGE,
+    RUNPOD_IMAGE_FEEDBACK_ENABLED,
+    RUNPOD_IMAGE_FEEDBACK_SSH,
+    RUNPOD_IMAGE_FEEDBACK_BASE_DIR,
+    RUNPOD_COMPOSITOR_ENABLED,
+    RUNPOD_COMPOSITOR_FALLBACK_LOCAL,
+    RUNPOD_COMPOSITOR_HOST,
+    RUNPOD_COMPOSITOR_SSH_PORT,
+    RUNPOD_COMPOSITOR_BASE_DIR,
+    STRIPE_PRICE_TO_PLAN,
+    DEMO_PRO_PRICE_ID,
+    SUPABASE_SERVICE_KEY,
+    OUTPUT_DIR,
+    TEMP_DIR,
+    TRAINING_DATA_DIR,
+)
+from backend_catalog import (
+    PLAN_LIMITS,
+    RESOLUTION_CONFIGS,
+    ADMIN_EMAILS,
+    HARDCODED_PLANS,
+    PUBLIC_TEMPLATE_ALLOWLIST,
+    SUPPORTED_LANGUAGES,
+    TEMPLATE_VOICE_SETTINGS,
+    TEMPLATE_SFX_STYLES,
+)
+from backend_image_prompts import (
+    SKELETON_IMAGE_STYLE_PREFIX,
+    SKELETON_MASTER_CONSISTENCY_PROMPT,
+    SKELETON_IMAGE_SUFFIX,
+    TEMPLATE_KLING_MOTION,
+    TEMPLATE_SFX_PROMPTS,
+    TEMPLATE_PROMPT_PREFIXES,
+    TEMPLATE_NEGATIVE_PROMPTS,
+    NEGATIVE_PROMPT,
+    WAN22_I2V_HIGH,
+)
+from backend_models import (
+    GenerateRequest,
+    SceneImageRequest,
+    FinalizeRequest,
+    CheckoutRequest,
+    SetPlanRequest,
+    FeedbackRequest,
+    ThumbnailFeedbackRequest,
+    ThumbnailGenerateRequest,
+)
+from backend_demo import (
+    DEMO_DIR,
+    analyze_screen_recording,
+    generate_demo_script,
+    generate_talking_head,
+    composite_demo_video,
+)
+from backend_state import (
+    _creative_sessions,
+    _creative_sessions_lock,
+    _projects,
+    _projects_lock,
+    _save_creative_sessions_to_disk,
+    _get_creative_session,
+    _save_projects_store,
+    _new_project_id,
+)
 try:
     import paramiko
 except Exception:
@@ -29,70 +112,6 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
-
-env_path = Path(__file__).parent / ".env"
-if env_path.exists():
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, val = line.split("=", 1)
-            os.environ.setdefault(key.strip(), val.strip())
-
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudflare.com")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
-FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
-XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
-XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
-RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY", "")
-RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4.5")
-RUNWAY_API_VERSION = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
-XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
-XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
-USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
-SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
-# Keep this off by default to avoid external proxy/account lock issues.
-USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
-RUNPOD_IMAGE_FEEDBACK_ENABLED = os.getenv("RUNPOD_IMAGE_FEEDBACK_ENABLED", "1").lower() in ("1", "true", "yes", "on")
-RUNPOD_IMAGE_FEEDBACK_SSH = os.getenv(
-    "RUNPOD_IMAGE_FEEDBACK_SSH",
-    "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p 22092 root@69.30.85.41",
-)
-RUNPOD_IMAGE_FEEDBACK_BASE_DIR = os.getenv("RUNPOD_IMAGE_FEEDBACK_BASE_DIR", "/workspace/image_training")
-RUNPOD_COMPOSITOR_ENABLED = os.getenv("RUNPOD_COMPOSITOR_ENABLED", "1").lower() in ("1", "true", "yes", "on")
-RUNPOD_COMPOSITOR_FALLBACK_LOCAL = os.getenv("RUNPOD_COMPOSITOR_FALLBACK_LOCAL", "1").lower() in ("1", "true", "yes", "on")
-RUNPOD_COMPOSITOR_HOST = os.getenv("RUNPOD_COMPOSITOR_HOST", "root@69.30.85.41")
-RUNPOD_COMPOSITOR_SSH_PORT = os.getenv("RUNPOD_COMPOSITOR_SSH_PORT", "22118")
-RUNPOD_COMPOSITOR_BASE_DIR = os.getenv("RUNPOD_COMPOSITOR_BASE_DIR", "/workspace/nyptid_compositor")
-
-stripe_lib.api_key = STRIPE_SECRET_KEY
-
-STRIPE_PRICE_TO_PLAN = {
-    "price_1T4eT7BL8lRmwao2hHcUbcny": "starter",
-    "price_1T4eTUBL8lRmwao2EK3JDOpy": "creator",
-    "price_1T4eTjBL8lRmwao2q6WkoZLH": "pro",
-    "price_1T4wZLBL8lRmwao2SyYRfHdQ": "demo_pro",
-}
-
-DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
-
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-
-OUTPUT_DIR = Path("generated_videos")
-OUTPUT_DIR.mkdir(exist_ok=True)
-TEMP_DIR = Path("temp_assets")
-TEMP_DIR.mkdir(exist_ok=True)
-TRAINING_DATA_DIR = Path("training_data")
-TRAINING_DATA_DIR.mkdir(exist_ok=True)
-CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
-CREATIVE_SESSION_PERSISTENCE_ENABLED = os.getenv("CREATIVE_SESSION_PERSISTENCE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
-PROJECTS_STORE_FILE = TEMP_DIR / "projects_store.json"
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 
@@ -118,8 +137,6 @@ async def _disable_html_cache(request: Request, call_next):
 
 jobs: dict = {}
 security = HTTPBearer(auto_error=False)
-_projects: dict = {}
-_projects_lock = asyncio.Lock()
 
 import asyncio as _asyncio
 _job_queue: _asyncio.PriorityQueue = None
@@ -187,29 +204,7 @@ async def _enqueue_generation_job(job_id: str, plan: str, coro_func, args):
     _update_queue_positions()
     await _get_job_queue().put((priority, _job_seq, job_id, coro_func, args))
 
-PLAN_LIMITS = {
-    "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
-    "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
-    "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
-    "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
-    "demo_pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": True},
-}
-
-RESOLUTION_CONFIGS = {
-    "720p": {"gen_width": 720, "gen_height": 1280, "output_width": 720, "output_height": 1280, "upscale": False},
-    "1080p": {"gen_width": 768, "gen_height": 1344, "output_width": 1080, "output_height": 1920, "upscale": True, "upscale_factor": 1.43},
-}
-
-
 # ─── Auth ─────────────────────────────────────────────────────────────────────
-
-ADMIN_EMAILS = {"omatic657@gmail.com"}
-HARDCODED_PLANS = {
-    "omatic657@gmail.com": "admin",
-    "alwakmyhem@gmail.com": "pro",
-}
-
-PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "objects", "wouldyourather", "scary", "history"}
 
 def _is_admin_user(user: Optional[dict]) -> bool:
     if not user:
@@ -958,129 +953,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         return json.loads(content[start:end])
 
 
-SUPPORTED_LANGUAGES = {
-    "en": {"name": "English", "model": "eleven_turbo_v2_5"},
-    "hi": {"name": "Hindi", "model": "eleven_multilingual_v2"},
-    "ta": {"name": "Tamil", "model": "eleven_multilingual_v2"},
-    "te": {"name": "Telugu", "model": "eleven_multilingual_v2"},
-    "bn": {"name": "Bengali", "model": "eleven_multilingual_v2"},
-    "mr": {"name": "Marathi", "model": "eleven_multilingual_v2"},
-    "gu": {"name": "Gujarati", "model": "eleven_multilingual_v2"},
-    "kn": {"name": "Kannada", "model": "eleven_multilingual_v2"},
-    "ml": {"name": "Malayalam", "model": "eleven_multilingual_v2"},
-    "pa": {"name": "Punjabi", "model": "eleven_multilingual_v2"},
-    "ur": {"name": "Urdu", "model": "eleven_multilingual_v2"},
-    "es": {"name": "Spanish", "model": "eleven_multilingual_v2"},
-    "pt": {"name": "Portuguese", "model": "eleven_multilingual_v2"},
-    "de": {"name": "German", "model": "eleven_multilingual_v2"},
-    "fr": {"name": "French", "model": "eleven_multilingual_v2"},
-    "ja": {"name": "Japanese", "model": "eleven_multilingual_v2"},
-    "ko": {"name": "Korean", "model": "eleven_multilingual_v2"},
-    "ar": {"name": "Arabic", "model": "eleven_multilingual_v2"},
-    "id": {"name": "Indonesian", "model": "eleven_multilingual_v2"},
-}
-
 # ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
-
-TEMPLATE_VOICE_SETTINGS = {
-    "skeleton": {
-        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - young, edgy male
-        "stability": 0.30,
-        "similarity_boost": 0.85,
-        "style": 0.55,
-        "speed": 1.15,
-    },
-    "history": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - deep, authoritative
-        "stability": 0.6,
-        "similarity_boost": 0.8,
-        "style": 0.2,
-    },
-    "story": {
-        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - warm, cinematic narrator
-        "stability": 0.65,
-        "similarity_boost": 0.85,
-        "style": 0.15,
-    },
-    "reddit": {
-        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",
-        "stability": 0.5,
-        "similarity_boost": 0.75,
-        "style": 0.35,
-    },
-    "top5": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",
-        "stability": 0.55,
-        "similarity_boost": 0.8,
-        "style": 0.25,
-    },
-    "roblox": {
-        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - young, rant energy
-        "stability": 0.35,
-        "similarity_boost": 0.7,
-        "style": 0.5,
-    },
-    "objects": {
-        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - warm, friendly narrator
-        "stability": 0.6,
-        "similarity_boost": 0.85,
-        "style": 0.3,
-    },
-    "split": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - authoritative comparison
-        "stability": 0.5,
-        "similarity_boost": 0.8,
-        "style": 0.3,
-    },
-    "twitter": {
-        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - casual, dramatic
-        "stability": 0.45,
-        "similarity_boost": 0.75,
-        "style": 0.4,
-    },
-    "quiz": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - game show energy
-        "stability": 0.45,
-        "similarity_boost": 0.8,
-        "style": 0.4,
-    },
-    "argument": {
-        "voice_id": "TX3LPaxmHKxFdv7VOQHJ",  # "Liam" - animated debate
-        "stability": 0.4,
-        "similarity_boost": 0.75,
-        "style": 0.45,
-    },
-    "wouldyourather": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - dramatic dilemma host
-        "stability": 0.5,
-        "similarity_boost": 0.8,
-        "style": 0.35,
-    },
-    "scary": {
-        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - hushed, intimate
-        "stability": 0.7,
-        "similarity_boost": 0.9,
-        "style": 0.1,
-    },
-    "motivation": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - deep, powerful
-        "stability": 0.65,
-        "similarity_boost": 0.85,
-        "style": 0.15,
-    },
-    "whatif": {
-        "voice_id": "onwK4e9ZLuTAKqWW03F9",  # "Daniel" - curious, awestruck
-        "stability": 0.55,
-        "similarity_boost": 0.85,
-        "style": 0.25,
-    },
-    "random": {
-        "voice_id": "pNInz6obpgDQGcFmaJgB",  # "Adam" - chaotic energy host
-        "stability": 0.4,
-        "similarity_boost": 0.7,
-        "style": 0.5,
-    },
-}
 
 
 async def generate_voiceover(text: str, output_path: str, template: str = "random",
@@ -1140,15 +1013,6 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
     word_timings = _extract_word_timings(text, data.get("alignment", {}))
     log.info(f"Voiceover generated with {len(word_timings)} word timings: {output_path}")
     return {"audio_path": output_path, "word_timings": word_timings}
-
-
-TEMPLATE_SFX_STYLES = {
-    "skeleton": "dark eerie ambient drone, subtle horror atmosphere",
-    "scary": "creepy horror atmosphere, tension building drone",
-    "objects": "mysterious discovery sound, wonder ambient",
-    "wouldyourather": "dramatic suspense, game show tension",
-    "history": "epic cinematic atmosphere, dramatic orchestra hint",
-}
 
 
 async def generate_scene_sfx(visual_description: str, duration_sec: float,
@@ -1426,71 +1290,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ─── ComfyUI Image Generation with Upscaling ─────────────────────────────────
 
-SKELETON_IMAGE_PROMPT_PREFIX = ""
-
-SKELETON_IMAGE_STYLE_PREFIX = (
-    "Photorealistic 3D studio render. Unreal Engine 5 quality. "
-    "No illustration, no comic art, no anime, no drawing, no sketch."
-)
-
-SKELETON_MASTER_CONSISTENCY_PROMPT = (
-    "MASTER CONSISTENCY RULES (apply to every scene): "
-    "Keep one continuous visual universe across all scenes. Keep the same skeleton character identity, "
-    "same skull shape, same limb proportions, same bone material, same eye style, same color grade, and same camera language. "
-    "For VS videos, lock two identities and keep both stable scene-to-scene: Driver A = Formula 1, Driver B = Super Formula. "
-    "Never swap identities. Never change art style. Never switch to illustration/comic/anime. "
-    "Maintain photoreal cinematic studio quality in every frame. "
-    "Outfits must remain role-accurate and fully opaque with realistic fabric folds and stitching. "
-    "If a visual detail is missing, infer from topic role while preserving the same identity lock."
-)
-
-SKELETON_IMAGE_SUFFIX = (
-    "Photorealistic 3D render, Unreal Engine 5, octane render, NOT illustration, NOT cartoon, NOT comic art. "
-    "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
-    "but the entire body from neck to feet is FULLY COVERED by the outfit described above. "
-    "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
-    "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face. "
-    "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
-    "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting."
-)
-
-TEMPLATE_KLING_MOTION = {
-    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. Clothing sways and folds realistically with body movement showing fabric physics. Camera holds steady with very slight cinematic push-in. Professional studio lighting stays consistent. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
-    "history": "Epic cinematic camera movement: slow dolly forward through the scene, atmospheric particles drift, fabric and hair move in wind, fire flickers, dramatic lighting shifts. Film-quality motion with depth.",
-    "story": "Emotional character animation: subtle facial expressions, natural body language, characters interact with environment. Cinematic camera slowly orbits or pushes in. Atmospheric lighting shifts to match mood.",
-    "reddit": "Static with subtle motion: slight camera drift, ambient lighting changes, minimal character movement. Clean modern look.",
-    "top5": "Dynamic reveal animation: dramatic camera push-in or orbit around subject, volumetric light beams shift, subject has powerful presence with minimal movement. Epic cinematic energy.",
-    "random": "Chaotic energy: rapid unexpected motion, surreal physics, things morph and transform, wild camera movement. Maximum visual impact.",
-    "roblox": "Roblox gameplay motion: character running forward on treadmill or obstacle course, smooth third-person camera follow, bouncy colorful environment, game-like movement.",
-    "objects": "Subtle product photography motion: slow orbit around the object, gentle lighting shifts, slight zoom in, the object appears to breathe or pulse with personality. Smooth cinematic.",
-    "split": "Split screen reveal: camera slowly pans across both sides showing the contrast, smooth transition between comparison elements, dramatic lighting shifts.",
-    "twitter": "Modern motion graphics: smooth text animations, subtle camera drift, satisfying background footage with gentle movement, clean transitions.",
-    "quiz": "Game show energy: dramatic zoom into answer reveal, spotlight movements, slight camera shake on reveals, bold color transitions between questions.",
-    "argument": "Debate intensity: camera cuts between two sides, slight shake during heated moments, dramatic lighting shifts, confrontational energy building.",
-    "wouldyourather": "Choice reveal: split screen animation revealing both options, dramatic pause before statistics, smooth transitions between dilemmas, building tension.",
-    "scary": "Horror atmosphere: extremely slow camera drift through dark environments, subtle movements in shadows, flickering lights, creeping dread. Almost imperceptible motion that builds unease.",
-    "motivation": "Epic cinematic: slow-motion camera sweep across landscape, golden light shifts, silhouette figure in the distance, wind and weather movement, inspirational energy.",
-    "whatif": "Scientific visualization: transformation from normal to hypothetical, dramatic scale changes, time-lapse effects, before-and-after morphing, epic camera pullback to show scale.",
-}
-
-TEMPLATE_SFX_PROMPTS = {
-    "skeleton": "Dark cinematic bass impact hit with eerie bone crack, dramatic low-end whoosh, horror tension riser",
-    "history": "Epic orchestral low brass stinger with battle drums, cinematic war ambience, ancient world atmosphere",
-    "story": "Emotional cinematic drone with subtle heartbeat, tension building string swell, dramatic mood shift",
-    "reddit": "Clean modern UI notification transition whoosh, subtle digital ambience, social media pop",
-    "top5": "Dramatic countdown reveal impact hit, deep bass drop, epic cinematic stinger with brass",
-    "random": "Chaotic glitch sound effect with bass drop, surreal warping transition, energetic impact hit",
-    "roblox": "Playful cartoon game sound effect, bouncy colorful pop, cheerful video game coin collect sound",
-    "objects": "Smooth cinematic swoosh transition, elegant product reveal shimmer, satisfying mechanical click",
-    "split": "Clean comparison split swoosh transition, dramatic side-by-side reveal impact, tension contrast hit",
-    "twitter": "Modern social media notification whoosh, clean digital text pop transition, subtle tech ambience",
-    "quiz": "Game show dramatic reveal stinger, suspenseful buzzer tension, audience gasps with anticipation",
-    "argument": "Intense debate tension riser, dramatic confrontation bass hit, aggressive argument impact stinger",
-    "wouldyourather": "Dramatic choice tension riser building to suspenseful reveal, decision point bass impact hit",
-    "scary": "Deep horror drone with creaking door, eerie whisper ambience, jump scare tension riser stinger",
-    "motivation": "Inspirational cinematic orchestra swell, uplifting epic brass rise, triumphant achievement stinger",
-    "whatif": "Mind-bending sci-fi transition whoosh, reality warping bass drop, cosmic scale reveal impact",
-}
 
 
 async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: float, output_path: str) -> str:
@@ -1524,315 +1323,6 @@ async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: f
         return ""
 
 
-SKELETON_NEGATIVE_PROMPT = (
-    "bare skeleton without clothes, naked skeleton, unclothed skeleton, skeleton with no outfit, "
-    "anatomy model only, medical skeleton display, skeleton without accessories, "
-    "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
-    "skin, flesh, muscles, human face, realistic person, "
-    "outdoor scene, room, environment, landscape, nature, buildings, "
-    "dark background, black background, white background, "
-    "blurry, low quality, watermark, text artifacts, deformed, "
-    "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
-    "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, "
-    "sheer material, translucent clothing, ghostly clothes, glass clothes, "
-    "jpeg artifacts, pixelated, ugly, low resolution, "
-    "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
-    "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose"
-)
-
-HISTORY_IMAGE_PROMPT_PREFIX = (
-    "Epic cinematic photorealistic historical scene, "
-    "shot on ARRI Alexa with anamorphic lens, film grain, "
-    "dramatic volumetric god rays and atmospheric haze, "
-    "period-accurate costumes and architecture with ultra detailed textures, "
-    "color graded like a Ridley Scott blockbuster, "
-    "production design level of a $200M epic film, "
-    "massive scale with armies or ruins or ancient cities, "
-    "8k ultra HD, masterpiece quality, "
-)
-
-HISTORY_NEGATIVE_PROMPT = (
-    "modern elements, cars, phones, electronics, contemporary clothing, "
-    "cartoon, anime, low poly, plastic, toy, chibi, "
-    "blurry, low quality, watermark, text, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, ugly, "
-    "bright cheerful lighting, flat lighting, studio background"
-)
-
-STORY_IMAGE_PROMPT_PREFIX = (
-    "Cinematic masterpiece scene, Pixar quality 3D meets photorealistic cinematography, "
-    "emotionally resonant composition with depth of field, "
-    "dramatic volumetric lighting with motivated light sources, "
-    "ray traced global illumination, atmospheric particles floating, "
-    "lens flare, bokeh, film grain, color graded for emotional impact, "
-    "character with consistent appearance centered in frame, "
-    "richly detailed fantastical environment, 8k ultra HD, award-winning visual, "
-)
-
-STORY_NEGATIVE_PROMPT = (
-    "cartoon, anime, low poly, flat shading, chibi, "
-    "blurry, low quality, watermark, text artifacts, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, ugly, "
-    "multiple characters unless specified, inconsistent character design, "
-    "flat lighting, boring composition, stock photo feel"
-)
-
-REDDIT_IMAGE_PROMPT_PREFIX = (
-    "Photorealistic modern-day scene illustrating a dramatic life moment, "
-    "cinematic photography with dramatic mood lighting, "
-    "realistic person in contemporary clothing in a modern setting, "
-    "emotional expression and body language visible, "
-    "depth of field, warm or cool tones matching the mood, "
-    "interior or urban environment with realistic details, "
-    "8k ultra HD, photojournalism quality, "
-)
-
-REDDIT_NEGATIVE_PROMPT = (
-    "cartoon, anime, 3D render, CGI look, fantasy, sci-fi, "
-    "historical, period clothing, armor, medieval, "
-    "blurry, low quality, watermark, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, ugly, "
-    "multiple people unless specified, skeleton, robot"
-)
-
-TOP5_IMAGE_PROMPT_PREFIX = (
-    "Dramatic cinematic documentary photograph, "
-    "hero-lit subject with bold chiaroscuro lighting, "
-    "volumetric spotlight beams, deep shadows, "
-    "rich color theme with intentional palette, "
-    "the subject dominates the frame in a powerful pose or composition, "
-    "anamorphic bokeh, film grain, depth of field, "
-    "8k ultra HD, National Geographic meets movie poster quality, "
-)
-
-TOP5_NEGATIVE_PROMPT = (
-    "cartoon, anime, low poly, chibi, cute, "
-    "blurry, low quality, watermark, text, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, ugly, "
-    "flat lighting, boring composition, centered symmetrical, "
-    "multiple unrelated subjects, cluttered background"
-)
-
-RANDOM_IMAGE_PROMPT_PREFIX = (
-    "Hyper-detailed surreal digital art, vivid oversaturated colors, "
-    "unexpected and absurd visual composition, "
-    "extreme camera angle with dramatic perspective, "
-    "mixing photorealistic and fantastical elements, "
-    "bold neon lighting, chromatic aberration, glitch effects, "
-    "trending on ArtStation, concept art masterpiece quality, "
-    "8k ultra HD, maximum visual impact, "
-)
-
-RANDOM_NEGATIVE_PROMPT = (
-    "boring, plain, simple, minimalist, subtle, "
-    "blurry, low quality, watermark, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, "
-    "monochrome, grayscale, desaturated, muted colors"
-)
-
-ROBLOX_IMAGE_PROMPT_PREFIX = (
-    "Roblox game screenshot, blocky character avatar running through colorful obstacle course, "
-    "bright saturated colors, clean Roblox aesthetic, "
-    "third-person view of character on treadmill or obby, "
-    "cheerful lighting, game UI elements, "
-)
-
-ROBLOX_NEGATIVE_PROMPT = (
-    "realistic human, photorealistic, dark horror, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, adult content"
-)
-
-OBJECTS_IMAGE_PROMPT_PREFIX = (
-    "Photorealistic product photography of an everyday object, "
-    "studio lighting with soft diffusion and subtle rim light, "
-    "the object is the hero subject centered in frame, "
-    "slightly anthropomorphized with personality, warm inviting tones, "
-    "shallow depth of field, contextual background, "
-    "Pixar-quality charm, 8k ultra HD, "
-)
-
-OBJECTS_NEGATIVE_PROMPT = (
-    "cartoon, anime, sketch, clipart, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, dark, scary, "
-    "multiple objects cluttered, messy background"
-)
-
-SPLIT_IMAGE_PROMPT_PREFIX = (
-    "Cinematic split-screen comparison photograph, "
-    "two contrasting scenes side by side with dramatic visual difference, "
-    "strong color coding (warm vs cool), "
-    "clean compositions that read well at half-width, "
-    "photorealistic detail, dramatic lighting contrast, "
-    "8k ultra HD, editorial quality, "
-)
-
-SPLIT_NEGATIVE_PROMPT = (
-    "single scene, no contrast, boring, similar sides, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, flat lighting"
-)
-
-TWITTER_IMAGE_PROMPT_PREFIX = (
-    "Modern clean digital aesthetic, dark mode color scheme, "
-    "blues and whites on dark background, "
-    "sleek typography, social media inspired visuals, "
-    "satisfying or dramatic footage matching the topic, "
-    "motion graphics feel, cinematic, "
-    "8k ultra HD, contemporary design, "
-)
-
-TWITTER_NEGATIVE_PROMPT = (
-    "old-fashioned, retro, historical, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, cluttered"
-)
-
-QUIZ_IMAGE_PROMPT_PREFIX = (
-    "Bold vibrant game show aesthetic, "
-    "bright colors with dark gradient background, "
-    "large clean typography, dramatic lighting, "
-    "spotlight effects, volumetric beams, "
-    "themed visual matching the trivia topic, "
-    "high energy presentation style, 8k, "
-)
-
-QUIZ_NEGATIVE_PROMPT = (
-    "boring, plain, muted colors, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, dark, dreary"
-)
-
-ARGUMENT_IMAGE_PROMPT_PREFIX = (
-    "Dramatic debate scene with two opposing sides, "
-    "color-coded lighting (blue vs red), "
-    "confrontational composition, split or face-to-face framing, "
-    "cinematic tension, dramatic shadows, "
-    "expressive characters or visual metaphors, "
-    "8k ultra HD, documentary quality, "
-)
-
-ARGUMENT_NEGATIVE_PROMPT = (
-    "peaceful, harmonious, agreement, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, flat lighting"
-)
-
-WYR_IMAGE_PROMPT_PREFIX = (
-    "Dramatic split choice visual, two contrasting options, "
-    "bold colors, cinematic lighting, "
-    "each option looks equally compelling or terrifying, "
-    "game show dramatic aesthetic, "
-    "photorealistic scenarios, vivid detail, "
-    "8k ultra HD, "
-)
-
-WYR_NEGATIVE_PROMPT = (
-    "boring, plain, single option, no contrast, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly"
-)
-
-SCARY_IMAGE_PROMPT_PREFIX = (
-    "Dark atmospheric horror cinematography, "
-    "David Fincher color palette -- desaturated blues, greens, sickly yellows, "
-    "shadows dominate 60% of the frame, "
-    "abandoned environments, dark hallways, foggy landscapes, "
-    "subtle wrongness in composition, things lurking in shadows, "
-    "found-footage grain, film noir lighting, "
-    "8k, dread-inducing atmosphere, "
-)
-
-SCARY_NEGATIVE_PROMPT = (
-    "bright, cheerful, colorful, warm, sunny, "
-    "cartoon, anime, cute, chibi, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, explicit gore"
-)
-
-MOTIVATION_IMAGE_PROMPT_PREFIX = (
-    "Epic cinematic landscape photography, "
-    "golden hour or dramatic weather (rain, fog, lightning), "
-    "lone silhouette figure against vast dramatic backdrop, "
-    "mountain peaks, ocean storms, city skylines, empty roads, "
-    "warm golds and deep blues color grading, "
-    "slow-motion texture quality, aspirational power, "
-    "8k ultra HD, National Geographic meets movie quality, "
-)
-
-MOTIVATION_NEGATIVE_PROMPT = (
-    "boring, flat, indoor, studio, "
-    "cartoon, anime, chibi, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly, dark horror"
-)
-
-WHATIF_IMAGE_PROMPT_PREFIX = (
-    "Photorealistic CGI scientific visualization, "
-    "hypothetical scenario playing out at massive scale, "
-    "before-and-after contrast, normal reality transforming, "
-    "epic wide shots showing global-scale effects, "
-    "dramatic color shifts indicating change, "
-    "scientifically grounded yet visually spectacular, "
-    "8k ultra HD, blockbuster VFX quality, "
-)
-
-WHATIF_NEGATIVE_PROMPT = (
-    "boring, plain, small scale, mundane, "
-    "cartoon, anime, chibi, "
-    "blurry, low quality, watermark, deformed, "
-    "jpeg artifacts, pixelated, ugly"
-)
-
-TEMPLATE_PROMPT_PREFIXES = {
-    "skeleton": SKELETON_IMAGE_PROMPT_PREFIX,
-    "history": HISTORY_IMAGE_PROMPT_PREFIX,
-    "story": STORY_IMAGE_PROMPT_PREFIX,
-    "reddit": REDDIT_IMAGE_PROMPT_PREFIX,
-    "top5": TOP5_IMAGE_PROMPT_PREFIX,
-    "random": RANDOM_IMAGE_PROMPT_PREFIX,
-    "roblox": ROBLOX_IMAGE_PROMPT_PREFIX,
-    "objects": OBJECTS_IMAGE_PROMPT_PREFIX,
-    "split": SPLIT_IMAGE_PROMPT_PREFIX,
-    "twitter": TWITTER_IMAGE_PROMPT_PREFIX,
-    "quiz": QUIZ_IMAGE_PROMPT_PREFIX,
-    "argument": ARGUMENT_IMAGE_PROMPT_PREFIX,
-    "wouldyourather": WYR_IMAGE_PROMPT_PREFIX,
-    "scary": SCARY_IMAGE_PROMPT_PREFIX,
-    "motivation": MOTIVATION_IMAGE_PROMPT_PREFIX,
-    "whatif": WHATIF_IMAGE_PROMPT_PREFIX,
-}
-
-TEMPLATE_NEGATIVE_PROMPTS = {
-    "skeleton": SKELETON_NEGATIVE_PROMPT,
-    "history": HISTORY_NEGATIVE_PROMPT,
-    "story": STORY_NEGATIVE_PROMPT,
-    "reddit": REDDIT_NEGATIVE_PROMPT,
-    "top5": TOP5_NEGATIVE_PROMPT,
-    "random": RANDOM_NEGATIVE_PROMPT,
-    "roblox": ROBLOX_NEGATIVE_PROMPT,
-    "objects": OBJECTS_NEGATIVE_PROMPT,
-    "split": SPLIT_NEGATIVE_PROMPT,
-    "twitter": TWITTER_NEGATIVE_PROMPT,
-    "quiz": QUIZ_NEGATIVE_PROMPT,
-    "argument": ARGUMENT_NEGATIVE_PROMPT,
-    "wouldyourather": WYR_NEGATIVE_PROMPT,
-    "scary": SCARY_NEGATIVE_PROMPT,
-    "motivation": MOTIVATION_NEGATIVE_PROMPT,
-    "whatif": WHATIF_NEGATIVE_PROMPT,
-}
-
-NEGATIVE_PROMPT = (
-    "blurry, low quality, watermark, text artifacts, deformed, "
-    "ugly, bad anatomy, bad proportions, duplicate, error, "
-    "jpeg artifacts, low resolution, worst quality, lowres, "
-    "oversaturated, undersaturated, noise, grain, pixelated"
-)
-
-
-WAN22_I2V_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
-WAN22_I2V_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
 
 
 async def _run_comfyui_workflow(workflow: dict, output_node: str, output_type: str = "images") -> dict:
@@ -3626,114 +3116,6 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
 
 # ─── API Endpoints ────────────────────────────────────────────────────────────
 
-class GenerateRequest(BaseModel):
-    template: str
-    prompt: str
-    resolution: str = "720p"
-    language: str = "en"
-    mode: str = "auto"
-    scenes: list = []
-
-
-class SceneImageRequest(BaseModel):
-    prompt: str
-    scene_index: int = 0
-    session_id: str = ""
-    template: str = "skeleton"
-    resolution: str = "720p"
-
-
-class FinalizeRequest(BaseModel):
-    session_id: str
-    template: str = "skeleton"
-    resolution: str = "720p"
-    language: str = "en"
-    narration: str = ""
-    scenes: list = []
-
-
-_creative_sessions: dict = {}
-_creative_sessions_lock = asyncio.Lock()
-
-
-def _prune_creative_sessions(max_age_seconds: int = 72 * 3600):
-    now = time.time()
-    stale_ids = [
-        sid for sid, sess in _creative_sessions.items()
-        if now - float(sess.get("created_at", now)) > max_age_seconds
-    ]
-    for sid in stale_ids:
-        _creative_sessions.pop(sid, None)
-
-
-def _load_creative_sessions_from_disk():
-    if not CREATIVE_SESSION_PERSISTENCE_ENABLED:
-        return
-    if not CREATIVE_SESSIONS_FILE.exists():
-        return
-    try:
-        data = json.loads(CREATIVE_SESSIONS_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            _creative_sessions.clear()
-            _creative_sessions.update(data)
-            _prune_creative_sessions()
-            log.info(f"Loaded {len(_creative_sessions)} creative sessions from disk")
-    except Exception as e:
-        log.warning(f"Failed to load creative sessions store: {e}")
-
-
-def _save_creative_sessions_to_disk():
-    if not CREATIVE_SESSION_PERSISTENCE_ENABLED:
-        return
-    try:
-        _prune_creative_sessions()
-        tmp_path = CREATIVE_SESSIONS_FILE.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(_creative_sessions, ensure_ascii=True), encoding="utf-8")
-        tmp_path.replace(CREATIVE_SESSIONS_FILE)
-    except Exception as e:
-        log.warning(f"Failed to persist creative sessions store: {e}")
-
-
-_load_creative_sessions_from_disk()
-
-
-def _get_creative_session(session_id: str):
-    """Fetch a creative session; on miss, refresh from disk and retry."""
-    session = _creative_sessions.get(session_id)
-    if session is not None:
-        return session
-    if CREATIVE_SESSION_PERSISTENCE_ENABLED:
-        _load_creative_sessions_from_disk()
-        session = _creative_sessions.get(session_id)
-    return session
-
-
-def _load_projects_store():
-    if not PROJECTS_STORE_FILE.exists():
-        return
-    try:
-        data = json.loads(PROJECTS_STORE_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            _projects.clear()
-            _projects.update(data)
-            log.info(f"Loaded {len(_projects)} projects from disk")
-    except Exception as e:
-        log.warning(f"Failed to load projects store: {e}")
-
-
-def _save_projects_store():
-    try:
-        tmp_path = PROJECTS_STORE_FILE.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(_projects, ensure_ascii=True), encoding="utf-8")
-        tmp_path.replace(PROJECTS_STORE_FILE)
-    except Exception as e:
-        log.warning(f"Failed to persist projects store: {e}")
-
-
-def _new_project_id() -> str:
-    return f"prj_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
-
-
 async def _create_or_update_project(project_id: str, data: dict):
     async with _projects_lock:
         existing = _projects.get(project_id, {})
@@ -3770,9 +3152,6 @@ async def _update_project_by_session(user_id: str, session_id: str, fields: dict
             return
         _projects[target_id] = {**_projects[target_id], **fields, "updated_at": time.time()}
         _save_projects_store()
-
-
-_load_projects_store()
 
 
 @app.post("/api/creative/script")
@@ -4991,10 +4370,6 @@ async def get_project(project_id: str, request: Request = None):
 
 # ─── Stripe Payments ──────────────────────────────────────────────────────────
 
-class CheckoutRequest(BaseModel):
-    price_id: str
-
-
 @app.post("/api/checkout")
 async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
     if not STRIPE_SECRET_KEY:
@@ -5066,11 +4441,6 @@ async def stripe_webhook(request: Request):
 
 # ─── Admin: set plan for a user (admin-only) ─────────────────────────────────
 
-class SetPlanRequest(BaseModel):
-    email: str
-    plan: str
-
-
 @app.post("/api/admin/set-plan")
 async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS and user.get("plan") != "admin":
@@ -5120,15 +4490,6 @@ async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)
 
 
 # ─── User Feedback Collection ─────────────────────────────────────────────────
-
-class FeedbackRequest(BaseModel):
-    job_id: str = ""
-    rating: int
-    comment: str = ""
-    template: str = ""
-    language: str = ""
-    feature: str = ""
-
 
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
@@ -5649,11 +5010,6 @@ async def list_thumbnails(user: dict = Depends(require_auth)):
     return {"files": files, "total": len(files)}
 
 
-class ThumbnailFeedbackRequest(BaseModel):
-    generation_id: str
-    accepted: bool
-
-
 @app.post("/api/thumbnails/feedback")
 async def thumbnail_feedback(req: ThumbnailFeedbackRequest, user: dict = Depends(require_auth)):
     if not _is_admin_user(user):
@@ -5757,14 +5113,6 @@ Output MUST be valid JSON:
   "style_notes": "Pattern analysis of what works for this channel",
   "patterns_detected": ["pattern1", "pattern2", "pattern3"]
 }"""
-
-
-class ThumbnailGenerateRequest(BaseModel):
-    mode: str  # "describe", "style_transfer", "screenshot_analysis"
-    description: str
-    style_reference_id: str = ""
-    sketch_image_id: str = ""
-    screenshot_description: str = ""
 
 
 async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
@@ -6066,470 +5414,6 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
 
     background_tasks.add_task(_run_thumbnail_pipeline)
     return {"status": "accepted", "job_id": job_id}
-
-
-# ─── Product Demo Video Pipeline ──────────────────────────────────────────────
-
-DEMO_DIR = Path("demo_uploads")
-DEMO_DIR.mkdir(exist_ok=True)
-
-DEMO_SYSTEM_PROMPT = """You are an expert product demo scriptwriter. You create engaging, professional voiceover scripts for software product demo videos.
-
-You will receive a description of what happens in a screen recording of a software product. Your job is to write a natural, enthusiastic, and clear voiceover script that explains what the viewer is seeing.
-
-RULES:
-- Write in second person ("you can see here...", "notice how...", "now watch as we...")
-- Be conversational and energetic, like a friendly SaaS founder showing their product
-- Break the script into timed segments that match the video sections
-- Each segment should be 3-8 seconds of speech
-- Include natural transitions ("and the best part is...", "but here's where it gets interesting...")
-- Highlight key features and benefits, not just what's on screen
-- Sound impressed by the product's capabilities
-- End with a strong call-to-action
-
-Output valid JSON:
-{
-  "title": "Product Demo Title",
-  "segments": [
-    {
-      "segment_num": 1,
-      "start_sec": 0.0,
-      "end_sec": 5.0,
-      "narration": "What the voiceover says during this segment",
-      "emphasis": "Key feature or benefit to highlight"
-    }
-  ],
-  "total_duration_sec": 60,
-  "cta": "Call to action text"
-}"""
-
-SADTALKER_REPLICATE_MODEL = "cjwbw/sadtalker:a519cc0cfebaaeade5f0f1a88b tried"
-
-
-async def analyze_screen_recording(video_path: str) -> dict:
-    """Extract frames from screen recording and analyze with Grok Vision. Memory-optimized for 512MB."""
-    import base64, gc
-
-    duration = 30.0
-    for probe_args in [
-        ["-show_entries", "format=duration"],
-        ["-show_entries", "stream=duration", "-select_streams", "v:0"],
-    ]:
-        probe_cmd = ["ffprobe", "-v", "error"] + probe_args + ["-of", "default=noprint_wrappers=1:nokey=1", video_path]
-        proc = await asyncio.create_subprocess_exec(
-            *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        raw_dur = stdout.decode().strip().split("\n")[0]
-        try:
-            duration = float(raw_dur)
-            if duration > 0:
-                break
-        except (ValueError, TypeError):
-            continue
-    log.info(f"Video duration: {duration:.1f}s")
-
-    num_frames = min(int(duration / 5), 6)
-    if num_frames < 3:
-        num_frames = 3
-    interval = duration / num_frames
-
-    frame_descriptions = []
-    xai_key = os.environ.get("XAI_API_KEY", "")
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        for i in range(num_frames):
-            timestamp = interval * i
-            frame_path = TEMP_DIR / f"demo_frame_{int(time.time()*1000)}_{i}.jpg"
-
-            extract_cmd = [
-                "ffmpeg", "-y", "-ss", f"{timestamp:.1f}", "-i", video_path,
-                "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "8",
-                str(frame_path)
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *extract_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
-
-            if not frame_path.exists():
-                frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
-                continue
-
-            with open(frame_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            frame_path.unlink(missing_ok=True)
-
-            try:
-                resp = await client.post(
-                    "https://api.x.ai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"},
-                    json={
-                        "model": "grok-2-vision-latest",
-                        "messages": [{"role": "user", "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                            {"type": "text", "text": "Describe this software screen in 1-2 sentences. What app, UI elements, and action is shown?"}
-                        ]}],
-                        "max_tokens": 100
-                    }
-                )
-                del b64
-                gc.collect()
-                if resp.status_code == 200:
-                    desc = resp.json()["choices"][0]["message"]["content"]
-                    frame_descriptions.append({"timestamp": round(timestamp, 1), "description": desc})
-                else:
-                    frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
-            except Exception as e:
-                log.warning(f"Frame analysis failed for frame {i}: {e}")
-                frame_descriptions.append({"timestamp": round(timestamp, 1), "description": f"Software interface at {timestamp:.0f}s"})
-                del b64
-                gc.collect()
-
-    return {
-        "duration": duration,
-        "frame_count": len(frame_descriptions),
-        "frames": frame_descriptions,
-        "description": " | ".join(f["description"] for f in frame_descriptions)
-    }
-
-
-async def generate_demo_script(analysis: dict, product_name: str = "", reference_notes: str = "") -> dict:
-    """Generate a timed voiceover script for the product demo."""
-    xai_key = os.environ.get("XAI_API_KEY", "")
-    duration = analysis.get("duration", 30)
-    target_words_min = max(40, int(duration * 2.0))
-    target_words_ideal = max(55, int(duration * 2.25))
-    target_words_max = max(70, int(duration * 2.6))
-
-    frame_timeline = ""
-    for f in analysis.get("frames", []):
-        frame_timeline += f"\n- At {f['timestamp']}s: {f['description']}"
-
-    user_prompt = f"""Product: {product_name or 'Software Product'}
-Video duration: {duration:.1f} seconds
-{f'Style notes from reference: {reference_notes}' if reference_notes else ''}
-
-Frame-by-frame breakdown of the screen recording:
-{frame_timeline}
-
-Write a voiceover script with timed segments that perfectly sync to what's happening on screen.
-The narration must naturally cover the full {duration:.0f} seconds at a calm, professional pace (not rushed).
-Target total narration length around {target_words_ideal} words (acceptable range: {target_words_min}-{target_words_max})."""
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"},
-            json={
-                "model": "grok-3-mini",
-                "messages": [
-                    {"role": "system", "content": DEMO_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 2000
-            }
-        )
-
-    if resp.status_code != 200:
-        raise RuntimeError(f"Script generation failed: {resp.status_code}")
-
-    raw = resp.json()["choices"][0]["message"]["content"]
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
-    import re
-
-    def _normalize_script(data: dict) -> dict:
-        """Normalize field names so the rest of the pipeline always sees start_time/end_time/text."""
-        if "segments" in data and isinstance(data["segments"], list):
-            for seg in data["segments"]:
-                if "start_sec" in seg and "start_time" not in seg:
-                    seg["start_time"] = seg.pop("start_sec")
-                if "end_sec" in seg and "end_time" not in seg:
-                    seg["end_time"] = seg.pop("end_sec")
-                if "narration" in seg and "text" not in seg:
-                    seg["text"] = seg.pop("narration")
-                for k in ["start_time", "end_time"]:
-                    if k in seg:
-                        seg[k] = float(seg[k])
-        return data
-
-    def _try_parse_json(text: str) -> dict:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON object found in response")
-        text = text[start:end]
-
-        text = re.sub(r'//[^\n]*', '', text)
-        text = re.sub(r',\s*([}\]])', r'\1', text)
-        text = re.sub(r'[\x00-\x1f]+', ' ', text)
-        text = text.replace('\u2013', '-').replace('\u2014', '-').replace('\u2018', "'").replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
-
-        try:
-            return _normalize_script(json.loads(text))
-        except json.JSONDecodeError:
-            pass
-
-        text2 = text.replace("'", '"')
-        try:
-            return _normalize_script(json.loads(text2))
-        except json.JSONDecodeError:
-            pass
-
-        def _fix_inner_quotes(m):
-            prefix, inner = m.group(1), m.group(2)
-            return prefix + '"' + inner.replace('"', '\\"') + '"'
-        text3 = re.sub(r'(:\s*)"(.*?)"(?=\s*[,}\]])', _fix_inner_quotes, text, flags=re.DOTALL)
-        try:
-            return _normalize_script(json.loads(text3))
-        except json.JSONDecodeError:
-            pass
-
-        segments = []
-        for pattern in [
-            r'"start_sec"\s*:\s*([\d.]+).*?"end_sec"\s*:\s*([\d.]+).*?"narration"\s*:\s*"((?:[^"\\]|\\.)*)"',
-            r'"start_time"\s*:\s*([\d.]+).*?"end_time"\s*:\s*([\d.]+).*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"',
-        ]:
-            seg_pattern = re.findall(pattern, text, re.DOTALL)
-            if seg_pattern:
-                for s, e, t in seg_pattern:
-                    segments.append({"start_time": float(s), "end_time": float(e), "text": t.replace('\\"', '"')})
-                break
-
-        title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-        title = title_match.group(1) if title_match else "Product Demo"
-
-        if segments:
-            return {"title": title, "segments": segments}
-
-        raise ValueError(f"Could not parse script JSON after all attempts. Raw start: {text[:300]}")
-
-    return _try_parse_json(raw)
-
-
-async def generate_ai_face(output_path: str) -> str:
-    """Generate a realistic AI male face photo using xAI Grok image generation."""
-    xai_key = os.environ.get("XAI_API_KEY", "")
-    ages = ["mid-20s", "late 20s", "early 30s", "mid-30s"]
-    styles = [
-        "clean-shaven with short brown hair, wearing a navy blue polo shirt",
-        "light stubble with dark hair swept to the side, wearing a black crew-neck t-shirt",
-        "clean-shaven with sandy blonde hair, wearing a gray henley shirt",
-        "trimmed beard with dark brown hair, wearing a white button-down shirt",
-        "clean-shaven with black hair, wearing a dark green quarter-zip pullover",
-    ]
-    import random as _rnd
-    age = _rnd.choice(ages)
-    style = _rnd.choice(styles)
-
-    prompt = (
-        f"Professional headshot portrait photo of a friendly, confident {age} male, {style}. "
-        "Looking directly at camera with a natural warm smile, slight head tilt. "
-        "Clean neutral background (soft gray or white gradient). "
-        "Shot on Canon EOS R5, 85mm f/1.4 lens, studio lighting with soft key light. "
-        "Sharp focus on eyes, natural skin texture, photorealistic. "
-        "Head and shoulders framing, centered composition."
-    )
-
-    headers = {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
-    payload = {"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": 1, "response_format": "url"}
-
-    last_status = 0
-    for attempt in range(4):
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
-                last_status = resp.status_code
-                if resp.status_code in (200, 201):
-                    data = resp.json().get("data", [])
-                    if data and data[0].get("url"):
-                        dl = await client.get(data[0]["url"], follow_redirects=True)
-                        if dl.status_code == 200:
-                            with open(output_path, "wb") as f:
-                                f.write(dl.content)
-                            log.info(f"AI face generated: {output_path}")
-                            return output_path
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    wait = (attempt + 1) * 5
-                    log.warning(f"AI face gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
-                    await asyncio.sleep(wait)
-                    continue
-                break
-        except Exception as e:
-            log.warning(f"AI face gen attempt {attempt+1} failed: {e}")
-            await asyncio.sleep((attempt + 1) * 3)
-
-    raise RuntimeError(f"Failed to generate AI face: {last_status}")
-
-
-async def generate_talking_head(face_image_path: str, audio_path: str, output_path: str) -> str:
-    """Generate a talking head video using SadTalker via Replicate API."""
-    import base64
-
-    with open(face_image_path, "rb") as f:
-        face_b64 = base64.b64encode(f.read()).decode()
-    with open(audio_path, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode()
-
-    face_ext = Path(face_image_path).suffix.lstrip(".")
-    audio_ext = Path(audio_path).suffix.lstrip(".")
-    face_uri = f"data:image/{face_ext};base64,{face_b64}"
-    audio_uri = f"data:audio/{audio_ext};base64,{audio_b64}"
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(
-            "https://api.replicate.com/v1/predictions",
-            headers={
-                "Authorization": "Bearer r8_placeholder",
-                "Content-Type": "application/json",
-                "Prefer": "wait"
-            },
-            json={
-                "version": "a519cc0cfebaaeade5f0f1a88b4b75d9cba8b12e0e3b8d70e1e2b3b4c5d6e7f8",
-                "input": {
-                    "source_image": face_uri,
-                    "driven_audio": audio_uri,
-                    "enhancer": "gfpgan",
-                    "pose_style": 0,
-                    "facerender": "facevid2vid",
-                    "exp_scale": 1.0,
-                    "still_mode": False,
-                    "preprocess": "crop",
-                    "face_model_resolution": "512"
-                }
-            }
-        )
-
-        if resp.status_code in (200, 201):
-            result = resp.json()
-            output_url = result.get("output")
-            if output_url:
-                dl_resp = await client.get(output_url)
-                if dl_resp.status_code == 200:
-                    with open(output_path, "wb") as f:
-                        f.write(dl_resp.content)
-                    return output_path
-
-        log.warning(f"Replicate SadTalker returned {resp.status_code}, falling back to static face")
-
-    return await _static_face_fallback(face_image_path, audio_path, output_path)
-
-
-async def _static_face_fallback(face_image_path: str, audio_path: str, output_path: str) -> str:
-    """Fallback: create a video from the static face image with the audio, with subtle zoom."""
-    cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-i", face_image_path,
-        "-i", audio_path,
-        "-vf", "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p,zoompan=z='1+0.001*on':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=512x512",
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        "-shortest", "-movflags", "+faststart",
-        output_path
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    await proc.communicate()
-    return output_path
-
-
-async def composite_demo_video(
-    screen_recording: str, talking_head: str, audio_path: str,
-    output_path: str, subtitle_path: str = None,
-    pip_position: str = "bottom-right", pip_size: float = 0.25
-) -> str:
-    """Composite screen recording + talking head PiP + voiceover + captions."""
-    probe_cmd = [
-        "ffprobe", "-v", "error", "-show_entries", "stream=width,height",
-        "-of", "csv=p=0:s=x", screen_recording
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await proc.communicate()
-    dims = stdout.decode().strip().split("\n")[0]
-    if "x" in dims:
-        main_w, main_h = dims.split("x")[:2]
-        main_w, main_h = int(main_w), int(main_h)
-    else:
-        main_w, main_h = 1920, 1080
-
-    pip_w = int(main_w * pip_size)
-    margin = int(main_w * 0.02)
-
-    if pip_position == "bottom-right":
-        pip_x = f"main_w-overlay_w-{margin}"
-        pip_y = f"main_h-overlay_h-{margin}"
-    elif pip_position == "bottom-left":
-        pip_x = str(margin)
-        pip_y = f"main_h-overlay_h-{margin}"
-    elif pip_position == "top-right":
-        pip_x = f"main_w-overlay_w-{margin}"
-        pip_y = str(margin)
-    else:
-        pip_x = str(margin)
-        pip_y = str(margin)
-
-    vf = (
-        f"[1:v]scale={pip_w}:-1,format=yuva420p,"
-        f"geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
-        f"a='if(gt(abs(W/2-X)*abs(W/2-X)+abs(H/2-Y)*abs(H/2-Y),(W/2)*(W/2)),0,255)'[pip];"
-        f"[0:v][pip]overlay={pip_x}:{pip_y}"
-    )
-
-    if subtitle_path and Path(subtitle_path).exists():
-        safe_sub = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
-        vf += f",ass='{safe_sub}'"
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", screen_recording,
-        "-i", talking_head,
-        "-i", audio_path,
-        "-filter_complex", vf,
-        "-map", "2:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart",
-        output_path
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-
-    if proc.returncode != 0:
-        log.warning(f"PiP composite failed, trying without circular mask: {stderr.decode()[-200:]}")
-        cmd_simple = [
-            "ffmpeg", "-y",
-            "-i", screen_recording,
-            "-i", talking_head,
-            "-i", audio_path,
-            "-filter_complex",
-            (
-                f"[1:v]scale={pip_w}:-1[pip];[0:v][pip]overlay={pip_x}:{pip_y}"
-                + (f",ass='{safe_sub}'" if (subtitle_path and Path(subtitle_path).exists()) else "")
-            ),
-            "-map", "2:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest", "-movflags", "+faststart",
-            output_path
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_simple, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await proc.communicate()
-
-    return output_path
 
 
 COMPRESS_THRESHOLD_MB = 50
@@ -6929,4 +5813,4 @@ if __name__ == "__main__":
     for f in OUTPUT_DIR.iterdir():
         if f.suffix == ".mp4" and f.stat().st_mtime < time.time() - 86400:
             f.unlink(missing_ok=True)
-    uvicorn.run("backend:app", host="0.0.0.0", port=8081, reload=True)
+    uvicorn.run("backend:app", host="0.0.0.0", port=int(os.getenv("PORT", "8091")), reload=True)
