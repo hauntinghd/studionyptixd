@@ -23,8 +23,9 @@ const resolveSafeApiBase = (rawBase: string): string => {
     }
 };
 
-const API = resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "");
-const rawGenerationApi = resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "");
+// Production must always use same-origin API routing; custom base URLs are local-dev only.
+const API = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "") : "";
+const rawGenerationApi = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "") : "";
 const GENERATION_API = (() => {
     if (!rawGenerationApi) {
         return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
