@@ -12,7 +12,10 @@ const resolveSafeApiBase = (rawBase: string): string => {
         const parsed = new URL(cleaned, window.location.origin);
         const isMixedContent = window.location.protocol === "https:" && parsed.protocol === "http:";
         const isLocalTarget = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
-        if (isMixedContent || isLocalTarget) return "";
+        const sameHost = parsed.hostname === window.location.hostname;
+        const hasCustomPort = parsed.port !== "" && parsed.port !== window.location.port;
+        // In production, block same-host cross-port overrides (e.g. :8091) to avoid connection-reset fetch failures.
+        if (isMixedContent || isLocalTarget || (sameHost && hasCustomPort)) return "";
         return cleaned;
     } catch {
         return "";
