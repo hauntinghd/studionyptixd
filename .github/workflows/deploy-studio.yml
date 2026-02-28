@@ -1,0 +1,51 @@
+name: Deploy Studio
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STUDIO_SSH_HOST }}
+          username: ${{ secrets.STUDIO_SSH_USER }}
+          key: ${{ secrets.STUDIO_SSH_KEY }}
+          port: ${{ secrets.STUDIO_SSH_PORT }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.STUDIO_APP_DIR }}"
+            STUDIO_PORT="${{ secrets.STUDIO_PORT }}"
+            SERVICE_NAME="${{ secrets.STUDIO_SERVICE_NAME }}"
+            if [ -z "${APP_DIR}" ]; then APP_DIR="$HOME/asd"; fi
+            if [ -z "${STUDIO_PORT}" ]; then STUDIO_PORT="8091"; fi
+            if [ -z "${SERVICE_NAME}" ]; then SERVICE_NAME="nyptid-studio"; fi
+
+            cd "${APP_DIR}"
+            git fetch origin master
+            git reset --hard origin/master
+
+            if [ -d "ViralShorts-App" ]; then
+              cd ViralShorts-App
+              npm ci
+              npm run build
+              cd ..
+            fi
+
+            if command -v systemctl >/dev/null 2>&1; then
+              sudo -n systemctl restart "${SERVICE_NAME}" || systemctl --user restart "${SERVICE_NAME}" || true
+            fi
+
+            if pgrep -f "uvicorn backend:app" >/dev/null 2>&1; then
+              pkill -f "uvicorn backend:app" || true
+              sleep 1
+            fi
+
+            nohup python3 -m uvicorn backend:app --host 0.0.0.0 --port "${STUDIO_PORT}" > /tmp/nyptid-studio.log 2>&1 &
+            sleep 3
+            curl -fsS "http://127.0.0.1:${STUDIO_PORT}/api/health"

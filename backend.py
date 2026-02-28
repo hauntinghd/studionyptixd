@@ -114,6 +114,43 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("nyptid-studio")
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
+_deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
+
+
+def _read_deploy_meta() -> tuple[str, str]:
+    now = time.time()
+    if now - float(_deploy_meta_cache.get("ts", 0.0)) < 15.0:
+        return str(_deploy_meta_cache.get("backend_commit", "")), str(_deploy_meta_cache.get("frontend_bundle", ""))
+
+    backend_commit = (os.getenv("STUDIO_COMMIT_SHA", "") or os.getenv("GITHUB_SHA", "")).strip()
+    if not backend_commit:
+        try:
+            backend_commit = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent),
+                text=True,
+                timeout=2,
+            ).strip()
+        except Exception:
+            backend_commit = ""
+
+    frontend_bundle = ""
+    try:
+        default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
+        current_dist = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
+        index_path = current_dist / "index.html"
+        if index_path.exists():
+            html = index_path.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"/assets/(index-[^\"']+\\.js)", html)
+            if m:
+                frontend_bundle = m.group(1)
+    except Exception:
+        frontend_bundle = ""
+
+    _deploy_meta_cache["ts"] = now
+    _deploy_meta_cache["backend_commit"] = backend_commit
+    _deploy_meta_cache["frontend_bundle"] = frontend_bundle
+    return backend_commit, frontend_bundle
 
 app.add_middleware(
     CORSMiddleware,
@@ -3654,6 +3691,7 @@ async def list_languages():
 async def health():
     skeleton_lora = await check_skeleton_lora_available()
     wan_ready = await check_wan22_available()
+    backend_commit, frontend_bundle = _read_deploy_meta()
     runway_video_enabled = bool(RUNWAY_API_KEY)
     grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
     if runway_video_enabled and grok_video_enabled:
@@ -3681,6 +3719,8 @@ async def health():
             if skeleton_lora
             else (f"xAI {XAI_IMAGE_MODEL}" if XAI_API_KEY else "SDXL")
         ),
+        "backend_commit": backend_commit,
+        "frontend_bundle": frontend_bundle,
     }
 
 
