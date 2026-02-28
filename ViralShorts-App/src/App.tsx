@@ -4,7 +4,10 @@ import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
 const API = (viteEnv.VITE_API_BASE_URL || "").replace(/\/+$/, "");
-const DEFAULT_ENGINE_API = `${window.location.protocol}//${window.location.hostname}:8091`;
+const isLocalDevHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+// In production, default generation traffic to same-origin so reverse proxy routing works.
+// Keep :8091 fallback for local dev when API base is not explicitly configured.
+const DEFAULT_ENGINE_API = API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
 const GENERATION_API = (viteEnv.VITE_GENERATION_API_BASE_URL || DEFAULT_ENGINE_API).replace(/\/+$/, "");
 const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
 const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
