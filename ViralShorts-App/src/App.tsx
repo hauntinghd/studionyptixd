@@ -2,7 +2,10 @@ import { useState, useEffect, createContext, useContext, useCallback, useRef } f
 import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search, Star, Send } from 'lucide-react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
-const API = "";
+const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
+const API = (viteEnv.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+const DEFAULT_ENGINE_API = `${window.location.protocol}//${window.location.hostname}:8091`;
+const GENERATION_API = (viteEnv.VITE_GENERATION_API_BASE_URL || DEFAULT_ENGINE_API).replace(/\/+$/, "");
 const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
 const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
 const Logo = ({ size = 24 }: { size?: number }) => (
@@ -1080,7 +1083,7 @@ function CreatePanel() {
         if (!jobId) return;
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${API}/api/status/${jobId}`);
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
                 const data = await res.json();
                 setJobStatus(data);
                 if (data.status === "complete" || data.status === "error") {
@@ -1173,7 +1176,7 @@ function CreatePanel() {
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`${API}/api/creative/session/${sessionId}/status`, {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/status`, {
                     headers: { Authorization: `Bearer ${session.access_token}` },
                 });
                 if (!res.ok) return;
@@ -1224,7 +1227,7 @@ function CreatePanel() {
         setJobStatus(null);
         setJobId(null);
         try {
-            const res = await fetch(`${API}/api/generate`, {
+            const res = await fetch(`${GENERATION_API}/api/generate`, {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
@@ -1245,7 +1248,7 @@ function CreatePanel() {
         setScriptLoading(true);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
-            const res = await fetch(`${API}/api/creative/session`, {
+            const res = await fetch(`${GENERATION_API}/api/creative/session`, {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
@@ -1263,7 +1266,7 @@ function CreatePanel() {
                 const uploadForm = new FormData();
                 uploadForm.append("session_id", data.session_id);
                 uploadForm.append("reference_image", creativeReferenceImage);
-                const refRes = await fetch(`${API}/api/creative/reference-image`, {
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
                     method: "POST",
                     headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
                     body: uploadForm,
@@ -1314,7 +1317,7 @@ function CreatePanel() {
         if (!scene.visual_description.trim()) return;
         setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
-            const res = await fetch(`${API}/api/creative/scene-image`, {
+            const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
@@ -1364,7 +1367,7 @@ function CreatePanel() {
         setJobId(null);
         setCreativeStep('generating');
         try {
-            const res = await fetch(`${API}/api/creative/finalize`, {
+            const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
@@ -1588,7 +1591,7 @@ function CreatePanel() {
                             </div>
                         ) : jobStatus.status === 'complete' ? (
                             <div>
-                                <video controls autoPlay className="w-full max-h-[500px] bg-black" src={`${API}/api/download/${jobStatus.output_file}`} />
+                                <video controls autoPlay className="w-full max-h-[500px] bg-black" src={`${GENERATION_API}/api/download/${jobStatus.output_file}`} />
                                 <div className="p-6 space-y-4">
                                     <div className="flex items-center justify-between">
                                         <div>
@@ -1600,7 +1603,7 @@ function CreatePanel() {
                                         </div>
                                         <CheckCircle2 className="w-8 h-8 text-emerald-400" />
                                     </div>
-                                    <a href={`${API}/api/download/${jobStatus.output_file}`} download
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
                                         className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                         <Download className="w-5 h-5" /> Download MP4
                                     </a>
@@ -1686,7 +1689,7 @@ function CreatePanel() {
                                                 <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
                                             </div>
                                             {p.output_file ? (
-                                                <a href={`${API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
+                                                <a href={`${GENERATION_API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
                                             ) : (
                                                 <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
                                             )}
@@ -1909,7 +1912,7 @@ function CreatePanel() {
                             <div>
                                 <video controls autoPlay
                                     className="w-full max-h-[500px] bg-black"
-                                    src={`${API}/api/download/${jobStatus.output_file}`}
+                                    src={`${GENERATION_API}/api/download/${jobStatus.output_file}`}
                                 />
                                 <div className="p-6 space-y-4">
                                     <div className="flex items-center justify-between">
@@ -1922,7 +1925,7 @@ function CreatePanel() {
                                         </div>
                                         <CheckCircle2 className="w-8 h-8 text-emerald-400" />
                                     </div>
-                                    <a href={`${API}/api/download/${jobStatus.output_file}`} download
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
                                         className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                         <Download className="w-5 h-5" />
                                         Download MP4
@@ -1986,7 +1989,7 @@ function ClonePanel() {
         if (!jobId) return;
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${API}/api/status/${jobId}`);
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
                 const data = await res.json();
                 setJobStatus(data);
                 if (data.status === "complete" || data.status === "error") {
@@ -2014,7 +2017,7 @@ function ClonePanel() {
         if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
 
         try {
-            const res = await fetch(`${API}/api/clone`, { method: "POST", headers, body: formData });
+            const res = await fetch(`${GENERATION_API}/api/clone`, { method: "POST", headers, body: formData });
             const data = await res.json();
             if (data.job_id) setJobId(data.job_id);
             else setLoading(false);
@@ -2160,7 +2163,7 @@ function ClonePanel() {
                         ) : jobStatus.status === 'complete' ? (
                             <div>
                                 <video controls autoPlay className="w-full max-h-[500px] bg-black"
-                                    src={`${API}/api/download/${jobStatus.output_file}`} />
+                                    src={`${GENERATION_API}/api/download/${jobStatus.output_file}`} />
                                 <div className="p-6 space-y-4">
                                     <div className="flex items-center justify-between">
                                         <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
@@ -2169,7 +2172,7 @@ function ClonePanel() {
                                     {jobStatus.metadata?.description && (
                                         <p className="text-gray-500 text-xs">{jobStatus.metadata.description}</p>
                                     )}
-                                    <a href={`${API}/api/download/${jobStatus.output_file}`} download
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
                                         className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                         <Download className="w-5 h-5" /> Download MP4
                                     </a>
@@ -2339,7 +2342,7 @@ function DemoPanel() {
         if (!jobId) return;
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${API}/api/status/${jobId}`);
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
                 const data = await res.json();
                 setJobStatus(data);
                 if (data.status === "complete" || data.status === "error") {
@@ -2541,7 +2544,7 @@ function DemoPanel() {
 
             const result = await new Promise<any>((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
-                xhr.open('POST', `${API}/api/demo`);
+                xhr.open('POST', `${GENERATION_API}/api/demo`);
                 if (session) xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
 
                 xhr.upload.onprogress = (e) => {
@@ -2940,8 +2943,8 @@ function DemoPanel() {
 
                     {jobStatus.status === 'complete' && jobStatus.output_url && (
                         <div className="px-6 py-4 border-t border-white/[0.05] space-y-3">
-                            <video controls className="w-full rounded-xl" src={`${API}${jobStatus.output_url}`} />
-                            <a href={`${API}${jobStatus.output_url}`} download
+                            <video controls className="w-full rounded-xl" src={`${GENERATION_API}${jobStatus.output_url}`} />
+                            <a href={`${GENERATION_API}${jobStatus.output_url}`} download
                                 className="flex items-center justify-center gap-2 w-full py-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl font-medium transition-all">
                                 <Download className="w-4 h-4" /> Download Demo Video
                             </a>
@@ -2980,9 +2983,10 @@ function ThumbnailPanel() {
     const [syncingLibrary, setSyncingLibrary] = useState(false);
     const [syncMessage, setSyncMessage] = useState('');
     const withThumbToken = useCallback((path: string) => {
-        if (!session?.access_token) return `${API}${path}`;
+        const base = path.startsWith("/api/thumbnails/generated/") ? GENERATION_API : API;
+        if (!session?.access_token) return `${base}${path}`;
         const sep = path.includes('?') ? '&' : '?';
-        return `${API}${path}${sep}access_token=${encodeURIComponent(session.access_token)}`;
+        return `${base}${path}${sep}access_token=${encodeURIComponent(session.access_token)}`;
     }, [session]);
 
     const fetchLibrary = useCallback(async () => {
@@ -3014,7 +3018,7 @@ function ThumbnailPanel() {
         if (!jobId) return;
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${API}/api/status/${jobId}`);
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
                 const data = await res.json();
                 setJobStatus(data);
                 if (data.status === 'complete' || data.status === 'error') {
@@ -3124,7 +3128,7 @@ function ThumbnailPanel() {
                 body.screenshot_description = screenshotDesc;
             }
 
-            const res = await fetch(`${API}/api/thumbnails/generate`, {
+            const res = await fetch(`${GENERATION_API}/api/thumbnails/generate`, {
                 method: 'POST', headers, body: JSON.stringify(body),
             });
             const data = await res.json();
