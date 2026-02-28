@@ -3,31 +3,30 @@ import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Sh
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
-const API = (viteEnv.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 const isLocalDevHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-// In production, prefer same-origin routing unless an explicit safe override is provided.
-// This avoids unreachable cross-port fetches that commonly surface as "Failed to fetch".
-const rawGenerationApi = (viteEnv.VITE_GENERATION_API_BASE_URL || "").trim().replace(/\/+$/, "");
+const resolveSafeApiBase = (rawBase: string): string => {
+    const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
+    if (!cleaned) return "";
+    if (isLocalDevHost) return cleaned;
+    try {
+        const parsed = new URL(cleaned, window.location.origin);
+        const isMixedContent = window.location.protocol === "https:" && parsed.protocol === "http:";
+        const isLocalTarget = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+        if (isMixedContent || isLocalTarget) return "";
+        return cleaned;
+    } catch {
+        return "";
+    }
+};
+
+const API = resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "");
+const rawGenerationApi = resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "");
 const GENERATION_API = (() => {
     if (!rawGenerationApi) {
         return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
     }
 
-    if (isLocalDevHost) {
-        return rawGenerationApi;
-    }
-
-    try {
-        const parsed = new URL(rawGenerationApi, window.location.origin);
-        const isMixedContent = window.location.protocol === "https:" && parsed.protocol === "http:";
-        const isLocalTarget = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
-        if (isMixedContent || isLocalTarget) {
-            return API || "";
-        }
-        return rawGenerationApi;
-    } catch {
-        return API || "";
-    }
+    return rawGenerationApi;
 })();
 const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
 const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
