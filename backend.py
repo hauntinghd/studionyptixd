@@ -41,6 +41,7 @@ from backend_settings import (
     XAI_IMAGE_ASPECT_RATIO,
     XAI_IMAGE_RESOLUTION,
     USE_XAI_VIDEO,
+    PRODUCT_DEMO_PUBLIC_ENABLED,
     SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
     USE_FAL_GROK_IMAGE,
     RUNPOD_IMAGE_FEEDBACK_ENABLED,
@@ -2945,10 +2946,110 @@ async def composite_video(
 
 # ─── Full Generation Pipeline ─────────────────────────────────────────────────
 
+
+def _normalize_scenes_for_render(scenes: list) -> list:
+    normalized = []
+    for idx, raw_scene in enumerate(scenes or []):
+        scene = dict(raw_scene or {})
+        narration = str(scene.get("narration", "") or "").strip()
+        visual_description = str(scene.get("visual_description", "") or "").strip()
+        if not visual_description:
+            visual_description = narration or f"Scene {idx + 1} visual"
+        try:
+            duration = float(scene.get("duration_sec", 5))
+        except Exception:
+            duration = 5.0
+        duration = max(3.5, min(duration, 10.0))
+        scene["narration"] = narration
+        scene["visual_description"] = visual_description
+        scene["duration_sec"] = round(duration, 2)
+        normalized.append(scene)
+    return normalized
+
+
+def _job_diag_init(job_id: str, mode: str):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    now = time.time()
+    job["diagnostics"] = {
+        "mode": mode,
+        "started_at": now,
+        "last_updated_at": now,
+        "current_stage": "queued",
+        "stage_started_at": now,
+        "stage_durations_sec": {},
+        "scene_events": [],
+    }
+
+
+def _job_set_stage(job_id: str, status: str, progress: int | None = None):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    now = time.time()
+    diag = job.setdefault("diagnostics", {
+        "mode": "unknown",
+        "started_at": now,
+        "last_updated_at": now,
+        "current_stage": "queued",
+        "stage_started_at": now,
+        "stage_durations_sec": {},
+        "scene_events": [],
+    })
+    prev_stage = diag.get("current_stage")
+    prev_started = float(diag.get("stage_started_at") or now)
+    if prev_stage:
+        elapsed = max(0.0, now - prev_started)
+        durations = diag.setdefault("stage_durations_sec", {})
+        durations[prev_stage] = round(float(durations.get(prev_stage, 0.0)) + elapsed, 2)
+    diag["current_stage"] = status
+    diag["stage_started_at"] = now
+    diag["last_updated_at"] = now
+    job["status"] = status
+    if progress is not None:
+        job["progress"] = progress
+
+
+def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, event: str, detail: str = ""):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    now = time.time()
+    diag = job.setdefault("diagnostics", {"scene_events": [], "last_updated_at": now})
+    events = diag.setdefault("scene_events", [])
+    events.append({
+        "ts": round(now, 3),
+        "scene": scene_idx + 1,
+        "total_scenes": total_scenes,
+        "event": event,
+        "detail": detail[:240],
+    })
+    if len(events) > 30:
+        del events[:-30]
+    diag["last_updated_at"] = now
+
+
+def _job_diag_finalize(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    now = time.time()
+    diag = job.get("diagnostics")
+    if not isinstance(diag, dict):
+        return
+    current_stage = diag.get("current_stage")
+    stage_started = float(diag.get("stage_started_at") or now)
+    if current_stage:
+        elapsed = max(0.0, now - stage_started)
+        durations = diag.setdefault("stage_durations_sec", {})
+        durations[current_stage] = round(float(durations.get(current_stage, 0.0)) + elapsed, 2)
+    diag["stage_started_at"] = now
+    diag["last_updated_at"] = now
+
 async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p", language: str = "en"):
     try:
-        jobs[job_id]["status"] = "generating_script"
-        jobs[job_id]["progress"] = 5
+        _job_set_stage(job_id, "generating_script", 5)
         lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
         log.info(f"[{job_id}] Generating script for '{topic}' ({template}, {resolution}, {lang_name})")
 
@@ -2956,7 +3057,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if language != "en":
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
         script_data = await generate_script(template, topic, extra_instructions=lang_instruction)
-        scenes = script_data.get("scenes", [])
+        scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
@@ -2973,8 +3074,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             mode_label = "static image"
         jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
 
-        jobs[job_id]["status"] = "generating_images"
-        jobs[job_id]["progress"] = 10
+        _job_set_stage(job_id, "generating_images", 10)
         jobs[job_id]["total_scenes"] = len(scenes)
         log.info(f"[{job_id}] Script ready: {len(scenes)} scenes. Mode: {mode_label}, {resolution}")
 
@@ -2995,8 +3095,8 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
             step_base = i * (2 if use_video else 1)
-            jobs[job_id]["progress"] = 10 + int((step_base / total_steps) * 55)
-            jobs[job_id]["status"] = "generating_images"
+            _job_set_stage(job_id, "generating_images", 10 + int((step_base / total_steps) * 55))
+            _job_record_scene_event(job_id, i, len(scenes), "image_start")
 
             if template == "skeleton":
                 vis_desc = scene.get("visual_description", "")
@@ -3021,12 +3121,13 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             cdn_url = img_result.get("cdn_url")
             engine_name = "Skeleton LoRA" if (template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
+            _job_record_scene_event(job_id, i, len(scenes), "image_ready", engine_name)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
 
             if use_video:
-                jobs[job_id]["status"] = "animating_scenes"
-                jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
+                _job_set_stage(job_id, "animating_scenes", 10 + int(((step_base + 1) / total_steps) * 55))
+                _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
                 try:
@@ -3040,6 +3141,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
@@ -3052,13 +3154,14 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     else:
                         engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_static")
 
             scene_assets.append(asset)
 
-        jobs[job_id]["status"] = "generating_voice"
-        jobs[job_id]["progress"] = 70
+        _job_set_stage(job_id, "generating_voice", 70)
         log.info(f"[{job_id}] Generating voiceover...")
 
         full_narration = " ".join(s.get("narration", "") for s in scenes)
@@ -3073,8 +3176,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
-        jobs[job_id]["status"] = "generating_sfx"
-        jobs[job_id]["progress"] = 78
+        _job_set_stage(job_id, "generating_sfx", 78)
         sfx_paths = []
         for i, scene in enumerate(scenes):
             sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
@@ -3085,8 +3187,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
         log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
 
-        jobs[job_id]["status"] = "compositing"
-        jobs[job_id]["progress"] = 82
+        _job_set_stage(job_id, "compositing", 82)
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
 
         output_filename = template + "_" + job_id + ".mp4"
@@ -3110,8 +3211,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if subtitle_path:
             Path(subtitle_path).unlink(missing_ok=True)
 
-        jobs[job_id]["status"] = "complete"
-        jobs[job_id]["progress"] = 100
+        _job_set_stage(job_id, "complete", 100)
         jobs[job_id]["output_file"] = output_filename
         jobs[job_id]["resolution"] = resolution
         jobs[job_id]["metadata"] = {
@@ -3124,12 +3224,14 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             "output_file": output_filename,
             "title": script_data.get("title", topic),
         })
+        _job_diag_finalize(job_id)
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
     except Exception as e:
         log.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
-        jobs[job_id]["status"] = "error"
+        _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
+        _job_diag_finalize(job_id)
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
@@ -3487,6 +3589,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "user_id": user.get("id"),
         "created_at": time.time(),
     }
+    _job_diag_init(job_id, "creative")
     await _update_project_by_session(user.get("id", ""), req.session_id, {
         "status": "rendering",
         "job_id": job_id,
@@ -3508,7 +3611,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
     """Run generation using pre-approved creative session scenes."""
     try:
         template = session["template"]
-        scenes = session["scenes"]
+        scenes = _normalize_scenes_for_render(session["scenes"])
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
@@ -3520,8 +3623,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
         gen_ts = str(int(time.time() * 1000))
 
-        jobs[job_id]["status"] = "generating_images"
-        jobs[job_id]["progress"] = 10
+        _job_set_stage(job_id, "generating_images", 10)
         jobs[job_id]["total_scenes"] = len(scenes)
 
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
@@ -3535,13 +3637,15 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
             step_base = i * (2 if use_video else 1)
-            jobs[job_id]["progress"] = 10 + int((step_base / total_steps) * 55)
+            _job_set_stage(job_id, "generating_images", 10 + int((step_base / total_steps) * 55))
+            _job_record_scene_event(job_id, i, len(scenes), "image_start")
 
             pre_gen = scene_images.get(i) or scene_images.get(str(i))
             if pre_gen and Path(pre_gen["path"]).exists():
                 img_path = pre_gen["path"]
                 cdn_url = pre_gen.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using pre-approved image")
+                _job_record_scene_event(job_id, i, len(scenes), "image_ready", "pre_approved")
             else:
                 full_prompt = scene.get("visual_description", "")
                 img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
@@ -3558,12 +3662,13 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     session["skeleton_reference_image"] = skeleton_reference_image_url
                 cdn_url = img_result.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
+                _job_record_scene_event(job_id, i, len(scenes), "image_ready", "generated")
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
 
             if use_video:
-                jobs[job_id]["status"] = "animating_scenes"
-                jobs[job_id]["progress"] = 10 + int(((step_base + 1) / total_steps) * 55)
+                _job_set_stage(job_id, "animating_scenes", 10 + int(((step_base + 1) / total_steps) * 55))
+                _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
                 try:
@@ -3575,6 +3680,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
@@ -3587,13 +3693,14 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     else:
                         engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_static")
 
             scene_assets.append(asset)
 
-        jobs[job_id]["status"] = "generating_voice"
-        jobs[job_id]["progress"] = 70
+        _job_set_stage(job_id, "generating_voice", 70)
         full_narration = session.get("narration", "") or " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
         vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
@@ -3605,8 +3712,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
 
-        jobs[job_id]["status"] = "generating_sfx"
-        jobs[job_id]["progress"] = 78
+        _job_set_stage(job_id, "generating_sfx", 78)
         sfx_paths = []
         for i, scene in enumerate(scenes):
             sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
@@ -3617,8 +3723,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
         log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
 
-        jobs[job_id]["status"] = "compositing"
-        jobs[job_id]["progress"] = 82
+        _job_set_stage(job_id, "compositing", 82)
         output_filename = template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
         await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path, sfx_paths=sfx_paths)
@@ -3634,8 +3739,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         if subtitle_path:
             Path(subtitle_path).unlink(missing_ok=True)
 
-        jobs[job_id]["status"] = "complete"
-        jobs[job_id]["progress"] = 100
+        _job_set_stage(job_id, "complete", 100)
         jobs[job_id]["output_file"] = output_filename
         jobs[job_id]["resolution"] = resolution
         jobs[job_id]["metadata"] = {
@@ -3648,6 +3752,7 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
             "output_file": output_filename,
             "title": script_data.get("title", session.get("topic", "")),
         })
+        _job_diag_finalize(job_id)
         log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
 
         sid = session.get("session_id")
@@ -3658,8 +3763,9 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
 
     except Exception as e:
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
-        jobs[job_id]["status"] = "error"
+        _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
+        _job_diag_finalize(job_id)
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
@@ -3863,7 +3969,7 @@ async def get_me(user: dict = Depends(require_auth)):
         limits = {**limits, "videos_per_month": 9999}
     else:
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
-    has_demo = plan == "demo_pro" or is_admin
+    has_demo = is_admin or (PRODUCT_DEMO_PUBLIC_ENABLED and plan == "demo_pro")
     return {
         "id": user["id"],
         "email": email,
@@ -3872,6 +3978,7 @@ async def get_me(user: dict = Depends(require_auth)):
         "limits": limits,
         "demo_access": has_demo,
         "demo_price_id": DEMO_PRO_PRICE_ID,
+        "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
     }
 
 
@@ -3907,6 +4014,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "user_id": user.get("id") if user else None,
         "created_at": time.time(),
     }
+    _job_diag_init(job_id, "auto")
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
     if user:
         project_id = _new_project_id()
@@ -4136,8 +4244,7 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
 
 async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, resolution: str = "720p"):
     try:
-        jobs[job_id]["status"] = "analyzing"
-        jobs[job_id]["progress"] = 5
+        _job_set_stage(job_id, "analyzing", 5)
         log.info(f"[{job_id}] Clone: analyzing viral video for topic '{topic}'")
 
         video_context = topic
@@ -4168,10 +4275,9 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         if video_path:
             Path(video_path).unlink(missing_ok=True)
 
-        jobs[job_id]["status"] = "generating_script"
-        jobs[job_id]["progress"] = 15
+        _job_set_stage(job_id, "generating_script", 15)
         script_data = await generate_clone_script(detected_template, topic, viral_info)
-        scenes = script_data.get("scenes", [])
+        scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 
@@ -4188,8 +4294,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             mode_label = "static image"
         jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
 
-        jobs[job_id]["status"] = "generating_images"
-        jobs[job_id]["progress"] = 20
+        _job_set_stage(job_id, "generating_images", 20)
         jobs[job_id]["total_scenes"] = len(scenes)
         log.info(f"[{job_id}] Clone script ready: {len(scenes)} scenes. Mode: {mode_label}, {resolution}")
 
@@ -4210,8 +4315,8 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
             step_base = i * (2 if use_video else 1)
-            jobs[job_id]["progress"] = 20 + int((step_base / total_steps) * 50)
-            jobs[job_id]["status"] = "generating_images"
+            _job_set_stage(job_id, "generating_images", 20 + int((step_base / total_steps) * 50))
+            _job_record_scene_event(job_id, i, len(scenes), "image_start")
 
             if detected_template == "skeleton":
                 vis_desc = scene.get("visual_description", "")
@@ -4236,12 +4341,13 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             cdn_url = img_result.get("cdn_url")
             engine_name = "Skeleton LoRA" if (detected_template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
+            _job_record_scene_event(job_id, i, len(scenes), "image_ready", engine_name)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
 
             if use_video:
-                jobs[job_id]["status"] = "animating_scenes"
-                jobs[job_id]["progress"] = 20 + int(((step_base + 1) / total_steps) * 50)
+                _job_set_stage(job_id, "animating_scenes", 20 + int(((step_base + 1) / total_steps) * 50))
+                _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(detected_template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
                 try:
@@ -4255,6 +4361,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
                 if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
                     asset["kling_clip"] = anim_result["path"]
@@ -4267,13 +4374,14 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                     else:
                         engine = "Wan 2.2"
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using static image")
+                    _job_record_scene_event(job_id, i, len(scenes), "animation_static")
 
             scene_assets.append(asset)
 
-        jobs[job_id]["status"] = "generating_voice"
-        jobs[job_id]["progress"] = 75
+        _job_set_stage(job_id, "generating_voice", 75)
         log.info(f"[{job_id}] Generating voiceover...")
 
         full_narration = " ".join(s.get("narration", "") for s in scenes)
@@ -4288,8 +4396,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=detected_template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
 
-        jobs[job_id]["status"] = "compositing"
-        jobs[job_id]["progress"] = 85
+        _job_set_stage(job_id, "compositing", 85)
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
 
         output_filename = detected_template + "_" + job_id + ".mp4"
@@ -4310,8 +4417,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         if subtitle_path:
             Path(subtitle_path).unlink(missing_ok=True)
 
-        jobs[job_id]["status"] = "complete"
-        jobs[job_id]["progress"] = 100
+        _job_set_stage(job_id, "complete", 100)
         jobs[job_id]["output_file"] = output_filename
         jobs[job_id]["resolution"] = resolution
         jobs[job_id]["metadata"] = {
@@ -4319,12 +4425,14 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
             "description": script_data.get("description", ""),
             "tags": script_data.get("tags", []),
         }
+        _job_diag_finalize(job_id)
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
     except Exception as e:
         log.error(f"[{job_id}] Clone pipeline failed: {e}", exc_info=True)
-        jobs[job_id]["status"] = "error"
+        _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
+        _job_diag_finalize(job_id)
         if video_path:
             Path(video_path).unlink(missing_ok=True)
 
@@ -4399,6 +4507,12 @@ async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_aut
         raise HTTPException(500, "Stripe not configured")
     if req.price_id not in STRIPE_PRICE_TO_PLAN:
         raise HTTPException(400, "Invalid price ID")
+    target_plan = STRIPE_PRICE_TO_PLAN.get(req.price_id, "")
+    user_email = user.get("email", "")
+    user_plan = user.get("plan", "free")
+    is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
+    if target_plan == "demo_pro" and (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
+        raise HTTPException(403, "Demo Pro is coming soon.")
 
     try:
         session = stripe_lib.checkout.Session.create(
@@ -5777,9 +5891,9 @@ async def create_demo_video(
     user_email = user.get("email", "")
     user_plan = user.get("plan", "free")
     is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
-    if not is_admin:
-        raise HTTPException(403, "Product Demo is admin-only right now.")
-    has_demo = user_plan == "demo_pro" or is_admin
+    if (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
+        raise HTTPException(403, "Product Demo is coming soon.")
+    has_demo = is_admin or (user_plan == "demo_pro")
     if not has_demo:
         raise HTTPException(403, "Product Demo requires the Demo Pro plan ($150/mo). Upgrade to access this feature.")
 

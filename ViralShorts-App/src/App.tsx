@@ -54,6 +54,7 @@ interface AuthContextType {
     loading: boolean;
     demoAccess: boolean;
     demoPriceId: string;
+    demoComingSoon: boolean;
     signIn: (email: string, password: string) => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
@@ -63,7 +64,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({
     session: null, supabase: null, plan: 'free', role: 'user', loading: true,
-    demoAccess: false, demoPriceId: '',
+    demoAccess: false, demoPriceId: '', demoComingSoon: true,
     signIn: async () => null, signUp: async () => null, signOut: async () => {},
     checkout: async () => {}, checkoutDemo: async () => {},
 });
@@ -76,6 +77,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const [loading, setLoading] = useState(true);
     const [demoAccess, setDemoAccess] = useState(false);
     const [demoPriceId, setDemoPriceId] = useState('');
+    const [demoComingSoon, setDemoComingSoon] = useState(true);
 
     useEffect(() => {
         (async () => {
@@ -95,7 +97,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (!session) { setPlan('free'); setRole('user'); setDemoAccess(false); return; }
+        if (!session) { setPlan('free'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); return; }
         (async () => {
             try {
                 const res = await fetch(`${API}/api/me`, {
@@ -107,8 +109,9 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                     setRole(data.role || 'user');
                     setDemoAccess(data.demo_access || false);
                     if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
+                    setDemoComingSoon(data.demo_coming_soon !== false);
                 }
-            } catch { setPlan('free'); setRole('user'); setDemoAccess(false); }
+            } catch { setPlan('free'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); }
         })();
     }, [session]);
 
@@ -168,7 +171,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [session, demoPriceId]);
 
     return (
-        <AuthContext.Provider value={{ session, supabase, plan, role, loading, demoAccess, demoPriceId, signIn, signUp, signOut, checkout, checkoutDemo }}>
+        <AuthContext.Provider value={{ session, supabase, plan, role, loading, demoAccess, demoPriceId, demoComingSoon, signIn, signUp, signOut, checkout, checkoutDemo }}>
             {children}
         </AuthContext.Provider>
     );
@@ -458,7 +461,8 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, checkout, checkoutDemo } = useContext(AuthContext);
+    const { session, role, checkout, checkoutDemo, demoComingSoon } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
 
     return (
         <>
@@ -862,9 +866,18 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 ))}
                             </ul>
                             <p className="text-[10px] text-gray-600 mb-3 text-center">Not for YouTube/TikTok creators. For software teams turning screen recordings into polished product demos.</p>
-                            <button onClick={() => session ? checkoutDemo() : onNavigate('auth')}
-                                className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black text-sm font-bold transition-all shadow-lg shadow-amber-500/25">
-                                {session ? 'Choose Demo Pro' : 'Sign Up to Subscribe'}
+                            <button
+                                onClick={() => {
+                                    if (demoComingSoon && !isAdmin) return;
+                                    session ? checkoutDemo() : onNavigate('auth');
+                                }}
+                                disabled={demoComingSoon && !isAdmin}
+                                className={`w-full py-2.5 rounded-lg text-sm font-bold transition-all ${
+                                    demoComingSoon && !isAdmin
+                                        ? 'bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed'
+                                        : 'bg-amber-500 hover:bg-amber-400 text-black shadow-lg shadow-amber-500/25'
+                                }`}>
+                                {demoComingSoon && !isAdmin ? 'Coming Soon' : (session ? 'Choose Demo Pro' : 'Sign Up to Subscribe')}
                             </button>
                         </div>
                     </div>
@@ -1649,6 +1662,7 @@ function CreatePanel() {
                                         Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
                                     </p>
                                 )}
+                                <JobDiagnostics jobStatus={jobStatus} />
                             </div>
                         )}
                     </div>
@@ -1984,6 +1998,7 @@ function CreatePanel() {
                                 {jobStatus.status === 'error' && (
                                     <p className="text-center text-sm text-red-400">{jobStatus.error || 'Generation failed'}</p>
                                 )}
+                                <JobDiagnostics jobStatus={jobStatus} />
                             </div>
                         )}
                     </div>
@@ -2230,6 +2245,7 @@ function ClonePanel() {
                                 {jobStatus.status === 'error' && (
                                     <p className="text-center text-sm text-red-400">{jobStatus.error || 'Generation failed'}</p>
                                 )}
+                                <JobDiagnostics jobStatus={jobStatus} />
                             </div>
                         )}
                     </div>
@@ -2353,7 +2369,8 @@ function AdminAnalyticsPanel() {
 }
 
 function DemoPanel() {
-    const { session, demoAccess, checkoutDemo } = useContext(AuthContext);
+    const { session, role, demoAccess, checkoutDemo, demoComingSoon } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
     const [referenceFile, setReferenceFile] = useState<File | null>(null);
     const [demoFile, setDemoFile] = useState<File | null>(null);
     const [faceFile, setFaceFile] = useState<File | null>(null);
@@ -2669,9 +2686,18 @@ function DemoPanel() {
                     <div className="bg-gradient-to-r from-violet-600/10 to-purple-600/10 border border-violet-500/20 rounded-2xl p-6">
                         <p className="text-3xl font-bold text-white">$150<span className="text-base font-normal text-gray-400">/month</span></p>
                         <p className="text-sm text-gray-400 mt-1">Unlimited product demo videos</p>
-                        <button onClick={checkoutDemo}
-                            className="mt-4 w-full py-3 rounded-xl font-semibold bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5 transition-all flex items-center justify-center gap-2">
-                            <Zap className="w-5 h-5" /> Upgrade to Demo Pro
+                        <button
+                            onClick={() => {
+                                if (demoComingSoon && !isAdmin) return;
+                                checkoutDemo();
+                            }}
+                            disabled={demoComingSoon && !isAdmin}
+                            className={`mt-4 w-full py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
+                                demoComingSoon && !isAdmin
+                                    ? 'bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed'
+                                    : 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5'
+                            }`}>
+                            <Zap className="w-5 h-5" /> {demoComingSoon && !isAdmin ? 'Coming Soon' : 'Upgrade to Demo Pro'}
                         </button>
                     </div>
                 </div>
@@ -3624,6 +3650,38 @@ function ProgressBar({ progress, status }: { progress: number; status: string })
                 <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-purple-500 transition-all duration-700 ease-out"
                     style={{ width: `${progress}%` }} />
             </div>
+        </div>
+    );
+}
+
+function JobDiagnostics({ jobStatus }: { jobStatus: any }) {
+    const diagnostics = jobStatus?.diagnostics;
+    if (!diagnostics) return null;
+    const durations = diagnostics.stage_durations_sec || {};
+    const stageEntries = Object.entries(durations) as Array<[string, number]>;
+    const latestSceneEvent = Array.isArray(diagnostics.scene_events) && diagnostics.scene_events.length > 0
+        ? diagnostics.scene_events[diagnostics.scene_events.length - 1]
+        : null;
+    return (
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 space-y-2">
+            <p className="text-[11px] uppercase tracking-wide text-gray-500">Diagnostics</p>
+            <p className="text-xs text-gray-300">
+                Stage: <span className="text-violet-300">{diagnostics.current_stage || jobStatus?.status || 'unknown'}</span>
+            </p>
+            {jobStatus?.animation_warnings ? (
+                <p className="text-xs text-amber-300">Animation warnings: {jobStatus.animation_warnings}</p>
+            ) : null}
+            {stageEntries.length > 0 ? (
+                <p className="text-xs text-gray-400">
+                    {stageEntries.slice(-4).map(([k, v]) => `${k}: ${v}s`).join(" | ")}
+                </p>
+            ) : null}
+            {latestSceneEvent ? (
+                <p className="text-xs text-gray-400">
+                    Scene {latestSceneEvent.scene}/{latestSceneEvent.total_scenes}: {latestSceneEvent.event}
+                    {latestSceneEvent.detail ? ` (${latestSceneEvent.detail})` : ""}
+                </p>
+            ) : null}
         </div>
     );
 }
