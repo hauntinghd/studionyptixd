@@ -24,7 +24,22 @@ SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
-RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY", "")
+
+
+def _resolve_runway_api_key() -> tuple[str, str]:
+    candidates = (
+        ("RUNWAY_API_KEY", os.getenv("RUNWAY_API_KEY", "")),
+        ("RUNWAYML_API_KEY", os.getenv("RUNWAYML_API_KEY", "")),
+        ("RUNWAY_KEY", os.getenv("RUNWAY_KEY", "")),
+    )
+    for source, raw in candidates:
+        val = (raw or "").strip().strip('"').strip("'")
+        if val:
+            return val, source
+    return "", ""
+
+
+RUNWAY_API_KEY, RUNWAY_API_KEY_SOURCE = _resolve_runway_api_key()
 RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4.5")
 RUNWAY_API_VERSION = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")

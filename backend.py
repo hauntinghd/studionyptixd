@@ -35,6 +35,7 @@ from backend_settings import (
     XAI_IMAGE_MODEL,
     XAI_VIDEO_MODEL,
     RUNWAY_API_KEY,
+    RUNWAY_API_KEY_SOURCE,
     RUNWAY_VIDEO_MODEL,
     RUNWAY_API_VERSION,
     XAI_IMAGE_ASPECT_RATIO,
@@ -3712,6 +3713,8 @@ async def health():
         "kling_enabled": bool(FAL_AI_KEY),
         "wan22_ready": wan_ready,
         "video_engine": video_engine,
+        "runway_key_configured": runway_video_enabled,
+        "runway_key_source": RUNWAY_API_KEY_SOURCE if runway_video_enabled else "",
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": (
