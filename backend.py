@@ -2188,43 +2188,27 @@ async def animate_image_runway_video(image_path: str, prompt: str, output_clip_p
 
 
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
-    """Animate a scene image using Runway first, then Grok as fallback."""
+    """Animate a scene image using FalAI Kling only (forced)."""
     provider_errors = []
 
-    if RUNWAY_API_KEY:
-        runway_clip_path = str(Path(output_dir_path) / ("runway_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+    if FAL_AI_KEY:
+        kling_clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
         try:
-            await animate_image_runway_video(
+            await animate_image_kling(
                 image_path,
                 prompt,
-                runway_clip_path,
-                duration_sec=duration_sec,
+                kling_clip_path,
+                duration=str(max(2, min(int(round(float(duration_sec))), 10))),
                 aspect_ratio="9:16",
                 image_cdn_url=image_cdn_url,
             )
-            return {"type": "runway_clip", "path": runway_clip_path}
+            return {"type": "kling_clip", "path": kling_clip_path}
         except Exception as e:
-            provider_errors.append("runway: " + str(e))
-            log.warning(f"Runway scene animation failed, falling back to Grok: {e}")
-
-    if USE_XAI_VIDEO and XAI_API_KEY:
-        grok_clip_path = str(Path(output_dir_path) / ("grok_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-        try:
-            await animate_image_grok_video(
-                image_path,
-                prompt,
-                grok_clip_path,
-                duration_sec=duration_sec,
-                aspect_ratio="9:16",
-                image_cdn_url=image_cdn_url,
-            )
-            return {"type": "grok_clip", "path": grok_clip_path}
-        except Exception as e:
-            provider_errors.append("grok: " + str(e))
-            log.warning(f"Grok scene animation failed: {e}")
+            provider_errors.append("fal_kling: " + str(e))
+            log.warning(f"FalAI Kling scene animation failed: {e}")
 
     if not provider_errors:
-        raise RuntimeError("No video engine configured (set RUNWAY_API_KEY and/or XAI_API_KEY)")
+        raise RuntimeError("No video engine configured (set FAL_AI_KEY)")
     raise RuntimeError("All video providers failed: " + " | ".join(provider_errors))
 
 
@@ -2976,18 +2960,15 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video_engine = runway_video_enabled or grok_video_enabled
+        fal_video_enabled = bool(FAL_AI_KEY)
+        use_video_engine = fal_video_enabled
         use_video = use_video_engine
         if template == "reddit":
             use_video = False
         if template != "reddit" and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
-        if runway_video_enabled:
-            mode_label = "Runway Image-to-Video"
-        elif grok_video_enabled:
-            mode_label = "Grok Imagine Video"
+            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
+        if fal_video_enabled:
+            mode_label = "FalAI Kling 2.1"
         else:
             mode_label = "static image"
         jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
@@ -3532,12 +3513,11 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
 
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video_engine = runway_video_enabled or grok_video_enabled
+        fal_video_enabled = bool(FAL_AI_KEY)
+        use_video_engine = fal_video_enabled
         use_video = use_video_engine
         if not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
+            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
         gen_ts = str(int(time.time() * 1000))
 
         jobs[job_id]["status"] = "generating_images"
@@ -3693,9 +3673,12 @@ async def health():
     skeleton_lora = await check_skeleton_lora_available()
     wan_ready = await check_wan22_available()
     backend_commit, frontend_bundle = _read_deploy_meta()
+    fal_video_enabled = bool(FAL_AI_KEY)
     runway_video_enabled = bool(RUNWAY_API_KEY)
     grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
-    if runway_video_enabled and grok_video_enabled:
+    if fal_video_enabled:
+        video_engine = "FalAI Kling 2.1 (forced)"
+    elif runway_video_enabled and grok_video_enabled:
         video_engine = "Runway (primary) + Grok fallback"
     elif runway_video_enabled:
         video_engine = "Runway Image-to-Video"
@@ -4192,18 +4175,15 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
-        use_video_engine = runway_video_enabled or grok_video_enabled
+        fal_video_enabled = bool(FAL_AI_KEY)
+        use_video_engine = fal_video_enabled
         use_video = use_video_engine
         if detected_template == "reddit":
             use_video = False
         if detected_template != "reddit" and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (RUNWAY_API_KEY/XAI_API_KEY)")
-        if runway_video_enabled:
-            mode_label = "Runway Image-to-Video"
-        elif grok_video_enabled:
-            mode_label = "Grok Imagine Video"
+            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
+        if fal_video_enabled:
+            mode_label = "FalAI Kling 2.1"
         else:
             mode_label = "static image"
         jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
