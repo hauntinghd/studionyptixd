@@ -158,7 +158,7 @@ def _read_deploy_meta() -> tuple[str, str]:
         index_path = current_dist / "index.html"
         if index_path.exists():
             html = index_path.read_text(encoding="utf-8", errors="ignore")
-            m = re.search(r"/assets/(index-[^\"']+\\.js)", html)
+            m = re.search(r"/assets/(index-[^\"']+\.js)", html)
             if m:
                 frontend_bundle = m.group(1)
     except Exception:
@@ -179,13 +179,20 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _disable_html_cache(request: Request, call_next):
-    """Prevent stale frontend shell caching so new dist bundles load immediately."""
+    """Prevent stale frontend shell and asset caching so new bundles load immediately."""
     response = await call_next(request)
     path = request.url.path or ""
     if path == "/" or path.endswith(".html"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    if path.startswith("/assets/") and (path.endswith(".js") or path.endswith(".css")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        # Extra hints for CDN layers to avoid stale bundle reuse.
+        response.headers["CDN-Cache-Control"] = "no-store"
+        response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
     return response
 
 
