@@ -428,7 +428,7 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="grid grid-cols-2 gap-4 text-sm">
                             <div>
                                 <p className="text-gray-500">Videos/month</p>
-                                <p className="font-bold text-white">{plan === 'pro' ? 'Unlimited' : plan === 'creator' ? '150' : '50'}</p>
+                                <p className="font-bold text-white">{plan === 'pro' ? '300' : plan === 'creator' ? '150' : '50'}</p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Max Resolution</p>
@@ -886,7 +886,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['Unlimited videos', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '5 min per video', '1080p output', 'Max priority speed', 'Clone viral shorts (Coming Soon)', 'Priority support'].map((f, i) => (
+                                {['300 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '5 min per video', '1080p output', 'Max priority speed', 'Clone viral shorts (Coming Soon)', 'Priority support'].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>

@@ -1,7 +1,7 @@
 PLAN_LIMITS = {
     "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
     "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
-    "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
+    "pro": {"videos_per_month": 300, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
     "demo_pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": True},
 }
 
