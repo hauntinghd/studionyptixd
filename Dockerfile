@@ -1,3 +1,11 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+COPY ViralShorts-App/package*.json ./
+RUN npm ci
+COPY ViralShorts-App/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,7 +32,7 @@ COPY backend_demo.py .
 COPY backend_state.py .
 COPY backend_queue.py .
 COPY backend_worker.py .
-COPY ViralShorts-App/dist/ ./ViralShorts-App/dist/
+COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
