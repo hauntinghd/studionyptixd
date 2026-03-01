@@ -52,6 +52,9 @@ from backend_settings import (
     RUNPOD_COMPOSITOR_HOST,
     RUNPOD_COMPOSITOR_SSH_PORT,
     RUNPOD_COMPOSITOR_BASE_DIR,
+    FORCE_720P_ONLY,
+    REDIS_QUEUE_ENABLED,
+    REDIS_URL,
     STRIPE_PRICE_TO_PLAN,
     DEMO_PRO_PRICE_ID,
     SUPABASE_SERVICE_KEY,
@@ -106,6 +109,16 @@ from backend_state import (
     _get_creative_session,
     _save_projects_store,
     _new_project_id,
+)
+from backend_queue import (
+    QueueFullError,
+    enqueue_generation_job,
+    get_queue_depth,
+    get_queue_max_depth,
+    get_queue_workers,
+    get_persisted_job_state,
+    init_queue_runtime,
+    persist_job_state,
 )
 try:
     import paramiko
@@ -176,72 +189,16 @@ async def _disable_html_cache(request: Request, call_next):
 
 jobs: dict = {}
 security = HTTPBearer(auto_error=False)
+init_queue_runtime(jobs, log)
 
-import asyncio as _asyncio
-_job_queue: _asyncio.PriorityQueue = None
-_queued_job_meta: dict = {}
-_job_workers_started = False
-_job_seq = 0
-# Enforce one active generation job at a time globally.
-# Additional jobs remain queued until the active job completes.
-JOB_QUEUE_WORKERS = 1
 
-def _get_job_queue():
-    global _job_queue
-    if _job_queue is None:
-        _job_queue = _asyncio.PriorityQueue()
-    return _job_queue
-
-def _plan_queue_priority(plan: str) -> int:
-    # Lower number runs first.
-    if plan in ("creator", "pro", "demo_pro", "admin"):
-        return 0
-    if plan == "starter":
-        return 1
-    return 2
-
-async def _job_queue_worker(worker_idx: int):
-    """Processes queued jobs with plan-aware priority."""
-    q = _get_job_queue()
-    while True:
-        _priority, _seq, job_id, coro_func, args = await q.get()
-        try:
-            _queued_job_meta.pop(job_id, None)
-            _update_queue_positions()
-            await coro_func(*args)
-        except Exception as e:
-            log.error(f"[{job_id}] Queue worker {worker_idx} error: {e}", exc_info=True)
-            if job_id in jobs:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["error"] = str(e)
-        finally:
-            q.task_done()
-
-def _update_queue_positions():
-    ordered = sorted(_queued_job_meta.items(), key=lambda item: (item[1][0], item[1][1]))
-    total = len(ordered)
-    for i, (qjid, _meta) in enumerate(ordered):
-        if qjid in jobs:
-            jobs[qjid]["queue_position"] = i + 1
-            jobs[qjid]["queue_total"] = total
-
-async def _ensure_job_workers():
-    global _job_workers_started
-    if _job_workers_started:
-        return
-    _job_workers_started = True
-    for i in range(JOB_QUEUE_WORKERS):
-        _asyncio.get_event_loop().create_task(_job_queue_worker(i + 1))
-
-async def _enqueue_generation_job(job_id: str, plan: str, coro_func, args):
-    global _job_seq
-    await _ensure_job_workers()
-    priority = _plan_queue_priority(plan)
-    _job_seq += 1
-    _queued_job_meta[job_id] = (priority, _job_seq)
-    jobs[job_id]["queue_priority"] = priority
-    _update_queue_positions()
-    await _get_job_queue().put((priority, _job_seq, job_id, coro_func, args))
+def _normalize_output_resolution(requested: str, priority_allowed: bool = False) -> str:
+    resolution = requested if requested in RESOLUTION_CONFIGS else "720p"
+    if FORCE_720P_ONLY:
+        return "720p"
+    if not priority_allowed and resolution == "1080p":
+        return "720p"
+    return resolution
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -2981,6 +2938,10 @@ def _job_diag_init(job_id: str, mode: str):
         "stage_durations_sec": {},
         "scene_events": [],
     }
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
 
 
 def _job_set_stage(job_id: str, status: str, progress: int | None = None):
@@ -3009,6 +2970,10 @@ def _job_set_stage(job_id: str, status: str, progress: int | None = None):
     job["status"] = status
     if progress is not None:
         job["progress"] = progress
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
 
 
 def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, event: str, detail: str = ""):
@@ -3028,6 +2993,10 @@ def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, even
     if len(events) > 30:
         del events[:-30]
     diag["last_updated_at"] = now
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
 
 
 def _job_diag_finalize(job_id: str):
@@ -3046,6 +3015,10 @@ def _job_diag_finalize(job_id: str):
         durations[current_stage] = round(float(durations.get(current_stage, 0.0)) + elapsed, 2)
     diag["stage_started_at"] = now
     diag["last_updated_at"] = now
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
 
 async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p", language: str = "en"):
     try:
@@ -3286,6 +3259,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     lang_instruction = ""
     if req.language != "en":
         lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
+    resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     script_data = await generate_script(req.template, req.prompt, extra_instructions=lang_instruction)
     scenes = script_data.get("scenes", [])
     if not scenes:
@@ -3297,7 +3271,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "user_id": user["id"],
             "template": req.template,
             "topic": req.prompt,
-            "resolution": req.resolution,
+            "resolution": resolution,
             "language": req.language,
             "script_data": script_data,
             "scenes": scenes,
@@ -3328,6 +3302,8 @@ async def creative_create_session(body: dict, request: Request = None):
         raise HTTPException(401, "Auth required")
     template = body.get("template", "skeleton")
     _ensure_template_allowed(template, user)
+    requested_resolution = body.get("resolution", "720p")
+    resolution = _normalize_output_resolution(requested_resolution, priority_allowed=False)
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
     async with _creative_sessions_lock:
         _creative_sessions[session_id] = {
@@ -3335,7 +3311,7 @@ async def creative_create_session(body: dict, request: Request = None):
             "user_id": user["id"],
             "template": template,
             "topic": body.get("topic", "Untitled"),
-            "resolution": body.get("resolution", "720p"),
+            "resolution": resolution,
             "language": body.get("language", "en"),
             "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
             "scenes": [],
@@ -3351,7 +3327,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "topic": body.get("topic", "Untitled"),
         "mode": "creative",
         "status": "draft",
-        "resolution": body.get("resolution", "720p"),
+        "resolution": resolution,
         "language": body.get("language", "en"),
         "session_id": session_id,
         "scene_count": 0,
@@ -3439,7 +3415,11 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False, user_id=user.get("id", ""), event="regenerate"))
 
     template = session.get("template", req.template)
-    resolution = session.get("resolution", req.resolution)
+    user_plan = user.get("plan", "free")
+    if user_plan == "admin":
+        user_plan = "pro"
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     full_prompt = req.prompt
     reference_image_url = session.get("reference_image_url", "")
@@ -3569,7 +3549,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     if user_plan == "admin":
         user_plan = "pro"
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
-    resolution = session.get("resolution", req.resolution)
+    resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
     if total_duration > float(plan_limits.get("max_duration_sec", 60)):
         raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
@@ -3603,7 +3583,13 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         if gen_id:
             asyncio.create_task(_mark_training_feedback(gen_id, accepted=True, user_id=user.get("id", ""), event="finalize"))
 
-    await _enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
+    try:
+        await enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
+    except QueueFullError as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        await persist_job_state(job_id, jobs[job_id])
+        raise HTTPException(429, str(e))
     return {"job_id": job_id}
 
 
@@ -3813,6 +3799,8 @@ async def health():
         ),
         "backend_commit": backend_commit,
         "frontend_bundle": frontend_bundle,
+        "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
+        "force_720p_only": FORCE_720P_ONLY,
     }
 
 
@@ -3929,10 +3917,12 @@ async def admin_analytics(user: dict = Depends(require_auth)):
         except Exception as e:
             log.warning(f"Admin analytics active-users fetch failed: {e}")
 
+    queue_depth = await get_queue_depth()
     return {
         "active_generations": active_generations,
-        "queue_depth": len(_queued_job_meta),
-        "queue_workers": JOB_QUEUE_WORKERS,
+        "queue_depth": queue_depth,
+        "queue_workers": get_queue_workers(),
+        "queue_max_depth": get_queue_max_depth(),
         "active_users_generating": active_generating_users,
         "active_users_signins_15m": active_users_signins_15m,
         "active_users_estimate": max(active_generating_users, active_users_signins_15m),
@@ -3999,9 +3989,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
 
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
 
-    resolution = req.resolution if req.resolution in RESOLUTION_CONFIGS else "720p"
-    if not plan_limits.get("priority", False) and resolution == "1080p":
-        resolution = "720p"
+    resolution = _normalize_output_resolution(req.resolution, priority_allowed=bool(plan_limits.get("priority", False)))
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -4030,13 +4018,22 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         })
         jobs[job_id]["project_id"] = project_id
 
-    await _enqueue_generation_job(job_id, user_plan, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language))
+    try:
+        await enqueue_generation_job(job_id, user_plan, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language))
+    except QueueFullError as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        await persist_job_state(job_id, jobs[job_id])
+        raise HTTPException(429, str(e))
 
     return {"status": "accepted", "job_id": job_id}
 
 
 @app.get("/api/status/{job_id}")
 async def job_status(job_id: str):
+    persisted = await get_persisted_job_state(job_id)
+    if isinstance(persisted, dict):
+        return persisted
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
     return jobs[job_id]
@@ -4447,7 +4444,7 @@ async def clone_video(
     if not XAI_API_KEY or not ELEVENLABS_API_KEY:
         raise HTTPException(500, "API keys not configured")
 
-    res = resolution if resolution in RESOLUTION_CONFIGS else "720p"
+    res = _normalize_output_resolution(resolution, priority_allowed=False)
 
     video_path = None
     if file and file.filename:
@@ -4466,7 +4463,13 @@ async def clone_video(
         "created_at": time.time(),
     }
 
-    await _enqueue_generation_job(job_id, "free", run_clone_pipeline, (job_id, topic, video_path, res))
+    try:
+        await enqueue_generation_job(job_id, "free", run_clone_pipeline, (job_id, topic, video_path, res))
+    except QueueFullError as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        await persist_job_state(job_id, jobs[job_id])
+        raise HTTPException(429, str(e))
     return {"status": "accepted", "job_id": job_id}
 
 

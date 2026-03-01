@@ -22,6 +22,8 @@ COPY backend_image_prompts.py .
 COPY backend_models.py .
 COPY backend_demo.py .
 COPY backend_state.py .
+COPY backend_queue.py .
+COPY backend_worker.py .
 COPY ViralShorts-App/dist/ ./ViralShorts-App/dist/
 
 RUN mkdir -p generated_videos temp_assets demo_uploads

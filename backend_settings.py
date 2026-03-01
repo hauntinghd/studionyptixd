@@ -59,6 +59,12 @@ RUNPOD_COMPOSITOR_FALLBACK_LOCAL = os.getenv("RUNPOD_COMPOSITOR_FALLBACK_LOCAL",
 RUNPOD_COMPOSITOR_HOST = os.getenv("RUNPOD_COMPOSITOR_HOST", "root@69.30.85.41")
 RUNPOD_COMPOSITOR_SSH_PORT = os.getenv("RUNPOD_COMPOSITOR_SSH_PORT", "22118")
 RUNPOD_COMPOSITOR_BASE_DIR = os.getenv("RUNPOD_COMPOSITOR_BASE_DIR", "/workspace/nyptid_compositor")
+JOB_QUEUE_WORKERS = max(1, int(os.getenv("JOB_QUEUE_WORKERS", "2")))
+JOB_MAX_QUEUE_DEPTH = max(1, int(os.getenv("JOB_MAX_QUEUE_DEPTH", "300")))
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_QUEUE_ENABLED = os.getenv("REDIS_QUEUE_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "studio")
+FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "1").lower() in ("1", "true", "yes", "on")
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 

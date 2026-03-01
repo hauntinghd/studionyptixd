@@ -6,3 +6,4 @@ PyJWT
 pydantic
 python-multipart
 paramiko
+redis
