@@ -34,7 +34,8 @@ const GENERATION_API = (() => {
     return rawGenerationApi;
 })();
 const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
-const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'objects', 'wouldyourather', 'scary', 'history']);
+const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'story', 'motivation']);
+const CLONE_COMING_SOON = true;
 const Logo = ({ size = 24 }: { size?: number }) => (
     <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
 );
@@ -55,6 +56,8 @@ interface AuthContextType {
     demoAccess: boolean;
     demoPriceId: string;
     demoComingSoon: boolean;
+    maintenanceBannerEnabled: boolean;
+    maintenanceBannerMessage: string;
     signIn: (email: string, password: string) => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
@@ -65,6 +68,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
     session: null, supabase: null, plan: 'free', role: 'user', loading: true,
     demoAccess: false, demoPriceId: '', demoComingSoon: true,
+    maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     signIn: async () => null, signUp: async () => null, signOut: async () => {},
     checkout: async () => {}, checkoutDemo: async () => {},
 });
@@ -78,12 +82,16 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const [demoAccess, setDemoAccess] = useState(false);
     const [demoPriceId, setDemoPriceId] = useState('');
     const [demoComingSoon, setDemoComingSoon] = useState(true);
+    const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
+    const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
 
     useEffect(() => {
         (async () => {
             try {
                 const res = await fetch(`${API}/api/config`);
                 const cfg = await res.json();
+                setMaintenanceBannerEnabled(Boolean(cfg.maintenance_banner_enabled));
+                setMaintenanceBannerMessage((cfg.maintenance_banner_message || "").trim());
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
                     setSupabase(sb);
@@ -171,7 +179,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [session, demoPriceId]);
 
     return (
-        <AuthContext.Provider value={{ session, supabase, plan, role, loading, demoAccess, demoPriceId, demoComingSoon, signIn, signUp, signOut, checkout, checkoutDemo }}>
+        <AuthContext.Provider value={{
+            session, supabase, plan, role, loading, demoAccess, demoPriceId, demoComingSoon,
+            maintenanceBannerEnabled, maintenanceBannerMessage,
+            signIn, signUp, signOut, checkout, checkoutDemo,
+        }}>
             {children}
         </AuthContext.Provider>
     );
@@ -186,7 +198,7 @@ function App() {
 }
 
 function AppShell() {
-    const { session, loading } = useContext(AuthContext);
+    const { session, loading, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const [page, setPage] = useState<'landing' | 'dashboard' | 'auth' | 'account'>(() => {
         try {
             const saved = localStorage.getItem('nyptid_page');
@@ -216,6 +228,11 @@ function AppShell() {
 
     return (
         <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
+            {maintenanceBannerEnabled && (
+                <div className="sticky top-0 z-50 border-b border-amber-300/20 bg-amber-500/10 px-4 py-2 text-center text-xs sm:text-sm text-amber-100 backdrop-blur">
+                    {maintenanceBannerMessage || "Studio is under high load. Queue times may be longer than usual while we scale capacity."}
+                </div>
+            )}
             {page === 'landing' && <LandingPage onNavigate={setPage} />}
             {page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
             {page === 'auth' && <AuthPage onNavigate={setPage} />}
@@ -463,6 +480,18 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
 function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, role, checkout, checkoutDemo, demoComingSoon } = useContext(AuthContext);
     const isAdmin = role === 'admin';
+    const realShortLinks = [
+        "https://youtube.com/shorts/36-AAocHhg0?feature=share",
+        "https://youtube.com/shorts/K8-W6xmXF7w?feature=share",
+        "https://youtube.com/shorts/1y10LtdyQ_I?feature=share",
+        "https://youtube.com/shorts/UcTCAOUNa1I?feature=share",
+    ];
+    const liveTemplates = [
+        { title: 'Skeleton AI', desc: '3D skeleton characters in outfits. Career salary comparisons, dark humor, viral breakdowns.', icon: '💀', color: 'from-gray-600 to-gray-800' },
+        { title: 'AI Stories', desc: 'Cinematic visual stories with emotional arcs and strong retention hooks.', icon: '🎬', color: 'from-violet-600 to-violet-800' },
+        { title: 'Motivation', desc: 'Powerful life advice with epic cinematic landscapes. Screenshot-worthy.', icon: '🔥', color: 'from-amber-600 to-amber-800' },
+    ];
+    const comingSoonTemplates = ['Objects Explain', 'Would You Rather', 'Scary Stories', 'Historical Epic', 'Argument Debate', 'What If', 'Business', 'Finance', 'Tech', 'Crypto'];
 
     return (
         <>
@@ -527,34 +556,67 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             </section>
 
+            {/* REAL OUTPUT PROOF */}
+            <section className="py-16 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6">
+                    <div className="text-center mb-10">
+                        <h2 className="text-3xl md:text-4xl font-bold mb-3">Real Shorts, Real Results</h2>
+                        <p className="text-gray-400 max-w-2xl mx-auto">
+                            No fake counters, no fake testimonials. Watch actual outputs and verify on YouTube.
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Featured Generated Short</p>
+                            <div className="rounded-xl overflow-hidden border border-white/[0.08] bg-black aspect-[9/16] max-h-[540px] mx-auto">
+                                <iframe
+                                    title="NYPTID Featured Short"
+                                    src="https://www.youtube.com/embed/36-AAocHhg0"
+                                    className="w-full h-full"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                    allowFullScreen
+                                />
+                            </div>
+                            <p className="text-xs text-gray-500 mt-3">
+                                Featured proof clip is embedded directly from your published channel output.
+                            </p>
+                        </div>
+                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Public YouTube Proof</p>
+                            <div className="space-y-2">
+                                {realShortLinks.map((url, i) => (
+                                    <a
+                                        key={url}
+                                        href={url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300 hover:border-violet-500/40 hover:text-white transition"
+                                    >
+                                        <span>Watch Short #{i + 1}</span>
+                                        <ArrowRight className="w-4 h-4" />
+                                    </a>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             {/* TEMPLATES SHOWCASE */}
             <section className="py-24 border-t border-white/5">
                 <div className="max-w-6xl mx-auto px-6">
                     <div className="text-center mb-16">
                         <h2 className="text-4xl font-bold mb-4">Choose Your Style</h2>
-                        <p className="text-gray-400 text-lg">Every template is engineered for maximum retention and virality</p>
+                        <p className="text-gray-400 text-lg">Start with 3 live templates. More are clearly marked in development.</p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {[
-                            { title: 'Skeleton AI', desc: '3D skeleton characters in outfits. Career salary comparisons, dark humor, viral breakdowns.', icon: '💀', color: 'from-gray-600 to-gray-800', tag: 'TRENDING' },
-                            { title: 'Objects Explain', desc: 'Everyday objects come to life and explain how they work. Educational + hilarious.', icon: '🔌', color: 'from-teal-600 to-teal-800', tag: 'TRENDING' },
-                            { title: 'Would You Rather', desc: 'Impossible dilemmas that everyone needs to answer. Insane engagement.', icon: '🤔', color: 'from-purple-600 to-purple-800', tag: 'HOT' },
-                            { title: 'Scary Stories', desc: 'Bone-chilling true crime and horror stories with Fincher-level atmosphere.', icon: '👻', color: 'from-zinc-700 to-zinc-900', tag: 'POPULAR' },
-                            { title: 'Historical Epic', desc: 'Cinematic historical content. Battles, empires, dramatic reveals.', icon: '⚔️', color: 'from-amber-700 to-amber-900', tag: 'NEW' },
-                            { title: 'Argument Debate', desc: 'Two sides debate hot topics. Viewers pick a side in comments.', icon: '🗣️', color: 'from-rose-600 to-rose-800', tag: 'HOT' },
-                            { title: 'Motivation', desc: 'Powerful life advice with epic cinematic landscapes. Screenshot-worthy.', icon: '🔥', color: 'from-amber-600 to-amber-800', tag: null },
-                            { title: 'What If', desc: 'Mind-bending hypotheticals with real science. Maximum curiosity gap.', icon: '🌍', color: 'from-indigo-600 to-indigo-800', tag: null },
-                            { title: 'Top 5 Lists', desc: 'Countdown videos with dramatic reveals and bold visuals.', icon: '🏆', color: 'from-yellow-700 to-yellow-900', tag: null },
-                            { title: 'Chaos Mode', desc: 'Maximum retention brain content. Fast, unpredictable, pure viral.', icon: '🌀', color: 'from-emerald-700 to-emerald-900', tag: null },
-                        ].map((t, i) => (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                        {liveTemplates.map((t, i) => (
                             <div key={i} onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
                                 className="group relative p-6 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:border-violet-500/30 hover:bg-violet-500/[0.03] transition-all cursor-pointer">
-                                {t.tag && (
-                                    <span className="absolute top-4 right-4 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30">
-                                        {t.tag}
-                                    </span>
-                                )}
+                                <span className="absolute top-4 right-4 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    LIVE
+                                </span>
                                 <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${t.color} flex items-center justify-center text-xl mb-4`}>
                                     {t.icon}
                                 </div>
@@ -562,6 +624,16 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <p className="text-gray-500 text-sm leading-relaxed">{t.desc}</p>
                             </div>
                         ))}
+                    </div>
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+                        <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Coming Soon Templates</p>
+                        <div className="flex flex-wrap gap-2">
+                            {comingSoonTemplates.map((name) => (
+                                <span key={name} className="text-xs px-3 py-1.5 rounded-full border border-white/[0.08] bg-black/20 text-gray-400">
+                                    {name}
+                                </span>
+                            ))}
+                        </div>
                     </div>
                 </div>
             </section>
@@ -711,7 +783,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 icon: <Globe className="w-6 h-6 text-violet-400" />,
                                 iconBg: 'bg-violet-500/10',
                                 title: 'Multi-Niche Templates',
-                                desc: 'Business, Tech, Crypto, Science, Entertainment, Education -- purpose-built templates with niche-optimized hooks and visuals.',
+                                desc: 'Business, Finance, Tech, Crypto, and Science templates are in progress and marked Coming Soon in-app.',
                                 tag: 'Q3 2026',
                             },
                             {
@@ -761,7 +833,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <span className="text-3xl font-extrabold">$0</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['3 videos/month', 'All 10 templates', '30s max', '720p output'].map((f, i) => (
+                                {['3 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '30s max', '720p output'].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-gray-600 shrink-0" />{f}
                                     </li>
@@ -782,7 +854,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['50 videos/month', 'All 10 templates', '60s per video', '720p output', 'Standard speed'].map((f, i) => (
+                                {['50 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '60s per video', '720p output', 'Standard speed'].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -806,7 +878,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['150 videos/month', 'All 10 templates', '3 min per video', '1080p output', 'Priority speed', 'Clone viral shorts'].map((f, i) => (
+                                {['150 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '3 min per video', '1080p output', 'Priority speed', 'Clone viral shorts (Coming Soon)'].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-300">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -827,7 +899,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['Unlimited videos', 'All 10 templates', '5 min per video', '1080p output', 'Max priority speed', 'Clone viral shorts', 'Priority support'].map((f, i) => (
+                                {['Unlimited videos', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '5 min per video', '1080p output', 'Max priority speed', 'Clone viral shorts (Coming Soon)', 'Priority support'].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -911,6 +983,9 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     useEffect(() => {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
+    useEffect(() => {
+        if (CLONE_COMING_SOON && tab === 'clone') setTab('create');
+    }, [tab]);
 
     if (!session) return null;
 
@@ -934,68 +1009,78 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                     </button>
                 </div>
 
-                <div className="flex gap-1 p-1 bg-white/[0.03] border border-white/[0.06] rounded-xl mb-8">
+                <div className="space-y-3 mb-8">
                     <button onClick={() => setTab('create')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
+                        className={`w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-sm transition-all ${
                             tab === 'create'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                ? 'bg-violet-600/90 text-white border-violet-500 shadow-lg shadow-violet-600/20'
+                                : 'bg-white/[0.02] text-gray-300 border-white/[0.08] hover:border-violet-500/40 hover:text-white'
                         }`}>
-                        <Wand2 className="w-4 h-4" />
-                        Create
+                        <span className="flex items-center gap-2 font-semibold">
+                            <Wand2 className="w-4 h-4" />
+                            Create
+                        </span>
+                        <span className="text-xs opacity-80">Build short videos</span>
                     </button>
-                    <button onClick={() => setTab('clone')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
-                            tab === 'clone'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
-                        }`}>
-                        <FileVideo className="w-4 h-4" />
-                        Clone
-                        {plan !== 'creator' && plan !== 'pro' && (
-                            <Lock className="w-3 h-3 text-gray-500" />
-                        )}
-                    </button>
-                    {isAdmin && (
-                    <button onClick={() => setTab('thumbnails')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
-                            tab === 'thumbnails'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
-                        }`}>
-                        <Image className="w-4 h-4" />
-                        Thumbnails
-                    </button>
-                    )}
-                    {isAdmin && (
-                    <button onClick={() => setTab('demo')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
-                            tab === 'demo'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
-                        }`}>
-                        <Monitor className="w-4 h-4" />
-                        Product Demo
-                    </button>
-                    )}
-                    {isAdmin && (
-                    <button onClick={() => setTab('analytics')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-medium transition-all ${
-                            tab === 'analytics'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                                : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
-                        }`}>
-                        <Eye className="w-4 h-4" />
-                        Product Analytics
-                    </button>
-                    )}
+                    <div className="p-1 bg-white/[0.03] border border-white/[0.06] rounded-xl">
+                        <div className="flex flex-wrap gap-1">
+                            <button onClick={() => !CLONE_COMING_SOON && setTab('clone')}
+                                disabled={CLONE_COMING_SOON}
+                                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                    tab === 'clone'
+                                        ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                        : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                } ${CLONE_COMING_SOON ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                                <FileVideo className="w-4 h-4" />
+                                Clone
+                                {CLONE_COMING_SOON ? (
+                                    <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 rounded">Soon</span>
+                                ) : plan !== 'creator' && plan !== 'pro' ? (
+                                    <Lock className="w-3 h-3 text-gray-500" />
+                                ) : null}
+                            </button>
+                            {isAdmin && (
+                                <button onClick={() => setTab('thumbnails')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'thumbnails'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Image className="w-4 h-4" />
+                                    Thumbnails
+                                </button>
+                            )}
+                            {isAdmin && (
+                                <button onClick={() => setTab('demo')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'demo'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Monitor className="w-4 h-4" />
+                                    Product Demo
+                                </button>
+                            )}
+                            {isAdmin && (
+                                <button onClick={() => setTab('analytics')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'analytics'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Eye className="w-4 h-4" />
+                                    Product Analytics
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
 
             {tab === 'create'
                 ? <CreatePanel />
                 : tab === 'clone'
-                    ? <ClonePanel />
+                    ? (CLONE_COMING_SOON ? <CreatePanel /> : <ClonePanel />)
                     : tab === 'demo'
                         ? <DemoPanel />
                         : tab === 'analytics'
@@ -1031,6 +1116,7 @@ interface CreatePanelPersistedState {
     creativeScenes: CreativeScene[];
     creativeTitle: string;
     creativeNarration: string;
+    storyAnimationEnabled?: boolean;
     jobId: string | null;
     ts: number;
 }
@@ -1050,6 +1136,7 @@ interface ProjectRow {
     title?: string;
     resolution?: string;
     language?: string;
+    story_animation_enabled?: boolean;
     scenes?: CreativeScene[];
     narration?: string;
     error?: string;
@@ -1078,11 +1165,13 @@ function CreatePanel() {
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
+    const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
     const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
     const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
     const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
     const [finalizeError, setFinalizeError] = useState<string | null>(null);
+    const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
     const restoreDoneRef = useRef(false);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
@@ -1102,16 +1191,30 @@ function CreatePanel() {
 
     const templates = [
         { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
+        { id: 'story', title: 'AI Stories', desc: 'Cinematic story shorts', icon: '🎬' },
+        { id: 'motivation', title: 'Motivation', desc: 'Powerful life advice', icon: '🔥' },
+        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
+        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
+        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
+        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
         { id: 'objects', title: 'Objects Explain', desc: 'Talking objects', icon: '🔌' },
         { id: 'wouldyourather', title: 'Would You Rather', desc: 'Impossible dilemmas', icon: '🤔' },
         { id: 'scary', title: 'Scary Stories', desc: 'Horror & true crime', icon: '👻' },
         { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
         { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
-        { id: 'motivation', title: 'Motivation', desc: 'Powerful life advice', icon: '🔥' },
         { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
-        { id: 'top5', title: 'Top 5', desc: 'Countdown lists', icon: '🏆' },
-        { id: 'random', title: 'Chaos Mode', desc: 'Maximum retention', icon: '🌀' },
     ];
+    const templateIds = new Set(templates.map(t => t.id));
+    useEffect(() => {
+        if (!templateIds.has(selectedTemplate)) {
+            setSelectedTemplate('skeleton');
+        }
+    }, [selectedTemplate]);
+    useEffect(() => {
+        if (selectedTemplate !== 'story' && storyAnimationEnabled !== true) {
+            setStoryAnimationEnabled(true);
+        }
+    }, [selectedTemplate, storyAnimationEnabled]);
 
     const authHeaders = (): Record<string, string> => {
         const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -1153,6 +1256,7 @@ function CreatePanel() {
             if (Array.isArray(saved.creativeScenes)) setCreativeScenes(saved.creativeScenes);
             if (typeof saved.creativeTitle === 'string') setCreativeTitle(saved.creativeTitle);
             if (typeof saved.creativeNarration === 'string') setCreativeNarration(saved.creativeNarration);
+            if (typeof saved.storyAnimationEnabled === 'boolean') setStoryAnimationEnabled(saved.storyAnimationEnabled);
             if (typeof saved.jobId === 'string' && saved.jobId) {
                 setJobId(saved.jobId);
                 setLoading(true);
@@ -1186,6 +1290,7 @@ function CreatePanel() {
             creativeScenes: safeScenes,
             creativeTitle,
             creativeNarration,
+            storyAnimationEnabled,
             jobId,
             ts: Date.now(),
         };
@@ -1207,6 +1312,7 @@ function CreatePanel() {
         creativeScenes,
         creativeTitle,
         creativeNarration,
+        storyAnimationEnabled,
         jobId,
     ]);
 
@@ -1284,6 +1390,40 @@ function CreatePanel() {
         } catch { setLoading(false); }
     };
 
+    const handleRegenerateAutoScene = async (sceneIndex: number) => {
+        const targetJobId = jobId || jobStatus?.job_id;
+        if (!targetJobId) return;
+        setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
+        try {
+            const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    job_id: targetJobId,
+                    scene_index: sceneIndex,
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                throw new Error(data?.detail || "Failed to regenerate scene image");
+            }
+            const updatedImage = data?.image;
+            if (updatedImage) {
+                setJobStatus((prev: any) => {
+                    if (!prev) return prev;
+                    const nextImages = Array.isArray(prev.scene_images) ? [...prev.scene_images] : [];
+                    while (nextImages.length <= sceneIndex) nextImages.push(null);
+                    nextImages[sceneIndex] = updatedImage;
+                    return { ...prev, scene_images: nextImages };
+                });
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to regenerate scene image");
+        } finally {
+            setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: false }));
+        }
+    };
+
     const handleCreativeStart = async () => {
         setScriptLoading(true);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
@@ -1296,6 +1436,7 @@ function CreatePanel() {
                     topic: prompt || "Untitled",
                     resolution: canUse1080p ? resolution : '720p',
                     language,
+                    story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
                 }),
             });
             if (!res.ok) throw new Error("Failed to create session");
@@ -1415,6 +1556,7 @@ function CreatePanel() {
                     template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
                     language,
+                    story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
                     narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
                         narration: "",
@@ -1475,6 +1617,11 @@ function CreatePanel() {
             setPrompt(p.topic || '');
             if (p.resolution === '720p' || p.resolution === '1080p') setResolution(p.resolution);
             if (p.language) setLanguage(p.language);
+            if (typeof p.story_animation_enabled === 'boolean') {
+                setStoryAnimationEnabled(p.story_animation_enabled);
+            } else {
+                setStoryAnimationEnabled(true);
+            }
             setCreativeMode(p.mode === 'creative' ? 'creative' : 'auto');
             if (p.mode === 'creative') {
                 setCreativeStep('edit');
@@ -1862,6 +2009,11 @@ function CreatePanel() {
                             onChange={(e) => setPrompt(e.target.value)}
                             disabled={loading || scriptLoading}
                             placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
+                                : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
+                                : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
+                                : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
+                                : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
+                                : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
                                 : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
                                 : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
                                 : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
@@ -1869,7 +2021,6 @@ function CreatePanel() {
                                 : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
                                 : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
                                 : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
-                                : selectedTemplate === 'top5' ? "e.g., Top 5 most powerful ancient civilizations"
                                 : "Enter your video topic..."}
                             className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
                             onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
@@ -1910,6 +2061,28 @@ function CreatePanel() {
                                 </span>
                             </div>
                         </label>
+                    </div>
+                )}
+
+                {creativeMode === 'creative' && selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">AI Stories Animation</p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Turn OFF to render with image-based camera motion only (no Kling scene animation).
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => !loading && !scriptLoading && setStoryAnimationEnabled(v => !v)}
+                                disabled={loading || scriptLoading}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                    storyAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                                } disabled:opacity-50`}
+                            >
+                                {storyAnimationEnabled ? "Animation ON" : "Animation OFF"}
+                            </button>
+                        </div>
                     </div>
                 )}
 
@@ -1971,6 +2144,37 @@ function CreatePanel() {
                                         <Download className="w-5 h-5" />
                                         Download MP4
                                     </a>
+                                    {jobStatus.resolution === '720p' && Array.isArray(jobStatus.scene_images) && jobStatus.scene_images.length > 0 && (
+                                        <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4 space-y-3">
+                                            <p className="text-xs uppercase tracking-wider text-gray-400 font-semibold">
+                                                Regenerate Scene Images (720p Training Data)
+                                            </p>
+                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                                {jobStatus.scene_images.map((sceneImg: any, idx: number) => {
+                                                    const imgUrl = String(sceneImg?.image_url || "");
+                                                    const src = imgUrl.startsWith("http") ? imgUrl : `${GENERATION_API}${imgUrl}`;
+                                                    const busy = !!regeneratingAutoScenes[idx];
+                                                    return (
+                                                        <div key={`auto-scene-${idx}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2 space-y-2">
+                                                            <div className="text-[10px] text-gray-500">Scene {idx + 1}</div>
+                                                            {imgUrl ? (
+                                                                <img src={src} alt={`Auto scene ${idx + 1}`} className="w-full h-28 object-cover rounded bg-black/40" />
+                                                            ) : (
+                                                                <div className="w-full h-28 rounded bg-black/40 flex items-center justify-center text-[10px] text-gray-600">No image</div>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleRegenerateAutoScene(idx)}
+                                                                disabled={busy}
+                                                                className="w-full py-1.5 rounded bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-[11px] font-semibold text-white"
+                                                            >
+                                                                {busy ? "Regenerating..." : "Regenerate"}
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
                                     <button onClick={() => { setJobStatus(null); setJobId(null); }}
                                         className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
                                         Create Another
@@ -2275,6 +2479,9 @@ function AdminAnalyticsPanel() {
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+    const [bannerEnabled, setBannerEnabled] = useState(false);
+    const [bannerMessage, setBannerMessage] = useState("Studio is under high load. Queue times may be longer than usual while we scale capacity.");
+    const [savingBanner, setSavingBanner] = useState(false);
 
     const loadAnalytics = useCallback(async () => {
         if (!session) return;
@@ -2285,7 +2492,10 @@ function AdminAnalyticsPanel() {
                 headers: { Authorization: `Bearer ${session.access_token}` },
             });
             if (!res.ok) throw new Error(`Failed to load analytics (${res.status})`);
-            setData(await res.json());
+            const payload = await res.json();
+            setData(payload);
+            setBannerEnabled(Boolean(payload.maintenance_banner_enabled));
+            setBannerMessage((payload.maintenance_banner_message || "").trim() || "Studio is under high load. Queue times may be longer than usual while we scale capacity.");
         } catch (e: any) {
             setError(e?.message || "Failed to load analytics");
         } finally {
@@ -2301,6 +2511,38 @@ function AdminAnalyticsPanel() {
 
     const subscribers = data?.subscribers_by_tier || {};
     const formatUsd = (v: number) => `$${Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const queueUtilization = Number(data?.queue_utilization_pct || 0);
+    const highLoadDetected = Boolean(data?.high_load_detected);
+
+    const saveBanner = useCallback(async () => {
+        if (!session) return;
+        setSavingBanner(true);
+        setError("");
+        try {
+            const res = await fetch(`${API}/api/admin/maintenance-banner`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({
+                    enabled: bannerEnabled,
+                    message: bannerMessage,
+                }),
+            });
+            if (!res.ok) throw new Error(`Failed to save banner (${res.status})`);
+            const updated = await res.json();
+            setData((prev: any) => ({
+                ...(prev || {}),
+                maintenance_banner_enabled: Boolean(updated.maintenance_banner_enabled),
+                maintenance_banner_message: updated.maintenance_banner_message || "",
+            }));
+        } catch (e: any) {
+            setError(e?.message || "Failed to save banner settings");
+        } finally {
+            setSavingBanner(false);
+        }
+    }, [session, bannerEnabled, bannerMessage]);
 
     return (
         <div className="max-w-5xl mx-auto px-6 pb-10 space-y-6">
@@ -2328,12 +2570,61 @@ function AdminAnalyticsPanel() {
                         <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                             <p className="text-xs text-gray-500 uppercase tracking-wider">Active Generations</p>
                             <p className="text-2xl font-bold text-white mt-1">{data.active_generations || 0}</p>
-                            <p className="text-xs text-gray-500 mt-1">Queue depth: {data.queue_depth || 0}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                Queue depth: {data.queue_depth || 0} / {data.queue_max_depth || 0} • Workers: {data.queue_workers || 0}
+                            </p>
                         </div>
                         <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                             <p className="text-xs text-gray-500 uppercase tracking-wider">Monthly Profit (proxy)</p>
                             <p className="text-2xl font-bold text-emerald-400 mt-1">{formatUsd(data.monthly_profit_usd || 0)}</p>
                             <p className="text-xs text-gray-500 mt-1">Source: {data.revenue_source || 'none'}</p>
+                        </div>
+                    </div>
+
+                    <div className={`rounded-xl border p-4 ${highLoadDetected ? "border-amber-400/40 bg-amber-500/10" : "border-white/[0.08] bg-white/[0.02]"}`}>
+                        <div className="flex items-center justify-between gap-4">
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase tracking-wider">Load Status</p>
+                                <p className={`text-lg font-bold mt-1 ${highLoadDetected ? "text-amber-300" : "text-emerald-300"}`}>
+                                    {highLoadDetected ? "High Load Detected" : "Normal Load"}
+                                </p>
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Queue utilization: {queueUtilization.toFixed(1)}% • Active per worker: {Number(data.active_generations_per_worker || 0).toFixed(2)}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">High Load Banner (Admin)</h3>
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                            <div>
+                                <p className="text-sm text-white font-medium">Show warning banner</p>
+                                <p className="text-xs text-gray-500">Students see longer queue warning during heavy load.</p>
+                            </div>
+                            <button
+                                onClick={() => setBannerEnabled(v => !v)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${bannerEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"}`}
+                            >
+                                {bannerEnabled ? "ON" : "OFF"}
+                            </button>
+                        </div>
+                        <textarea
+                            value={bannerMessage}
+                            onChange={(e) => setBannerMessage(e.target.value)}
+                            rows={2}
+                            className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all resize-none"
+                            placeholder="Studio is under high load. Queue times may be longer than usual while we scale capacity."
+                        />
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={saveBanner}
+                                disabled={savingBanner}
+                                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition disabled:opacity-60"
+                            >
+                                {savingBanner ? "Saving..." : "Save Banner"}
+                            </button>
+                            <p className="text-xs text-gray-500">Current: {data.maintenance_banner_enabled ? "Visible" : "Hidden"}</p>
                         </div>
                     </div>
 

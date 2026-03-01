@@ -192,6 +192,8 @@ async def _disable_html_cache(request: Request, call_next):
 jobs: dict = {}
 security = HTTPBearer(auto_error=False)
 init_queue_runtime(jobs, log)
+AUTO_SCENE_IMAGE_ROOT = Path(TRAINING_DATA_DIR) / "auto_scene_images"
+AUTO_SCENE_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Runtime banner state can be updated by admin without restart.
 _maintenance_banner_enabled = bool(MAINTENANCE_BANNER_ENABLED)
@@ -223,6 +225,43 @@ def _bool_from_any(value, default: bool = False) -> bool:
     if text in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def _auto_scene_dir(job_id: str) -> Path:
+    d = AUTO_SCENE_IMAGE_ROOT / str(job_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _auto_scene_url(job_id: str, filename: str) -> str:
+    return f"/api/auto/scene-image/{job_id}/{filename}"
+
+
+def _persist_auto_scene_image(job_id: str, scene_index: int, image_path: str, scene: dict, template: str, img_result: dict | None, source: str) -> dict | None:
+    """Persist auto-mode 720p scene images for regeneration/training workflows."""
+    try:
+        src = Path(image_path)
+        if not src.exists():
+            return None
+        dst_name = f"scene_{scene_index + 1:02d}.png"
+        dst = _auto_scene_dir(job_id) / dst_name
+        shutil.copy2(src, dst)
+        result = img_result or {}
+        return {
+            "scene_index": scene_index,
+            "filename": dst_name,
+            "image_url": _auto_scene_url(job_id, dst_name),
+            "local_path": str(dst),
+            "visual_description": str((scene or {}).get("visual_description", "") or ""),
+            "template": template,
+            "generation_id": str(result.get("generation_id", "") or ""),
+            "cdn_url": str(result.get("cdn_url", "") or ""),
+            "source": source,
+            "updated_at": time.time(),
+        }
+    except Exception as e:
+        log.warning(f"[{job_id}] Failed to persist scene image {scene_index + 1}: {e}")
+        return None
 
 
 def _persist_env_overrides(updates: dict[str, str]) -> None:
@@ -350,7 +389,11 @@ async def get_user_plan(user: dict) -> dict:
 TEMPLATE_SYSTEM_PROMPTS = {
     "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where skeleton characters in detailed outfits deliver rapid-fire comparisons. The reference channel is CrypticScience.
 
-CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Write visual descriptions as if directing a cinematographer and VFX artist -- describe exactly what the camera sees, the character's pose, outfit details, what they're holding, and the motion/action happening.
+CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Keep each visual_description SIMPLE but DETAILED, with a HARD MAX of 3 sentences:
+- Sentence 1: exact outfit + identity lock details first (full body outfit, colors, logos/brand family, accessories).
+- Sentence 2: pose + prop + camera framing.
+- Sentence 3: motion/action cues only (what moves and how).
+Never exceed 3 sentences. Prefer 2-3 concise sentences over long paragraphs.
 
 THE SKELETON CHARACTER RULES (STRICT):
 - Think of it as a REAL PERSON wearing a full outfit, but with a SKULL for a head and SKELETON HANDS. The body under the clothes is NOT visible -- clothes cover everything from neck to feet.
@@ -358,9 +401,10 @@ THE SKELETON CHARACTER RULES (STRICT):
 - CLOTHING (CRITICAL -- THIS IS THE MOST IMPORTANT RULE): The skeleton MUST be wearing a COMPLETE outfit that COVERS THE ENTIRE BODY from neck to feet:
   * If it's a pilot: full navy pilot uniform with epaulettes, tie, pants, shoes -- NO bare ribcage showing
   * If it's a doctor: full white lab coat BUTTONED UP over scrubs, stethoscope, dress pants, shoes -- NO bare spine showing
-  * If it's an F1 driver: full racing suit zipped to the collar, gloves, boots -- NO bare bones showing
+  * If it's a race driver (NASCAR/F1/etc): full racing suit zipped to the collar, gloves, boots -- NO bare bones showing
   * ONLY the skull face and bony hands should be visible. The rest of the body is HIDDEN by opaque clothes.
   * Clothes fit like on a real person with proper draping, wrinkles, and fabric weight.
+  * OUTFIT LOCK: For each character identity, keep one exact outfit design across all scenes (same base suit, same main colors, same sponsor/logo style language, same accessories). Do not drift outfit style scene-to-scene unless explicitly requested.
 - ONE skeleton per scene unless it's a VS/comparison shot (max 2)
 - Always FULL BODY visible from head to toe, centered in frame
 - EVERY scene the skeleton must be DOING something with ultra-smooth human-like natural motion -- fluid arm gestures, natural head turns, realistic weight and momentum. Zach D Films quality movement. NEVER stiff, robotic, or jerky motion.
@@ -420,7 +464,7 @@ Output valid JSON:
   "tags": ["tag1", "tag2"]
 }
 
-Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with the outfit description FIRST (e.g. "A skeleton character wearing a full navy surgeon's scrubs with stethoscope..."). The outfit is the MOST IMPORTANT part -- it defines WHO the skeleton represents. Never write a bare skeleton without clothing. 2-3 sentences minimum per visual_description covering outfit, pose, props, camera angle, and motion.""",
+Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with the outfit description FIRST (e.g. "A skeleton character wearing a full navy surgeon's scrubs with stethoscope..."). The outfit is the MOST IMPORTANT part -- it defines WHO the skeleton represents. Keep outfit consistency locked for each character across all 10 scenes unless explicitly instructed otherwise. Never write a bare skeleton without clothing. Each visual_description must be 1-3 sentences (hard max 3), covering outfit lock, pose/props/camera, and motion.""",
 
     "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
 
@@ -3125,6 +3169,8 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
+        scene_prompts = [str(s.get("visual_description", "") or "") for s in scenes]
+        scene_images = []
         total_steps = len(scenes) * (2 if use_video else 1)
         gen_ts = str(int(time.time() * 1000))
 
@@ -3166,6 +3212,18 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             engine_name = "Skeleton LoRA" if (template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
             _job_record_scene_event(job_id, i, len(scenes), "image_ready", engine_name)
+            if resolution == "720p":
+                persisted_scene = _persist_auto_scene_image(
+                    job_id,
+                    i,
+                    img_path,
+                    scene,
+                    template,
+                    img_result,
+                    source="initial_auto",
+                )
+                if persisted_scene:
+                    scene_images.append(persisted_scene)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
 
@@ -3204,6 +3262,9 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                     _job_record_scene_event(job_id, i, len(scenes), "animation_static")
 
             scene_assets.append(asset)
+
+        jobs[job_id]["scene_prompts"] = scene_prompts
+        jobs[job_id]["scene_images"] = scene_images
 
         _job_set_stage(job_id, "generating_voice", 70)
         log.info(f"[{job_id}] Generating voiceover...")
@@ -4174,6 +4235,122 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         raise HTTPException(429, str(e))
 
     return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/api/auto/scene-image/{job_id}/{filename}")
+async def auto_scene_image(job_id: str, filename: str):
+    safe = Path(filename).name
+    if safe != filename:
+        raise HTTPException(400, "Invalid filename")
+    path = _auto_scene_dir(job_id) / safe
+    if not path.exists():
+        raise HTTPException(404, "Image not found")
+    media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(str(path), media_type=media_type, filename=safe)
+
+
+@app.post("/api/auto/regenerate-scene-image")
+async def auto_regenerate_scene_image(body: dict, request: Request = None):
+    job_id = str((body or {}).get("job_id", "") or "").strip()
+    if not job_id:
+        raise HTTPException(400, "job_id is required")
+    try:
+        scene_index = int((body or {}).get("scene_index", 0))
+    except Exception:
+        raise HTTPException(400, "scene_index must be an integer")
+
+    state = jobs.get(job_id)
+    in_memory_job = True
+    if not isinstance(state, dict):
+        persisted = await get_persisted_job_state(job_id)
+        if not isinstance(persisted, dict):
+            raise HTTPException(404, "Job not found")
+        state = dict(persisted)
+        in_memory_job = False
+
+    # If the job is tied to a user, require matching auth for regeneration.
+    owner_user_id = str(state.get("user_id", "") or "")
+    if owner_user_id:
+        user = await get_current_user_from_request(request) if request else None
+        if not user or str(user.get("id", "")) != owner_user_id:
+            raise HTTPException(403, "Not authorized for this job")
+
+    resolution = str(state.get("resolution", "720p") or "720p")
+    if resolution != "720p":
+        raise HTTPException(400, "Image regeneration is available only for 720p auto mode")
+
+    scene_images = state.get("scene_images", [])
+    if not isinstance(scene_images, list) or not scene_images:
+        raise HTTPException(400, "No persisted scene images for this job")
+    if scene_index < 0 or scene_index >= len(scene_images):
+        raise HTTPException(404, "Scene index out of range")
+
+    template = str(state.get("template", "skeleton") or "skeleton")
+    scene_entry = scene_images[scene_index] if isinstance(scene_images[scene_index], dict) else {}
+    scene_prompt = str(scene_entry.get("visual_description", "") or "")
+    if not scene_prompt:
+        prompts = state.get("scene_prompts", [])
+        if isinstance(prompts, list) and 0 <= scene_index < len(prompts):
+            scene_prompt = str(prompts[scene_index] or "")
+    if not scene_prompt:
+        raise HTTPException(400, "Scene prompt unavailable for regeneration")
+
+    prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+    neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+    if template == "skeleton":
+        skeleton_anchor = ""
+        if isinstance(scene_images, list) and scene_images:
+            first_scene = scene_images[0] if isinstance(scene_images[0], dict) else {}
+            s1_desc = str(first_scene.get("visual_description", "") or "")
+            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
+            if outfit_match:
+                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+        full_prompt = (
+            SKELETON_IMAGE_STYLE_PREFIX + " "
+            + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
+            + skeleton_anchor + scene_prompt + " " + SKELETON_IMAGE_SUFFIX
+        )
+    else:
+        full_prompt = prompt_prefix + scene_prompt
+
+    ts = int(time.time() * 1000)
+    out_name = f"scene_{scene_index + 1:02d}_regen_{ts}.png"
+    out_path = str(_auto_scene_dir(job_id) / out_name)
+    img_result = await generate_scene_image(
+        full_prompt,
+        out_path,
+        resolution="720p",
+        negative_prompt=neg_prompt,
+        template=template,
+        reference_image_url="",
+    )
+
+    old_gen_id = str(scene_entry.get("generation_id", "") or "")
+    new_gen_id = str(img_result.get("generation_id", "") or "")
+    if old_gen_id and new_gen_id and old_gen_id != new_gen_id:
+        try:
+            asyncio.create_task(_mark_training_feedback(old_gen_id, accepted=False, user_id=owner_user_id, event="auto_regenerate"))
+        except Exception:
+            pass
+
+    updated = {
+        "scene_index": scene_index,
+        "filename": out_name,
+        "image_url": _auto_scene_url(job_id, out_name),
+        "local_path": str(Path(out_path)),
+        "visual_description": scene_prompt,
+        "template": template,
+        "generation_id": new_gen_id,
+        "cdn_url": str(img_result.get("cdn_url", "") or ""),
+        "source": "regenerated_auto",
+        "updated_at": time.time(),
+    }
+    scene_images[scene_index] = updated
+    state["scene_images"] = scene_images
+    if in_memory_job:
+        jobs[job_id]["scene_images"] = scene_images
+    await persist_job_state(job_id, state)
+    return {"ok": True, "job_id": job_id, "scene_index": scene_index, "image": updated}
 
 
 @app.get("/api/status/{job_id}")

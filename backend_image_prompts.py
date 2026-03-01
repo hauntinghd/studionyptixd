@@ -9,11 +9,14 @@ SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "MASTER CONSISTENCY RULES (apply to every scene): "
     "Keep one continuous visual universe across all scenes. Keep the same skeleton character identity, "
     "same skull shape, same limb proportions, same bone material, same eye style, same color grade, and same camera language. "
-    "For VS videos, lock two identities and keep both stable scene-to-scene: Driver A = Formula 1, Driver B = Super Formula. "
+    "For VS videos, lock two identities and keep both stable scene-to-scene as Character A and Character B. "
     "Never swap identities. Never change art style. Never switch to illustration/comic/anime. "
     "Maintain photoreal cinematic studio quality in every frame. "
     "Use glossy white bone material with subtle glass-like specular highlights, and realistic reflective eyeballs in every scene. "
     "Outfits must remain role-accurate and fully opaque with realistic fabric folds and stitching. "
+    "OUTFIT LOCK: keep the exact same primary outfit design for each locked character across all scenes (same base suit, same main colors, same sponsor/logo placement language, same gloves, same shoes, same accessories) unless the prompt explicitly requests a change. "
+    "For motorsport topics, lock one racing-livery identity per character and keep sponsor/logo families, patch positions, and suit color blocking consistent scene-to-scene. "
+    "Do not randomly switch brands, uniform style, logo layout, or colorway mid-video. "
     "If a visual detail is missing, infer from topic role while preserving the same identity lock."
 )
 
@@ -24,7 +27,8 @@ SKELETON_IMAGE_SUFFIX = (
     "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
     "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face, with glass-like highlights. "
     "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
-    "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting."
+    "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting. "
+    "Preserve outfit continuity across the whole video: same suit identity, same logo family/placement, same color blocking."
 )
 
 TEMPLATE_KLING_MOTION = {
@@ -77,6 +81,7 @@ SKELETON_NEGATIVE_PROMPT = (
     "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, "
     "sheer material, translucent clothing, ghostly clothes, glass clothes, "
     "jpeg artifacts, pixelated, ugly, low resolution, "
+    "inconsistent outfit between scenes, changing sponsor logos every scene, mismatched racing suit branding, "
     "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
     "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose"
 )
