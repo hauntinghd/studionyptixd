@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -53,6 +53,8 @@ from backend_settings import (
     RUNPOD_COMPOSITOR_SSH_PORT,
     RUNPOD_COMPOSITOR_BASE_DIR,
     FORCE_720P_ONLY,
+    MAINTENANCE_BANNER_ENABLED,
+    MAINTENANCE_BANNER_MESSAGE,
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
     STRIPE_PRICE_TO_PLAN,
@@ -191,6 +193,13 @@ jobs: dict = {}
 security = HTTPBearer(auto_error=False)
 init_queue_runtime(jobs, log)
 
+# Runtime banner state can be updated by admin without restart.
+_maintenance_banner_enabled = bool(MAINTENANCE_BANNER_ENABLED)
+_maintenance_banner_message = (
+    (MAINTENANCE_BANNER_MESSAGE or "").strip()
+    or "Studio is under high load. Queue times may be longer than usual while we scale capacity."
+)
+
 
 def _normalize_output_resolution(requested: str, priority_allowed: bool = False) -> str:
     resolution = requested if requested in RESOLUTION_CONFIGS else "720p"
@@ -199,6 +208,44 @@ def _normalize_output_resolution(requested: str, priority_allowed: bool = False)
     if not priority_allowed and resolution == "1080p":
         return "720p"
     return resolution
+
+
+def _bool_from_any(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _persist_env_overrides(updates: dict[str, str]) -> None:
+    env_file = Path(__file__).parent / ".env"
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
+    out = []
+    seen = set()
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        key, _ = line.split("=", 1)
+        key = key.strip()
+        if key in updates:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, val in updates.items():
+        if key not in seen:
+            out.append(f"{key}={val}")
+    env_file.write_text("\n".join(out).strip() + "\n", encoding="utf-8")
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -1999,7 +2046,12 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
     async with httpx.AsyncClient(timeout=60) as client:
         res_resp = await client.get(result_url, headers={"Authorization": "Key " + FAL_AI_KEY})
         if res_resp.status_code != 200:
-            raise RuntimeError("Kling result fetch failed: " + str(res_resp.status_code))
+            # Fallback: some queue variants expose result at status_url without the trailing /status.
+            fallback_result_url = status_url[:-7] if status_url.endswith("/status") else ""
+            if fallback_result_url:
+                res_resp = await client.get(fallback_result_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+            if res_resp.status_code != 200:
+                raise RuntimeError("Kling result fetch failed: " + str(res_resp.status_code))
         result_data = res_resp.json()
 
     video_url = result_data.get("video", {}).get("url")
@@ -2148,6 +2200,12 @@ async def animate_image_runway_video(image_path: str, prompt: str, output_clip_p
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
     """Animate a scene image using FalAI Kling only (forced)."""
     provider_errors = []
+    try:
+        requested_duration = float(duration_sec)
+    except Exception:
+        requested_duration = 5.0
+    # FalAI Kling I2V accepts only 5s or 10s durations.
+    kling_duration = 10 if requested_duration >= 7.5 else 5
 
     if FAL_AI_KEY:
         kling_clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
@@ -2156,7 +2214,7 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
                 image_path,
                 prompt,
                 kling_clip_path,
-                duration=str(max(2, min(int(round(float(duration_sec))), 10))),
+                duration=str(kling_duration),
                 aspect_ratio="9:16",
                 image_cdn_url=image_cdn_url,
             )
@@ -2924,6 +2982,18 @@ def _normalize_scenes_for_render(scenes: list) -> list:
     return normalized
 
 
+def _force_template_scene_duration(scenes: list, template: str) -> list:
+    """Lock selected templates to fixed 5s scenes for stable Kling generation."""
+    if template not in {"skeleton", "story", "motivation"}:
+        return scenes
+    forced = []
+    for s in scenes or []:
+        scene = dict(s or {})
+        scene["duration_sec"] = 5.0
+        forced.append(scene)
+    return forced
+
+
 def _job_diag_init(job_id: str, mode: str):
     job = jobs.get(job_id)
     if not job:
@@ -3031,6 +3101,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
         script_data = await generate_script(template, topic, extra_instructions=lang_instruction)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
+        scenes = _force_template_scene_duration(scenes, template)
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
@@ -3304,6 +3375,9 @@ async def creative_create_session(body: dict, request: Request = None):
     _ensure_template_allowed(template, user)
     requested_resolution = body.get("resolution", "720p")
     resolution = _normalize_output_resolution(requested_resolution, priority_allowed=False)
+    story_animation_enabled = _bool_from_any(body.get("story_animation_enabled"), True)
+    if template != "story" or resolution != "720p":
+        story_animation_enabled = True
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
     async with _creative_sessions_lock:
         _creative_sessions[session_id] = {
@@ -3316,6 +3390,7 @@ async def creative_create_session(body: dict, request: Request = None):
             "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
             "scenes": [],
             "scene_images": {},
+            "story_animation_enabled": story_animation_enabled,
             "reference_image_url": "",
             "created_at": time.time(),
         }
@@ -3330,10 +3405,15 @@ async def creative_create_session(body: dict, request: Request = None):
         "resolution": resolution,
         "language": body.get("language", "en"),
         "session_id": session_id,
+        "story_animation_enabled": story_animation_enabled,
         "scene_count": 0,
     })
     log.info(f"Creative session created: {session_id} for user {user['id']}")
-    return {"session_id": session_id, "project_id": project_id}
+    return {
+        "session_id": session_id,
+        "project_id": project_id,
+        "story_animation_enabled": story_animation_enabled,
+    }
 
 
 @app.post("/api/creative/reference-image")
@@ -3388,6 +3468,7 @@ async def creative_session_status(session_id: str, request: Request = None):
         "template": session.get("template", ""),
         "topic": session.get("topic", ""),
         "scene_count": len(session.get("scenes", [])),
+        "story_animation_enabled": _bool_from_any(session.get("story_animation_enabled"), True),
     }
 
 
@@ -3540,7 +3621,11 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         session["narration"] = req.narration
     if req.scenes:
         session["scenes"] = req.scenes
+    story_animation_enabled = _bool_from_any(req.story_animation_enabled, _bool_from_any(session.get("story_animation_enabled"), True))
+    if session.get("template") != "story":
+        story_animation_enabled = True
     async with _creative_sessions_lock:
+        session["story_animation_enabled"] = story_animation_enabled
         _save_creative_sessions_to_disk()
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
@@ -3550,6 +3635,9 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         user_plan = "pro"
     plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
+    if resolution != "720p":
+        story_animation_enabled = True
+        session["story_animation_enabled"] = True
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
     if total_duration > float(plan_limits.get("max_duration_sec", 60)):
         raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
@@ -3568,6 +3656,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "plan": user_plan,
         "user_id": user.get("id"),
         "created_at": time.time(),
+        "story_animation_enabled": story_animation_enabled,
     }
     _job_diag_init(job_id, "creative")
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -3576,6 +3665,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "scene_count": len(session.get("scenes", [])),
         "scenes": session.get("scenes", []),
         "narration": session.get("narration", ""),
+        "story_animation_enabled": story_animation_enabled,
     })
 
     for si_data in session.get("scene_images", {}).values():
@@ -3598,15 +3688,21 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
     try:
         template = session["template"]
         scenes = _normalize_scenes_for_render(session["scenes"])
+        scenes = _force_template_scene_duration(scenes, template)
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
 
         fal_video_enabled = bool(FAL_AI_KEY)
         use_video_engine = fal_video_enabled
-        use_video = use_video_engine
-        if not use_video_engine:
+        story_animation_enabled = _bool_from_any(session.get("story_animation_enabled"), True)
+        if template == "story" and resolution == "720p" and not story_animation_enabled:
+            use_video = False
+        else:
+            use_video = use_video_engine
+        if use_video and not use_video_engine:
             raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
+        jobs[job_id]["story_animation_enabled"] = bool(story_animation_enabled)
         gen_ts = str(int(time.time() * 1000))
 
         _job_set_stage(job_id, "generating_images", 10)
@@ -3804,6 +3900,11 @@ async def health():
     }
 
 
+@app.head("/api/health")
+async def health_head():
+    return Response(status_code=200)
+
+
 @app.post("/api/admin/comfyui-url")
 async def set_comfyui_url(body: dict, user: dict = Depends(require_auth)):
     """Admin-only: update the ComfyUI URL at runtime (e.g. after cloudflared restart)."""
@@ -3918,14 +4019,25 @@ async def admin_analytics(user: dict = Depends(require_auth)):
             log.warning(f"Admin analytics active-users fetch failed: {e}")
 
     queue_depth = await get_queue_depth()
+    queue_workers = max(1, int(get_queue_workers()))
+    queue_max_depth = max(1, int(get_queue_max_depth()))
+    active_users_estimate = max(active_generating_users, active_users_signins_15m)
+    queue_utilization_pct = round((queue_depth / queue_max_depth) * 100, 1)
+    active_generations_per_worker = round(active_generations / queue_workers, 2)
+    high_load_detected = queue_utilization_pct >= 70.0 or active_generations_per_worker >= 1.0
     return {
         "active_generations": active_generations,
         "queue_depth": queue_depth,
-        "queue_workers": get_queue_workers(),
-        "queue_max_depth": get_queue_max_depth(),
+        "queue_workers": queue_workers,
+        "queue_max_depth": queue_max_depth,
+        "queue_utilization_pct": queue_utilization_pct,
+        "active_generations_per_worker": active_generations_per_worker,
+        "high_load_detected": high_load_detected,
         "active_users_generating": active_generating_users,
         "active_users_signins_15m": active_users_signins_15m,
-        "active_users_estimate": max(active_generating_users, active_users_signins_15m),
+        "active_users_estimate": active_users_estimate,
+        "maintenance_banner_enabled": _maintenance_banner_enabled,
+        "maintenance_banner_message": _maintenance_banner_message,
         "subscribers_by_tier": tier_counts,
         "total_paid_subscribers": sum(tier_counts.values()),
         "monthly_revenue_usd": round(monthly_revenue_usd, 2),
@@ -3935,12 +4047,47 @@ async def admin_analytics(user: dict = Depends(require_auth)):
     }
 
 
+@app.post("/api/admin/maintenance-banner")
+async def admin_set_maintenance_banner(body: dict, user: dict = Depends(require_auth)):
+    global _maintenance_banner_enabled, _maintenance_banner_message
+    email = user.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+
+    enabled = _bool_from_any(body.get("enabled"), _maintenance_banner_enabled)
+    message = str(body.get("message", _maintenance_banner_message)).strip()
+    if not message:
+        message = "Studio is under high load. Queue times may be longer than usual while we scale capacity."
+
+    _maintenance_banner_enabled = enabled
+    _maintenance_banner_message = message
+
+    try:
+        escaped_message = '"' + message.replace('"', '\\"') + '"'
+        _persist_env_overrides(
+            {
+                "MAINTENANCE_BANNER_ENABLED": "1" if enabled else "0",
+                "MAINTENANCE_BANNER_MESSAGE": escaped_message,
+            }
+        )
+    except Exception as e:
+        log.warning(f"Failed to persist maintenance banner settings to .env: {e}")
+
+    return {
+        "ok": True,
+        "maintenance_banner_enabled": _maintenance_banner_enabled,
+        "maintenance_banner_message": _maintenance_banner_message,
+    }
+
+
 @app.get("/api/config")
 async def public_config():
     return {
         "supabase_url": SUPABASE_URL,
         "supabase_anon_key": SUPABASE_ANON_KEY,
         "stripe_enabled": bool(STRIPE_SECRET_KEY),
+        "maintenance_banner_enabled": _maintenance_banner_enabled,
+        "maintenance_banner_message": _maintenance_banner_message,
         "plans": {
             name: {k: v for k, v in limits.items()}
             for name, limits in PLAN_LIMITS.items()
@@ -4275,6 +4422,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         _job_set_stage(job_id, "generating_script", 15)
         script_data = await generate_clone_script(detected_template, topic, viral_info)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
+        scenes = _force_template_scene_duration(scenes, detected_template)
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 

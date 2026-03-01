@@ -12,6 +12,7 @@ SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "For VS videos, lock two identities and keep both stable scene-to-scene: Driver A = Formula 1, Driver B = Super Formula. "
     "Never swap identities. Never change art style. Never switch to illustration/comic/anime. "
     "Maintain photoreal cinematic studio quality in every frame. "
+    "Use glossy white bone material with subtle glass-like specular highlights, and realistic reflective eyeballs in every scene. "
     "Outfits must remain role-accurate and fully opaque with realistic fabric folds and stitching. "
     "If a visual detail is missing, infer from topic role while preserving the same identity lock."
 )
@@ -21,7 +22,7 @@ SKELETON_IMAGE_SUFFIX = (
     "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
     "but the entire body from neck to feet is FULLY COVERED by the outfit described above. "
     "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
-    "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face. "
+    "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face, with glass-like highlights. "
     "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
     "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting."
 )
@@ -293,6 +294,7 @@ SCARY_NEGATIVE_PROMPT = (
 
 MOTIVATION_IMAGE_PROMPT_PREFIX = (
     "Epic cinematic landscape photography, "
+    "disciplined people training hard (gym, running, boxing, athletic drills) and focused self-improvement moments, "
     "golden hour or dramatic weather (rain, fog, lightning), "
     "lone silhouette figure against vast dramatic backdrop, "
     "mountain peaks, ocean storms, city skylines, empty roads, "
