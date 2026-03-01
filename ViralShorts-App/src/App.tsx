@@ -27,6 +27,7 @@ const resolveSafeApiBase = (rawBase: string): string => {
 const API = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "") : "";
 const rawGenerationApi = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "") : "";
 const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
+const BOOT_CONFIG_TIMEOUT_MS = 8000;
 const GENERATION_API = (() => {
     if (!rawGenerationApi) {
         return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
@@ -91,8 +92,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
 
     useEffect(() => {
         (async () => {
+            let timeout: ReturnType<typeof setTimeout> | null = null;
+            const controller = new AbortController();
             try {
-                const res = await fetch(`${API}/api/config`);
+                timeout = setTimeout(() => controller.abort(), BOOT_CONFIG_TIMEOUT_MS);
+                const res = await fetch(`${API}/api/config`, { signal: controller.signal });
                 const cfg = await res.json();
                 setMaintenanceBannerEnabled(Boolean(cfg.maintenance_banner_enabled));
                 setMaintenanceBannerMessage((cfg.maintenance_banner_message || "").trim());
@@ -104,7 +108,10 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                     sb.auth.onAuthStateChange((_e, s) => setSession(s));
                 }
             } catch { /* no supabase config yet -- free mode */ }
-            setLoading(false);
+            finally {
+                if (timeout) clearTimeout(timeout);
+                setLoading(false);
+            }
         })();
     }, []);
 
@@ -224,11 +231,11 @@ function AppShell() {
     }, [page]);
 
     useEffect(() => {
+        if (!session && page === 'dashboard') setPage('landing');
+        if (!session && page === 'account') setPage('auth');
         if (loading) return;
         // Keep logged-in users in studio on hard refresh.
         if (session && (page === 'landing' || page === 'auth')) setPage('dashboard');
-        if (!session && page === 'dashboard') setPage('landing');
-        if (!session && page === 'account') setPage('auth');
     }, [session, loading, page]);
 
     return (
