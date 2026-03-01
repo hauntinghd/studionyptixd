@@ -132,6 +132,34 @@ log = logging.getLogger("nyptid-studio")
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 _deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
+_frontend_asset_cache = {"ts": 0.0, "js": "", "css": ""}
+_frontend_cache_buster = str(int(time.time()))
+
+
+def _resolve_latest_frontend_assets() -> tuple[str, str]:
+    now = time.time()
+    if now - float(_frontend_asset_cache.get("ts", 0.0)) < 10.0:
+        return str(_frontend_asset_cache.get("js", "")), str(_frontend_asset_cache.get("css", ""))
+    js_name = ""
+    css_name = ""
+    try:
+        default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
+        dist_root = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
+        assets_dir = dist_root / "assets"
+        if assets_dir.exists():
+            js_candidates = sorted(assets_dir.glob("index-*.js"), key=lambda p: p.stat().st_mtime, reverse=True)
+            css_candidates = sorted(assets_dir.glob("index-*.css"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if js_candidates:
+                js_name = js_candidates[0].name
+            if css_candidates:
+                css_name = css_candidates[0].name
+    except Exception:
+        js_name = ""
+        css_name = ""
+    _frontend_asset_cache["ts"] = now
+    _frontend_asset_cache["js"] = js_name
+    _frontend_asset_cache["css"] = css_name
+    return js_name, css_name
 
 
 def _read_deploy_meta() -> tuple[str, str]:
@@ -161,6 +189,9 @@ def _read_deploy_meta() -> tuple[str, str]:
             m = re.search(r"/assets/(index-[^\"']+\.js)", html)
             if m:
                 frontend_bundle = m.group(1)
+        if not frontend_bundle:
+            latest_js, _ = _resolve_latest_frontend_assets()
+            frontend_bundle = latest_js
     except Exception:
         frontend_bundle = ""
 
@@ -183,6 +214,31 @@ async def _disable_html_cache(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path or ""
     if path == "/" or path.endswith(".html"):
+        try:
+            content_type = str(response.headers.get("content-type", "")).lower()
+            if "text/html" in content_type and hasattr(response, "body_iterator"):
+                body = b""
+                async for chunk in response.body_iterator:
+                    body += chunk
+                html = body.decode("utf-8", errors="ignore")
+                latest_js, latest_css = _resolve_latest_frontend_assets()
+                if latest_js:
+                    html = re.sub(r"/assets/index-[^\"']+\.js(\?[^\"']*)?", f"/assets/{latest_js}?v={_frontend_cache_buster}", html)
+                if latest_css:
+                    html = re.sub(r"/assets/index-[^\"']+\.css(\?[^\"']*)?", f"/assets/{latest_css}?v={_frontend_cache_buster}", html)
+                headers = dict(response.headers)
+                headers.pop("content-length", None)
+                headers.pop("Content-Length", None)
+                headers.pop("content-type", None)
+                headers.pop("Content-Type", None)
+                response = Response(
+                    content=html,
+                    status_code=response.status_code,
+                    headers=headers,
+                    media_type="text/html",
+                )
+        except Exception:
+            pass
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
