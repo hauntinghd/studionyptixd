@@ -26,6 +26,7 @@ const resolveSafeApiBase = (rawBase: string): string => {
 // Production must always use same-origin API routing; custom base URLs are local-dev only.
 const API = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "") : "";
 const rawGenerationApi = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "") : "";
+const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
 const GENERATION_API = (() => {
     if (!rawGenerationApi) {
         return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
@@ -33,6 +34,9 @@ const GENERATION_API = (() => {
 
     return rawGenerationApi;
 })();
+if (typeof window !== "undefined" && /firefox/i.test(window.navigator.userAgent)) {
+    (window as any).__NYPTID_FIREFOX_HOTFIX__ = FIREFOX_HOTFIX_TAG;
+}
 const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
 const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'story', 'motivation']);
 const CLONE_COMING_SOON = true;
