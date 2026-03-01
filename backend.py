@@ -232,6 +232,17 @@ async def _disable_html_cache(request: Request, call_next):
                     html = re.sub(r"/assets/index-[^\"']+\.js(\?[^\"']*)?", f"/assets/{latest_js}?v={_frontend_cache_buster}", html)
                 if latest_css:
                     html = re.sub(r"/assets/index-[^\"']+\.css(\?[^\"']*)?", f"/assets/{latest_css}?v={_frontend_cache_buster}", html)
+                # Runtime UI safety net: remove legacy Free-plan card/text if stale frontend bundle is served.
+                free_plan_hotfix = """<script>(function(){function run(){try{
+var p=document.querySelector('#pricing p.text-gray-400');
+if(p&&/start free\\./i.test(p.textContent||'')){p.textContent='Choose the plan that fits your output needs. Upgrade anytime as you scale.';}
+var cta=[].slice.call(document.querySelectorAll('button')).find(function(b){return /start creating free/i.test((b.textContent||'').trim());});
+if(cta){cta.textContent='Start Creating';}
+var freeBtn=[].slice.call(document.querySelectorAll('button')).find(function(b){return /sign up free/i.test((b.textContent||'').trim());});
+if(freeBtn){var card=freeBtn.closest('div'); if(card){card.remove();}}
+}catch(e){}}; run(); var n=0; var t=setInterval(function(){run(); n++; if(n>20) clearInterval(t);}, 500);}());</script>"""
+                if "</head>" in html:
+                    html = html.replace("</head>", free_plan_hotfix + "</head>")
                 headers = dict(response.headers)
                 headers.pop("content-length", None)
                 headers.pop("Content-Length", None)
