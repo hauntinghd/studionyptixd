@@ -223,6 +223,7 @@ function AppShell() {
         if (loading) return;
         // Keep logged-in users in studio on hard refresh.
         if (session && (page === 'landing' || page === 'auth')) setPage('dashboard');
+        if (!session && page === 'dashboard') setPage('landing');
         if (!session && page === 'account') setPage('auth');
     }, [session, loading, page]);
 
