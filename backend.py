@@ -162,6 +162,12 @@ def _resolve_latest_frontend_assets() -> tuple[str, str]:
     return js_name, css_name
 
 
+def _resolve_frontend_asset_path(filename: str) -> Path:
+    default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
+    dist_root = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
+    return dist_root / "assets" / filename
+
+
 def _read_deploy_meta() -> tuple[str, str]:
     now = time.time()
     if now - float(_deploy_meta_cache.get("ts", 0.0)) < 15.0:
@@ -250,6 +256,20 @@ async def _disable_html_cache(request: Request, call_next):
         response.headers["CDN-Cache-Control"] = "no-store"
         response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
     return response
+
+
+@app.get("/assets/index-BlMPK7KO.js")
+async def serve_legacy_firefox_bundle_alias():
+    """Alias stale cached bundle URL to the latest built JS asset."""
+    latest_js, _ = _resolve_latest_frontend_assets()
+    if latest_js:
+        latest_path = _resolve_frontend_asset_path(latest_js)
+        if latest_path.exists():
+            return FileResponse(str(latest_path), media_type="text/javascript")
+    legacy_path = _resolve_frontend_asset_path("index-BlMPK7KO.js")
+    if legacy_path.exists():
+        return FileResponse(str(legacy_path), media_type="text/javascript")
+    raise HTTPException(status_code=404, detail="Asset not found")
 
 
 jobs: dict = {}
