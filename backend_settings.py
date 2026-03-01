@@ -9,7 +9,7 @@ if env_path.exists():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, val = line.split("=", 1)
-            os.environ.setdefault(key.strip(), val.strip())
+            os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
@@ -65,6 +65,11 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_QUEUE_ENABLED = os.getenv("REDIS_QUEUE_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "studio")
 FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "1").lower() in ("1", "true", "yes", "on")
+MAINTENANCE_BANNER_ENABLED = os.getenv("MAINTENANCE_BANNER_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+MAINTENANCE_BANNER_MESSAGE = os.getenv(
+    "MAINTENANCE_BANNER_MESSAGE",
+    "Studio is under high load. Some generations may queue longer than usual while we scale capacity.",
+).strip()
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 
