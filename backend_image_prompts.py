@@ -2,6 +2,7 @@ SKELETON_IMAGE_PROMPT_PREFIX = ""
 
 SKELETON_IMAGE_STYLE_PREFIX = (
     "Photorealistic 3D studio render. Unreal Engine 5 quality. "
+    "High-key commercial lighting with bright readable mids, clean subject separation, and vibrant but realistic color contrast. "
     "No illustration, no comic art, no anime, no drawing, no sketch."
 )
 
@@ -17,6 +18,7 @@ SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "OUTFIT LOCK: keep the exact same primary outfit design for each locked character across all scenes (same base suit, same main colors, same sponsor/logo placement language, same gloves, same shoes, same accessories) unless the prompt explicitly requests a change. "
     "For motorsport topics, lock one racing-livery identity per character and keep sponsor/logo families, patch positions, and suit color blocking consistent scene-to-scene. "
     "Do not randomly switch brands, uniform style, logo layout, or colorway mid-video. "
+    "Maintain bright, clear readability across all scenes (avoid muddy shadows and underexposure). "
     "If a visual detail is missing, infer from topic role while preserving the same identity lock."
 )
 
@@ -28,11 +30,12 @@ SKELETON_IMAGE_SUFFIX = (
     "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face, with glass-like highlights. "
     "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
     "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting. "
+    "Color grade is vibrant and premium: rich but natural saturation, bright mids, crisp highlight roll-off, readable facial skull details. "
     "Preserve outfit continuity across the whole video: same suit identity, same logo family/placement, same color blocking."
 )
 
 TEMPLATE_KLING_MOTION = {
-    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. Clothing sways and folds realistically with body movement showing fabric physics. Camera holds steady with very slight cinematic push-in. Professional studio lighting stays consistent. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
+    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. Clothing sways and folds realistically with body movement showing fabric physics. Add micro-beat camera accents every ~1-1.5 seconds (gentle punch-in, lateral drift, or slight push) to keep momentum high without jitter. Professional studio lighting stays consistent and bright. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
     "history": "Epic cinematic camera movement: slow dolly forward through the scene, atmospheric particles drift, fabric and hair move in wind, fire flickers, dramatic lighting shifts. Film-quality motion with depth.",
     "story": "Emotional character animation: subtle facial expressions, natural body language, characters interact with environment. Cinematic camera slowly orbits or pushes in. Atmospheric lighting shifts to match mood.",
     "reddit": "Static with subtle motion: slight camera drift, ambient lighting changes, minimal character movement. Clean modern look.",

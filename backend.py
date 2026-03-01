@@ -515,7 +515,7 @@ MOTION DIRECTION (for animation -- include this in visual_description):
 - Keep motion SUBTLE and realistic -- no wild jumping or dancing. Zach D Films quality smooth cinematic motion.
 
 STRUCTURE (10 scenes, 45-50 seconds):
-1. HOOK: "[A] vs [B] -- who makes more?" Skeleton looking directly at camera, arms crossed
+1. HOOK: "[A] vs [B] -- who makes more?" plus an immediate numeric stake in the first line (example: "$250M vs $500M over 10 years"). Skeleton looking directly at camera, arms crossed
 2. SETUP: Context scene. Both skeletons in their outfits facing each other
 3-5. THING A DEEP DIVE: Three scenes with specific salary facts, skeleton A in action poses with props
 6-8. THING B DEEP DIVE: Three scenes with specific salary facts, skeleton B in action poses with props
@@ -528,8 +528,11 @@ NARRATION RULES:
 - NEVER say "dive into", "buckle up", "let's explore", "in this video"
 - Real names, real dollar amounts, real brands in every scene
 - 1-2 sentences MAX per scene -- tight, snappy, high-retention
+- Every scene must include at least one concrete anchor: a real person name, a dollar figure, or a hard comparison delta.
+- At least every second scene must include an explicit delta/payoff phrase ("2x", "double", "+$250M", "wins by $X").
+- Final scene line must declare the winner clearly in plain language.
 
-CAPTION: text_overlay is ONE impactful word ("MILLION", "VERSUS", "DOUBLE", "WINNER")
+CAPTION: text_overlay is 1-2 impactful words (numbers allowed) such as "MILLION", "2X", "VERSUS", "WINNER".
 
 Output valid JSON:
 {
