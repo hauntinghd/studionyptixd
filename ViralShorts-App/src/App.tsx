@@ -45,7 +45,7 @@ const Logo = ({ size = 24 }: { size?: number }) => (
     <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
 );
 
-type Plan = 'free' | 'starter' | 'creator' | 'pro';
+type Plan = 'starter' | 'creator' | 'pro';
 const PRICE_IDS: Record<string, string> = {
     starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
     creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
@@ -71,7 +71,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType>({
-    session: null, supabase: null, plan: 'free', role: 'user', loading: true,
+    session: null, supabase: null, plan: 'starter', role: 'user', loading: true,
     demoAccess: false, demoPriceId: '', demoComingSoon: true,
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     signIn: async () => null, signUp: async () => null, signOut: async () => {},
@@ -81,7 +81,7 @@ const AuthContext = createContext<AuthContextType>({
 function AuthProvider({ children }: { children: React.ReactNode }) {
     const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
     const [session, setSession] = useState<Session | null>(null);
-    const [plan, setPlan] = useState<Plan>('free');
+    const [plan, setPlan] = useState<Plan>('starter');
     const [role, setRole] = useState<string>('user');
     const [loading, setLoading] = useState(true);
     const [demoAccess, setDemoAccess] = useState(false);
@@ -107,7 +107,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                     setSession(s);
                     sb.auth.onAuthStateChange((_e, s) => setSession(s));
                 }
-            } catch { /* no supabase config yet -- free mode */ }
+            } catch { /* no supabase config yet */ }
             finally {
                 if (timeout) clearTimeout(timeout);
                 setLoading(false);
@@ -116,7 +116,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (!session) { setPlan('free'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); return; }
+        if (!session) { setPlan('starter'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); return; }
         (async () => {
             try {
                 const res = await fetch(`${API}/api/me`, {
@@ -124,13 +124,14 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                 });
                 if (res.ok) {
                     const data = await res.json();
-                    setPlan(data.plan || 'free');
+                    const incomingPlan = (data.plan === 'free' ? 'starter' : data.plan) || 'starter';
+                    setPlan((['starter', 'creator', 'pro'].includes(incomingPlan) ? incomingPlan : 'starter') as Plan);
                     setRole(data.role || 'user');
                     setDemoAccess(data.demo_access || false);
                     if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
                     setDemoComingSoon(data.demo_coming_soon !== false);
                 }
-            } catch { setPlan('free'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); }
+            } catch { setPlan('starter'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); }
         })();
     }, [session]);
 
@@ -153,7 +154,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const signOut = useCallback(async () => {
         if (supabase) await supabase.auth.signOut();
         setSession(null);
-        setPlan('free');
+        setPlan('starter');
     }, [supabase]);
 
     const checkout = useCallback(async (planName: string) => {
@@ -397,8 +398,8 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
 
-    const planNames: Record<Plan, string> = { free: 'Free', starter: 'Starter', creator: 'Creator', pro: 'Pro' };
-    const planColors: Record<Plan, string> = { free: 'text-gray-400', starter: 'text-blue-400', creator: 'text-violet-400', pro: 'text-amber-400' };
+    const planNames: Record<Plan, string> = { starter: 'Starter', creator: 'Creator', pro: 'Pro' };
+    const planColors: Record<Plan, string> = { starter: 'text-blue-400', creator: 'text-violet-400', pro: 'text-amber-400' };
 
     return (
         <>
@@ -427,7 +428,7 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="grid grid-cols-2 gap-4 text-sm">
                             <div>
                                 <p className="text-gray-500">Videos/month</p>
-                                <p className="font-bold text-white">{plan === 'pro' ? 'Unlimited' : plan === 'creator' ? '150' : plan === 'starter' ? '50' : '3'}</p>
+                                <p className="font-bold text-white">{plan === 'pro' ? 'Unlimited' : plan === 'creator' ? '150' : '50'}</p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Max Resolution</p>
@@ -455,13 +456,7 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                                 Unlock 1080p output, clone viral shorts, priority rendering, and more.
                             </p>
                             <div className="flex gap-3">
-                                {plan === 'free' && (
-                                    <button onClick={() => checkout('starter')}
-                                        className="px-5 py-2.5 bg-white/5 hover:bg-white/10 text-white font-medium rounded-xl transition border border-white/10 text-sm">
-                                        Starter $14/mo
-                                    </button>
-                                )}
-                                {(plan === 'free' || plan === 'starter') && (
+                                {plan === 'starter' && (
                                     <button onClick={() => checkout('creator')}
                                         className="px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-violet-600/20 text-sm">
                                         Creator $24/mo
@@ -535,7 +530,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
                         <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
                             className="group px-8 py-4 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl text-lg transition-all flex items-center gap-2 shadow-lg shadow-violet-600/25">
-                            {session ? 'Open Studio' : 'Start Creating Free'}
+                            {session ? 'Open Studio' : 'Start Creating'}
                             <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                         </button>
                         <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
@@ -833,30 +828,10 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <div className="max-w-5xl mx-auto px-6">
                     <div className="text-center mb-16">
                         <h2 className="text-4xl font-bold mb-4">Simple, Honest Pricing</h2>
-                        <p className="text-gray-400 text-lg">Start free. No credit card required. Upgrade when you're ready to scale.</p>
+                        <p className="text-gray-400 text-lg">Choose the plan that fits your output needs. Upgrade anytime as you scale.</p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                        {/* FREE */}
-                        <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-                            <h3 className="text-lg font-bold mb-1">Free</h3>
-                            <p className="text-gray-500 text-xs mb-5">Try it out</p>
-                            <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">$0</span>
-                            </div>
-                            <ul className="space-y-2.5 mb-6">
-                                {['3 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '30s max', '720p output'].map((f, i) => (
-                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
-                                        <CheckCircle2 className="w-3.5 h-3.5 text-gray-600 shrink-0" />{f}
-                                    </li>
-                                ))}
-                            </ul>
-                            <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
-                                className="w-full py-2.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all border border-white/10">
-                                {session ? 'Open Studio' : 'Sign Up Free'}
-                            </button>
-                        </div>
-
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         {/* STARTER */}
                         <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
                             <h3 className="text-lg font-bold mb-1">Starter</h3>
@@ -1011,7 +986,6 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         <h1 className="text-2xl font-bold">Welcome back</h1>
                         <p className="text-gray-500 text-sm mt-1">
                             <span className="capitalize text-violet-400 font-medium">{plan}</span> plan
-                            {plan === 'free' && <span className="text-gray-600"> -- <button onClick={() => onNavigate('account')} className="text-violet-400 hover:text-violet-300 transition">Upgrade</button> for more</span>}
                         </p>
                     </div>
                     <button onClick={() => onNavigate('account')}
@@ -2111,12 +2085,6 @@ function CreatePanel() {
                         <><Wand2 className="w-5 h-5" /> Generate at {canUse1080p ? resolution : '720p'}</>
                     )}
                 </button>
-
-                {plan === 'free' && (
-                    <p className="text-center text-sm text-gray-600">
-                        You're on the free plan (3 videos/month, 720p). Upgrade for more.
-                    </p>
-                )}
 
                 {/* JOB STATUS (auto mode) */}
                 {jobStatus && (

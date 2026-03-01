@@ -394,9 +394,9 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
         )
         user_id = payload.get("sub")
         email = payload.get("email", "")
-        plan = HARDCODED_PLANS.get(email, "free")
+        plan = HARDCODED_PLANS.get(email, "")
 
-        if plan == "free" and SUPABASE_URL and SUPABASE_ANON_KEY:
+        if not plan and SUPABASE_URL and SUPABASE_ANON_KEY:
             try:
                 svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
                 async with httpx.AsyncClient(timeout=8) as client:
@@ -410,9 +410,12 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
                     if resp.status_code == 200:
                         rows = resp.json()
                         if rows:
-                            plan = rows[0].get("plan", "free")
+                            plan = rows[0].get("plan", "starter")
             except Exception:
                 pass
+
+        if not plan or plan == "free":
+            plan = "starter"
 
         return {"id": user_id, "email": email, "plan": plan}
     except jwt.exceptions.PyJWTError:
@@ -445,9 +448,9 @@ async def require_auth(cred: HTTPAuthorizationCredentials = Depends(security)) -
 
 
 async def get_user_plan(user: dict) -> dict:
-    """Look up user's plan from Supabase. Falls back to free."""
+    """Look up user's plan from Supabase. Falls back to starter."""
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        return PLAN_LIMITS["free"]
+        return PLAN_LIMITS["starter"]
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -460,11 +463,13 @@ async def get_user_plan(user: dict) -> dict:
             if resp.status_code == 200:
                 data = resp.json()
                 if data:
-                    plan_name = data[0].get("plan", "free")
-                    return PLAN_LIMITS.get(plan_name, PLAN_LIMITS["free"])
+                    plan_name = data[0].get("plan", "starter")
+                    if plan_name == "free":
+                        plan_name = "starter"
+                    return PLAN_LIMITS.get(plan_name, PLAN_LIMITS["starter"])
     except Exception as e:
         log.warning(f"Failed to fetch user plan: {e}")
-    return PLAN_LIMITS["free"]
+    return PLAN_LIMITS["starter"]
 
 
 # ─── xAI Grok Script Generation ───────────────────────────────────────────────
@@ -3643,10 +3648,12 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False, user_id=user.get("id", ""), event="regenerate"))
 
     template = session.get("template", req.template)
-    user_plan = user.get("plan", "free")
+    user_plan = user.get("plan", "starter")
+    if user_plan == "free":
+        user_plan = "starter"
     if user_plan == "admin":
         user_plan = "pro"
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     full_prompt = req.prompt
@@ -3777,10 +3784,12 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
 
-    user_plan = user.get("plan", "free")
+    user_plan = user.get("plan", "starter")
+    if user_plan == "free":
+        user_plan = "starter"
     if user_plan == "admin":
         user_plan = "pro"
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     if resolution != "720p":
         story_animation_enabled = True
@@ -4245,14 +4254,16 @@ async def public_config():
 
 @app.get("/api/me")
 async def get_me(user: dict = Depends(require_auth)):
-    plan = user.get("plan", "free")
+    plan = user.get("plan", "starter")
+    if plan == "free":
+        plan = "starter"
     email = user.get("email", "")
     is_admin = email in ADMIN_EMAILS or plan == "admin"
     if plan == "admin":
         limits = PLAN_LIMITS["pro"]
         limits = {**limits, "videos_per_month": 9999}
     else:
-        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
     has_demo = is_admin or (PRODUCT_DEMO_PUBLIC_ENABLED and plan == "demo_pro")
     return {
         "id": user["id"],
@@ -4275,13 +4286,15 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
 
     user = await get_current_user_from_request(request) if request else None
     _ensure_template_allowed(req.template, user)
-    user_plan = "free"
+    user_plan = "starter"
     if user:
-        user_plan = user.get("plan", "free")
+        user_plan = user.get("plan", "starter")
+        if user_plan == "free":
+            user_plan = "starter"
         if user_plan == "admin":
             user_plan = "pro"
 
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])
+    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
 
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=bool(plan_limits.get("priority", False)))
 
@@ -4875,7 +4888,7 @@ async def clone_video(
     }
 
     try:
-        await enqueue_generation_job(job_id, "free", run_clone_pipeline, (job_id, topic, video_path, res))
+        await enqueue_generation_job(job_id, "starter", run_clone_pipeline, (job_id, topic, video_path, res))
     except QueueFullError as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -4923,7 +4936,7 @@ async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_aut
         raise HTTPException(400, "Invalid price ID")
     target_plan = STRIPE_PRICE_TO_PLAN.get(req.price_id, "")
     user_email = user.get("email", "")
-    user_plan = user.get("plan", "free")
+    user_plan = user.get("plan", "starter")
     is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
     if target_plan == "demo_pro" and (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
         raise HTTPException(403, "Demo Pro is coming soon.")
@@ -5060,7 +5073,7 @@ async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_aut
         "template": req.template,
         "language": req.language,
         "feature": req.feature or "general",
-        "plan": user.get("plan", "free"),
+        "plan": user.get("plan", "starter"),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -6303,7 +6316,7 @@ async def create_demo_video(
         raise HTTPException(401, "Authentication required")
 
     user_email = user.get("email", "")
-    user_plan = user.get("plan", "free")
+    user_plan = user.get("plan", "starter")
     is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
     if (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
         raise HTTPException(403, "Product Demo is coming soon.")

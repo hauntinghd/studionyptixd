@@ -1,5 +1,4 @@
 PLAN_LIMITS = {
-    "free": {"videos_per_month": 3, "max_duration_sec": 30, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
     "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
     "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
     "pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
@@ -17,7 +16,7 @@ HARDCODED_PLANS = {
     "alwakmyhem@gmail.com": "pro",
 }
 
-PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "objects", "wouldyourather", "scary", "history"}
+PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "story", "motivation", "objects", "wouldyourather", "scary", "history"}
 
 SUPPORTED_LANGUAGES = {
     "en": {"name": "English", "model": "eleven_turbo_v2_5"},
