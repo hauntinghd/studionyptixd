@@ -5,7 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=omatic657
-WorkingDirectory=/home/omatic657
+WorkingDirectory=/home/omatic657/asd
+Environment=FRONTEND_DIST_DIR=/home/omatic657/asd/ViralShorts-App/dist
 ExecStart=/usr/bin/python3 -m uvicorn backend:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5

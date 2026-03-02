@@ -23,7 +23,7 @@ jobs:
             STUDIO_PORT="${{ secrets.STUDIO_PORT }}"
             SERVICE_NAME="${{ secrets.STUDIO_SERVICE_NAME }}"
             if [ -z "${APP_DIR}" ]; then APP_DIR="$HOME/asd"; fi
-            if [ -z "${STUDIO_PORT}" ]; then STUDIO_PORT="8091"; fi
+            if [ -z "${STUDIO_PORT}" ]; then STUDIO_PORT="8000"; fi
             if [ -z "${SERVICE_NAME}" ]; then SERVICE_NAME="nyptid-studio"; fi
 
             cd "${APP_DIR}"
@@ -38,14 +38,19 @@ jobs:
             fi
 
             if command -v systemctl >/dev/null 2>&1; then
-              sudo -n systemctl restart "${SERVICE_NAME}" || systemctl --user restart "${SERVICE_NAME}" || true
+              if sudo -n true >/dev/null 2>&1; then
+                if [ -f "nyptid-studio.service" ]; then
+                  sudo -n cp "nyptid-studio.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+                fi
+                sudo -n systemctl daemon-reload
+                sudo -n systemctl restart "${SERVICE_NAME}"
+              else
+                systemctl --user daemon-reload || true
+                systemctl --user restart "${SERVICE_NAME}"
+              fi
+            else
+              echo "systemctl not found; refusing to start ad-hoc uvicorn process."
+              exit 1
             fi
-
-            if pgrep -f "uvicorn backend:app" >/dev/null 2>&1; then
-              pkill -f "uvicorn backend:app" || true
-              sleep 1
-            fi
-
-            nohup python3 -m uvicorn backend:app --host 0.0.0.0 --port "${STUDIO_PORT}" > /tmp/nyptid-studio.log 2>&1 &
             sleep 3
             curl -fsS "http://127.0.0.1:${STUDIO_PORT}/api/health"
