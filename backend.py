@@ -168,6 +168,16 @@ def _resolve_frontend_asset_path(filename: str) -> Path:
     return dist_root / "assets" / filename
 
 
+def _apply_runtime_js_text_hotfix(js: str) -> str:
+    """Patch legacy pricing strings in stale frontend bundles."""
+    if not js:
+        return js
+    js = js.replace("Unlimited videos", "300 videos/month")
+    js = js.replace("Sign Up Free", "Sign Up to Subscribe")
+    js = js.replace("Start Creating Free", "Start Creating")
+    return js
+
+
 def _read_deploy_meta() -> tuple[str, str]:
     now = time.time()
     if now - float(_deploy_meta_cache.get("ts", 0.0)) < 15.0:
@@ -228,8 +238,8 @@ async def _disable_html_cache(request: Request, call_next):
                     body += chunk
                 html = body.decode("utf-8", errors="ignore")
                 latest_js, latest_css = _resolve_latest_frontend_assets()
-                if latest_js:
-                    html = re.sub(r"/assets/index-[^\"']+\.js(\?[^\"']*)?", f"/assets/{latest_js}?v={_frontend_cache_buster}", html)
+                # Force an uncached runtime JS endpoint to bypass stale CDN-cached bundle paths.
+                html = re.sub(r"/assets/index-[^\"']+\.js(\?[^\"']*)?", f"/assets/runtime-hotfix.js?v={_frontend_cache_buster}", html)
                 if latest_css:
                     html = re.sub(r"/assets/index-[^\"']+\.css(\?[^\"']*)?", f"/assets/{latest_css}?v={_frontend_cache_buster}", html)
                 # Runtime UI safety net: remove legacy Free-plan card/text if stale frontend bundle is served.
@@ -291,6 +301,25 @@ if(freeBtn){var card=freeBtn.closest('div'); if(card){card.remove();}}
         response.headers["CDN-Cache-Control"] = "no-store"
         response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
     return response
+
+
+@app.get("/assets/runtime-hotfix.js")
+async def serve_runtime_hotfix_js():
+    """Serve JS with runtime text hotfixes to bypass stale CDN bundle caching."""
+    latest_js, _ = _resolve_latest_frontend_assets()
+    target = _resolve_frontend_asset_path(latest_js) if latest_js else _resolve_frontend_asset_path("index-BlMPK7KO.js")
+    if not target.exists():
+        fallback = _resolve_frontend_asset_path("index-BlMPK7KO.js")
+        if fallback.exists():
+            target = fallback
+        else:
+            raise HTTPException(status_code=404, detail="Hotfix JS not found")
+    js = _apply_runtime_js_text_hotfix(target.read_text(encoding="utf-8", errors="ignore"))
+    resp = Response(content=js, media_type="text/javascript")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.get("/assets/index-BlMPK7KO.js")
