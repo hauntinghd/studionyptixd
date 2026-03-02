@@ -270,30 +270,8 @@ if(freeBtn){var card=freeBtn.closest('div'); if(card){card.remove();}}
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     if path.startswith("/assets/") and (path.endswith(".js") or path.endswith(".css")):
-        try:
-            # Runtime patch for stale JS bundles: force updated pricing copy.
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if path.endswith(".js") and "javascript" in content_type and hasattr(response, "body_iterator"):
-                raw = b""
-                async for chunk in response.body_iterator:
-                    raw += chunk
-                js = raw.decode("utf-8", errors="ignore")
-                if "Unlimited videos" in js or "Sign Up Free" in js:
-                    js = js.replace("Unlimited videos", "300 videos/month")
-                    js = js.replace("Sign Up Free", "Sign Up to Subscribe")
-                    headers = dict(response.headers)
-                    headers.pop("content-length", None)
-                    headers.pop("Content-Length", None)
-                    headers.pop("content-type", None)
-                    headers.pop("Content-Type", None)
-                    response = Response(
-                        content=js,
-                        status_code=response.status_code,
-                        headers=headers,
-                        media_type="text/javascript",
-                    )
-        except Exception:
-            pass
+        # Do not consume streaming asset responses in middleware.
+        # Reading body_iterator here can drain the response and cause truncated JS (blank page).
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
