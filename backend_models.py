@@ -7,6 +7,16 @@ class GenerateRequest(BaseModel):
     resolution: str = "720p"
     language: str = "en"
     mode: str = "auto"
+    quality_mode: str = "cinematic"
+    mint_mode: bool = True
+    transition_style: str = "smooth"
+    micro_escalation_mode: bool = True
+    voice_id: str = ""
+    voice_speed: float = 1.0
+    pacing_mode: str = "standard"
+    art_style: str = "auto"
+    reference_image_url: str = ""
+    reference_lock_mode: str = "strict"
     scenes: list = []
 
 
@@ -16,6 +26,12 @@ class SceneImageRequest(BaseModel):
     session_id: str = ""
     template: str = "skeleton"
     resolution: str = "720p"
+    quality_mode: str = "cinematic"
+    mint_mode: bool = True
+    transition_style: str = "smooth"
+    micro_escalation_mode: bool = True
+    reference_lock_mode: str = "strict"
+    art_style: str = "auto"
 
 
 class FinalizeRequest(BaseModel):
@@ -23,11 +39,26 @@ class FinalizeRequest(BaseModel):
     template: str = "skeleton"
     resolution: str = "720p"
     language: str = "en"
+    quality_mode: str = "cinematic"
+    mint_mode: bool = True
+    transition_style: str = "smooth"
+    micro_escalation_mode: bool = True
     narration: str = ""
     scenes: list = []
+    story_animation_enabled: bool = True
+    reference_lock_mode: str = "strict"
+    voice_id: str = ""
+    voice_speed: float = 1.0
+    pacing_mode: str = "standard"
+    art_style: str = "auto"
+    subtitles_enabled: bool = True
 
 
 class CheckoutRequest(BaseModel):
+    price_id: str
+
+
+class TopupCheckoutRequest(BaseModel):
     price_id: str
 
 

@@ -9,6 +9,7 @@ import time
 import subprocess
 import tempfile
 import logging
+import io
 import httpx
 import jwt
 from datetime import datetime, timezone
@@ -38,12 +39,16 @@ from backend_settings import (
     RUNWAY_API_KEY_SOURCE,
     RUNWAY_VIDEO_MODEL,
     RUNWAY_API_VERSION,
+    PLAN_PRICE_USD,
     XAI_IMAGE_ASPECT_RATIO,
     XAI_IMAGE_RESOLUTION,
     USE_XAI_VIDEO,
     PRODUCT_DEMO_PUBLIC_ENABLED,
     SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
     USE_FAL_GROK_IMAGE,
+    IMAGE_QUALITY_BESTOF_ENABLED,
+    IMAGE_QUALITY_BESTOF_COUNT,
+    IMAGE_QUALITY_MIN_SCORE,
     RUNPOD_IMAGE_FEEDBACK_ENABLED,
     RUNPOD_IMAGE_FEEDBACK_SSH,
     RUNPOD_IMAGE_FEEDBACK_BASE_DIR,
@@ -53,12 +58,17 @@ from backend_settings import (
     RUNPOD_COMPOSITOR_SSH_PORT,
     RUNPOD_COMPOSITOR_BASE_DIR,
     FORCE_720P_ONLY,
+    SCRIPT_TO_SHORT_ENABLED,
+    STORY_ADVANCED_CONTROLS_ENABLED,
+    STORY_RETENTION_TUNING_ENABLED,
+    DISABLE_ALL_SFX,
     MAINTENANCE_BANNER_ENABLED,
     MAINTENANCE_BANNER_MESSAGE,
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
     STRIPE_PRICE_TO_PLAN,
     DEMO_PRO_PRICE_ID,
+    TOPUP_PACKS,
     SUPABASE_SERVICE_KEY,
     OUTPUT_DIR,
     TEMP_DIR,
@@ -66,6 +76,7 @@ from backend_settings import (
 )
 from backend_catalog import (
     PLAN_LIMITS,
+    PLAN_FEATURES,
     RESOLUTION_CONFIGS,
     ADMIN_EMAILS,
     HARDCODED_PLANS,
@@ -90,6 +101,7 @@ from backend_models import (
     SceneImageRequest,
     FinalizeRequest,
     CheckoutRequest,
+    TopupCheckoutRequest,
     SetPlanRequest,
     FeedbackRequest,
     ThumbnailFeedbackRequest,
@@ -127,6 +139,13 @@ try:
 except Exception:
     paramiko = None
 
+try:
+    from PIL import Image, ImageFilter, ImageStat
+except Exception:
+    Image = None
+    ImageFilter = None
+    ImageStat = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
 
@@ -134,6 +153,74 @@ app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 _deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
 _frontend_asset_cache = {"ts": 0.0, "js": "", "css": ""}
 _frontend_cache_buster = str(int(time.time()))
+DEFAULT_ELEVENLABS_VOICES = [
+    {"voice_id": "EXAVITQu4vr4xnSDxMaL", "name": "Sarah", "category": "premade", "description": "Warm, upbeat female", "gender": "female", "accent": "american", "age": "young", "preview_url": ""},
+    {"voice_id": "FGY2WhTYpPnrIDTdsKH5", "name": "Laura", "category": "premade", "description": "Neutral narration", "gender": "female", "accent": "american", "age": "young", "preview_url": ""},
+    {"voice_id": "XB0fDUnXU5powFXDhCwa", "name": "Charlotte", "category": "premade", "description": "Calm storytelling", "gender": "female", "accent": "british", "age": "young", "preview_url": ""},
+    {"voice_id": "pNInz6obpgDQGcFmaJgB", "name": "Adam", "category": "premade", "description": "Confident male narrator", "gender": "male", "accent": "american", "age": "middle_aged", "preview_url": ""},
+    {"voice_id": "onwK4e9ZLuTAKqWW03F9", "name": "Daniel", "category": "premade", "description": "Clear educational tone", "gender": "male", "accent": "british", "age": "middle_aged", "preview_url": ""},
+]
+_voice_catalog_cache = {"ts": 0.0, "source": "unknown", "provider_ok": False, "count": 0, "warning": "not_checked"}
+
+
+def _fallback_voice_catalog() -> list[dict]:
+    return [dict(v) for v in DEFAULT_ELEVENLABS_VOICES]
+
+
+def _cache_voice_catalog(source: str, provider_ok: bool, count: int, warning: str = ""):
+    _voice_catalog_cache["ts"] = time.time()
+    _voice_catalog_cache["source"] = source
+    _voice_catalog_cache["provider_ok"] = bool(provider_ok)
+    _voice_catalog_cache["count"] = max(0, int(count or 0))
+    _voice_catalog_cache["warning"] = warning or ""
+
+
+async def _fetch_voice_catalog() -> tuple[list[dict], str, bool, str]:
+    if not ELEVENLABS_API_KEY:
+        warning = "ElevenLabs API key not configured; using fallback voices."
+        return _fallback_voice_catalog(), "fallback", False, warning
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        voices = []
+        for v in data.get("voices", []):
+            voices.append({
+                "voice_id": v["voice_id"],
+                "name": v.get("name", "Unknown"),
+                "category": v.get("category", ""),
+                "description": v.get("labels", {}).get("description", ""),
+                "gender": v.get("labels", {}).get("gender", ""),
+                "accent": v.get("labels", {}).get("accent", ""),
+                "age": v.get("labels", {}).get("age", ""),
+                "preview_url": v.get("preview_url", ""),
+            })
+        if voices:
+            return voices, "elevenlabs", True, ""
+        warning = "ElevenLabs returned zero voices; using fallback voices."
+        return _fallback_voice_catalog(), "fallback", False, warning
+    except Exception as e:
+        warning = f"ElevenLabs voice catalog unavailable ({type(e).__name__}); using fallback voices."
+        log.warning(warning)
+        return _fallback_voice_catalog(), "fallback", False, warning
+
+
+async def _voice_provider_snapshot(force_refresh: bool = False) -> dict:
+    age_sec = time.time() - float(_voice_catalog_cache.get("ts", 0.0))
+    if force_refresh or age_sec > 60.0:
+        voices, source, provider_ok, warning = await _fetch_voice_catalog()
+        _cache_voice_catalog(source, provider_ok, len(voices), warning)
+    return {
+        "source": str(_voice_catalog_cache.get("source", "unknown")),
+        "provider_ok": bool(_voice_catalog_cache.get("provider_ok", False)),
+        "count": int(_voice_catalog_cache.get("count", 0) or 0),
+        "warning": str(_voice_catalog_cache.get("warning", "") or ""),
+        "age_sec": round(max(0.0, age_sec), 1),
+    }
 
 
 def _resolve_latest_frontend_assets() -> tuple[str, str]:
@@ -238,21 +325,10 @@ async def _disable_html_cache(request: Request, call_next):
                     body += chunk
                 html = body.decode("utf-8", errors="ignore")
                 latest_js, latest_css = _resolve_latest_frontend_assets()
-                # Force an uncached runtime JS endpoint to bypass stale CDN-cached bundle paths.
-                html = re.sub(r"/assets/index-[^\"']+\.js(\?[^\"']*)?", f"/assets/runtime-hotfix.js?v={_frontend_cache_buster}", html)
+                # Keep the compiled JS asset path from the built index.html.
+                # Overriding to runtime-hotfix.js can mask newly deployed frontend bundles.
                 if latest_css:
                     html = re.sub(r"/assets/index-[^\"']+\.css(\?[^\"']*)?", f"/assets/{latest_css}?v={_frontend_cache_buster}", html)
-                # Runtime UI safety net: remove legacy Free-plan card/text if stale frontend bundle is served.
-                free_plan_hotfix = """<script>(function(){function run(){try{
-var p=document.querySelector('#pricing p.text-gray-400');
-if(p&&/start free\\./i.test(p.textContent||'')){p.textContent='Choose the plan that fits your output needs. Upgrade anytime as you scale.';}
-var cta=[].slice.call(document.querySelectorAll('button')).find(function(b){return /start creating free/i.test((b.textContent||'').trim());});
-if(cta){cta.textContent='Start Creating';}
-var freeBtn=[].slice.call(document.querySelectorAll('button')).find(function(b){return /sign up free/i.test((b.textContent||'').trim());});
-if(freeBtn){var card=freeBtn.closest('div'); if(card){card.remove();}}
-}catch(e){}}; run(); var n=0; var t=setInterval(function(){run(); n++; if(n>20) clearInterval(t);}, 500);}());</script>"""
-                if "</head>" in html:
-                    html = html.replace("</head>", free_plan_hotfix + "</head>")
                 headers = dict(response.headers)
                 headers.pop("content-length", None)
                 headers.pop("Content-Length", None)
@@ -319,6 +395,8 @@ security = HTTPBearer(auto_error=False)
 init_queue_runtime(jobs, log)
 AUTO_SCENE_IMAGE_ROOT = Path(TRAINING_DATA_DIR) / "auto_scene_images"
 AUTO_SCENE_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+_JOB_RETENTION_ACTIVE_SEC = 12 * 3600
+_JOB_RETENTION_FINAL_SEC = 2 * 3600
 
 # Runtime banner state can be updated by admin without restart.
 _maintenance_banner_enabled = bool(MAINTENANCE_BANNER_ENABLED)
@@ -326,6 +404,239 @@ _maintenance_banner_message = (
     (MAINTENANCE_BANNER_MESSAGE or "").strip()
     or "Studio is under high load. Queue times may be longer than usual while we scale capacity."
 )
+KPI_TARGETS = {
+    "first_render_success_rate": 0.95,
+    "time_to_publishable_sec": 8 * 60,
+    "estimated_cost_per_short_usd": 2.00,
+}
+KPI_METRICS_PATH = TEMP_DIR / "kpi_metrics.json"
+TOPUP_WALLET_PATH = TEMP_DIR / "topup_wallets.json"
+USAGE_LEDGER_PATH = TEMP_DIR / "usage_ledger.jsonl"
+_kpi_metrics = {
+    "total_jobs": 0,
+    "completed_jobs": 0,
+    "error_jobs": 0,
+    "first_render_pass_jobs": 0,
+    "total_publishable_time_sec": 0.0,
+    "total_estimated_cost_usd": 0.0,
+    "template_breakdown": {},
+    "updated_at": 0.0,
+}
+_topup_wallets: dict[str, dict] = {}
+_topup_wallet_lock = asyncio.Lock()
+
+
+def _load_kpi_metrics() -> None:
+    global _kpi_metrics
+    try:
+        if KPI_METRICS_PATH.exists():
+            loaded = json.loads(KPI_METRICS_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                _kpi_metrics = {**_kpi_metrics, **loaded}
+    except Exception:
+        pass
+
+
+def _save_kpi_metrics() -> None:
+    try:
+        KPI_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        KPI_METRICS_PATH.write_text(json.dumps(_kpi_metrics, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_topup_wallets() -> None:
+    global _topup_wallets
+    try:
+        if TOPUP_WALLET_PATH.exists():
+            data = json.loads(TOPUP_WALLET_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _topup_wallets = data
+    except Exception:
+        _topup_wallets = {}
+
+
+def _save_topup_wallets() -> None:
+    try:
+        TOPUP_WALLET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TOPUP_WALLET_PATH.write_text(json.dumps(_topup_wallets, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _month_key(ts: float | None = None) -> str:
+    now = datetime.fromtimestamp(ts or time.time(), tz=timezone.utc)
+    return f"{now.year:04d}-{now.month:02d}"
+
+
+def _wallet_for_user(user_id: str) -> dict:
+    if not user_id:
+        return {"topup_credits": 0, "monthly_usage": {}, "updated_at": time.time()}
+    wallet = _topup_wallets.get(user_id)
+    if not isinstance(wallet, dict):
+        wallet = {"topup_credits": 0, "monthly_usage": {}, "updated_at": time.time()}
+        _topup_wallets[user_id] = wallet
+    wallet.setdefault("topup_credits", 0)
+    wallet.setdefault("monthly_usage", {})
+    wallet.setdefault("updated_at", time.time())
+    return wallet
+
+
+def _plan_monthly_credit_limit(plan: str) -> int:
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("starter", {}))
+    return int(limits.get("videos_per_month", 0) or 0)
+
+
+def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool, is_admin: bool = False) -> dict:
+    if is_admin:
+        return {
+            "monthly_limit": 9999,
+            "monthly_used": 0,
+            "monthly_remaining": 9999,
+            "topup_credits": 9999,
+            "credits_total_remaining": 9999,
+            "requires_topup": False,
+            "month_key": _month_key(),
+        }
+    user_id = str(user.get("id", "") or "")
+    wallet = _wallet_for_user(user_id)
+    mk = _month_key()
+    monthly_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
+    monthly_limit = _plan_monthly_credit_limit(effective_plan) if billing_active else 0
+    monthly_remaining = max(0, monthly_limit - monthly_used)
+    topup = int(wallet.get("topup_credits", 0) or 0)
+    total_remaining = monthly_remaining + topup
+    return {
+        "monthly_limit": monthly_limit,
+        "monthly_used": monthly_used,
+        "monthly_remaining": monthly_remaining,
+        "topup_credits": topup,
+        "credits_total_remaining": total_remaining,
+        "requires_topup": bool(billing_active and total_remaining <= 0),
+        "month_key": mk,
+    }
+
+
+async def _reserve_generation_credit(user: dict, effective_plan: str, billing_active: bool, is_admin: bool = False) -> tuple[bool, str, dict]:
+    if is_admin:
+        return True, "admin", _credit_state_for_user(user, effective_plan, billing_active, is_admin=True)
+    if not billing_active:
+        return False, "subscription_required", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+    user_id = str(user.get("id", "") or "")
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(user_id)
+        state = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+        mk = state["month_key"]
+        if state["monthly_remaining"] > 0:
+            usage = dict(wallet.get("monthly_usage", {}) or {})
+            usage[mk] = int(usage.get(mk, 0) or 0) + 1
+            wallet["monthly_usage"] = usage
+            wallet["updated_at"] = time.time()
+            _save_topup_wallets()
+            return True, "monthly", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+        topup = int(wallet.get("topup_credits", 0) or 0)
+        if topup > 0:
+            wallet["topup_credits"] = topup - 1
+            wallet["updated_at"] = time.time()
+            _save_topup_wallets()
+            return True, "topup", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+        return False, "topup_required", state
+
+
+async def _refund_generation_credit(user_id: str, source: str, month_key: str = "") -> None:
+    if not user_id or source not in {"monthly", "topup"}:
+        return
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(user_id)
+        if source == "topup":
+            wallet["topup_credits"] = int(wallet.get("topup_credits", 0) or 0) + 1
+        else:
+            mk = month_key or _month_key()
+            usage = dict(wallet.get("monthly_usage", {}) or {})
+            usage[mk] = max(0, int(usage.get(mk, 0) or 0) - 1)
+            wallet["monthly_usage"] = usage
+        wallet["updated_at"] = time.time()
+        _save_topup_wallets()
+
+
+def _append_usage_ledger(event: dict) -> None:
+    try:
+        USAGE_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LEDGER_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+async def _credit_topup_wallet(user_id: str, credits: int, source: str, stripe_session_id: str = "") -> None:
+    if not user_id or credits <= 0:
+        return
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(user_id)
+        wallet["topup_credits"] = int(wallet.get("topup_credits", 0) or 0) + int(credits)
+        wallet["updated_at"] = time.time()
+        _save_topup_wallets()
+    _append_usage_ledger({
+        "type": "topup_credit",
+        "user_id": user_id,
+        "credits": int(credits),
+        "source": source,
+        "stripe_session_id": stripe_session_id,
+        "ts": time.time(),
+    })
+
+
+def _estimate_job_cost_usd(job_state: dict) -> float:
+    template = str(job_state.get("template", "") or "")
+    mode = str(job_state.get("generation_mode", "video") or "video")
+    resolution = str(job_state.get("resolution", "720p") or "720p")
+    total_scenes = int(job_state.get("total_scenes", 0) or 0)
+    if total_scenes <= 0 and isinstance(job_state.get("scene_assets"), list):
+        total_scenes = len(job_state.get("scene_assets", []))
+    total_scenes = max(total_scenes, 1)
+    # Heuristic estimate tuned to current FAL/Grok economics.
+    image_scene_cost = 0.03 if template == "skeleton" else 0.04
+    video_scene_cost = 0.16 if resolution == "720p" else 0.25
+    per_scene = image_scene_cost + (video_scene_cost if mode == "video" else 0.0)
+    return round(total_scenes * per_scene, 3)
+
+
+def _record_kpi_for_job(job_id: str, job_state: dict) -> None:
+    if not isinstance(job_state, dict):
+        return
+    status = str(job_state.get("status", "") or "")
+    if status not in {"complete", "error"}:
+        return
+    if bool(job_state.get("kpi_recorded")):
+        return
+    created_at = float(job_state.get("created_at") or time.time())
+    terminal_at = float(job_state.get("completed_at") or time.time())
+    publishable_sec = max(0.0, terminal_at - created_at)
+    template = str(job_state.get("template", "unknown") or "unknown")
+    estimated_cost = _estimate_job_cost_usd(job_state)
+    regenerate_count = int(job_state.get("regenerate_count", 0) or 0)
+    animation_warnings = int(job_state.get("animation_warnings", 0) or 0)
+    first_render_pass = (status == "complete" and regenerate_count == 0 and animation_warnings == 0)
+
+    _kpi_metrics["total_jobs"] = int(_kpi_metrics.get("total_jobs", 0)) + 1
+    if status == "complete":
+        _kpi_metrics["completed_jobs"] = int(_kpi_metrics.get("completed_jobs", 0)) + 1
+        _kpi_metrics["total_publishable_time_sec"] = float(_kpi_metrics.get("total_publishable_time_sec", 0.0)) + publishable_sec
+    else:
+        _kpi_metrics["error_jobs"] = int(_kpi_metrics.get("error_jobs", 0)) + 1
+    if first_render_pass:
+        _kpi_metrics["first_render_pass_jobs"] = int(_kpi_metrics.get("first_render_pass_jobs", 0)) + 1
+    _kpi_metrics["total_estimated_cost_usd"] = float(_kpi_metrics.get("total_estimated_cost_usd", 0.0)) + estimated_cost
+    by_template = _kpi_metrics.setdefault("template_breakdown", {})
+    entry = by_template.setdefault(template, {"total": 0, "complete": 0, "error": 0})
+    entry["total"] = int(entry.get("total", 0)) + 1
+    if status == "complete":
+        entry["complete"] = int(entry.get("complete", 0)) + 1
+    else:
+        entry["error"] = int(entry.get("error", 0)) + 1
+    _kpi_metrics["updated_at"] = time.time()
+    job_state["kpi_recorded"] = True
+    _save_kpi_metrics()
 
 
 def _normalize_output_resolution(requested: str, priority_allowed: bool = False) -> str:
@@ -335,6 +646,30 @@ def _normalize_output_resolution(requested: str, priority_allowed: bool = False)
     if not priority_allowed and resolution == "1080p":
         return "720p"
     return resolution
+
+
+def _resolve_user_plan_for_limits(user: dict | None) -> tuple[str, dict]:
+    if not user:
+        return "starter", PLAN_LIMITS["starter"]
+    email = str(user.get("email", "") or "")
+    if email in ADMIN_EMAILS:
+        pro = dict(PLAN_LIMITS.get("pro", PLAN_LIMITS["starter"]))
+        pro["videos_per_month"] = max(int(pro.get("videos_per_month", 300) or 300), 9999)
+        return "pro", pro
+    plan = str(user.get("plan", "starter") or "starter")
+    if plan in {"free", "none", "admin"}:
+        plan = "starter"
+    if plan not in PLAN_LIMITS:
+        plan = "starter"
+    return plan, PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+
+
+def _plan_features_for(plan: str, is_admin: bool = False) -> list[str]:
+    tier = "pro" if is_admin else (plan if plan in PLAN_FEATURES else "starter")
+    features = list(PLAN_FEATURES.get(tier, PLAN_FEATURES.get("starter", [])))
+    if is_admin and "admin_unlimited_access" not in features:
+        features.append("admin_unlimited_access")
+    return features
 
 
 def _bool_from_any(value, default: bool = False) -> bool:
@@ -352,6 +687,438 @@ def _bool_from_any(value, default: bool = False) -> bool:
     return default
 
 
+REFERENCE_LOCK_MODES = {"strict", "inspired"}
+ART_STYLE_PRESETS = {
+    "auto": "",
+    "cinematic_realism": "Photoreal cinematic realism with natural skin detail, physically-plausible lighting, clean lens behavior, and premium film color grade.",
+    "commercial_polish": "High-end commercial look: crisp product-grade detail, controlled highlights, clean background separation, and premium ad-level finish.",
+    "moody_noir": "Moody low-key cinematic style with rich shadow contrast, tasteful grain-free clarity, and dramatic yet realistic lighting.",
+    "bright_lifestyle": "Bright modern lifestyle aesthetic with soft natural light, inviting color balance, realistic textures, and clean premium framing.",
+}
+
+
+def _normalize_reference_lock_mode(value, default: str = "strict") -> str:
+    text = str(value or default).strip().lower()
+    return text if text in REFERENCE_LOCK_MODES else default
+
+
+def _normalize_art_style(value, template: str = "", default: str = "auto") -> str:
+    if str(template or "").strip().lower() == "skeleton":
+        return "auto"
+    text = str(value or default).strip().lower()
+    return text if text in ART_STYLE_PRESETS else default
+
+
+def _art_style_prompt_fragment(art_style: str, template: str = "") -> str:
+    style = _normalize_art_style(art_style, template=template, default="auto")
+    return ART_STYLE_PRESETS.get(style, "")
+
+
+def _looks_like_provider_moderation_error(message: str) -> bool:
+    msg = str(message or "").strip().lower()
+    if not msg:
+        return False
+    moderation_markers = (
+        "safety",
+        "moderation",
+        "policy",
+        "violence",
+        "graphic",
+        "disallowed",
+        "not allowed",
+        "blocked",
+        "rejected",
+        "refused",
+        "content violation",
+    )
+    provider_markers = ("xai", "x.ai", "grok", "fal.ai", "fal", "provider")
+    has_moderation = any(t in msg for t in moderation_markers)
+    # Some providers return moderation rejections without explicit vendor labels.
+    if has_moderation:
+        return True
+    return any(p in msg for p in provider_markers) and ("400" in msg or "422" in msg or "invalid_request_error" in msg)
+
+
+def _prompt_likely_moderated(prompt: str) -> bool:
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return False
+    risky_terms = (
+        "fallen bodies",
+        "dead body",
+        "dead bodies",
+        "lifeless",
+        "corpse",
+        "gore",
+        "gory",
+        "graphic injury",
+        "blood-soaked",
+    )
+    return any(t in text for t in risky_terms)
+
+
+def _soften_story_prompt_for_moderation(prompt: str, aggressive: bool = False) -> str:
+    text = str(prompt or "")
+    if not text:
+        return text
+    replacements = [
+        (r"\bfallen bodies?\b", "devastating aftermath"),
+        (r"\bdead bodies?\b", "chaotic aftermath"),
+        (r"\bcorpse(s)?\b", "aftermath"),
+        (r"\blifeless\b", "unresponsive"),
+        (r"\bbloody\b", "tense"),
+        (r"\bgore\b", "distress"),
+        (r"\bgory\b", "intense"),
+        (r"\bgraphic injury\b", "emotional impact"),
+    ]
+    if aggressive:
+        replacements.extend([
+            (r"\bdeath\b", "loss"),
+            (r"\bkilled\b", "hurt"),
+            (r"\bmurder(ed|ous)?\b", "harmful"),
+            (r"\bviolence\b", "conflict"),
+            (r"\bweapon(s)?\b", "threat"),
+            (r"\bbleeding\b", "injured"),
+        ])
+    softened = text
+    for pattern, repl in replacements:
+        softened = re.sub(pattern, repl, softened, flags=re.IGNORECASE)
+    if softened != text:
+        suffix = " Keep the emotional gravity high, avoid explicit gore or graphic injury."
+        if aggressive:
+            suffix = " Keep the emotional gravity high with cinematic tension, but avoid explicit violence, death wording, gore, or injuries."
+        softened += suffix
+    return softened
+
+
+def _decode_data_image_url(data_url: str) -> tuple[bytes, str]:
+    text = str(data_url or "").strip()
+    if not text.startswith("data:image/") or "," not in text:
+        return b"", ""
+    try:
+        header, b64_data = text.split(",", 1)
+        mime = "image/png"
+        if ";" in header and ":" in header:
+            mime = header.split(":", 1)[1].split(";", 1)[0].strip() or mime
+        raw = base64.b64decode(b64_data, validate=False)
+        return (raw if raw else b"", mime)
+    except Exception:
+        return b"", ""
+
+
+def _extract_reference_dna(raw: bytes, template: str = "skeleton") -> dict:
+    dna = {
+        "template": str(template or ""),
+        "orientation": "portrait",
+        "aspect_ratio": 0.562,
+        "palette_family": "neutral_cool",
+        "lighting_style": "balanced",
+        "contrast_style": "cinematic",
+        "sharpness_style": "clean",
+        "width": 0,
+        "height": 0,
+    }
+    if not raw or Image is None:
+        return dna
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        w, h = img.size
+        if w > 0 and h > 0:
+            ratio = float(w / h)
+            dna["width"] = int(w)
+            dna["height"] = int(h)
+            dna["aspect_ratio"] = round(ratio, 4)
+            if ratio < 0.85:
+                dna["orientation"] = "portrait"
+            elif ratio > 1.15:
+                dna["orientation"] = "landscape"
+            else:
+                dna["orientation"] = "square"
+
+        tiny = img.resize((128, max(1, int(128 * (img.height / max(img.width, 1))))), Image.BILINEAR)
+        stat_rgb = ImageStat.Stat(tiny)
+        mean_r, mean_g, mean_b = [float(v) for v in stat_rgb.mean[:3]]
+        gray = tiny.convert("L")
+        bright = float(ImageStat.Stat(gray).mean[0])
+        contrast = float(ImageStat.Stat(gray).stddev[0])
+
+        hsv_px = list(tiny.convert("HSV").getdata())
+        sat_vals = [int(px[1]) for px in hsv_px]
+        hue_vals = [int(px[0]) for px in hsv_px if int(px[1]) > 25]
+        sat_avg = float(sum(sat_vals) / max(len(sat_vals), 1))
+        hue_avg = float(sum(hue_vals) / max(len(hue_vals), 1)) if hue_vals else 0.0
+
+        if ImageFilter is not None:
+            edge = tiny.convert("L").filter(ImageFilter.FIND_EDGES)
+            edge_strength = float(ImageStat.Stat(edge).mean[0])
+        else:
+            edge_strength = 0.0
+
+        palette = "neutral_cool"
+        if sat_avg < 45:
+            palette = "desaturated"
+        elif mean_r > mean_b + 8:
+            palette = "warm"
+        elif mean_b > mean_r + 8:
+            palette = "cool"
+        elif 18 <= hue_avg <= 45:
+            palette = "warm"
+        elif 95 <= hue_avg <= 145:
+            palette = "cool"
+
+        if bright < 70:
+            lighting = "moody_lowkey"
+        elif bright > 180:
+            lighting = "highkey_bright"
+        else:
+            lighting = "balanced"
+
+        if contrast < 28:
+            contrast_style = "soft"
+        elif contrast > 68:
+            contrast_style = "punchy"
+        else:
+            contrast_style = "cinematic"
+
+        sharpness_style = "clean" if edge_strength >= 24 else "soft"
+        dna.update({
+            "palette_family": palette,
+            "lighting_style": lighting,
+            "contrast_style": contrast_style,
+            "sharpness_style": sharpness_style,
+            "avg_brightness": round(bright, 2),
+            "avg_contrast": round(contrast, 2),
+            "avg_saturation": round(sat_avg, 2),
+            "edge_strength": round(edge_strength, 2),
+        })
+    except Exception:
+        return dna
+    return dna
+
+
+def _analyze_reference_quality(raw: bytes, lock_mode: str = "strict") -> dict:
+    out = {"accepted": True, "warnings": [], "metrics": {}}
+    if not raw:
+        return {"accepted": False, "warnings": ["empty_image"], "metrics": {}}
+    size_kb = len(raw) / 1024.0
+    out["metrics"]["size_kb"] = round(size_kb, 1)
+    if size_kb < 40:
+        out["warnings"].append("very_small_file")
+
+    dims = {"width": 0, "height": 0, "aspect_ratio": 0.0}
+    if Image is not None:
+        try:
+            img = Image.open(io.BytesIO(raw))
+            w, h = img.size
+            dims = {"width": int(w), "height": int(h), "aspect_ratio": round(float(w / max(h, 1)), 4)}
+            if min(w, h) < 768:
+                out["warnings"].append("low_resolution_reference")
+            ratio = float(w / max(h, 1))
+            if ratio < 0.45 or ratio > 0.8:
+                out["warnings"].append("non_portrait_aspect")
+        except Exception:
+            out["warnings"].append("unreadable_image")
+    out["metrics"].update(dims)
+
+    fatal = {"empty_image", "unreadable_image"}
+    if "low_resolution_reference" in out["warnings"] and lock_mode == "strict":
+        out["accepted"] = False
+    if any(w in fatal for w in out["warnings"]):
+        out["accepted"] = False
+    return out
+
+
+def _reference_dna_prompt_fragment(reference_dna: dict | None, lock_mode: str, template: str) -> str:
+    dna = reference_dna or {}
+    if not dna:
+        return ""
+    strength = "hard lock" if lock_mode == "strict" else "soft style guidance"
+    return (
+        "REFERENCE DNA (" + strength + "): "
+        + "orientation=" + str(dna.get("orientation", "portrait")) + ", "
+        + "palette=" + str(dna.get("palette_family", "neutral")) + ", "
+        + "lighting=" + str(dna.get("lighting_style", "balanced")) + ", "
+        + "contrast=" + str(dna.get("contrast_style", "cinematic")) + ", "
+        + "sharpness=" + str(dna.get("sharpness_style", "clean")) + ". "
+        + ("Maintain exact identity/outfit continuity scene-to-scene. " if lock_mode == "strict" else "Preserve style while allowing pose/composition variety. ")
+        + (
+            "For skeleton keep skull geometry, outfit, and logo family unchanged."
+            if template == "skeleton"
+            else (
+                "For story keep recurring subjects, key locations, and grade continuity consistent when the script indicates recurrence."
+                if template == "story"
+                else "Keep subject styling and grading consistent across scenes."
+            )
+        )
+    )
+
+
+def _build_scene_prompt_with_reference(
+    template: str,
+    visual_description: str,
+    quality_mode: str = "standard",
+    skeleton_anchor: str = "",
+    reference_dna: dict | None = None,
+    reference_lock_mode: str = "strict",
+    art_style: str = "auto",
+) -> str:
+    delta = str(visual_description or "").strip()
+    immutable = _reference_dna_prompt_fragment(reference_dna, _normalize_reference_lock_mode(reference_lock_mode), template)
+    style_fragment = _art_style_prompt_fragment(art_style, template=template)
+    immutable_blocks = [block for block in [immutable, style_fragment] if block]
+    immutable_context = " ".join(immutable_blocks).strip()
+    if template == "skeleton":
+        return _build_skeleton_image_prompt(
+            delta,
+            skeleton_anchor=skeleton_anchor,
+            quality_mode=quality_mode,
+            immutable_context=immutable_context,
+        )
+    if template == "story":
+        return _build_story_image_prompt(
+            delta,
+            quality_mode=quality_mode,
+            immutable_context=immutable_context,
+        )
+    prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+    if immutable_context:
+        return f"{prefix} IMMUTABLE STYLE: {immutable_context} SCENE DELTA: {delta}"
+    return prefix + delta
+
+
+def _score_generated_image_quality(image_path: str, prompt: str = "", template: str = "") -> dict:
+    """Heuristic image quality scorer used for best-of candidate selection."""
+    if Image is None or ImageStat is None:
+        return {"score": 0.0, "ok": False, "reason": "pillow_unavailable"}
+    p = Path(image_path)
+    if not p.exists() or p.stat().st_size <= 0:
+        return {"score": 0.0, "ok": False, "reason": "missing_image"}
+    try:
+        with Image.open(p) as im:
+            rgb = im.convert("RGB")
+            w, h = rgb.size
+            mega_px = (float(w) * float(h)) / 1_000_000.0
+            gray = rgb.convert("L")
+            bright = float(ImageStat.Stat(gray).mean[0])
+            contrast = float(ImageStat.Stat(gray).stddev[0])
+            hsv = rgb.convert("HSV")
+            sat = float(ImageStat.Stat(hsv).mean[1])
+            edge_strength = 0.0
+            if ImageFilter is not None:
+                edge_img = gray.filter(ImageFilter.FIND_EDGES)
+                edge_strength = float(ImageStat.Stat(edge_img).mean[0])
+
+            def _clamp01(v: float) -> float:
+                if v <= 0.0:
+                    return 0.0
+                if v >= 1.0:
+                    return 1.0
+                return v
+
+            sharp_norm = _clamp01((edge_strength - 10.0) / 35.0)
+            contrast_norm = _clamp01((contrast - 26.0) / 48.0)
+            sat_norm = _clamp01((sat - 28.0) / 95.0)
+            exposure_norm = _clamp01(1.0 - (abs(bright - 145.0) / 145.0))
+            size_norm = _clamp01(mega_px / 0.9)  # 720x1280 ~= 0.92MP baseline
+
+            score = 100.0 * (
+                0.34 * sharp_norm
+                + 0.24 * contrast_norm
+                + 0.14 * sat_norm
+                + 0.16 * exposure_norm
+                + 0.12 * size_norm
+            )
+            notes = []
+            if edge_strength < 12:
+                score -= 10.0
+                notes.append("soft_edges")
+            if contrast < 22:
+                score -= 8.0
+                notes.append("flat_contrast")
+            if sat < 20:
+                score -= 6.0
+                notes.append("washed_colors")
+            if template == "skeleton" and ("eyes" in prompt.lower() or "eyeballs" in prompt.lower()) and edge_strength < 14:
+                score -= 5.0
+                notes.append("weak_eye_detail")
+
+            score = max(0.0, min(100.0, score))
+            return {
+                "score": round(score, 2),
+                "ok": score >= float(IMAGE_QUALITY_MIN_SCORE),
+                "metrics": {
+                    "width": w,
+                    "height": h,
+                    "mega_px": round(mega_px, 3),
+                    "brightness": round(bright, 2),
+                    "contrast": round(contrast, 2),
+                    "saturation": round(sat, 2),
+                    "edge_strength": round(edge_strength, 2),
+                },
+                "notes": notes,
+            }
+    except Exception as e:
+        return {"score": 0.0, "ok": False, "reason": f"scoring_error:{e}"}
+
+
+def _resolve_reference_for_scene(session: dict, template: str, scene_index: int) -> str:
+    base_ref_public = str(session.get("reference_image_public_url", "") or "")
+    base_ref_inline = str(session.get("reference_image_url", "") or "")
+    base_ref = base_ref_public or base_ref_inline
+    skeleton_ref = str(session.get("skeleton_reference_image", "") or "")
+    rolling_ref = str(session.get("rolling_reference_image_url", "") or "")
+    lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), default="strict")
+    selected = skeleton_ref if template == "skeleton" and skeleton_ref else base_ref
+    if template == "skeleton" and not selected:
+        selected = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
+    # External providers are more reliable with public HTTPS URLs than data URLs.
+    if lock_mode == "strict":
+        if base_ref_public:
+            return base_ref_public
+        if rolling_ref:
+            return rolling_ref
+    if lock_mode == "inspired" and rolling_ref and scene_index > 0 and scene_index % 3 == 0 and not base_ref_public:
+        return rolling_ref
+    return selected
+
+
+def _ensure_reference_public_url(session_id: str, session: dict) -> str:
+    """Backfill a public reference URL for legacy sessions that only stored a data URL."""
+    existing = str(session.get("reference_image_public_url", "") or "")
+    if existing:
+        return existing
+    data_url = str(session.get("reference_image_url", "") or "")
+    if not data_url.startswith("data:image/"):
+        return ""
+    try:
+        header, b64_data = data_url.split(",", 1)
+        mime = "image/png"
+        if ";" in header and ":" in header:
+            mime = header.split(":", 1)[1].split(";", 1)[0].strip() or mime
+        ext = ".png"
+        if "jpeg" in mime or "jpg" in mime:
+            ext = ".jpg"
+        elif "webp" in mime:
+            ext = ".webp"
+        raw = base64.b64decode(b64_data, validate=False)
+        if not raw:
+            return ""
+        ref_dir = TEMP_DIR / "creative_references"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        ref_name = f"{session_id}_reference{ext}"
+        ref_path = ref_dir / ref_name
+        ref_path.write_bytes(raw)
+        public_url = f"{SITE_URL.rstrip('/')}/api/creative/reference-file/{ref_name}"
+        session["reference_image_path"] = str(ref_path)
+        session["reference_image_public_url"] = public_url
+        # Keep skeleton compatibility key aligned with provider-friendly URL.
+        if session.get("template") == "skeleton" and str(session.get("skeleton_reference_image", "") or "").startswith("data:image/"):
+            session["skeleton_reference_image"] = public_url
+        return public_url
+    except Exception:
+        return ""
+
+
 def _auto_scene_dir(job_id: str) -> Path:
     d = AUTO_SCENE_IMAGE_ROOT / str(job_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -360,6 +1127,27 @@ def _auto_scene_dir(job_id: str) -> Path:
 
 def _auto_scene_url(job_id: str, filename: str) -> str:
     return f"/api/auto/scene-image/{job_id}/{filename}"
+
+
+def _prune_in_memory_jobs():
+    """Bound in-memory job growth to reduce long-run RAM pressure."""
+    if not jobs:
+        return
+    now = time.time()
+    final_states = {"complete", "error"}
+    stale_ids = []
+    for jid, state in list(jobs.items()):
+        if not isinstance(state, dict):
+            stale_ids.append(jid)
+            continue
+        created_at = float(state.get("created_at") or now)
+        age_sec = max(0.0, now - created_at)
+        status = str(state.get("status", "") or "")
+        max_age = _JOB_RETENTION_FINAL_SEC if status in final_states else _JOB_RETENTION_ACTIVE_SEC
+        if age_sec > max_age:
+            stale_ids.append(jid)
+    for jid in stale_ids:
+        jobs.pop(jid, None)
 
 
 def _persist_auto_scene_image(job_id: str, scene_index: int, image_path: str, scene: dict, template: str, img_result: dict | None, source: str) -> dict | None:
@@ -411,12 +1199,41 @@ def _persist_env_overrides(updates: dict[str, str]) -> None:
             out.append(f"{key}={val}")
     env_file.write_text("\n".join(out).strip() + "\n", encoding="utf-8")
 
+
+_load_kpi_metrics()
+_load_topup_wallets()
+
+
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 def _is_admin_user(user: Optional[dict]) -> bool:
     if not user:
         return False
-    return user.get("email", "") in ADMIN_EMAILS or user.get("plan") == "admin"
+    return user.get("email", "") in ADMIN_EMAILS
+
+
+def _profile_plan_is_paid(plan: str) -> bool:
+    normalized = str(plan or "").strip().lower()
+    if not normalized or normalized in {"none", "free"}:
+        return False
+    return normalized in PLAN_LIMITS
+
+
+def _billing_active_for_user(user: Optional[dict]) -> bool:
+    """Resolve paid access with a resilient profile-plan fallback."""
+    if not user:
+        return False
+    email = str(user.get("email", "") or "").strip()
+    if email in ADMIN_EMAILS:
+        return True
+    if _stripe_has_active_subscription(email):
+        return True
+    stored_plan = str(user.get("plan", "none") or "none")
+    if _profile_plan_is_paid(stored_plan):
+        log.warning("Stripe check failed/inactive; allowing paid access via profile plan for %s", email)
+        return True
+    return False
+
 
 def _ensure_template_allowed(template: str, user: Optional[dict]):
     if _is_admin_user(user):
@@ -452,12 +1269,12 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
                     if resp.status_code == 200:
                         rows = resp.json()
                         if rows:
-                            plan = rows[0].get("plan", "starter")
+                            plan = rows[0].get("plan", "none")
             except Exception:
                 pass
 
         if not plan or plan == "free":
-            plan = "starter"
+            plan = "none"
 
         return {"id": user_id, "email": email, "plan": plan}
     except jwt.exceptions.PyJWTError:
@@ -652,7 +1469,7 @@ Generate 10-12 scenes for a 45-60 second short.""",
 
 VISUAL STYLE:
 - Every scene is a standalone cinematic masterpiece -- Pixar quality 3D or hyper-photorealistic
-- ONE consistent main character described identically in EVERY scene (same face, clothing, build, hair)
+- Keep continuity for recurring subjects and locations when the script repeats them; do not force one main character into every scene
 - Art direction changes with emotion: warm golden light (hope), cold blue (danger), saturated vivid (wonder), desaturated gray (loss)
 - Camera work: dolly tracking shots, slow push-ins for emotional moments, wide establishing shots for scale
 - Environments: richly detailed, fantastical or emotionally resonant locations
@@ -685,7 +1502,7 @@ Output format MUST be valid JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "Emotionally resonant 1-2 sentence narration",
-      "visual_description": "Cinematic scene: [art style], [camera angle], [lighting], [color palette], [character in consistent clothing], [environment], [atmospheric effects]. Pixar/UE5 quality, 8k.",
+      "visual_description": "Cinematic scene: [art style], [camera angle], [lighting], [color palette], [subject(s) for this beat], [environment], [atmospheric effects]. Pixar/UE5 quality, 8k.",
       "text_overlay": "DRAMATIC PHRASE or empty string"
     }
   ],
@@ -1148,42 +1965,119 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     system_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
     if extra_instructions:
         system_prompt += extra_instructions
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "grok-3-mini-fast",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Create a viral short about: {topic}"},
-                ],
-                "temperature": 0.8,
-            },
+    story_script_to_short_mode = (
+        template == "story"
+        and "SCRIPT-TO-SHORT MODE (PRE-ALPHA)" in str(extra_instructions or "")
+    )
+    async def _call_script_gen(prompt_text: str, temp: float = 0.8) -> dict:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-3-mini-fast",
+                    "messages": [
+                        {"role": "system", "content": prompt_text},
+                        {"role": "user", "content": f"Create a viral short about: {topic}"},
+                    ],
+                    "temperature": temp,
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end == 0:
+                raise ValueError("No JSON found in Grok response")
+            return json.loads(content[start:end])
+
+    def _score_story_script_quality(data: dict) -> tuple[int, list[str]]:
+        scenes = data.get("scenes", [])
+        if not isinstance(scenes, list):
+            return (0, ["invalid_scenes"])
+        min_scenes = 12 if story_script_to_short_mode else 10
+        max_scenes = 15 if story_script_to_short_mode else 13
+        score = 100
+        notes = []
+        if len(scenes) < min_scenes:
+            score -= 30
+            notes.append("too_few_scenes")
+        if len(scenes) > max_scenes:
+            score -= 10
+            notes.append("too_many_scenes")
+
+        continuity_hits = 0
+        emotional_hits = 0
+        motion_hits = 0
+        for s in scenes:
+            vis = str((s or {}).get("visual_description", "") or "").lower()
+            nar = str((s or {}).get("narration", "") or "").lower()
+            if re.search(r"\b(continuity|same setting|same location|recurring|timeline|same event|same era)\b", vis):
+                continuity_hits += 1
+            if re.search(r"\b(loss|hope|fear|grief|love|regret|choice|sacrifice|tension|danger|resolve)\b", nar):
+                emotional_hits += 1
+            if re.search(r"\b(camera|dolly|push|tracking|motion|continuity|moves|moving)\b", vis):
+                motion_hits += 1
+
+        n = max(len(scenes), 1)
+        continuity_threshold = max(2, n // 4)
+        if story_script_to_short_mode:
+            continuity_threshold = max(1, n // 6)
+        if continuity_hits < continuity_threshold:
+            score -= 8
+            notes.append("weak_visual_continuity")
+        if emotional_hits < max(3, n // 3):
+            score -= 14
+            notes.append("weak_emotional_arc")
+        if motion_hits < max(3, n // 4):
+            score -= 10
+            notes.append("weak_camera_motion_language")
+        return (max(0, min(score, 100)), notes)
+
+    first = await _call_script_gen(system_prompt, temp=0.8)
+    if template != "story":
+        return first
+
+    first_score, first_notes = _score_story_script_quality(first)
+    if first_score >= 80:
+        return first
+
+    log.warning(f"Story script quality low ({first_score}); retrying with stricter constraints: {','.join(first_notes)}")
+    retention_tuning = ""
+    if STORY_RETENTION_TUNING_ENABLED:
+        retention_tuning = (
+            " Add explicit pattern interrupts every 2-3 scenes, keep narration punchy with short sentences, "
+            "and force escalating stakes so each scene feels higher consequence than the previous one."
         )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON found in Grok response")
-        return json.loads(content[start:end])
+    hardened_prompt = (
+        system_prompt
+        + "\n\nQUALITY OVERRIDE (MUST FOLLOW): "
+        + (("Ensure 12-15 scenes with explicit emotional escalation, ") if story_script_to_short_mode else ("Ensure 10-12 scenes with explicit emotional escalation, "))
+        + "maintain continuity of people/locations/timeline based on the script beat (do not force a single protagonist in every scene), "
+        + "and include camera/motion continuity language in each scene."
+        + retention_tuning
+    )
+    second = await _call_script_gen(hardened_prompt, temp=0.65)
+    second_score, _ = _score_story_script_quality(second)
+    return second if second_score >= first_score else first
 
 
 # ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
 
 
 async def generate_voiceover(text: str, output_path: str, template: str = "random",
-                             override_voice_id: str = "", language: str = "en") -> dict:
+                             override_voice_id: str = "", language: str = "en",
+                             override_speed: float | None = None) -> dict:
     """Generate voiceover with word-level timestamps for caption sync.
     Returns {"audio_path": str, "word_timings": list[dict]} where each timing is
     {"word": str, "start": float, "end": float}.
     """
     vs = TEMPLATE_VOICE_SETTINGS.get(template, {})
     voice_id = override_voice_id if override_voice_id else vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
+    speed = float(override_speed) if override_speed is not None else float(vs.get("speed", 1.0))
     lang_cfg = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"])
     tts_model = lang_cfg["model"]
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
@@ -1202,7 +2096,7 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
                     "stability": vs.get("stability", 0.5),
                     "similarity_boost": vs.get("similarity_boost", 0.75),
                     "style": vs.get("style", 0.3),
-                    "speed": vs.get("speed", 1.0),
+                    "speed": max(0.8, min(1.35, speed)),
                 },
             },
         )
@@ -1236,14 +2130,29 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
 
 
 async def generate_scene_sfx(visual_description: str, duration_sec: float,
-                              output_path: str, template: str = "") -> str:
+                              output_path: str, template: str = "", scene_index: int = -1, total_scenes: int = 0) -> str:
     """Generate a sound effect for a scene using ElevenLabs Sound Effects API.
     Returns the path to the generated SFX audio file, or empty string on failure."""
-    if not ELEVENLABS_API_KEY:
+    if not _sfx_enabled() or not ELEVENLABS_API_KEY:
         return ""
 
     style_hint = TEMPLATE_SFX_STYLES.get(template, "cinematic ambient atmosphere")
-    sfx_prompt = f"{style_hint}, matching visual: {visual_description[:200]}"
+    transition_palette = [
+        "smooth whoosh transition",
+        "dramatic cinematic hit with sub bass",
+        "quick snap transition accent",
+        "soft zoom swell with airy tail",
+        "blur sweep transition texture",
+    ]
+    if scene_index == 0:
+        dynamic_layer = "strong opening hook impact, attention-grabbing stinger"
+    elif total_scenes > 0 and scene_index == (total_scenes - 1):
+        dynamic_layer = "final payoff impact, satisfying outro resolve"
+    elif scene_index >= 0:
+        dynamic_layer = transition_palette[scene_index % len(transition_palette)]
+    else:
+        dynamic_layer = "cinematic transition accent"
+    sfx_prompt = f"{style_hint}, {dynamic_layer}, matching visual: {visual_description[:200]}"
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -1256,7 +2165,7 @@ async def generate_scene_sfx(visual_description: str, duration_sec: float,
                 json={
                     "text": sfx_prompt,
                     "duration_seconds": min(duration_sec, 22.0),
-                    "prompt_influence": 0.4,
+                    "prompt_influence": 0.58,
                 },
             )
             if resp.status_code != 200:
@@ -1291,6 +2200,169 @@ def _probe_audio_duration_seconds(audio_path: str) -> float:
         return float((proc.stdout or "0").strip() or 0)
     except Exception:
         return 0.0
+
+
+def _probe_video_duration_seconds(video_path: str) -> float:
+    """Best-effort video duration probe using ffprobe."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return float((proc.stdout or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+TRANSITION_STYLE_MAP = {
+    "no_motion": "none",
+    "none": "none",
+    "dramatic": "fadeblack",
+    "smooth": "fade",
+    "slide": "slideleft",
+    "zoom": "circleopen",
+    "snap": "pixelize",
+    "blur": "hblur",
+}
+
+
+def _normalize_transition_style(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in TRANSITION_STYLE_MAP:
+        return raw
+    if raw in {"off", "disabled"}:
+        return "no_motion"
+    return "smooth"
+
+
+def _transition_duration_for_style(style: str) -> float:
+    if style in {"snap"}:
+        return 0.08
+    if style in {"dramatic", "blur"}:
+        return 0.22
+    if style in {"slide", "zoom"}:
+        return 0.18
+    return 0.16
+
+
+def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
+    if template not in {"skeleton", "story", "motivation"}:
+        return False
+    if value is None:
+        return True
+    return _bool_from_any(value, True)
+
+
+def _normalize_voice_speed(value, default: float = 1.0) -> float:
+    try:
+        raw = float(value)
+    except Exception:
+        raw = float(default)
+    return max(0.8, min(1.35, raw))
+
+
+def _normalize_pacing_mode(value) -> str:
+    raw = str(value or "standard").strip().lower()
+    if raw in {"standard", "fast", "very_fast"}:
+        return raw
+    if raw in {"very-fast", "veryfast"}:
+        return "very_fast"
+    return "standard"
+
+
+def _sfx_enabled() -> bool:
+    return not DISABLE_ALL_SFX
+
+
+def _apply_story_pacing(scenes: list, template: str, pacing_mode: str = "standard") -> list:
+    if template != "story":
+        return scenes
+    mode = _normalize_pacing_mode(pacing_mode)
+    mult = {"standard": 1.0, "fast": 0.9, "very_fast": 0.8}.get(mode, 1.0)
+    paced = []
+    for s in scenes or []:
+        scene = dict(s or {})
+        dur = float(scene.get("duration_sec", 5) or 5)
+        dur = max(2.5, min(8.0, round(dur * mult, 2)))
+        scene["duration_sec"] = dur
+        paced.append(scene)
+    return paced
+
+
+MICRO_ESCALATION_MAX_SOURCE_SCENES = 16
+MICRO_ESCALATION_MAX_OUTPUT_CLIPS = 48
+
+
+async def _build_micro_escalation_clips(
+    source_clips: list[Path],
+    source_durations: list[float],
+    job_ts: str,
+) -> tuple[list[Path], list[float]]:
+    """Split 5s scene clips into shorter editorial beats without extra generation calls."""
+    if len(source_clips) > MICRO_ESCALATION_MAX_SOURCE_SCENES:
+        return list(source_clips), list(source_durations)
+    micro_clips: list[Path] = []
+    micro_durations: list[float] = []
+
+    for i, clip in enumerate(source_clips):
+        clip_path = str(clip)
+        base_dur = source_durations[i] if i < len(source_durations) else _probe_video_duration_seconds(clip_path)
+        base_dur = max(0.5, float(base_dur or 5.0))
+        if base_dur < 3.2:
+            micro_clips.append(clip)
+            micro_durations.append(base_dur)
+            continue
+
+        # 2-3 virtual beats per source scene.
+        boundaries = [0.0, round(base_dur * 0.34, 3), round(base_dur * 0.68, 3), base_dur]
+        if base_dur < 4.8:
+            boundaries = [0.0, round(base_dur * 0.52, 3), base_dur]
+
+        for b in range(len(boundaries) - 1):
+            if len(micro_clips) >= MICRO_ESCALATION_MAX_OUTPUT_CLIPS:
+                return list(source_clips), list(source_durations)
+            start = max(0.0, boundaries[b])
+            seg_dur = max(0.42, boundaries[b + 1] - boundaries[b])
+            out = TEMP_DIR / f"micro_{job_ts}_{i}_{b}.mp4"
+            vf = "eq=contrast=1.02:saturation=1.03"
+            if b == 1:
+                vf = "setpts=0.92*PTS,eq=contrast=1.08:saturation=1.06"
+            elif b >= 2:
+                vf = "setpts=0.97*PTS,eq=contrast=1.05:saturation=1.1"
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
+                "-t", f"{seg_dur:.3f}",
+                "-i", clip_path,
+                "-an",
+                "-vf", vf,
+                "-threads", "1",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                str(out),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
+                actual = _probe_video_duration_seconds(str(out))
+                micro_clips.append(out)
+                micro_durations.append(max(0.35, actual if actual > 0 else seg_dur))
+            else:
+                # Fallback preserves reliability if edit split fails.
+                micro_clips.append(clip)
+                micro_durations.append(base_dur)
+                break
+
+    return micro_clips, micro_durations
 
 
 def _build_atempo_filter_chain(speed: float) -> str:
@@ -1335,7 +2407,7 @@ async def _quintuple_check_scene_sfx(
 
         retry_out = str(TEMP_DIR / (f"{job_id}_sfx_retry_{i}.mp3" if job_id else f"sfx_retry_{i}_{int(time.time()*1000)}.mp3"))
         desc = scene.get("visual_description", "")
-        retry = await generate_scene_sfx(desc, expected, retry_out, template=template)
+        retry = await generate_scene_sfx(desc, expected, retry_out, template=template, scene_index=i, total_scenes=len(scenes))
         retry_ok = bool(retry and Path(retry).exists() and Path(retry).stat().st_size > 0)
         retry_dur = _probe_audio_duration_seconds(retry) if retry_ok else 0.0
         if retry_ok and abs(retry_dur - expected) <= 1.5:
@@ -1514,7 +2586,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: float, output_path: str) -> str:
     """Generate a sound effect for a scene using ElevenLabs Sound Effects API."""
-    if not ELEVENLABS_API_KEY:
+    if not _sfx_enabled() or not ELEVENLABS_API_KEY:
         return ""
     base_sfx = TEMPLATE_SFX_PROMPTS.get(template, "Cinematic dramatic transition impact hit with bass")
     sfx_prompt = f"{base_sfx}. Scene: {scene_desc[:150]}"
@@ -1797,6 +2869,7 @@ async def _generate_image_xai_direct(prompt: str, output_path: str, reference_im
     }
     if reference_image_url:
         payload["image_url"] = reference_image_url
+        log.info(f"xAI direct image conditioning enabled: {'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}")
 
     for attempt in range(3):
         try:
@@ -1853,6 +2926,7 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
             }
             if reference_image_url:
                 payload["image_url"] = reference_image_url
+                log.info(f"Fal Grok image conditioning enabled: {'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}")
 
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
@@ -1977,11 +3051,44 @@ async def generate_scene_image(
     For other templates: Grok Imagine > SDXL.
     Returns {"local_path": str, "cdn_url": str | None}.
     """
+    async def _enforce_1080_image(path: str) -> None:
+        if resolution != "1080p":
+            return
+        target = RESOLUTION_CONFIGS.get("1080p", {})
+        out_w = int(target.get("output_width", 1080) or 1080)
+        out_h = int(target.get("output_height", 1920) or 1920)
+        src = Path(path)
+        if not src.exists():
+            return
+        upscaled = src.with_name(src.stem + "_up1080.png")
+        vf = (
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,"
+            "unsharp=5:5:0.55:5:5:0.0"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src),
+            "-vf", vf,
+            "-frames:v", "1",
+            str(upscaled),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+        if proc.returncode == 0 and upscaled.exists() and upscaled.stat().st_size > 0:
+            shutil.move(str(upscaled), str(src))
+            log.info(f"Image upscaled to 1080p: {src.name}")
+        else:
+            upscaled.unlink(missing_ok=True)
+            log.warning(f"Image 1080p upscale skipped for {src.name}: {err.decode()[-200:]}")
+
     if template == "skeleton":
         try:
             lora_available = await check_skeleton_lora_available()
             if lora_available:
                 await generate_image_skeleton_lora(prompt, output_path, resolution=resolution)
+                await _enforce_1080_image(output_path)
                 log.info("Skeleton image generated via LoRA (zero API cost)")
                 return {"local_path": output_path, "cdn_url": None}
         except Exception as e:
@@ -1989,17 +3096,124 @@ async def generate_scene_image(
 
     if FAL_AI_KEY or XAI_API_KEY:
         try:
-            return await generate_image_grok(
+            if IMAGE_QUALITY_BESTOF_ENABLED and IMAGE_QUALITY_BESTOF_COUNT > 1:
+                best_count = max(2, int(IMAGE_QUALITY_BESTOF_COUNT))
+                cand_root = Path(output_path)
+                candidates = []
+                for idx in range(best_count):
+                    cand_path = str(cand_root.with_name(f"{cand_root.stem}_cand_{idx}{cand_root.suffix or '.png'}"))
+                    try:
+                        cand_result = await generate_image_grok(
+                            prompt,
+                            cand_path,
+                            resolution=resolution,
+                            reference_image_url=reference_image_url,
+                        )
+                        await _enforce_1080_image(cand_path)
+                        qa = _score_generated_image_quality(cand_path, prompt=prompt, template=template)
+                        candidates.append({"path": cand_path, "result": cand_result, "qa": qa, "idx": idx})
+                        log.info(
+                            f"Best-of candidate {idx+1}/{best_count} score={qa.get('score', 0.0)} "
+                            f"ok={qa.get('ok', False)} notes={','.join(qa.get('notes', []))}"
+                        )
+                    except Exception as cand_err:
+                        log.warning(f"Best-of candidate {idx+1}/{best_count} failed: {cand_err}")
+                if not candidates:
+                    raise RuntimeError("all best-of image candidates failed")
+
+                winner = max(candidates, key=lambda c: float(c.get("qa", {}).get("score", 0.0)))
+                winner_path = str(winner["path"])
+                winner_result = dict(winner["result"])
+                winner_qa = dict(winner.get("qa", {}))
+                if Path(winner_path).resolve() != Path(output_path).resolve():
+                    shutil.copyfile(winner_path, output_path)
+                winner_result["local_path"] = output_path
+                winner_result["qa_score"] = winner_qa.get("score", 0.0)
+                winner_result["qa_ok"] = bool(winner_qa.get("ok", False))
+                winner_result["qa_notes"] = winner_qa.get("notes", [])
+                # Story salvage pass: if winner is still below threshold, do one extra high-realism attempt.
+                if template == "story" and not winner_result["qa_ok"]:
+                    try:
+                        salvage_prompt = f"{prompt} {STORY_REALISM_REFINEMENT}"
+                        salvage_path = str(cand_root.with_name(f"{cand_root.stem}_salvage{cand_root.suffix or '.png'}"))
+                        salvage_result = await generate_image_grok(
+                            salvage_prompt,
+                            salvage_path,
+                            resolution=resolution,
+                            reference_image_url=reference_image_url,
+                        )
+                        await _enforce_1080_image(salvage_path)
+                        salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                        if float(salvage_qa.get("score", 0.0)) > float(winner_result.get("qa_score", 0.0)):
+                            shutil.copyfile(salvage_path, output_path)
+                            winner_result = dict(salvage_result)
+                            winner_result["local_path"] = output_path
+                            winner_result["qa_score"] = salvage_qa.get("score", 0.0)
+                            winner_result["qa_ok"] = bool(salvage_qa.get("ok", False))
+                            winner_result["qa_notes"] = salvage_qa.get("notes", [])
+                            log.info(f"Story salvage image replaced winner, score={winner_result['qa_score']}")
+                        Path(salvage_path).unlink(missing_ok=True)
+                    except Exception as salvage_err:
+                        log.warning(f"Story salvage pass failed: {salvage_err}")
+                if not winner_result["qa_ok"]:
+                    log.warning(
+                        f"Best-of winner below threshold {IMAGE_QUALITY_MIN_SCORE}: "
+                        f"score={winner_result['qa_score']} path={Path(output_path).name}"
+                    )
+                else:
+                    log.info(
+                        f"Best-of winner selected score={winner_result['qa_score']} "
+                        f"candidate={winner.get('idx', -1)+1}/{best_count}"
+                    )
+
+                for cand in candidates:
+                    p = Path(str(cand.get("path", "") or ""))
+                    if p.exists() and p.resolve() != Path(output_path).resolve():
+                        p.unlink(missing_ok=True)
+                return winner_result
+
+            result = await generate_image_grok(
                 prompt,
                 output_path,
                 resolution=resolution,
                 reference_image_url=reference_image_url,
             )
+            await _enforce_1080_image(output_path)
+            qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
+            result["qa_score"] = qa.get("score", 0.0)
+            result["qa_ok"] = bool(qa.get("ok", False))
+            result["qa_notes"] = qa.get("notes", [])
+            if template == "story" and not result["qa_ok"]:
+                try:
+                    salvage_prompt = f"{prompt} {STORY_REALISM_REFINEMENT}"
+                    salvage_path = str(Path(output_path).with_name(Path(output_path).stem + "_salvage" + Path(output_path).suffix))
+                    salvage_result = await generate_image_grok(
+                        salvage_prompt,
+                        salvage_path,
+                        resolution=resolution,
+                        reference_image_url=reference_image_url,
+                    )
+                    await _enforce_1080_image(salvage_path)
+                    salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                    if float(salvage_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
+                        shutil.copyfile(salvage_path, output_path)
+                        result = dict(salvage_result)
+                        result["local_path"] = output_path
+                        result["qa_score"] = salvage_qa.get("score", 0.0)
+                        result["qa_ok"] = bool(salvage_qa.get("ok", False))
+                        result["qa_notes"] = salvage_qa.get("notes", [])
+                        log.info(f"Story single-pass salvage improved image score={result['qa_score']}")
+                    Path(salvage_path).unlink(missing_ok=True)
+                except Exception as salvage_err:
+                    log.warning(f"Story single-pass salvage failed: {salvage_err}")
+            return result
         except Exception as e:
             log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
 
     await generate_image_comfyui(prompt, output_path, resolution=resolution, negative_prompt=negative_prompt)
-    return {"local_path": output_path, "cdn_url": None}
+    await _enforce_1080_image(output_path)
+    qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
+    return {"local_path": output_path, "cdn_url": None, "qa_score": qa.get("score", 0.0), "qa_ok": bool(qa.get("ok", False)), "qa_notes": qa.get("notes", [])}
 
 
 async def generate_image_comfyui(prompt: str, output_path: str, resolution: str = "720p", negative_prompt: str = "") -> str:
@@ -2375,7 +3589,7 @@ async def animate_image_runway_video(image_path: str, prompt: str, output_clip_p
 
 
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
-    """Animate a scene image using FalAI Kling only (forced)."""
+    """Animate a scene image using Runway first, then FalAI Kling fallback."""
     provider_errors = []
     try:
         requested_duration = float(duration_sec)
@@ -2383,6 +3597,21 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
         requested_duration = 5.0
     # FalAI Kling I2V accepts only 5s or 10s durations.
     kling_duration = 10 if requested_duration >= 7.5 else 5
+
+    if RUNWAY_API_KEY:
+        runway_clip_path = str(Path(output_dir_path) / ("runway_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+        try:
+            await animate_image_runway_video(
+                image_path=image_path,
+                prompt=prompt,
+                output_clip_path=runway_clip_path,
+                duration_sec=requested_duration,
+                image_cdn_url=image_cdn_url,
+            )
+            return {"type": "runway_clip", "path": runway_clip_path}
+        except Exception as e:
+            provider_errors.append("runway: " + str(e))
+            log.warning(f"Runway scene animation failed, trying FalAI Kling fallback: {e}")
 
     if FAL_AI_KEY:
         kling_clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
@@ -2401,7 +3630,7 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
             log.warning(f"FalAI Kling scene animation failed: {e}")
 
     if not provider_errors:
-        raise RuntimeError("No video engine configured (set FAL_AI_KEY)")
+        raise RuntimeError("No video engine configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
     raise RuntimeError("All video providers failed: " + " | ".join(provider_errors))
 
 
@@ -2768,7 +3997,15 @@ async def _merge_sfx_track(sfx_paths: list[str], scenes: list, output_path: str)
     return ""
 
 
-async def _composite_video_on_runpod(scene_clips: list[Path], audio_path: str, output_path: str, subtitle_path: str = None, sfx_track: str = "") -> str:
+async def _composite_video_on_runpod(
+    scene_clips: list[Path],
+    audio_path: str,
+    output_path: str,
+    subtitle_path: str = None,
+    sfx_track: str = "",
+    transition_style: str = "smooth",
+    clip_durations: list[float] | None = None,
+) -> str:
     """Run final concat + merge on RunPod to reduce Render RAM pressure."""
     run_id = f"cmp_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
     remote_dir = f"{RUNPOD_COMPOSITOR_BASE_DIR.rstrip('/')}/{run_id}"
@@ -2851,10 +4088,34 @@ async def _composite_video_on_runpod(scene_clips: list[Path], audio_path: str, o
         if not up_ok:
             raise RuntimeError(f"RunPod concat upload failed: {up_err}")
 
-        concat_cmd = (
-            f"ffmpeg -y -f concat -safe 0 -i '{remote_concat}' "
-            f"-c:v libx264 -preset fast -pix_fmt yuv420p '{remote_merged}'"
-        )
+        style = _normalize_transition_style(transition_style)
+        xfade_type = TRANSITION_STYLE_MAP.get(style, "fade")
+        transition_dur = _transition_duration_for_style(style)
+        use_xfade = (style != "no_motion" and style != "none" and len(uploaded_remote_files) > 1)
+        if use_xfade:
+            durations = list(clip_durations or [])
+            while len(durations) < len(uploaded_remote_files):
+                durations.append(5.0)
+            durations = [max(0.4, float(d or 5.0)) for d in durations[:len(uploaded_remote_files)]]
+            ff_inputs = " ".join([f"-i '{p}'" for p in uploaded_remote_files])
+            parts = []
+            cumulative = durations[0]
+            for idx in range(1, len(uploaded_remote_files)):
+                left = "0:v" if idx == 1 else f"v{idx-1}"
+                out = f"v{idx}"
+                offset = max(0.0, cumulative - transition_dur * idx)
+                parts.append(f"[{left}][{idx}:v]xfade=transition={xfade_type}:duration={transition_dur:.3f}:offset={offset:.3f}[{out}]")
+                cumulative += durations[idx]
+            final_label = f"v{len(uploaded_remote_files) - 1}"
+            concat_cmd = (
+                f"ffmpeg -y {ff_inputs} -filter_complex \"{';'.join(parts)}\" "
+                f"-map '[{final_label}]' -c:v libx264 -preset fast -pix_fmt yuv420p '{remote_merged}'"
+            )
+        else:
+            concat_cmd = (
+                f"ffmpeg -y -f concat -safe 0 -i '{remote_concat}' "
+                f"-c:v libx264 -preset fast -pix_fmt yuv420p '{remote_merged}'"
+            )
         ok, err = await asyncio.to_thread(
             _run_remote_cmd_blocking,
             RUNPOD_COMPOSITOR_HOST,
@@ -2935,6 +4196,8 @@ async def composite_video(
     use_svd: bool = False,
     subtitle_path: str = None,
     sfx_paths: list[str] = None,
+    transition_style: str = "smooth",
+    micro_escalation_mode: bool = False,
 ) -> str:
     """Composite scene clips into final MP4 with optional burned-in captions and SFX.
     scene_assets: list of dicts with keys: image, frames, kling_clip
@@ -2948,6 +4211,7 @@ async def composite_video(
     job_ts = str(int(time.time() * 1000))
     concat_file = TEMP_DIR / ("concat_" + job_ts + ".txt")
     scene_clips = []
+    clip_durations = []
 
     num_scenes = len(scenes)
     for i, (scene, asset) in enumerate(zip(scenes, scene_assets)):
@@ -2965,6 +4229,7 @@ async def composite_video(
                     out_w, out_h, text_overlay, resolution,
                 )
                 scene_clips.append(Path(clip_path))
+                clip_durations.append(float(duration))
                 continue
             except Exception as e:
                 log.warning(f"Kling clip processing failed for scene {i}: {e}")
@@ -2976,6 +4241,7 @@ async def composite_video(
                     out_w, out_h, text_overlay, resolution,
                 )
                 scene_clips.append(Path(clip_path))
+                clip_durations.append(float(duration))
                 continue
             except Exception as e:
                 log.warning(f"SVD clip failed for scene {i}, falling back to static: {e}")
@@ -2985,11 +4251,22 @@ async def composite_video(
             out_w, out_h, text_overlay, resolution,
         )
         scene_clips.append(Path(clip_path))
+        clip_durations.append(float(duration))
 
     existing_clips = [c for c in scene_clips if c.exists() and c.stat().st_size > 0]
     if not existing_clips:
         raise RuntimeError("No scene clips were created -- nothing to composite")
-    log.info(f"Compositing {len(existing_clips)} scene clips into video")
+    working_clips = list(existing_clips)
+    working_durations = [clip_durations[i] if i < len(clip_durations) else _probe_video_duration_seconds(str(c)) for i, c in enumerate(existing_clips)]
+    if micro_escalation_mode:
+        try:
+            working_clips, working_durations = await _build_micro_escalation_clips(existing_clips, working_durations, job_ts)
+            log.info(f"Micro-escalation enabled: {len(existing_clips)} base clips -> {len(working_clips)} beat clips")
+        except Exception as e:
+            log.warning(f"Micro-escalation build failed, falling back to base clips: {e}")
+            working_clips = list(existing_clips)
+            working_durations = list(working_durations)
+    log.info(f"Compositing {len(working_clips)} scene clips into video")
 
     sfx_track = ""
     if sfx_paths and any(sfx_paths):
@@ -2999,13 +4276,15 @@ async def composite_video(
     if RUNPOD_COMPOSITOR_ENABLED:
         try:
             await _composite_video_on_runpod(
-                existing_clips,
+                working_clips,
                 audio_path,
                 output_path,
                 subtitle_path=subtitle_path,
                 sfx_track=sfx_track,
+                transition_style=transition_style,
+                clip_durations=working_durations,
             )
-            for clip in scene_clips:
+            for clip in set(scene_clips + working_clips):
                 clip.unlink(missing_ok=True)
             if sfx_track:
                 Path(sfx_track).unlink(missing_ok=True)
@@ -3017,16 +4296,45 @@ async def composite_video(
             log.warning(f"RunPod compositing failed, falling back local: {e}")
 
     with open(concat_file, "w") as f:
-        for clip in existing_clips:
+        for clip in working_clips:
             f.write("file '" + str(clip.resolve()) + "'\n")
 
     merged_video = TEMP_DIR / ("merged_" + job_ts + ".mp4")
-    cmd = [
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", str(concat_file),
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        str(merged_video),
-    ]
+    style = _normalize_transition_style(transition_style)
+    xfade_type = TRANSITION_STYLE_MAP.get(style, "fade")
+    transition_dur = _transition_duration_for_style(style)
+    use_xfade = (style != "no_motion" and style != "none" and len(working_clips) > 1)
+    if use_xfade:
+        durations = []
+        for i, clip in enumerate(working_clips):
+            probed = _probe_video_duration_seconds(str(clip))
+            fallback = working_durations[i] if i < len(working_durations) else 5.0
+            durations.append(max(0.4, probed if probed > 0.1 else float(fallback)))
+        cmd = ["ffmpeg", "-y"]
+        for clip in working_clips:
+            cmd.extend(["-i", str(clip)])
+        parts = []
+        cumulative = durations[0]
+        for idx in range(1, len(working_clips)):
+            left = "0:v" if idx == 1 else f"v{idx-1}"
+            out = f"v{idx}"
+            offset = max(0.0, cumulative - transition_dur * idx)
+            parts.append(f"[{left}][{idx}:v]xfade=transition={xfade_type}:duration={transition_dur:.3f}:offset={offset:.3f}[{out}]")
+            cumulative += durations[idx]
+        final_label = f"v{len(working_clips)-1}"
+        cmd.extend([
+            "-filter_complex", ";".join(parts),
+            "-map", f"[{final_label}]",
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            str(merged_video),
+        ])
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_file),
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            str(merged_video),
+        ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -3125,7 +4433,7 @@ async def composite_video(
     if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
         raise RuntimeError("FFmpeg produced no final output file")
 
-    for clip in scene_clips:
+    for clip in set(scene_clips + working_clips):
         clip.unlink(missing_ok=True)
     concat_file.unlink(missing_ok=True)
     merged_video.unlink(missing_ok=True)
@@ -3159,6 +4467,240 @@ def _normalize_scenes_for_render(scenes: list) -> list:
     return normalized
 
 
+SKELETON_QUALITY_MODES = {"standard", "cinematic"}
+SKELETON_CINEMATIC_PROMPT_ADDON = (
+    "CINEMATIC UPGRADE RULES: Open each scene with immediate tension or high-stakes action. "
+    "Use dynamic 24-35mm framing, low-angle or over-shoulder composition, strong foreground/background depth, "
+    "volumetric rim lighting, and high local contrast. Keep a premium viral short aesthetic with clean silhouette separation. "
+    "Avoid static centered idle poses, flat lighting, washed contrast, cartoon style, and text overlays."
+)
+STORY_MASTER_CONSISTENCY_PROMPT = (
+    "MASTER STORY CONSISTENCY RULES (apply to every scene): "
+    "Keep one continuous visual universe across all scenes. Keep recurring people, places, era details, "
+    "color grade, and camera language continuity scene-to-scene when the script indicates recurrence. "
+    "Do not switch art style or turn into cartoon/anime unless explicitly requested. "
+    "Preserve realistic skin texture, grounded proportions, and emotionally readable expressions. "
+    "When multiple subjects appear, prioritize whichever subject the current script beat is about. "
+    "Maintain bright readable mids, clean separation, and premium cinematic detail in every frame."
+)
+STORY_CINEMATIC_PROMPT_ADDON = (
+    "CINEMATIC STORY UPGRADE RULES: Open each scene with visible emotional stakes or conflict. "
+    "Use dynamic 24-35mm framing, motivated camera motion, foreground/background depth, and volumetric edge lighting. "
+    "Keep every composition readable in vertical format and avoid static idle center-framing. "
+    "Avoid washed contrast, muddy shadows, low-detail backgrounds, and stock-photo framing."
+)
+STORY_REALISM_REFINEMENT = (
+    "Realism lock: photoreal human skin texture, natural pores, physically plausible hands and fingers, "
+    "natural eye reflections, grounded facial proportions, realistic fabric micro-detail, and non-plastic materials. "
+    "No CGI waxiness, no uncanny face, no extra fingers, no malformed hands."
+)
+
+
+def _normalize_skeleton_quality_mode(value: str | None, template: str = "skeleton") -> str:
+    if template not in {"skeleton", "story"}:
+        return "standard"
+    raw = str(value or "").strip().lower()
+    if raw in {"pro", "high", "cinematic_plus"}:
+        raw = "cinematic"
+    if raw in SKELETON_QUALITY_MODES:
+        return raw
+    # Default to cinematic for skeleton/story upgrades while keeping generation memory profile unchanged.
+    return "cinematic"
+
+
+def _normalize_mint_mode(value, template: str) -> bool:
+    default_on = template in {"skeleton", "story"}
+    return _bool_from_any(value, default=default_on)
+
+
+def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = True) -> list:
+    """Deterministic scene rewrite pass for stronger first-render reliability."""
+    if not _normalize_mint_mode(mint_mode, template):
+        return scenes
+    if template not in {"skeleton", "story"}:
+        return scenes
+
+    def _sentences(text: str) -> list[str]:
+        parts = re.split(r"(?<=[.!?])\s+", text.strip())
+        return [p.strip() for p in parts if p and p.strip()]
+
+    compiled = []
+    for raw_scene in scenes or []:
+        scene = dict(raw_scene or {})
+        visual = re.sub(r"\s+", " ", str(scene.get("visual_description", "") or "")).strip()
+        chunks = _sentences(visual)
+        if not chunks:
+            if template == "skeleton":
+                chunks = [
+                    "A fully clothed skeleton character wearing a role-accurate outfit from neck to feet appears in a detailed cinematic environment.",
+                    "The skeleton takes a clear action pose with a role-specific prop while camera framing emphasizes conflict and readability.",
+                    "Motion begins instantly with smooth human-like momentum and directional continuity into the next shot.",
+                ]
+            else:
+                chunks = [
+                    "The primary subject(s) for this script beat appear in a specific cinematic environment.",
+                    "The subject(s) perform a clear action with visible stakes and readable composition.",
+                    "Camera movement and subject motion continue smoothly to preserve scene-to-scene continuity.",
+                ]
+        if len(chunks) > 3:
+            chunks = chunks[:3]
+        while len(chunks) < 3:
+            chunks.append("")
+
+        if template == "skeleton":
+            if "skeleton" not in chunks[0].lower():
+                chunks[0] = f"A skeleton character {chunks[0][0].lower() + chunks[0][1:]}" if chunks[0] else \
+                    "A skeleton character appears in a cinematic environment."
+            if "wearing" not in chunks[0].lower():
+                chunks[0] = chunks[0].rstrip(".!?") + " wearing a fully opaque role-accurate outfit from neck to feet."
+            if not re.search(r"\b(environment|background|street|city|desert|forest|interior|exterior|battlefield|temple|rome|studio)\b", chunks[0], re.IGNORECASE):
+                chunks[0] = chunks[0].rstrip(".!?") + " In a detailed environment matching the scene request."
+            if not re.search(r"\b(holding|aiming|running|facing|fighting|action|pose|gestur|turning|pointing)\b", chunks[1], re.IGNORECASE):
+                chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                    "The skeleton takes a clear action pose with a role-specific prop and readable composition."
+            if not re.search(r"\b(motion|camera|moves|moving|drift|continuity|momentum)\b", chunks[2], re.IGNORECASE):
+                chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                    "Motion begins instantly with smooth momentum and directional continuity."
+        else:
+            if not re.search(r"\b(character|protagonist|person|figure|subject|crowd|group|family|worker)\b", chunks[0], re.IGNORECASE):
+                chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
+                    "The primary subject(s) for this script beat are clearly visible."
+            if not re.search(r"\b(environment|background|setting|location|interior|exterior)\b", chunks[0], re.IGNORECASE):
+                chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment."
+            if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding)\b", chunks[1], re.IGNORECASE):
+                chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                    "The subject(s) perform a clear action with visible stakes."
+            if not re.search(r"\b(camera|motion|continuity|transition)\b", chunks[2], re.IGNORECASE):
+                chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                    "Camera and subject motion preserve smooth continuity into the next scene."
+
+        scene["visual_description"] = " ".join([c.strip() for c in chunks[:3] if c and c.strip()]).strip()
+        compiled.append(scene)
+    return compiled
+
+
+def _build_skeleton_image_prompt(
+    visual_description: str,
+    skeleton_anchor: str = "",
+    quality_mode: str = "cinematic",
+    immutable_context: str = "",
+) -> str:
+    mode = _normalize_skeleton_quality_mode(quality_mode, template="skeleton")
+    addon = (SKELETON_CINEMATIC_PROMPT_ADDON + " ") if mode == "cinematic" else ""
+    immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
+    return (
+        SKELETON_IMAGE_STYLE_PREFIX + " "
+        + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
+        + "NON-NEGOTIABLE CHARACTER RULE: both eye sockets contain realistic human-like eyeballs with visible iris and wet reflective highlights in every scene. "
+        + addon + immutable + skeleton_anchor + str(visual_description or "").strip() + " "
+        + SKELETON_IMAGE_SUFFIX
+    )
+
+
+def _build_story_image_prompt(
+    visual_description: str,
+    quality_mode: str = "cinematic",
+    immutable_context: str = "",
+) -> str:
+    mode = _normalize_skeleton_quality_mode(quality_mode, template="story")
+    addon = (STORY_CINEMATIC_PROMPT_ADDON + " ") if mode == "cinematic" else ""
+    immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
+    return (
+        TEMPLATE_PROMPT_PREFIXES.get("story", "") + " "
+        + STORY_MASTER_CONSISTENCY_PROMPT + " "
+        + addon + immutable + str(visual_description or "").strip()
+    ).strip()
+
+
+def _apply_template_scene_constraints(scenes: list, template: str, quality_mode: str = "standard") -> list:
+    """Harden model output so template-critical constraints cannot drift."""
+    if template not in {"skeleton", "story"}:
+        return scenes
+    quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
+
+    def _sentences(text: str) -> list[str]:
+        parts = re.split(r"(?<=[.!?])\s+", text.strip())
+        return [p.strip() for p in parts if p and p.strip()]
+
+    constrained = []
+    for raw_scene in scenes or []:
+        scene = dict(raw_scene or {})
+        visual = re.sub(r"\s+", " ", str(scene.get("visual_description", "") or "")).strip()
+        chunks = _sentences(visual)
+        if not chunks:
+            if template == "skeleton":
+                chunks = [
+                    "A skeleton character wearing a fully opaque role-accurate outfit from neck to feet stands centered in frame.",
+                    "The skeleton holds a role-specific prop in a cinematic environment matching the scene request.",
+                    "Motion cue: smooth natural arm and head movement with realistic fabric sway.",
+                ]
+            else:
+                chunks = [
+                    "The key subject(s) from this story beat appear in a specific cinematic environment.",
+                    "The subject(s) perform a clear action with visible emotional stakes and readable composition.",
+                    "Motion cue: camera and subject movement preserve smooth continuity into the next scene.",
+                ]
+        if len(chunks) > 3:
+            chunks = chunks[:3]
+
+        if template == "skeleton":
+            first = chunks[0]
+            if "skeleton" not in first.lower():
+                if first:
+                    first = f"A skeleton character {first[0].lower() + first[1:]}"
+                else:
+                    first = "A skeleton character is centered in frame."
+            if "wearing" not in first.lower():
+                first = first.rstrip(".!?") + " wearing a full opaque outfit from neck to feet."
+            chunks[0] = first
+
+            if len(chunks) < 2:
+                chunks.append("The skeleton holds a role-specific prop in a cinematic environment that matches the scene request.")
+            if len(chunks) < 3:
+                chunks.append("Motion cue: smooth natural arm and head movement with realistic fabric sway.")
+
+            # Hard default for Skeleton AI: eyeballs must always be present.
+            eyes_ok = any(
+                re.search(r"\b(eye|eyes|eyeball|eyeballs|iris|pupil|sockets?)\b", c, re.IGNORECASE)
+                for c in chunks[:3]
+            )
+            if not eyes_ok:
+                chunks[0] = chunks[0].rstrip(".!?") + " with realistic visible eyeballs in both eye sockets."
+            elif not re.search(r"\beyeball|eyeballs|iris|pupil\b", chunks[0], re.IGNORECASE):
+                chunks[0] = chunks[0].rstrip(".!?") + " Keep realistic eyeballs with visible iris detail."
+        else:
+            first = chunks[0]
+            if not re.search(r"\b(main character|protagonist|hero|lead|character|person|subject|crowd|group|family|worker)\b", first, re.IGNORECASE):
+                if first:
+                    first = f"The key subject(s) for this beat {first[0].lower() + first[1:]}"
+                else:
+                    first = "The key subject(s) for this beat are clearly visible."
+            if not re.search(r"\b(environment|setting|location|interior|exterior|city|street|room|forest|desert|studio)\b", first, re.IGNORECASE):
+                first = first.rstrip(".!?") + " in a specific cinematic environment."
+            chunks[0] = first
+
+            if len(chunks) < 2:
+                chunks.append("The subject(s) perform a clear action with visible emotional stakes and readable composition.")
+            if len(chunks) < 3:
+                chunks.append("Motion cue: camera and subject movement preserve scene-to-scene continuity.")
+
+        if quality_mode == "cinematic":
+            if not re.search(r"\b(high[- ]stakes|danger|conflict|urgent|impact|tension|emotional stakes)\b", chunks[0], re.IGNORECASE):
+                chunks[0] = chunks[0].rstrip(".!?") + " in an immediate high-stakes moment."
+            if len(chunks) < 2:
+                chunks.append("Dynamic 24-35mm low-angle cinematic framing with volumetric rim lighting and deep subject separation.")
+            elif not re.search(r"\b(lens|camera|low-angle|over-shoulder|dolly|framing|rim light|volumetric)\b", chunks[1], re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + " Dynamic 24-35mm cinematic framing with low-angle depth and volumetric rim lighting."
+            if len(chunks) < 3:
+                chunks.append("Motion starts instantly with smooth human-like momentum and carries continuity into the next shot.")
+            elif not re.search(r"\b(motion|moves|moving|turns|gestures|drift|camera|continuity)\b", chunks[2], re.IGNORECASE):
+                chunks[2] = chunks[2].rstrip(".!?") + " Motion starts instantly with smooth momentum and clear directional continuity."
+
+        scene["visual_description"] = " ".join(chunks[:3]).strip()
+        constrained.append(scene)
+    return constrained
+
+
 def _force_template_scene_duration(scenes: list, template: str) -> list:
     """Lock selected templates to fixed 5s scenes for stable Kling generation."""
     if template not in {"skeleton", "story", "motivation"}:
@@ -3172,6 +4714,7 @@ def _force_template_scene_duration(scenes: list, template: str) -> list:
 
 
 def _job_diag_init(job_id: str, mode: str):
+    _prune_in_memory_jobs()
     job = jobs.get(job_id)
     if not job:
         return
@@ -3262,13 +4805,60 @@ def _job_diag_finalize(job_id: str):
         durations[current_stage] = round(float(durations.get(current_stage, 0.0)) + elapsed, 2)
     diag["stage_started_at"] = now
     diag["last_updated_at"] = now
+    status = str(job.get("status", "") or "")
+    if status in {"complete", "error"} and not job.get("completed_at"):
+        job["completed_at"] = now
+    if status == "error" and job.get("credit_charged") and (not job.get("credit_refunded")):
+        user_id = str(job.get("user_id", "") or "")
+        source = str(job.get("credit_source", "") or "")
+        month_key = str(job.get("credit_month_key", "") or "")
+        if user_id and source in {"monthly", "topup"}:
+            try:
+                asyncio.create_task(_refund_generation_credit(user_id, source, month_key=month_key))
+                job["credit_refunded"] = True
+            except Exception:
+                pass
+    if status in {"complete", "error"} and job.get("credit_charged"):
+        _append_usage_ledger({
+            "type": "generation_terminal",
+            "job_id": job_id,
+            "user_id": str(job.get("user_id", "") or ""),
+            "status": status,
+            "template": str(job.get("template", "") or ""),
+            "plan": str(job.get("plan", "") or ""),
+            "quality_mode": str(job.get("quality_mode", "") or ""),
+            "mint_mode": bool(job.get("mint_mode", False)),
+            "credit_source": str(job.get("credit_source", "") or ""),
+            "credit_refunded": bool(job.get("credit_refunded", False)),
+            "estimated_cost_usd": float(_estimate_job_cost_usd(job)),
+            "ts": now,
+        })
+    _record_kpi_for_job(job_id, job)
     try:
         asyncio.create_task(persist_job_state(job_id, job))
     except Exception:
         pass
 
-async def run_generation_pipeline(job_id: str, template: str, topic: str, resolution: str = "720p", language: str = "en"):
+async def run_generation_pipeline(
+    job_id: str,
+    template: str,
+    topic: str,
+    resolution: str = "720p",
+    language: str = "en",
+    quality_mode: str = "standard",
+    mint_mode: bool = True,
+    transition_style: str = "smooth",
+    micro_escalation_mode: bool = True,
+):
     try:
+        job_state = jobs.get(job_id, {})
+        voice_id = str(job_state.get("voice_id", "") or "").strip()
+        voice_speed = _normalize_voice_speed(job_state.get("voice_speed", 1.0), default=1.0)
+        pacing_mode = _normalize_pacing_mode(job_state.get("pacing_mode", "standard"))
+        art_style = _normalize_art_style(job_state.get("art_style", "auto"), template=template)
+        reference_image_url = str(job_state.get("reference_image_url", "") or "").strip()
+        reference_lock_mode = _normalize_reference_lock_mode(job_state.get("reference_lock_mode"), default="strict")
+        reference_dna = job_state.get("reference_dna", {}) if isinstance(job_state.get("reference_dna"), dict) else {}
         _job_set_stage(job_id, "generating_script", 5)
         lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
         log.info(f"[{job_id}] Generating script for '{topic}' ({template}, {resolution}, {lang_name})")
@@ -3278,18 +4868,28 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
         script_data = await generate_script(template, topic, extra_instructions=lang_instruction)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
-        scenes = _force_template_scene_duration(scenes, template)
+        quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
+        mint_mode = _normalize_mint_mode(mint_mode, template=template)
+        micro_escalation_mode = _normalize_micro_escalation_mode(micro_escalation_mode, template=template)
+        scenes = _apply_template_scene_constraints(scenes, template, quality_mode=quality_mode)
+        scenes = _apply_mint_scene_compiler(scenes, template, mint_mode=mint_mode)
+        if not (template == "story" and pacing_mode != "standard"):
+            scenes = _force_template_scene_duration(scenes, template)
+        scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        use_video_engine = fal_video_enabled
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        use_video_engine = fal_video_enabled or runway_video_enabled
         use_video = use_video_engine
         if template == "reddit":
             use_video = False
         if template != "reddit" and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
-        if fal_video_enabled:
+            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
+        if runway_video_enabled:
+            mode_label = "Runway (primary)"
+        elif fal_video_enabled:
             mode_label = "FalAI Kling 2.1"
         else:
             mode_label = "static image"
@@ -3299,7 +4899,6 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         jobs[job_id]["total_scenes"] = len(scenes)
         log.info(f"[{job_id}] Script ready: {len(scenes)} scenes. Mode: {mode_label}, {resolution}")
 
-        prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         scene_prompts = [str(s.get("visual_description", "") or "") for s in scenes]
@@ -3308,7 +4907,9 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
         gen_ts = str(int(time.time() * 1000))
 
         skeleton_anchor = ""
-        skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL if template == "skeleton" else ""
+        skeleton_reference_image_url = ""
+        if template == "skeleton":
+            skeleton_reference_image_url = reference_image_url or SKELETON_GLOBAL_REFERENCE_IMAGE_URL
         if template == "skeleton" and scenes:
             s1_desc = scenes[0].get("visual_description", "")
             outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
@@ -3321,15 +4922,15 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             _job_set_stage(job_id, "generating_images", 10 + int((step_base / total_steps) * 55))
             _job_record_scene_event(job_id, i, len(scenes), "image_start")
 
-            if template == "skeleton":
-                vis_desc = scene.get("visual_description", "")
-                full_prompt = (
-                    SKELETON_IMAGE_STYLE_PREFIX + " "
-                    + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-                    + skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
-                )
-            else:
-                full_prompt = prompt_prefix + scene.get("visual_description", "")
+            full_prompt = _build_scene_prompt_with_reference(
+                template=template,
+                visual_description=scene.get("visual_description", ""),
+                quality_mode=quality_mode,
+                skeleton_anchor=skeleton_anchor,
+                reference_dna=reference_dna,
+                reference_lock_mode=reference_lock_mode,
+                art_style=art_style,
+            )
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
             img_result = await generate_scene_image(
                 full_prompt,
@@ -3337,7 +4938,7 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
                 resolution=resolution,
                 negative_prompt=neg_prompt,
                 template=template,
-                reference_image_url=skeleton_reference_image_url if template == "skeleton" else "",
+                reference_image_url=skeleton_reference_image_url if template == "skeleton" else reference_image_url,
             )
             if template == "skeleton" and not skeleton_reference_image_url and i == 0:
                 skeleton_reference_image_url = _file_to_data_image_url(img_path)
@@ -3404,7 +5005,14 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
 
         full_narration = " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
+        vo_result = await generate_voiceover(
+            full_narration,
+            audio_path,
+            template=template,
+            language=language,
+            override_voice_id=voice_id,
+            override_speed=voice_speed,
+        )
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
 
@@ -3414,23 +5022,37 @@ async def run_generation_pipeline(job_id: str, template: str, topic: str, resolu
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
-        _job_set_stage(job_id, "generating_sfx", 78)
         sfx_paths = []
-        for i, scene in enumerate(scenes):
-            sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
-            desc = scene.get("visual_description", "")
-            dur = scene.get("duration_sec", 5)
-            sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
-            sfx_paths.append(sfx_file)
-        sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
-        log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+        if _sfx_enabled():
+            _job_set_stage(job_id, "generating_sfx", 78)
+            for i, scene in enumerate(scenes):
+                sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
+                desc = scene.get("visual_description", "")
+                dur = scene.get("duration_sec", 5)
+                sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
+                sfx_paths.append(sfx_file)
+            sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
+            log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+        else:
+            log.info(f"[{job_id}] SFX disabled globally; skipping generation/mix")
 
         _job_set_stage(job_id, "compositing", 82)
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
 
         output_filename = template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path, sfx_paths=sfx_paths)
+        await composite_video(
+            scenes,
+            scene_assets,
+            audio_path,
+            output_path,
+            resolution=resolution,
+            use_svd=use_video,
+            subtitle_path=subtitle_path,
+            sfx_paths=sfx_paths,
+            transition_style=_normalize_transition_style(transition_style),
+            micro_escalation_mode=micro_escalation_mode,
+        )
 
         for sfx in sfx_paths:
             if sfx:
@@ -3519,14 +5141,44 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    if not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
+    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
+    mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
+    art_style = _normalize_art_style(req.art_style, template=req.template)
+    reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
+    transition_style = _normalize_transition_style(req.transition_style)
+    micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
+    voice_id = str(req.voice_id or "").strip()
+    voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
+    pacing_mode = _normalize_pacing_mode(req.pacing_mode)
+    if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+        voice_id = ""
+        voice_speed = 1.0
+        pacing_mode = "standard"
     lang_name = SUPPORTED_LANGUAGES.get(req.language, {}).get("name", "English")
     lang_instruction = ""
     if req.language != "en":
         lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
+    script_to_short_mode = str(req.mode or "").strip().lower() == "script_to_short"
+    if script_to_short_mode and not SCRIPT_TO_SHORT_ENABLED:
+        raise HTTPException(503, "Script to Short is temporarily disabled")
+    script_to_short_instruction = ""
+    if script_to_short_mode:
+        scene_range = "12-15" if req.template == "story" else "10-14"
+        script_to_short_instruction = (
+            "\n\nSCRIPT-TO-SHORT MODE (PRE-ALPHA): The user input is already a full script. "
+            "Do not invent a different story. Keep the original intent and wording as much as possible while adapting for timing. "
+            f"Split into {scene_range} scenes with clear visual progression and strong retention pacing. "
+            "Do not force a single unchanged main character in every scene; match subjects to each script beat. "
+            "Each scene must have concise narration and a cinematic visual_description that can be directly rendered."
+        )
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
-    script_data = await generate_script(req.template, req.prompt, extra_instructions=lang_instruction)
-    scenes = script_data.get("scenes", [])
+    script_data = await generate_script(req.template, req.prompt, extra_instructions=(lang_instruction + script_to_short_instruction))
+    scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
+    scenes = _apply_template_scene_constraints(scenes, req.template, quality_mode=quality_mode)
+    scenes = _apply_mint_scene_compiler(scenes, req.template, mint_mode=mint_mode)
     if not scenes:
         raise HTTPException(500, "Script generation returned no scenes")
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
@@ -3541,6 +5193,19 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "script_data": script_data,
             "scenes": scenes,
             "scene_images": {},
+            "quality_mode": quality_mode,
+            "mint_mode": mint_mode,
+            "art_style": art_style,
+            "transition_style": transition_style,
+            "micro_escalation_mode": micro_escalation_mode,
+            "voice_id": voice_id,
+            "voice_speed": voice_speed,
+            "pacing_mode": pacing_mode,
+            "reference_image_url": "",
+            "reference_lock_mode": reference_lock_mode,
+            "reference_dna": {},
+            "reference_quality": {},
+            "rolling_reference_image_url": "",
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -3556,6 +5221,16 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             }
             for i, s in enumerate(scenes)
         ],
+        "quality_mode": quality_mode,
+        "mint_mode": mint_mode,
+        "art_style": art_style,
+        "transition_style": transition_style,
+        "micro_escalation_mode": micro_escalation_mode,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
+        "reference_lock_mode": reference_lock_mode,
+        "mode": "script_to_short" if script_to_short_mode else "creative",
     }
 
 
@@ -3565,10 +5240,26 @@ async def creative_create_session(body: dict, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    if not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
     template = body.get("template", "skeleton")
+    quality_mode = _normalize_skeleton_quality_mode(body.get("quality_mode"), template=template)
+    mint_mode = _normalize_mint_mode(body.get("mint_mode"), template=template)
+    art_style = _normalize_art_style(body.get("art_style"), template=template)
+    transition_style = _normalize_transition_style(body.get("transition_style", "smooth"))
+    micro_escalation_mode = _normalize_micro_escalation_mode(body.get("micro_escalation_mode"), template=template)
+    voice_id = str(body.get("voice_id", "") or "").strip()
+    voice_speed = _normalize_voice_speed(body.get("voice_speed", 1.0), default=1.0)
+    pacing_mode = _normalize_pacing_mode(body.get("pacing_mode", "standard"))
+    if template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+        voice_id = ""
+        voice_speed = 1.0
+        pacing_mode = "standard"
+    reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     _ensure_template_allowed(template, user)
+    _user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     requested_resolution = body.get("resolution", "720p")
-    resolution = _normalize_output_resolution(requested_resolution, priority_allowed=False)
+    resolution = _normalize_output_resolution(requested_resolution, priority_allowed=bool(plan_limits.get("priority", False)))
     story_animation_enabled = _bool_from_any(body.get("story_animation_enabled"), True)
     if template != "story" or resolution != "720p":
         story_animation_enabled = True
@@ -3584,8 +5275,20 @@ async def creative_create_session(body: dict, request: Request = None):
             "script_data": {"title": body.get("topic", "Untitled"), "tags": []},
             "scenes": [],
             "scene_images": {},
+            "quality_mode": quality_mode,
+            "mint_mode": mint_mode,
+            "art_style": art_style,
+            "transition_style": transition_style,
+            "micro_escalation_mode": micro_escalation_mode,
+            "voice_id": voice_id,
+            "voice_speed": voice_speed,
+            "pacing_mode": pacing_mode,
             "story_animation_enabled": story_animation_enabled,
             "reference_image_url": "",
+            "reference_lock_mode": reference_lock_mode,
+            "reference_dna": {},
+            "reference_quality": {},
+            "rolling_reference_image_url": "",
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -3598,6 +5301,10 @@ async def creative_create_session(body: dict, request: Request = None):
         "status": "draft",
         "resolution": resolution,
         "language": body.get("language", "en"),
+        "art_style": art_style,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
         "session_id": session_id,
         "story_animation_enabled": story_animation_enabled,
         "scene_count": 0,
@@ -3607,6 +5314,15 @@ async def creative_create_session(body: dict, request: Request = None):
         "session_id": session_id,
         "project_id": project_id,
         "story_animation_enabled": story_animation_enabled,
+        "quality_mode": quality_mode,
+        "mint_mode": mint_mode,
+        "art_style": art_style,
+        "transition_style": transition_style,
+        "micro_escalation_mode": micro_escalation_mode,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
+        "reference_lock_mode": reference_lock_mode,
     }
 
 
@@ -3614,6 +5330,7 @@ async def creative_create_session(body: dict, request: Request = None):
 async def creative_reference_image(
     session_id: str = Form(...),
     reference_image: UploadFile = File(...),
+    reference_lock_mode: str = Form("strict"),
     request: Request = None,
 ):
     """Upload optional creative reference style image and persist it for all scene generations."""
@@ -3634,15 +5351,60 @@ async def creative_reference_image(
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(400, "Reference image must be <= 8MB")
 
+    lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default=_normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict"))
+    quality = _analyze_reference_quality(raw, lock_mode=lock_mode)
+    if not quality.get("accepted", True) and lock_mode == "strict":
+        raise HTTPException(400, "Reference image quality too low for Strict Reference Lock. Upload a higher-resolution image or switch to Style Inspired mode.")
+
     mime = reference_image.content_type or "image/png"
     data_url = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+    ext = ".png"
+    if "jpeg" in mime or "jpg" in mime:
+        ext = ".jpg"
+    elif "webp" in mime:
+        ext = ".webp"
+    ref_dir = TEMP_DIR / "creative_references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    ref_name = f"{session_id}_reference{ext}"
+    ref_path = ref_dir / ref_name
+    ref_path.write_bytes(raw)
+    public_url = f"{SITE_URL.rstrip('/')}/api/creative/reference-file/{ref_name}"
     session["reference_image_url"] = data_url
+    session["reference_image_path"] = str(ref_path)
+    session["reference_image_public_url"] = public_url
+    session["reference_lock_mode"] = lock_mode
+    session["reference_quality"] = quality
+    session["reference_dna"] = _extract_reference_dna(raw, template=str(session.get("template", "skeleton") or "skeleton"))
+    session["rolling_reference_image_url"] = public_url
     if session.get("template") == "skeleton":
         # Keep legacy skeleton key in sync for downstream compatibility.
-        session["skeleton_reference_image"] = data_url
+        session["skeleton_reference_image"] = public_url
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "reference_lock_mode": lock_mode,
+        "quality": quality,
+        "reference_image_public_url": public_url,
+        "reference_dna": session.get("reference_dna", {}),
+    }
+
+
+@app.get("/api/creative/reference-file/{filename}")
+async def creative_reference_file(filename: str):
+    """Serve uploaded creative reference images over HTTPS for provider conditioning."""
+    safe = os.path.basename(filename)
+    if not safe or safe != filename:
+        raise HTTPException(400, "Invalid filename")
+    path = TEMP_DIR / "creative_references" / safe
+    if not path.exists():
+        raise HTTPException(404, "Reference image not found")
+    media_type = "image/png"
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        media_type = "image/jpeg"
+    elif path.suffix.lower() == ".webp":
+        media_type = "image/webp"
+    return FileResponse(str(path), media_type=media_type, filename=safe)
 
 
 @app.get("/api/creative/session/{session_id}/status")
@@ -3659,11 +5421,57 @@ async def creative_session_status(session_id: str, request: Request = None):
     return {
         "session_id": session_id,
         "has_reference_image": bool(session.get("reference_image_url") or session.get("skeleton_reference_image")),
+        "reference_lock_mode": _normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict"),
+        "reference_quality": session.get("reference_quality", {}),
         "template": session.get("template", ""),
+        "quality_mode": _normalize_skeleton_quality_mode(session.get("quality_mode"), template=session.get("template", "")),
+        "mint_mode": _normalize_mint_mode(session.get("mint_mode"), template=session.get("template", "")),
+        "art_style": _normalize_art_style(session.get("art_style", "auto"), template=session.get("template", "")),
+        "transition_style": _normalize_transition_style(session.get("transition_style", "smooth")),
+        "micro_escalation_mode": _normalize_micro_escalation_mode(session.get("micro_escalation_mode"), template=session.get("template", "")),
         "topic": session.get("topic", ""),
         "scene_count": len(session.get("scenes", [])),
         "story_animation_enabled": _bool_from_any(session.get("story_animation_enabled"), True),
     }
+
+
+@app.get("/api/creative/session/{session_id}/scene-images")
+async def creative_session_scene_images(session_id: str, request: Request = None):
+    """Return persisted creative scene images from backend storage (RunPod), not browser cache."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    session = _get_creative_session(session_id)
+    if not session:
+        raise HTTPException(404, "Creative session not found")
+    if session["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your session")
+
+    out = []
+    scene_images = session.get("scene_images", {}) or {}
+    for key, info in scene_images.items():
+        if not isinstance(info, dict):
+            continue
+        path = str(info.get("path", "") or "")
+        if not path:
+            continue
+        p = Path(path)
+        if not p.exists():
+            continue
+        try:
+            idx = int(key)
+        except Exception:
+            continue
+        mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+        payload = base64.b64encode(p.read_bytes()).decode("ascii")
+        out.append({
+            "scene_index": idx,
+            "image_data": f"data:{mime};base64,{payload}",
+            "generation_id": str(info.get("generation_id", "") or ""),
+            "cdn_url": str(info.get("cdn_url", "") or ""),
+        })
+    out.sort(key=lambda x: int(x.get("scene_index", 0)))
+    return {"session_id": session_id, "scene_images": out}
 
 
 @app.post("/api/creative/scene-image")
@@ -3672,6 +5480,8 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    if not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
     session = _get_creative_session(req.session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
@@ -3690,42 +5500,107 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         asyncio.create_task(_mark_training_feedback(prev_gen_id, accepted=False, user_id=user.get("id", ""), event="regenerate"))
 
     template = session.get("template", req.template)
-    user_plan = user.get("plan", "starter")
-    if user_plan == "free":
-        user_plan = "starter"
-    if user_plan == "admin":
-        user_plan = "pro"
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
+    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode or session.get("quality_mode"), template=template)
+    mint_mode = _normalize_mint_mode(req.mint_mode if req.mint_mode is not None else session.get("mint_mode"), template=template)
+    art_style = _normalize_art_style(req.art_style or session.get("art_style", "auto"), template=template)
+    reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
+    session["reference_lock_mode"] = reference_lock_mode
+    session["art_style"] = art_style
+    _ensure_reference_public_url(req.session_id, session)
+    user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
-    full_prompt = req.prompt
-    reference_image_url = session.get("reference_image_url", "")
-    skeleton_reference_image_url = session.get("skeleton_reference_image", "")
-    if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url):
-        skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
-
+    constrained_prompt = req.prompt
     if template == "skeleton":
-        full_prompt = (
-            SKELETON_IMAGE_STYLE_PREFIX + " "
-            + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-            + full_prompt + " " + SKELETON_IMAGE_SUFFIX
-        )
-
-    scene_reference = reference_image_url
-    if template == "skeleton" and not scene_reference:
-        scene_reference = skeleton_reference_image_url
+        constrained_prompt = _apply_template_scene_constraints(
+            [{"visual_description": req.prompt}],
+            template,
+            quality_mode=quality_mode,
+        )[0]["visual_description"]
+    constrained_prompt = _apply_mint_scene_compiler(
+        [{"visual_description": constrained_prompt}],
+        template,
+        mint_mode=mint_mode,
+    )[0]["visual_description"]
+    full_prompt = _build_scene_prompt_with_reference(
+        template=template,
+        visual_description=constrained_prompt,
+        quality_mode=quality_mode,
+        reference_dna=session.get("reference_dna", {}),
+        reference_lock_mode=reference_lock_mode,
+        art_style=art_style,
+    )
+    scene_reference = _resolve_reference_for_scene(session, template, req.scene_index)
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
-    img_result = await generate_scene_image(
-        full_prompt,
-        img_path,
-        resolution=resolution,
-        negative_prompt=neg_prompt,
-        template=template,
-        reference_image_url=scene_reference,
-    )
+    try:
+        img_result = await generate_scene_image(
+            full_prompt,
+            img_path,
+            resolution=resolution,
+            negative_prompt=neg_prompt,
+            template=template,
+            reference_image_url=scene_reference,
+        )
+    except Exception as e:
+        should_try_moderation_rewrite = (
+            template == "story"
+            and (
+                _looks_like_provider_moderation_error(str(e or ""))
+                or _prompt_likely_moderated(constrained_prompt)
+            )
+        )
+        if should_try_moderation_rewrite:
+            retry_candidates = [
+                _soften_story_prompt_for_moderation(constrained_prompt, aggressive=False),
+                _soften_story_prompt_for_moderation(constrained_prompt, aggressive=True),
+            ]
+            seen = {constrained_prompt}
+            retried = False
+            last_retry_error: Exception | None = None
+            for candidate in retry_candidates:
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                retried = True
+                constrained_prompt = candidate
+                full_prompt = _build_scene_prompt_with_reference(
+                    template=template,
+                    visual_description=constrained_prompt,
+                    quality_mode=quality_mode,
+                    reference_dna=session.get("reference_dna", {}),
+                    reference_lock_mode=reference_lock_mode,
+                    art_style=art_style,
+                )
+                try:
+                    img_result = await generate_scene_image(
+                        full_prompt,
+                        img_path,
+                        resolution=resolution,
+                        negative_prompt=neg_prompt,
+                        template=template,
+                        reference_image_url=scene_reference,
+                    )
+                    last_retry_error = None
+                    break
+                except Exception as retry_err:
+                    last_retry_error = retry_err
+            if last_retry_error is not None or not retried:
+                raise HTTPException(
+                    400,
+                    "Image provider rejected this scene prompt due to safety policy. Try regenerate, or simplify violent wording while keeping the same emotion.",
+                ) from (last_retry_error or e)
+        else:
+            raise HTTPException(
+                500,
+                "Scene image generation failed. Please regenerate this scene.",
+            ) from e
     if template == "skeleton" and req.scene_index == 0 and not (session.get("skeleton_reference_image") or session.get("reference_image_url")):
         session["skeleton_reference_image"] = _file_to_data_image_url(img_path)
+    if reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
+        rolled = str(img_result.get("cdn_url", "") or "").strip() or _file_to_data_image_url(img_path)
+        if rolled:
+            session["rolling_reference_image_url"] = rolled
 
     gen_id = img_result.get("generation_id", "")
 
@@ -3736,13 +5611,19 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     session["scene_images"][req.scene_index] = {
         "path": img_path,
         "cdn_url": img_result.get("cdn_url"),
-        "prompt": req.prompt,
+        "prompt": constrained_prompt,
         "generation_id": gen_id,
+        "qa_score": float(img_result.get("qa_score", 0.0) or 0.0),
+        "qa_ok": bool(img_result.get("qa_ok", False)),
+        "qa_notes": img_result.get("qa_notes", []),
     }
 
     while len(session["scenes"]) <= req.scene_index:
         session["scenes"].append({"narration": "", "visual_description": "", "duration_sec": 5})
-    session["scenes"][req.scene_index]["visual_description"] = req.prompt
+    session["scenes"][req.scene_index]["visual_description"] = constrained_prompt
+    session["quality_mode"] = quality_mode
+    session["mint_mode"] = mint_mode
+    session["art_style"] = art_style
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -3755,8 +5636,13 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     return {
         "scene_index": req.scene_index,
         "image_data": f"data:image/png;base64,{img_b64}",
-        "prompt_used": req.prompt,
+        "prompt_used": constrained_prompt,
         "generation_id": gen_id,
+        "quality_mode": quality_mode,
+        "mint_mode": mint_mode,
+        "qa_score": float(img_result.get("qa_score", 0.0) or 0.0),
+        "qa_ok": bool(img_result.get("qa_ok", False)),
+        "qa_notes": img_result.get("qa_notes", []),
     }
 
 
@@ -3808,30 +5694,68 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    if not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
     session = _get_creative_session(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
     _ensure_template_allowed(session.get("template", req.template), user)
+    _ensure_reference_public_url(req.session_id, session)
 
     if req.narration:
         session["narration"] = req.narration
     if req.scenes:
         session["scenes"] = req.scenes
+    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode or session.get("quality_mode"), template=session.get("template", req.template))
+    mint_mode = _normalize_mint_mode(req.mint_mode if req.mint_mode is not None else session.get("mint_mode"), template=session.get("template", req.template))
+    art_style = _normalize_art_style(req.art_style or session.get("art_style", "auto"), template=session.get("template", req.template))
+    transition_style = _normalize_transition_style(req.transition_style or session.get("transition_style"))
+    micro_escalation_mode = _normalize_micro_escalation_mode(
+        req.micro_escalation_mode if req.micro_escalation_mode is not None else session.get("micro_escalation_mode"),
+        template=session.get("template", req.template),
+    )
+    voice_id = str(req.voice_id or session.get("voice_id", "") or "").strip()
+    voice_speed = _normalize_voice_speed(req.voice_speed if req.voice_speed is not None else session.get("voice_speed", 1.0), default=1.0)
+    pacing_mode = _normalize_pacing_mode(req.pacing_mode or session.get("pacing_mode", "standard"))
+    subtitles_enabled = _bool_from_any(req.subtitles_enabled, _bool_from_any(session.get("subtitles_enabled"), True))
+    if session.get("template", req.template) != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+        voice_id = ""
+        voice_speed = 1.0
+        pacing_mode = "standard"
+    reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
     story_animation_enabled = _bool_from_any(req.story_animation_enabled, _bool_from_any(session.get("story_animation_enabled"), True))
     if session.get("template") != "story":
         story_animation_enabled = True
     async with _creative_sessions_lock:
+        session["quality_mode"] = quality_mode
+        session["mint_mode"] = mint_mode
+        session["art_style"] = art_style
+        session["transition_style"] = transition_style
+        session["micro_escalation_mode"] = micro_escalation_mode
+        session["voice_id"] = voice_id
+        session["voice_speed"] = voice_speed
+        session["pacing_mode"] = pacing_mode
+        session["subtitles_enabled"] = subtitles_enabled
+        session["reference_lock_mode"] = reference_lock_mode
         session["story_animation_enabled"] = story_animation_enabled
         _save_creative_sessions_to_disk()
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
 
-    user_plan = user.get("plan", "starter")
-    if user_plan == "free":
-        user_plan = "starter"
-    if user_plan == "admin":
-        user_plan = "pro"
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
+    user_plan, plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = user.get("email", "") in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
+    can_render, credit_source, credit_state = await _reserve_generation_credit(
+        user,
+        user_plan if not is_admin else "pro",
+        billing_active,
+        is_admin=is_admin,
+    )
+    if not can_render:
+        raise HTTPException(
+            402,
+            "No generation credits left this month. Buy a top-up pack to continue.",
+        )
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     if resolution != "720p":
         story_animation_enabled = True
@@ -3855,6 +5779,20 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "user_id": user.get("id"),
         "created_at": time.time(),
         "story_animation_enabled": story_animation_enabled,
+        "quality_mode": quality_mode,
+        "mint_mode": mint_mode,
+            "art_style": art_style,
+        "transition_style": transition_style,
+        "micro_escalation_mode": micro_escalation_mode,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
+        "subtitles_enabled": subtitles_enabled,
+        "reference_lock_mode": reference_lock_mode,
+        "credit_charged": True,
+        "credit_source": credit_source,
+        "credit_month_key": credit_state.get("month_key", _month_key()),
+        "credit_refunded": False,
     }
     _job_diag_init(job_id, "creative")
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -3863,6 +5801,9 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "scene_count": len(session.get("scenes", [])),
         "scenes": session.get("scenes", []),
         "narration": session.get("narration", ""),
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
         "story_animation_enabled": story_animation_enabled,
     })
 
@@ -3872,8 +5813,17 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
             asyncio.create_task(_mark_training_feedback(gen_id, accepted=True, user_id=user.get("id", ""), event="finalize"))
 
     try:
+        # Queue runtime compatibility:
+        # pass only the original positional args and read render modes from session.
         await enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
     except QueueFullError as e:
+        if jobs[job_id].get("credit_charged") and str(jobs[job_id].get("credit_source", "")) in {"monthly", "topup"}:
+            await _refund_generation_credit(
+                str(jobs[job_id].get("user_id", "") or ""),
+                str(jobs[job_id].get("credit_source", "") or ""),
+                month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
+            )
+            jobs[job_id]["credit_refunded"] = True
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         await persist_job_state(job_id, jobs[job_id])
@@ -3881,25 +5831,49 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     return {"job_id": job_id}
 
 
-async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
+async def _run_creative_pipeline(
+    job_id: str,
+    session: dict,
+    resolution: str,
+    quality_mode: str = "standard",
+    mint_mode: bool = True,
+    transition_style: str = "smooth",
+    micro_escalation_mode: bool = True,
+):
     """Run generation using pre-approved creative session scenes."""
     try:
         template = session["template"]
+        quality_mode = _normalize_skeleton_quality_mode(session.get("quality_mode") or quality_mode, template=template)
+        mint_mode = _normalize_mint_mode(session.get("mint_mode") if session.get("mint_mode") is not None else mint_mode, template=template)
+        transition_style = _normalize_transition_style(session.get("transition_style") or transition_style)
+        micro_escalation_mode = _normalize_micro_escalation_mode(session.get("micro_escalation_mode") if session.get("micro_escalation_mode") is not None else micro_escalation_mode, template=template)
+        voice_id = str(session.get("voice_id", "") or "").strip()
+        voice_speed = _normalize_voice_speed(session.get("voice_speed", 1.0), default=1.0)
+        pacing_mode = _normalize_pacing_mode(session.get("pacing_mode", "standard"))
+        subtitles_enabled = _bool_from_any(session.get("subtitles_enabled"), True)
         scenes = _normalize_scenes_for_render(session["scenes"])
-        scenes = _force_template_scene_duration(scenes, template)
+        scenes = _apply_template_scene_constraints(scenes, template, quality_mode=quality_mode)
+        scenes = _apply_mint_scene_compiler(scenes, template, mint_mode=mint_mode)
+        if not (template == "story" and pacing_mode != "standard"):
+            scenes = _force_template_scene_duration(scenes, template)
+        scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
+        reference_lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict")
+        reference_dna = session.get("reference_dna", {}) if isinstance(session.get("reference_dna"), dict) else {}
+        art_style = _normalize_art_style(session.get("art_style", "auto"), template=template)
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        use_video_engine = fal_video_enabled
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        use_video_engine = fal_video_enabled or runway_video_enabled
         story_animation_enabled = _bool_from_any(session.get("story_animation_enabled"), True)
         if template == "story" and resolution == "720p" and not story_animation_enabled:
             use_video = False
         else:
             use_video = use_video_engine
         if use_video and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
+            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
         jobs[job_id]["story_animation_enabled"] = bool(story_animation_enabled)
         gen_ts = str(int(time.time() * 1000))
 
@@ -3909,10 +5883,12 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         total_steps = len(scenes) * (2 if use_video else 1)
-        reference_image_url = session.get("reference_image_url", "")
-        skeleton_reference_image_url = session.get("skeleton_reference_image", "")
-        if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url):
-            skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
+        skeleton_anchor = ""
+        if template == "skeleton" and scenes:
+            s1_desc = str(scenes[0].get("visual_description", "") or "")
+            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
+            if outfit_match:
+                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -3927,7 +5903,15 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using pre-approved image")
                 _job_record_scene_event(job_id, i, len(scenes), "image_ready", "pre_approved")
             else:
-                full_prompt = scene.get("visual_description", "")
+                full_prompt = _build_scene_prompt_with_reference(
+                    template=template,
+                    visual_description=scene.get("visual_description", ""),
+                    quality_mode=quality_mode,
+                    skeleton_anchor=skeleton_anchor,
+                    reference_dna=reference_dna,
+                    reference_lock_mode=reference_lock_mode,
+                    art_style=art_style,
+                )
                 img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
                 img_result = await generate_scene_image(
                     full_prompt,
@@ -3935,11 +5919,16 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
                     resolution=resolution,
                     negative_prompt=neg_prompt,
                     template=template,
-                    reference_image_url=(reference_image_url or skeleton_reference_image_url) if template == "skeleton" else reference_image_url,
+                    reference_image_url=_resolve_reference_for_scene(session, template, i),
                 )
-                if template == "skeleton" and not (reference_image_url or skeleton_reference_image_url) and i == 0:
-                    skeleton_reference_image_url = _file_to_data_image_url(img_path)
-                    session["skeleton_reference_image"] = skeleton_reference_image_url
+                if template == "skeleton" and not (session.get("reference_image_url") or session.get("skeleton_reference_image")) and i == 0:
+                    skeleton_seed = _file_to_data_image_url(img_path)
+                    if skeleton_seed:
+                        session["skeleton_reference_image"] = skeleton_seed
+                if reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
+                    rolled = str(img_result.get("cdn_url", "") or "").strip() or _file_to_data_image_url(img_path)
+                    if rolled:
+                        session["rolling_reference_image_url"] = rolled
                 cdn_url = img_result.get("cdn_url")
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
                 _job_record_scene_event(job_id, i, len(scenes), "image_ready", "generated")
@@ -3983,30 +5972,51 @@ async def _run_creative_pipeline(job_id: str, session: dict, resolution: str):
         _job_set_stage(job_id, "generating_voice", 70)
         full_narration = session.get("narration", "") or " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
+        vo_result = await generate_voiceover(
+            full_narration,
+            audio_path,
+            template=template,
+            language=language,
+            override_voice_id=voice_id,
+            override_speed=voice_speed,
+        )
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
 
         subtitle_path = None
-        if word_timings:
+        if subtitles_enabled and word_timings:
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
 
-        _job_set_stage(job_id, "generating_sfx", 78)
         sfx_paths = []
-        for i, scene in enumerate(scenes):
-            sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
-            desc = scene.get("visual_description", "")
-            dur = scene.get("duration_sec", 5)
-            sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template)
-            sfx_paths.append(sfx_file)
-        sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
-        log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+        if _sfx_enabled():
+            _job_set_stage(job_id, "generating_sfx", 78)
+            for i, scene in enumerate(scenes):
+                sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
+                desc = scene.get("visual_description", "")
+                dur = scene.get("duration_sec", 5)
+                sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
+                sfx_paths.append(sfx_file)
+            sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
+            log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
+        else:
+            log.info(f"[{job_id}] SFX disabled globally; skipping generation/mix")
 
         _job_set_stage(job_id, "compositing", 82)
         output_filename = template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path, sfx_paths=sfx_paths)
+        await composite_video(
+            scenes,
+            scene_assets,
+            audio_path,
+            output_path,
+            resolution=resolution,
+            use_svd=use_video,
+            subtitle_path=subtitle_path,
+            sfx_paths=sfx_paths,
+            transition_style=_normalize_transition_style(transition_style),
+            micro_escalation_mode=micro_escalation_mode,
+        )
 
         for sfx in sfx_paths:
             if sfx:
@@ -4062,10 +6072,12 @@ async def health():
     fal_video_enabled = bool(FAL_AI_KEY)
     runway_video_enabled = bool(RUNWAY_API_KEY)
     grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
-    if fal_video_enabled:
-        video_engine = "FalAI Kling 2.1 (forced)"
+    if runway_video_enabled and fal_video_enabled:
+        video_engine = "Runway (primary) + FalAI Kling fallback"
     elif runway_video_enabled and grok_video_enabled:
         video_engine = "Runway (primary) + Grok fallback"
+    elif fal_video_enabled:
+        video_engine = "FalAI Kling 2.1"
     elif runway_video_enabled:
         video_engine = "Runway Image-to-Video"
     elif grok_video_enabled:
@@ -4084,6 +6096,7 @@ async def health():
         "video_engine": video_engine,
         "runway_key_configured": runway_video_enabled,
         "runway_key_source": RUNWAY_API_KEY_SOURCE if runway_video_enabled else "",
+        "runway_video_model": RUNWAY_VIDEO_MODEL if runway_video_enabled else "",
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": (
@@ -4145,11 +6158,14 @@ async def admin_analytics(user: dict = Depends(require_auth)):
         raise HTTPException(403, "Admin only")
 
     active_job_statuses = {"queued", "generating_script", "generating_images", "animating_scenes", "generating_voice", "generating_sfx", "compositing", "analyzing"}
-    active_jobs = [j for j in jobs.values() if j.get("status") in active_job_statuses]
+    active_jobs = []
+    for j in jobs.values():
+        if isinstance(j, dict) and j.get("status") in active_job_statuses:
+            active_jobs.append(j)
     active_generations = len(active_jobs)
     active_generating_users = len({j.get("user_id") for j in active_jobs if j.get("user_id")})
 
-    tier_counts = {"starter": 0, "creator": 0, "pro": 0, "demo_pro": 0}
+    tier_counts = {"starter": 0, "creator": 0, "pro": 0, "elite": 0, "demo_pro": 0}
     monthly_revenue_usd = 0.0
     revenue_source = "none"
 
@@ -4186,6 +6202,7 @@ async def admin_analytics(user: dict = Depends(require_auth)):
                         p = row.get("plan")
                         if p in tier_counts:
                             tier_counts[p] += 1
+                            monthly_revenue_usd += float(PLAN_PRICE_USD.get(p, 0.0) or 0.0)
                     revenue_source = "profiles"
         except Exception as e:
             log.warning(f"Admin analytics profiles fallback failed: {e}")
@@ -4216,13 +6233,26 @@ async def admin_analytics(user: dict = Depends(require_auth)):
         except Exception as e:
             log.warning(f"Admin analytics active-users fetch failed: {e}")
 
-    queue_depth = await get_queue_depth()
-    queue_workers = max(1, int(get_queue_workers()))
-    queue_max_depth = max(1, int(get_queue_max_depth()))
+    queue_depth = 0
+    queue_workers = 1
+    queue_max_depth = 1
+    try:
+        queue_depth = max(0, int(await get_queue_depth()))
+    except Exception as e:
+        log.warning(f"Admin analytics queue depth read failed: {e}")
+    try:
+        queue_workers = max(1, int(get_queue_workers()))
+    except Exception as e:
+        log.warning(f"Admin analytics queue workers read failed: {e}")
+    try:
+        queue_max_depth = max(1, int(get_queue_max_depth()))
+    except Exception as e:
+        log.warning(f"Admin analytics queue max-depth read failed: {e}")
     active_users_estimate = max(active_generating_users, active_users_signins_15m)
     queue_utilization_pct = round((queue_depth / queue_max_depth) * 100, 1)
     active_generations_per_worker = round(active_generations / queue_workers, 2)
     high_load_detected = queue_utilization_pct >= 70.0 or active_generations_per_worker >= 1.0
+    voice_diag = await _voice_provider_snapshot(force_refresh=False)
     return {
         "active_generations": active_generations,
         "queue_depth": queue_depth,
@@ -4242,6 +6272,10 @@ async def admin_analytics(user: dict = Depends(require_auth)):
         # We currently expose gross subscription revenue as a profit proxy.
         "monthly_profit_usd": round(monthly_revenue_usd, 2),
         "revenue_source": revenue_source,
+        "voice_provider_ok": voice_diag["provider_ok"],
+        "voice_catalog_source": voice_diag["source"],
+        "voice_catalog_count": voice_diag["count"],
+        "voice_catalog_warning": voice_diag["warning"],
     }
 
 
@@ -4290,33 +6324,83 @@ async def public_config():
             name: {k: v for k, v in limits.items()}
             for name, limits in PLAN_LIMITS.items()
         },
+        "plan_features": {
+            name: list(features)
+            for name, features in PLAN_FEATURES.items()
+        },
+        "plan_prices_usd": {k: float(v) for k, v in PLAN_PRICE_USD.items()},
         "prices": {v: k for k, v in STRIPE_PRICE_TO_PLAN.items()},
+        "topup_packs": [
+            {"price_id": price_id, **meta}
+            for price_id, meta in TOPUP_PACKS.items()
+        ],
+        "transition_styles": list(TRANSITION_STYLE_MAP.keys()),
+        "render_capabilities": {
+            "animated_max_resolution": ("720p" if FORCE_720P_ONLY else "1080p"),
+            "micro_escalation_supported": True,
+            "micro_escalation_max_source_scenes": MICRO_ESCALATION_MAX_SOURCE_SCENES,
+            "micro_escalation_max_output_clips": MICRO_ESCALATION_MAX_OUTPUT_CLIPS,
+        },
+        "feature_flags": {
+            "script_to_short_enabled": SCRIPT_TO_SHORT_ENABLED,
+            "story_advanced_controls_enabled": STORY_ADVANCED_CONTROLS_ENABLED,
+            "story_retention_tuning_enabled": STORY_RETENTION_TUNING_ENABLED,
+            "disable_all_sfx": DISABLE_ALL_SFX,
+        },
     }
 
 
 @app.get("/api/me")
 async def get_me(user: dict = Depends(require_auth)):
-    plan = user.get("plan", "starter")
+    plan = str(user.get("plan", "none") or "none")
     if plan == "free":
-        plan = "starter"
+        plan = "none"
     email = user.get("email", "")
-    is_admin = email in ADMIN_EMAILS or plan == "admin"
-    if plan == "admin":
+    is_admin = email in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
+    if (not is_admin) and (not billing_active):
+        # Unpaid accounts should present as no active plan.
+        plan = "none"
+    elif (not is_admin) and plan not in PLAN_LIMITS:
+        # Paid account with missing/unknown stored plan defaults to paid starter tier.
+        plan = "starter"
+    if is_admin:
         limits = PLAN_LIMITS["pro"]
         limits = {**limits, "videos_per_month": 9999}
     else:
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+    credit_state = _credit_state_for_user(user, plan if not is_admin else "pro", billing_active, is_admin=is_admin)
     has_demo = is_admin or (PRODUCT_DEMO_PUBLIC_ENABLED and plan == "demo_pro")
+    effective_plan = "pro" if is_admin else plan
+    features = _plan_features_for(effective_plan, is_admin=is_admin)
     return {
         "id": user["id"],
         "email": email,
-        "plan": plan if plan != "admin" else "pro",
+        "plan": effective_plan,
         "role": "admin" if is_admin else "user",
+        "billing_active": billing_active,
         "limits": limits,
+        "features": features,
+        "monthly_credits_remaining": credit_state["monthly_remaining"],
+        "monthly_credits_used": credit_state["monthly_used"],
+        "monthly_credits_limit": credit_state["monthly_limit"],
+        "topup_credits_remaining": credit_state["topup_credits"],
+        "credits_total_remaining": credit_state["credits_total_remaining"],
+        "requires_topup": credit_state["requires_topup"],
+        "credit_month": credit_state["month_key"],
         "demo_access": has_demo,
         "demo_price_id": DEMO_PRO_PRICE_ID,
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
     }
+
+
+def _user_has_paid_access(user: dict | None) -> bool:
+    if not user:
+        return False
+    email = str(user.get("email", "") or "")
+    if email in ADMIN_EMAILS:
+        return True
+    return _billing_active_for_user(user)
 
 
 @app.post("/api/generate")
@@ -4327,16 +6411,52 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
+    if user and not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
+    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
+    mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
+    art_style = _normalize_art_style(req.art_style, template=req.template)
+    voice_id = str(req.voice_id or "").strip()
+    voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
+    pacing_mode = _normalize_pacing_mode(req.pacing_mode)
+    if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+        voice_id = ""
+        voice_speed = 1.0
+        pacing_mode = "standard"
+    reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
+    reference_image_url = str(req.reference_image_url or "").strip()
+    reference_dna = {}
+    if reference_image_url.startswith("data:image/"):
+        raw_ref, _mime = _decode_data_image_url(reference_image_url)
+        if raw_ref:
+            quality = _analyze_reference_quality(raw_ref, lock_mode=reference_lock_mode)
+            if not quality.get("accepted", True) and reference_lock_mode == "strict":
+                raise HTTPException(400, "Reference image quality too low for Strict lock. Upload a higher-resolution image or use Inspired lock.")
+            reference_dna = _extract_reference_dna(raw_ref, template=req.template)
     user_plan = "starter"
+    plan_limits = PLAN_LIMITS["starter"]
+    is_admin = False
     if user:
-        user_plan = user.get("plan", "starter")
-        if user_plan == "free":
-            user_plan = "starter"
-        if user_plan == "admin":
-            user_plan = "pro"
-
-    plan_limits = PLAN_LIMITS.get(user_plan, PLAN_LIMITS["starter"])
+        user_plan, plan_limits = _resolve_user_plan_for_limits(user)
+        is_admin = user.get("email", "") in ADMIN_EMAILS
+        billing_active = _billing_active_for_user(user)
+        can_render, credit_source, credit_state = await _reserve_generation_credit(
+            user,
+            user_plan if not is_admin else "pro",
+            billing_active,
+            is_admin=is_admin,
+        )
+        if not can_render:
+            raise HTTPException(
+                402,
+                "No generation credits left this month. Buy a top-up pack to continue.",
+            )
+    else:
+        credit_source = ""
+        credit_state = {"month_key": _month_key()}
+    transition_style = _normalize_transition_style(req.transition_style)
+    micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
 
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=bool(plan_limits.get("priority", False)))
 
@@ -4350,6 +6470,21 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "plan": user_plan,
         "user_id": user.get("id") if user else None,
         "created_at": time.time(),
+        "quality_mode": quality_mode,
+        "mint_mode": mint_mode,
+        "art_style": art_style,
+        "transition_style": transition_style,
+        "micro_escalation_mode": micro_escalation_mode,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
+        "reference_image_url": reference_image_url,
+        "reference_lock_mode": reference_lock_mode,
+        "reference_dna": reference_dna,
+        "credit_charged": bool(user),
+        "credit_source": credit_source,
+        "credit_month_key": credit_state.get("month_key", _month_key()),
+        "credit_refunded": False,
     }
     _job_diag_init(job_id, "auto")
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
@@ -4363,13 +6498,29 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
             "status": "rendering",
             "resolution": resolution,
             "language": language,
+            "art_style": art_style,
+            "voice_id": voice_id,
+            "voice_speed": voice_speed,
+            "pacing_mode": pacing_mode,
             "job_id": job_id,
         })
         jobs[job_id]["project_id"] = project_id
 
     try:
-        await enqueue_generation_job(job_id, user_plan, run_generation_pipeline, (job_id, req.template, req.prompt, resolution, language))
+        await enqueue_generation_job(
+            job_id,
+            user_plan,
+            run_generation_pipeline,
+            (job_id, req.template, req.prompt, resolution, language, quality_mode, mint_mode, transition_style, micro_escalation_mode),
+        )
     except QueueFullError as e:
+        if jobs[job_id].get("credit_charged") and str(jobs[job_id].get("credit_source", "")) in {"monthly", "topup"}:
+            await _refund_generation_credit(
+                str(jobs[job_id].get("user_id", "") or ""),
+                str(jobs[job_id].get("credit_source", "") or ""),
+                month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
+            )
+            jobs[job_id]["credit_refunded"] = True
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         await persist_job_state(job_id, jobs[job_id])
@@ -4427,6 +6578,12 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
         raise HTTPException(404, "Scene index out of range")
 
     template = str(state.get("template", "skeleton") or "skeleton")
+    quality_mode = _normalize_skeleton_quality_mode((body or {}).get("quality_mode") or state.get("quality_mode"), template=template)
+    mint_mode = _normalize_mint_mode((body or {}).get("mint_mode") if isinstance(body, dict) else None, template=template)
+    art_style = _normalize_art_style(state.get("art_style", "auto"), template=template)
+    reference_lock_mode = _normalize_reference_lock_mode(state.get("reference_lock_mode"), default="strict")
+    reference_dna = state.get("reference_dna", {}) if isinstance(state.get("reference_dna"), dict) else {}
+    reference_image_url = str(state.get("reference_image_url", "") or "").strip()
     scene_entry = scene_images[scene_index] if isinstance(scene_images[scene_index], dict) else {}
     scene_prompt = str(scene_entry.get("visual_description", "") or "")
     if not scene_prompt:
@@ -4435,24 +6592,35 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
             scene_prompt = str(prompts[scene_index] or "")
     if not scene_prompt:
         raise HTTPException(400, "Scene prompt unavailable for regeneration")
+    scene_prompt = _apply_mint_scene_compiler(
+        [{"visual_description": scene_prompt}],
+        template,
+        mint_mode=mint_mode,
+    )[0]["visual_description"]
 
-    prompt_prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+    skeleton_anchor = ""
+    if template == "skeleton" and isinstance(scene_images, list) and scene_images:
+        first_scene = scene_images[0] if isinstance(scene_images[0], dict) else {}
+        s1_desc = str(first_scene.get("visual_description", "") or "")
+        outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
+        if outfit_match:
+            skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
     if template == "skeleton":
-        skeleton_anchor = ""
-        if isinstance(scene_images, list) and scene_images:
-            first_scene = scene_images[0] if isinstance(scene_images[0], dict) else {}
-            s1_desc = str(first_scene.get("visual_description", "") or "")
-            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
-            if outfit_match:
-                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
-        full_prompt = (
-            SKELETON_IMAGE_STYLE_PREFIX + " "
-            + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-            + skeleton_anchor + scene_prompt + " " + SKELETON_IMAGE_SUFFIX
-        )
-    else:
-        full_prompt = prompt_prefix + scene_prompt
+        scene_prompt = _apply_template_scene_constraints(
+            [{"visual_description": scene_prompt}],
+            template,
+            quality_mode=quality_mode,
+        )[0]["visual_description"]
+    full_prompt = _build_scene_prompt_with_reference(
+        template=template,
+        visual_description=scene_prompt,
+        quality_mode=quality_mode,
+        skeleton_anchor=skeleton_anchor,
+        reference_dna=reference_dna,
+        reference_lock_mode=reference_lock_mode,
+        art_style=art_style,
+    )
 
     ts = int(time.time() * 1000)
     out_name = f"scene_{scene_index + 1:02d}_regen_{ts}.png"
@@ -4463,7 +6631,7 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
         resolution="720p",
         negative_prompt=neg_prompt,
         template=template,
-        reference_image_url="",
+        reference_image_url=reference_image_url,
     )
 
     old_gen_id = str(scene_entry.get("generation_id", "") or "")
@@ -4481,6 +6649,7 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
         "local_path": str(Path(out_path)),
         "visual_description": scene_prompt,
         "template": template,
+        "quality_mode": quality_mode,
         "generation_id": new_gen_id,
         "cdn_url": str(img_result.get("cdn_url", "") or ""),
         "source": "regenerated_auto",
@@ -4488,19 +6657,26 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
     }
     scene_images[scene_index] = updated
     state["scene_images"] = scene_images
+    state["regenerate_count"] = int(state.get("regenerate_count", 0) or 0) + 1
     if in_memory_job:
         jobs[job_id]["scene_images"] = scene_images
+        jobs[job_id]["regenerate_count"] = int(jobs[job_id].get("regenerate_count", 0) or 0) + 1
     await persist_job_state(job_id, state)
     return {"ok": True, "job_id": job_id, "scene_index": scene_index, "image": updated}
 
 
 @app.get("/api/status/{job_id}")
 async def job_status(job_id: str):
+    _prune_in_memory_jobs()
     persisted = await get_persisted_job_state(job_id)
     if isinstance(persisted, dict):
+        _record_kpi_for_job(job_id, persisted)
+        if persisted.get("kpi_recorded"):
+            await persist_job_state(job_id, persisted)
         return persisted
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
+    _record_kpi_for_job(job_id, jobs[job_id])
     return jobs[job_id]
 
 
@@ -4740,18 +6916,25 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         _job_set_stage(job_id, "generating_script", 15)
         script_data = await generate_clone_script(detected_template, topic, viral_info)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
+        clone_quality_mode = _normalize_skeleton_quality_mode("cinematic", template=detected_template)
+        clone_mint_mode = _normalize_mint_mode(True, template=detected_template)
+        scenes = _apply_template_scene_constraints(scenes, detected_template, quality_mode=clone_quality_mode)
+        scenes = _apply_mint_scene_compiler(scenes, detected_template, mint_mode=clone_mint_mode)
         scenes = _force_template_scene_duration(scenes, detected_template)
         if not scenes:
             raise ValueError("Clone script generation returned no scenes")
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        use_video_engine = fal_video_enabled
+        runway_video_enabled = bool(RUNWAY_API_KEY)
+        use_video_engine = fal_video_enabled or runway_video_enabled
         use_video = use_video_engine
         if detected_template == "reddit":
             use_video = False
         if detected_template != "reddit" and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set FAL_AI_KEY)")
-        if fal_video_enabled:
+            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
+        if runway_video_enabled:
+            mode_label = "Runway (primary)"
+        elif fal_video_enabled:
             mode_label = "FalAI Kling 2.1"
         else:
             mode_label = "static image"
@@ -4783,10 +6966,10 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
 
             if detected_template == "skeleton":
                 vis_desc = scene.get("visual_description", "")
-                full_prompt = (
-                    SKELETON_IMAGE_STYLE_PREFIX + " "
-                    + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-                    + clone_skeleton_anchor + vis_desc + " " + SKELETON_IMAGE_SUFFIX
+                full_prompt = _build_skeleton_image_prompt(
+                    vis_desc,
+                    skeleton_anchor=clone_skeleton_anchor,
+                    quality_mode=clone_quality_mode,
                 )
             else:
                 full_prompt = prompt_prefix + scene.get("visual_description", "")
@@ -4906,9 +7089,16 @@ async def clone_video(
     resolution: str = Form("720p"),
     file: UploadFile = File(None),
     background_tasks: BackgroundTasks = None,
+    request: Request = None,
 ):
     if not XAI_API_KEY or not ELEVENLABS_API_KEY:
         raise HTTPException(500, "API keys not configured")
+
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _user_has_paid_access(user):
+        raise HTTPException(402, "Active subscription required. Please choose a plan.")
 
     res = _normalize_output_resolution(resolution, priority_allowed=False)
 
@@ -4970,6 +7160,86 @@ async def get_project(project_id: str, request: Request = None):
 
 # ─── Stripe Payments ──────────────────────────────────────────────────────────
 
+def _stripe_find_customer_id_by_email(email: str) -> str:
+    """Best-effort Stripe customer lookup for billing portal/checkout continuity."""
+    if not email:
+        return ""
+    try:
+        customers = stripe_lib.Customer.list(email=email, limit=10)
+        data = list(getattr(customers, "data", []) or [])
+        if not data:
+            return ""
+        data.sort(key=lambda c: int(getattr(c, "created", 0) or 0), reverse=True)
+        return str(data[0].id)
+    except Exception as e:
+        log.warning(f"Stripe customer lookup failed for {email}: {e}")
+        return ""
+
+
+def _stripe_has_active_subscription(email: str) -> bool:
+    """Return True when user has active access through Stripe."""
+    if not STRIPE_SECRET_KEY:
+        # Paywall is strict: no Stripe key means no paid verification.
+        return False
+    customer_id = _stripe_find_customer_id_by_email(email)
+    if not customer_id:
+        return False
+    try:
+        subs = stripe_lib.Subscription.list(customer=customer_id, status="all", limit=20)
+        active_statuses = {"active", "trialing", "past_due"}
+        for sub in list(getattr(subs, "data", []) or []):
+            status = str(getattr(sub, "status", "") or "")
+            if status in active_statuses:
+                return True
+        return False
+    except Exception as e:
+        # Strict paywall: fail closed on Stripe lookup errors.
+        log.warning(f"Stripe subscription lookup failed for {email}: {e}")
+        return False
+
+
+async def _supabase_find_user_id_by_email(email: str) -> str:
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL or not email:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            users_resp = await client.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                },
+            )
+            if users_resp.status_code != 200:
+                return ""
+            users_data = users_resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+            for u in user_list or []:
+                if str(u.get("email", "")).strip().lower() == email.strip().lower():
+                    return str(u.get("id", ""))
+    except Exception as e:
+        log.warning(f"Supabase user lookup failed for {email}: {e}")
+    return ""
+
+
+async def _supabase_set_user_plan(user_id: str, plan: str):
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL or not user_id:
+        return
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers={
+                "apikey": svc_key,
+                "Authorization": f"Bearer {svc_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+            json={"id": user_id, "plan": plan},
+        )
+
+
 @app.post("/api/checkout")
 async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
     if not STRIPE_SECRET_KEY:
@@ -4979,25 +7249,85 @@ async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_aut
     target_plan = STRIPE_PRICE_TO_PLAN.get(req.price_id, "")
     user_email = user.get("email", "")
     user_plan = user.get("plan", "starter")
-    is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
+    is_admin = user_email in ADMIN_EMAILS
     if target_plan == "demo_pro" and (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
         raise HTTPException(403, "Demo Pro is coming soon.")
 
     try:
-        session = stripe_lib.checkout.Session.create(
-            mode="subscription",
-            payment_method_types=["card"],
-            line_items=[{"price": req.price_id, "quantity": 1}],
-            success_url=f"{SITE_URL}?payment=success",
-            cancel_url=f"{SITE_URL}?payment=cancelled",
-            client_reference_id=user["id"],
-            customer_email=user["email"],
-            metadata={"user_id": user["id"], "plan": STRIPE_PRICE_TO_PLAN[req.price_id]},
-        )
+        checkout_payload = {
+            "mode": "subscription",
+            "payment_method_types": ["card"],
+            "line_items": [{"price": req.price_id, "quantity": 1}],
+            "success_url": f"{SITE_URL}?payment=success",
+            "cancel_url": f"{SITE_URL}?payment=cancelled",
+            "client_reference_id": user["id"],
+            "metadata": {"user_id": user["id"], "plan": STRIPE_PRICE_TO_PLAN[req.price_id]},
+        }
+        customer_id = _stripe_find_customer_id_by_email(user["email"])
+        if customer_id:
+            checkout_payload["customer"] = customer_id
+        else:
+            checkout_payload["customer_email"] = user["email"]
+        session = stripe_lib.checkout.Session.create(**checkout_payload)
         return {"checkout_url": session.url}
     except Exception as e:
         log.error(f"Stripe checkout error: {e}")
         raise HTTPException(500, f"Payment error: {str(e)}")
+
+
+@app.post("/api/checkout/topup")
+async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(require_auth)):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    pack = TOPUP_PACKS.get(req.price_id)
+    if not pack:
+        raise HTTPException(400, "Invalid top-up pack")
+    if user.get("email", "") in ADMIN_EMAILS:
+        raise HTTPException(400, "Admin account does not require top-up packs")
+    try:
+        checkout_payload = {
+            "mode": "payment",
+            "payment_method_types": ["card"],
+            "line_items": [{"price": req.price_id, "quantity": 1}],
+            "success_url": f"{SITE_URL}?topup=success",
+            "cancel_url": f"{SITE_URL}?topup=cancelled",
+            "client_reference_id": user["id"],
+            "metadata": {
+                "user_id": user["id"],
+                "topup_price_id": req.price_id,
+                "topup_pack": str(pack.get("pack", "")),
+                "topup_credits": str(int(pack.get("credits", 0) or 0)),
+            },
+        }
+        customer_id = _stripe_find_customer_id_by_email(user["email"])
+        if customer_id:
+            checkout_payload["customer"] = customer_id
+        else:
+            checkout_payload["customer_email"] = user["email"]
+        session = stripe_lib.checkout.Session.create(**checkout_payload)
+        return {"checkout_url": session.url}
+    except Exception as e:
+        log.error(f"Stripe top-up checkout error: {e}")
+        raise HTTPException(500, f"Payment error: {str(e)}")
+
+
+@app.post("/api/billing-portal")
+async def create_billing_portal_session(user: dict = Depends(require_auth)):
+    """Create a Stripe customer portal session so users can cancel/manage plans."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
+    if not customer_id:
+        raise HTTPException(404, "No billing profile found yet. Start a subscription first.")
+    try:
+        portal = stripe_lib.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"{SITE_URL}?billing=updated",
+        )
+        return {"portal_url": portal.url}
+    except Exception as e:
+        log.error(f"Stripe billing portal error: {e}")
+        raise HTTPException(500, "Could not open billing portal")
 
 
 @app.post("/api/stripe-webhook")
@@ -5016,31 +7346,61 @@ async def stripe_webhook(request: Request):
 
     if event.get("type") == "checkout.session.completed":
         session_data = event["data"]["object"]
-        user_id = session_data.get("client_reference_id") or session_data.get("metadata", {}).get("user_id")
-        plan = session_data.get("metadata", {}).get("plan", "starter")
-
-        if user_id and SUPABASE_URL:
-            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-            try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    await client.post(
-                        f"{SUPABASE_URL}/rest/v1/profiles",
-                        headers={
-                            "apikey": svc_key,
-                            "Authorization": f"Bearer {svc_key}",
-                            "Content-Type": "application/json",
-                            "Prefer": "resolution=merge-duplicates",
-                        },
-                        json={"id": user_id, "plan": plan},
-                    )
-                log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
-            except Exception as e:
-                log.error(f"Failed to update plan for {user_id}: {e}")
+        metadata = session_data.get("metadata", {}) or {}
+        mode = str(session_data.get("mode", "") or "")
+        user_id = str(session_data.get("client_reference_id") or metadata.get("user_id") or "")
+        if mode == "subscription":
+            plan = metadata.get("plan", "starter")
+            if user_id and SUPABASE_URL:
+                svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+                try:
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        await client.post(
+                            f"{SUPABASE_URL}/rest/v1/profiles",
+                            headers={
+                                "apikey": svc_key,
+                                "Authorization": f"Bearer {svc_key}",
+                                "Content-Type": "application/json",
+                                "Prefer": "resolution=merge-duplicates",
+                            },
+                            json={"id": user_id, "plan": plan},
+                        )
+                    log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
+                except Exception as e:
+                    log.error(f"Failed to update plan for {user_id}: {e}")
+        elif mode == "payment":
+            topup_credits = int(str(metadata.get("topup_credits", "0") or "0"))
+            if user_id and topup_credits > 0:
+                await _credit_topup_wallet(
+                    user_id=user_id,
+                    credits=topup_credits,
+                    source=str(metadata.get("topup_pack", "topup") or "topup"),
+                    stripe_session_id=str(session_data.get("id", "") or ""),
+                )
+                log.info(f"Stripe webhook: credited {topup_credits} top-up credits to {user_id}")
 
     elif event.get("type") == "customer.subscription.deleted":
         sub = event["data"]["object"]
-        customer_email = sub.get("customer_email", "")
-        log.info(f"Subscription cancelled for {customer_email}")
+        customer_email = str(sub.get("customer_email", "") or "")
+        customer_id = str(sub.get("customer", "") or "")
+        if not customer_email and customer_id and STRIPE_SECRET_KEY:
+            try:
+                customer = stripe_lib.Customer.retrieve(customer_id)
+                customer_email = str(getattr(customer, "email", "") or "")
+            except Exception as e:
+                log.warning(f"Failed to resolve Stripe customer email from {customer_id}: {e}")
+        if customer_email:
+            try:
+                target_id = await _supabase_find_user_id_by_email(customer_email)
+                if target_id:
+                    await _supabase_set_user_plan(target_id, "none")
+                    log.info(f"Subscription cancelled; downgraded {customer_email} -> none")
+                else:
+                    log.warning(f"Subscription cancelled but no Supabase user found for {customer_email}")
+            except Exception as e:
+                log.error(f"Failed to downgrade cancelled subscription for {customer_email}: {e}")
+        else:
+            log.warning("Subscription cancelled event received without resolvable customer email")
 
     return {"status": "ok"}
 
@@ -5049,10 +7409,12 @@ async def stripe_webhook(request: Request):
 
 @app.post("/api/admin/set-plan")
 async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
-    if user.get("email") not in ADMIN_EMAILS and user.get("plan") != "admin":
+    if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
-    if req.plan not in list(PLAN_LIMITS.keys()) + ["admin"]:
+    if req.plan not in list(PLAN_LIMITS.keys()) + ["admin", "none"]:
         raise HTTPException(400, f"Invalid plan. Options: {list(PLAN_LIMITS.keys())}")
+    if req.plan == "admin" and req.email not in ADMIN_EMAILS:
+        raise HTTPException(400, "Only whitelisted admin emails can be admin.")
 
     svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
     if not svc_key or not SUPABASE_URL:
@@ -5087,7 +7449,7 @@ async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)
                     "Content-Type": "application/json",
                     "Prefer": "resolution=merge-duplicates",
                 },
-                json={"id": target_id, "plan": req.plan, "role": "admin" if req.plan == "admin" else "user"},
+                json={"id": target_id, "plan": req.plan, "role": "admin" if req.email in ADMIN_EMAILS else "user"},
             )
         return {"status": "ok", "email": req.email, "plan": req.plan}
     except Exception as e:
@@ -5146,7 +7508,7 @@ async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_aut
 
 @app.get("/api/admin/feedback")
 async def get_all_feedback(user: dict = Depends(require_auth)):
-    if user.get("email") not in ADMIN_EMAILS and user.get("plan") != "admin":
+    if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
 
     svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
@@ -5176,11 +7538,40 @@ async def get_all_feedback(user: dict = Depends(require_auth)):
     return {"feedback": [], "total": 0, "avg_rating": 0}
 
 
+@app.get("/api/admin/kpi")
+async def get_admin_kpi(user: dict = Depends(require_auth)):
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    total_jobs = int(_kpi_metrics.get("total_jobs", 0))
+    completed_jobs = int(_kpi_metrics.get("completed_jobs", 0))
+    first_pass = int(_kpi_metrics.get("first_render_pass_jobs", 0))
+    total_time = float(_kpi_metrics.get("total_publishable_time_sec", 0.0))
+    total_cost = float(_kpi_metrics.get("total_estimated_cost_usd", 0.0))
+    success_rate = (completed_jobs / total_jobs) if total_jobs else 0.0
+    first_render_success_rate = (first_pass / total_jobs) if total_jobs else 0.0
+    avg_time_to_publishable_sec = (total_time / completed_jobs) if completed_jobs else 0.0
+    avg_estimated_cost_per_short = (total_cost / max(total_jobs, 1)) if total_jobs else 0.0
+    return {
+        "targets": KPI_TARGETS,
+        "metrics": {
+            **_kpi_metrics,
+            "success_rate": round(success_rate, 4),
+            "first_render_success_rate": round(first_render_success_rate, 4),
+            "avg_time_to_publishable_sec": round(avg_time_to_publishable_sec, 2),
+            "avg_estimated_cost_per_short_usd": round(avg_estimated_cost_per_short, 3),
+        },
+        "on_track": {
+            "first_render_success_rate": first_render_success_rate >= float(KPI_TARGETS["first_render_success_rate"]),
+            "time_to_publishable_sec": avg_time_to_publishable_sec <= float(KPI_TARGETS["time_to_publishable_sec"]),
+            "estimated_cost_per_short_usd": avg_estimated_cost_per_short <= float(KPI_TARGETS["estimated_cost_per_short_usd"]),
+        },
+    }
+
+
 # ─── Startup: seed accounts ──────────────────────────────────────────────────
 
 SEED_ACCOUNTS = {
     "omatic657@gmail.com": {"plan": "admin", "role": "admin"},
-    "alwakmyhem@gmail.com": {"plan": "pro", "role": "user"},
 }
 
 
@@ -6290,28 +8681,12 @@ async def run_demo_pipeline(job_id: str, demo_path: str, ref_path: str, face_pat
 @app.get("/api/voices")
 async def list_voices():
     """List available ElevenLabs voices for the user to choose from."""
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ElevenLabs API key not configured")
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            "https://api.elevenlabs.io/v1/voices",
-            headers={"xi-api-key": ELEVENLABS_API_KEY},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    voices = []
-    for v in data.get("voices", []):
-        voices.append({
-            "voice_id": v["voice_id"],
-            "name": v.get("name", "Unknown"),
-            "category": v.get("category", ""),
-            "description": v.get("labels", {}).get("description", ""),
-            "gender": v.get("labels", {}).get("gender", ""),
-            "accent": v.get("labels", {}).get("accent", ""),
-            "age": v.get("labels", {}).get("age", ""),
-            "preview_url": v.get("preview_url", ""),
-        })
-    return {"voices": voices}
+    voices, source, provider_ok, warning = await _fetch_voice_catalog()
+    _cache_voice_catalog(source, provider_ok, len(voices), warning)
+    out = {"voices": voices, "source": source, "provider_ok": provider_ok}
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 @app.post("/api/voices/preview")
@@ -6359,7 +8734,7 @@ async def create_demo_video(
 
     user_email = user.get("email", "")
     user_plan = user.get("plan", "starter")
-    is_admin = user_email in ADMIN_EMAILS or user_plan == "admin"
+    is_admin = user_email in ADMIN_EMAILS
     if (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
         raise HTTPException(403, "Product Demo is coming soon.")
     has_demo = is_admin or (user_plan == "demo_pro")

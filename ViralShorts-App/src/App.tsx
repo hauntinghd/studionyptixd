@@ -1,5 +1,5 @@
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search, Star, Send } from 'lucide-react';
+import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search, Star, Send, CreditCard } from 'lucide-react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
@@ -45,7 +45,12 @@ const Logo = ({ size = 24 }: { size?: number }) => (
     <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
 );
 
-type Plan = 'starter' | 'creator' | 'pro';
+type Plan = 'none' | 'starter' | 'creator' | 'pro' | 'elite';
+type TopupPack = { price_id: string; pack: string; credits: number; price_usd: number };
+type PlanLimit = { videos_per_month?: number; max_duration_sec?: number; max_resolution?: string; can_clone?: boolean; priority?: boolean; demo_access?: boolean };
+type PlanLimitMap = Record<string, PlanLimit>;
+type PlanFeatureMap = Record<string, string[]>;
+type PlanPriceMap = Record<string, number>;
 const PRICE_IDS: Record<string, string> = {
     starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
     creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
@@ -58,35 +63,56 @@ interface AuthContextType {
     plan: Plan;
     role: string;
     loading: boolean;
+    billingActive: boolean;
+    monthlyCreditsRemaining: number;
+    topupCreditsRemaining: number;
+    creditsTotalRemaining: number;
+    requiresTopup: boolean;
+    topupPacks: TopupPack[];
     demoAccess: boolean;
     demoPriceId: string;
     demoComingSoon: boolean;
     maintenanceBannerEnabled: boolean;
     maintenanceBannerMessage: string;
+    publicPlanLimits: PlanLimitMap;
+    publicPlanFeatures: PlanFeatureMap;
+    publicPlanPrices: PlanPriceMap;
     signIn: (email: string, password: string) => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
     checkout: (plan: string) => Promise<void>;
+    checkoutTopup: (priceId: string) => Promise<string | null>;
     checkoutDemo: () => Promise<void>;
+    manageBilling: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextType>({
-    session: null, supabase: null, plan: 'starter', role: 'user', loading: true,
-    demoAccess: false, demoPriceId: '', demoComingSoon: true,
+    session: null, supabase: null, plan: 'none', role: 'user', loading: true, billingActive: false,
+    monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: [],
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: {}, publicPlanFeatures: {}, publicPlanPrices: {},
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     signIn: async () => null, signUp: async () => null, signOut: async () => {},
-    checkout: async () => {}, checkoutDemo: async () => {},
+    checkout: async () => {}, checkoutTopup: async () => null, checkoutDemo: async () => {}, manageBilling: async () => null,
 });
 
 function AuthProvider({ children }: { children: React.ReactNode }) {
     const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
     const [session, setSession] = useState<Session | null>(null);
-    const [plan, setPlan] = useState<Plan>('starter');
+    const [plan, setPlan] = useState<Plan>('none');
     const [role, setRole] = useState<string>('user');
     const [loading, setLoading] = useState(true);
+    const [billingActive, setBillingActive] = useState(false);
+    const [monthlyCreditsRemaining, setMonthlyCreditsRemaining] = useState(0);
+    const [topupCreditsRemaining, setTopupCreditsRemaining] = useState(0);
+    const [creditsTotalRemaining, setCreditsTotalRemaining] = useState(0);
+    const [requiresTopup, setRequiresTopup] = useState(false);
+    const [topupPacks, setTopupPacks] = useState<TopupPack[]>([]);
     const [demoAccess, setDemoAccess] = useState(false);
     const [demoPriceId, setDemoPriceId] = useState('');
     const [demoComingSoon, setDemoComingSoon] = useState(true);
+    const [publicPlanLimits, setPublicPlanLimits] = useState<PlanLimitMap>({});
+    const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>({});
+    const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>({});
     const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
     const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
 
@@ -98,8 +124,25 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                 timeout = setTimeout(() => controller.abort(), BOOT_CONFIG_TIMEOUT_MS);
                 const res = await fetch(`${API}/api/config`, { signal: controller.signal });
                 const cfg = await res.json();
+                if (cfg && typeof cfg === 'object') {
+                    if (cfg.plans && typeof cfg.plans === 'object') setPublicPlanLimits(cfg.plans as PlanLimitMap);
+                    if (cfg.plan_features && typeof cfg.plan_features === 'object') setPublicPlanFeatures(cfg.plan_features as PlanFeatureMap);
+                    if (cfg.plan_prices_usd && typeof cfg.plan_prices_usd === 'object') setPublicPlanPrices(cfg.plan_prices_usd as PlanPriceMap);
+                }
                 setMaintenanceBannerEnabled(Boolean(cfg.maintenance_banner_enabled));
                 setMaintenanceBannerMessage((cfg.maintenance_banner_message || "").trim());
+                if (Array.isArray(cfg.topup_packs)) {
+                    const packs = cfg.topup_packs
+                        .filter((p: any) => p && typeof p.price_id === 'string')
+                        .map((p: any) => ({
+                            price_id: p.price_id,
+                            pack: String(p.pack || ''),
+                            credits: Number(p.credits || 0),
+                            price_usd: Number(p.price_usd || 0),
+                        }))
+                        .sort((a: TopupPack, b: TopupPack) => a.credits - b.credits);
+                    setTopupPacks(packs);
+                }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
                     setSupabase(sb);
@@ -116,7 +159,18 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (!session) { setPlan('starter'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); return; }
+        if (!session) {
+            setPlan('none');
+            setRole('user');
+            setBillingActive(false);
+            setMonthlyCreditsRemaining(0);
+            setTopupCreditsRemaining(0);
+            setCreditsTotalRemaining(0);
+            setRequiresTopup(false);
+            setDemoAccess(false);
+            setDemoComingSoon(true);
+            return;
+        }
         (async () => {
             try {
                 const res = await fetch(`${API}/api/me`, {
@@ -124,14 +178,29 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                 });
                 if (res.ok) {
                     const data = await res.json();
-                    const incomingPlan = (data.plan === 'free' ? 'starter' : data.plan) || 'starter';
-                    setPlan((['starter', 'creator', 'pro'].includes(incomingPlan) ? incomingPlan : 'starter') as Plan);
+                    const incomingPlan = (data.plan === 'free' ? 'none' : data.plan) || 'none';
+                    setPlan((['none', 'starter', 'creator', 'pro', 'elite'].includes(incomingPlan) ? incomingPlan : 'none') as Plan);
                     setRole(data.role || 'user');
+                    setBillingActive(Boolean(data.billing_active));
+                    setMonthlyCreditsRemaining(Number(data.monthly_credits_remaining || 0));
+                    setTopupCreditsRemaining(Number(data.topup_credits_remaining || 0));
+                    setCreditsTotalRemaining(Number(data.credits_total_remaining || 0));
+                    setRequiresTopup(Boolean(data.requires_topup));
                     setDemoAccess(data.demo_access || false);
                     if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
                     setDemoComingSoon(data.demo_coming_soon !== false);
                 }
-            } catch { setPlan('starter'); setRole('user'); setDemoAccess(false); setDemoComingSoon(true); }
+            } catch {
+                setPlan('none');
+                setRole('user');
+                setBillingActive(false);
+                setMonthlyCreditsRemaining(0);
+                setTopupCreditsRemaining(0);
+                setCreditsTotalRemaining(0);
+                setRequiresTopup(false);
+                setDemoAccess(false);
+                setDemoComingSoon(true);
+            }
         })();
     }, [session]);
 
@@ -154,7 +223,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const signOut = useCallback(async () => {
         if (supabase) await supabase.auth.signOut();
         setSession(null);
-        setPlan('starter');
+        setPlan('none');
+        setMonthlyCreditsRemaining(0);
+        setTopupCreditsRemaining(0);
+        setCreditsTotalRemaining(0);
+        setRequiresTopup(false);
     }, [supabase]);
 
     const checkout = useCallback(async (planName: string) => {
@@ -190,11 +263,62 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch (e) { console.error("Demo checkout failed", e); }
     }, [session, demoPriceId]);
 
+    const checkoutTopup = useCallback(async (priceId: string): Promise<string | null> => {
+        if (!priceId || !session) return "Missing top-up price";
+        try {
+            const res = await fetch(`${API}/api/checkout/topup`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ price_id: priceId }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) return (data as any).detail || "Could not start top-up checkout";
+            if ((data as any).checkout_url) {
+                window.location.href = (data as any).checkout_url;
+                return null;
+            }
+            return "Checkout URL missing";
+        } catch (e) {
+            console.error("Top-up checkout failed", e);
+            return "Top-up checkout failed";
+        }
+    }, [session]);
+
+    const manageBilling = useCallback(async (): Promise<string | null> => {
+        if (!session) return "Not signed in";
+        try {
+            const res = await fetch(`${API}/api/billing-portal`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                return (data as any).detail || "Could not open billing portal";
+            }
+            if ((data as any).portal_url) {
+                window.location.href = (data as any).portal_url;
+                return null;
+            }
+            return "Billing portal URL missing";
+        } catch (e) {
+            console.error("Billing portal failed", e);
+            return "Billing portal request failed";
+        }
+    }, [session]);
+
     return (
         <AuthContext.Provider value={{
-            session, supabase, plan, role, loading, demoAccess, demoPriceId, demoComingSoon,
+            session, supabase, plan, role, loading, billingActive,
+            monthlyCreditsRemaining, topupCreditsRemaining, creditsTotalRemaining, requiresTopup, topupPacks,
+            demoAccess, demoPriceId, demoComingSoon,
+            publicPlanLimits, publicPlanFeatures, publicPlanPrices,
             maintenanceBannerEnabled, maintenanceBannerMessage,
-            signIn, signUp, signOut, checkout, checkoutDemo,
+            signIn, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,
         }}>
             {children}
         </AuthContext.Provider>
@@ -210,7 +334,7 @@ function App() {
 }
 
 function AppShell() {
-    const { session, loading, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
+    const { session, loading, role, billingActive, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const [page, setPage] = useState<'landing' | 'dashboard' | 'auth' | 'account'>(() => {
         try {
             const saved = localStorage.getItem('nyptid_page');
@@ -235,9 +359,19 @@ function AppShell() {
         if (!session && page === 'dashboard') setPage('landing');
         if (!session && page === 'account') setPage('auth');
         if (loading) return;
-        // Keep logged-in users in studio on hard refresh.
-        if (session && (page === 'landing' || page === 'auth')) setPage('dashboard');
-    }, [session, loading, page]);
+        const isAdmin = role === 'admin';
+        const paidAccess = isAdmin || billingActive;
+        if (session && !paidAccess && page === 'dashboard') {
+            setPage('landing');
+            setTimeout(() => {
+                const el = document.getElementById('pricing');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 0);
+            return;
+        }
+        // Keep logged-in paid users in studio on hard refresh.
+        if (session && paidAccess && (page === 'landing' || page === 'auth')) setPage('dashboard');
+    }, [session, loading, page, role, billingActive]);
 
     return (
         <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
@@ -259,7 +393,8 @@ export default App;
 type PageNav = (p: 'landing' | 'dashboard' | 'auth' | 'account') => void;
 
 function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }) {
-    const { session, signOut } = useContext(AuthContext);
+    const { session, role, billingActive, signOut, manageBilling } = useContext(AuthContext);
+    const paidAccess = role === 'admin' || billingActive;
 
     return (
         <nav className="fixed top-0 w-full z-50 backdrop-blur-xl bg-[#09090b]/80 border-b border-white/5">
@@ -268,14 +403,40 @@ function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }
                     <Logo size={32} />
                     <span className="text-xl font-bold tracking-tight">NYPTID Studio</span>
                 </button>
+                <div className="hidden xl:flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-2 py-1">
+                    <a href="/skeleton-ai-video-generator.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">Skeleton AI</a>
+                    <a href="/ai-story-video-generator.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">AI Stories</a>
+                    <a href="/motivation-video-maker.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">Motivation</a>
+                    <a href="/runpod-ai-video-workflow.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">RunPod</a>
+                </div>
                 <div className="flex items-center gap-3">
-                    <button onClick={() => onNavigate('dashboard')}
-                        className={`px-4 py-2 text-sm font-medium rounded-lg transition ${active === 'dashboard' ? 'text-white bg-violet-600/20 border border-violet-500/30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}>
-                        Dashboard
-                    </button>
+                    {paidAccess ? (
+                        <button onClick={() => onNavigate('dashboard')}
+                            className={`px-4 py-2 text-sm font-medium rounded-lg transition ${active === 'dashboard' ? 'text-white bg-violet-600/20 border border-violet-500/30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}>
+                            Dashboard
+                        </button>
+                    ) : (
+                        <a href="#pricing"
+                            className="px-4 py-2 text-sm font-semibold text-white bg-violet-600 hover:bg-violet-500 rounded-lg transition-all shadow-lg shadow-violet-600/20">
+                            Choose Plan
+                        </a>
+                    )}
                     <div className="w-px h-6 bg-white/10 mx-1" />
                     {session ? (
                         <div className="flex items-center gap-2">
+                            {paidAccess && (
+                                <button
+                                    onClick={async () => {
+                                        const err = await manageBilling();
+                                        if (err) alert(err);
+                                    }}
+                                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-lg transition"
+                                    title="Manage Billing"
+                                >
+                                    <CreditCard className="w-4 h-4" />
+                                    <span className="hidden sm:inline">Billing</span>
+                                </button>
+                            )}
                             <button onClick={() => onNavigate('account')}
                                 className="flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-lg transition">
                                 <User className="w-4 h-4" />
@@ -329,7 +490,7 @@ function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
         if (result) {
             setError(result);
         } else if (mode === 'signup') {
-            setSuccess('Account created! Check your email to confirm, then sign in.');
+            setSuccess('Account created. Check your inbox (and spam) for the verification email, confirm your address, then sign in and choose a paid plan to unlock generation.');
         }
         setLoading(false);
     };
@@ -368,6 +529,15 @@ function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-sm">{success}</div>
                     )}
 
+                    {mode === 'signup' && !success && (
+                        <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.08] text-gray-300 text-sm">
+                            After account creation:
+                            <br />1) Verify your email.
+                            <br />2) Sign in.
+                            <br />3) Choose a paid plan on Pricing.
+                        </div>
+                    )}
+
                     <button type="submit" disabled={loading}
                         className="w-full py-3.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20">
                         {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
@@ -392,14 +562,21 @@ function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, plan, signOut, checkout } = useContext(AuthContext);
+    const {
+        session, plan, signOut, checkout, manageBilling, checkoutTopup, topupPacks,
+        monthlyCreditsRemaining, topupCreditsRemaining, creditsTotalRemaining,
+        publicPlanLimits,
+    } = useContext(AuthContext);
+    const [billingLoading, setBillingLoading] = useState(false);
+    const [billingError, setBillingError] = useState("");
+    const [topupError, setTopupError] = useState("");
 
     useEffect(() => {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
 
-    const planNames: Record<Plan, string> = { starter: 'Starter', creator: 'Creator', pro: 'Pro' };
-    const planColors: Record<Plan, string> = { starter: 'text-blue-400', creator: 'text-violet-400', pro: 'text-amber-400' };
+    const planNames: Record<Plan, string> = { none: 'No Active Plan', starter: 'Starter', creator: 'Creator', pro: 'Pro', elite: 'Studio Elite' };
+    const planColors: Record<Plan, string> = { none: 'text-gray-400', starter: 'text-blue-400', creator: 'text-violet-400', pro: 'text-amber-400', elite: 'text-rose-300' };
 
     return (
         <>
@@ -427,35 +604,80 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         <h3 className="font-bold text-lg mb-4">Plan Features</h3>
                         <div className="grid grid-cols-2 gap-4 text-sm">
                             <div>
-                                <p className="text-gray-500">Videos/month</p>
-                                <p className="font-bold text-white">{plan === 'pro' ? '300' : plan === 'creator' ? '150' : '50'}</p>
+                                <p className="text-gray-500">Generation credits/month</p>
+                                <p className="font-bold text-white">{plan === 'none' ? '0' : String(publicPlanLimits[plan]?.videos_per_month || 0)}</p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Max Resolution</p>
-                                <p className="font-bold text-white">{plan === 'creator' || plan === 'pro' ? '1080p' : '720p'}</p>
+                                <p className="font-bold text-white">{plan === 'none' ? '-' : String(publicPlanLimits[plan]?.max_resolution || '720p')}</p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Clone Feature</p>
-                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' ? 'text-emerald-400' : 'text-gray-600'}`}>
-                                    {plan === 'creator' || plan === 'pro' ? 'Enabled' : 'Locked'}
+                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'text-emerald-400' : 'text-gray-600'}`}>
+                                    {plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'Enabled' : 'Locked'}
                                 </p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Priority Queue</p>
-                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' ? 'text-emerald-400' : 'text-gray-600'}`}>
-                                    {plan === 'creator' || plan === 'pro' ? 'Yes' : 'No'}
+                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'text-emerald-400' : 'text-gray-600'}`}>
+                                    {plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'Yes' : 'No'}
                                 </p>
                             </div>
                         </div>
                     </div>
 
-                    {plan !== 'pro' && (
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <h3 className="font-bold text-lg mb-4">Credits</h3>
+                        <div className="grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                                <p className="text-gray-500">Monthly left</p>
+                                <p className="font-bold text-white">{monthlyCreditsRemaining}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Top-up left</p>
+                                <p className="font-bold text-white">{topupCreditsRemaining}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Total left</p>
+                                <p className="font-bold text-violet-300">{creditsTotalRemaining}</p>
+                            </div>
+                        </div>
+                        {topupPacks.length > 0 && (
+                            <div className="mt-5">
+                                <p className="text-gray-400 text-sm mb-3">Top-up packs (one-time purchase)</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {topupPacks.map((pack) => (
+                                        <button
+                                            key={pack.price_id}
+                                            onClick={async () => {
+                                                setTopupError("");
+                                                const err = await checkoutTopup(pack.price_id);
+                                                if (err) setTopupError(err);
+                                            }}
+                                            className="px-4 py-2 bg-violet-600/80 hover:bg-violet-500 text-white rounded-lg text-sm font-medium transition"
+                                        >
+                                            {pack.credits} credits • ${pack.price_usd.toFixed(2)}
+                                        </button>
+                                    ))}
+                                </div>
+                                {topupError && <p className="mt-3 text-sm text-red-400">{topupError}</p>}
+                            </div>
+                        )}
+                    </div>
+
+                    {plan !== 'pro' && plan !== 'elite' && (
                         <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/5 to-purple-500/5 border border-violet-500/20">
                             <h3 className="font-bold text-lg mb-2">Upgrade Your Plan</h3>
                             <p className="text-gray-400 text-sm mb-4">
-                                Unlock 1080p output, clone viral shorts, priority rendering, and more.
+                                Unlock pro transitions, stronger SFX, priority rendering, and more.
                             </p>
                             <div className="flex gap-3">
+                                {plan === 'none' && (
+                                    <button onClick={() => checkout('starter')}
+                                        className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-600/20 text-sm">
+                                        Starter $9/mo
+                                    </button>
+                                )}
                                 {plan === 'starter' && (
                                     <button onClick={() => checkout('creator')}
                                         className="px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-violet-600/20 text-sm">
@@ -469,6 +691,27 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                         </div>
                     )}
+
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <h3 className="font-bold text-lg mb-2">Billing & Subscription</h3>
+                        <p className="text-gray-400 text-sm mb-4">
+                            Open Stripe billing portal to manage payment method or cancel your subscription anytime.
+                        </p>
+                        <button
+                            onClick={async () => {
+                                setBillingError("");
+                                setBillingLoading(true);
+                                const err = await manageBilling();
+                                if (err) setBillingError(err);
+                                setBillingLoading(false);
+                            }}
+                            disabled={billingLoading}
+                            className="px-5 py-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-60 text-white font-medium rounded-xl transition border border-white/10 text-sm"
+                        >
+                            {billingLoading ? "Opening..." : "Manage Billing"}
+                        </button>
+                        {billingError && <p className="mt-3 text-sm text-red-400">{billingError}</p>}
+                    </div>
 
                     <button onClick={signOut}
                         className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-medium rounded-xl transition border border-red-500/20">
@@ -485,7 +728,11 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, role, checkout, checkoutDemo, demoComingSoon } = useContext(AuthContext);
+    const {
+        session, role, billingActive, checkout, checkoutDemo, demoComingSoon,
+        requiresTopup, topupPacks, checkoutTopup, creditsTotalRemaining,
+        publicPlanLimits, publicPlanFeatures, publicPlanPrices,
+    } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const realShortLinks = [
         "https://youtube.com/shorts/36-AAocHhg0?feature=share",
@@ -499,10 +746,61 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
         { title: 'Motivation', desc: 'Powerful life advice with epic cinematic landscapes. Screenshot-worthy.', icon: '🔥', color: 'from-amber-600 to-amber-800' },
     ];
     const comingSoonTemplates = ['Objects Explain', 'Would You Rather', 'Scary Stories', 'Historical Epic', 'Argument Debate', 'What If', 'Business', 'Finance', 'Tech', 'Crypto'];
+    const getPlanLimit = (name: string): PlanLimit => publicPlanLimits[name] || {};
+    const getPlanPrice = (name: string, fallback: number): number => {
+        const raw = publicPlanPrices[name];
+        return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+    };
+    const featureLabel = (f: string): string => ({
+        micro_escalation_lite: 'Micro-escalation Lite',
+        micro_escalation_plus: 'Micro-escalation Plus',
+        micro_escalation_pro: 'Micro-escalation Pro',
+        smart_transition_pack: 'Smart transition pack',
+        cinematic_transition_pack: 'Cinematic transition pack',
+        balanced_sfx_mix: 'Balanced SFX mix',
+        enhanced_sfx_mix: 'Enhanced audio mix (rolling out)',
+        pro_sfx_stack: 'Pro audio stack (rolling out)',
+        prompt_polish_booster: 'Prompt polish booster',
+        style_consistency_lock: 'Style consistency lock',
+        early_access_feature_waves: 'Early-access feature waves',
+        elite_priority_lane: 'Elite priority lane',
+    }[f] || f.replace(/_/g, ' '));
 
     return (
         <>
             <NavBar onNavigate={onNavigate} />
+            {session && !billingActive && !isAdmin && (
+                <section className="pt-24 pb-4">
+                    <div className="max-w-5xl mx-auto px-6">
+                        <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                            <div className="font-semibold mb-1">Choose a plan to continue</div>
+                            <div>Your account is active, but generation is locked until payment is active.</div>
+                            <div className="mt-1">Next steps: verify your email, sign in, then pick Starter, Creator, or Pro below.</div>
+                        </div>
+                    </div>
+                </section>
+            )}
+            {session && billingActive && !isAdmin && requiresTopup && (
+                <section className="pt-24 pb-4">
+                    <div className="max-w-5xl mx-auto px-6">
+                        <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
+                            <div className="font-semibold mb-1">Monthly credits used up</div>
+                            <div className="mb-2">You have {creditsTotalRemaining} credits left. Buy a top-up pack to keep generating today.</div>
+                            <div className="flex flex-wrap gap-2">
+                                {topupPacks.map((pack) => (
+                                    <button
+                                        key={pack.price_id}
+                                        onClick={() => { checkoutTopup(pack.price_id); }}
+                                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium transition"
+                                    >
+                                        {pack.credits} credits • ${pack.price_usd.toFixed(2)}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            )}
 
             {/* HERO */}
             <section className="relative pt-32 pb-24 overflow-hidden">
@@ -523,7 +821,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     </h1>
 
                     <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-                        Real 3D animated scenes. Premium AI voiceovers in 19 languages. 1080p output.
+                        Real 3D animated scenes. Premium AI voiceovers in 19 languages. 720p animation-first output.
                         Type a topic, pick a style, and get a scroll-stopping short in minutes.
                     </p>
 
@@ -559,6 +857,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <img src="/social-proof.png" alt="YouTube Studio analytics showing 42.3K views, 155 subscribers, 75.4% average watch percentage from NYPTID Studio generated content" className="w-full" />
                         </div>
                         <p className="text-xs text-gray-600 mt-3 text-center">155 subscribers. 42.3K views. 75.4% average watch. All from AI-generated shorts.</p>
+                        <p className="text-xs text-gray-600 mt-1 text-center">Distribution today: YouTube Shorts export workflow. Direct posting to TikTok/Instagram is still marked Coming Soon.</p>
                     </div>
                 </div>
             </section>
@@ -647,7 +946,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 
             {/* HOW IT WORKS */}
             <section className="py-24 border-t border-white/5">
-                <div className="max-w-5xl mx-auto px-6">
+                <div className="max-w-[1600px] mx-auto px-4 sm:px-6">
                     <div className="text-center mb-16">
                         <h2 className="text-4xl font-bold mb-4">How It Works</h2>
                         <p className="text-gray-400 text-lg">From idea to viral short in 3 steps</p>
@@ -681,7 +980,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
                             <div className="flex items-center gap-3 mb-6">
                                 <div className="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center text-sm font-bold text-red-400">X</div>
-                                <h3 className="text-lg font-bold text-gray-400">Other Platforms</h3>
+                                <h3 className="text-lg font-bold text-gray-400">Typical Faceless Tools (WOXO, AutoShorts, etc.)</h3>
                             </div>
                             <ul className="space-y-3">
                                 {[
@@ -706,9 +1005,9 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <ul className="space-y-3">
                                 {[
                                     'Real 3D rendered scenes -- not slideshows',
-                                    'Flat monthly pricing -- no credit anxiety',
+                                    'Transparent monthly pricing with explicit generation credits',
                                     'Dedicated GPU infrastructure -- consistently fast',
-                                    'Up to 1080p output with AI upscaling',
+                                    '720p output tuned for animation reliability',
                                     '19 languages including Hindi, Spanish, Japanese',
                                 ].map((item, i) => (
                                     <li key={i} className="flex items-start gap-2 text-sm text-gray-300">
@@ -742,9 +1041,9 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <div className="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center mb-5">
                                 <Monitor className="w-6 h-6 text-amber-400" />
                             </div>
-                            <h3 className="text-xl font-bold mb-3">Up to 1080p Output</h3>
+                            <h3 className="text-xl font-bold mb-3">Reliable 720p Output</h3>
                             <p className="text-gray-500 leading-relaxed">
-                                Generate at native SDXL resolution with AI upscaling to full 1080p. Crisp, professional shorts that stand out in any feed.
+                                Generate with a 720p animation pipeline tuned for speed, consistency, and stable renders under load.
                             </p>
                         </div>
                     </div>
@@ -829,19 +1128,30 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="text-center mb-16">
                         <h2 className="text-4xl font-bold mb-4">Simple, Honest Pricing</h2>
                         <p className="text-gray-400 text-lg">Choose the plan that fits your output needs. Upgrade anytime as you scale.</p>
+                        <p className="text-gray-500 text-xs mt-2">Plan limits and capabilities are synced from live backend config.</p>
+                        <p className="text-gray-500 text-xs mt-1">Credits are the enforceable unit. 1 completed render currently consumes 1 credit.</p>
+                        <p className="text-gray-500 text-xs mt-1">Limits are intentionally set for sustainable quality delivery at each plan tier.</p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4 items-stretch">
                         {/* STARTER */}
                         <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
                             <h3 className="text-lg font-bold mb-1">Starter</h3>
                             <p className="text-gray-500 text-xs mb-5">Getting started</p>
                             <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">$14</span>
+                                <span className="text-3xl font-extrabold">${getPlanPrice('starter', 14)}</span>
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['50 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '60s per video', '720p output', 'Standard speed'].map((f, i) => (
+                                {[
+                                    `${getPlanLimit('starter').videos_per_month || 50} generation credits/month`,
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('starter').max_duration_sec || 60) / 60))} min per video`,
+                                    `${getPlanLimit('starter').max_resolution || '720p'} output`,
+                                    ...(publicPlanFeatures.starter || ['micro_escalation_lite', 'smart_transition_pack']).map(featureLabel),
+                                    'Standard speed',
+                                ].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -861,11 +1171,20 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <h3 className="text-lg font-bold mb-1">Creator</h3>
                             <p className="text-gray-500 text-xs mb-5">For serious creators</p>
                             <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">$24</span>
+                                <span className="text-3xl font-extrabold">${getPlanPrice('creator', 24)}</span>
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['150 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '3 min per video', '1080p output', 'Priority speed', 'Clone viral shorts (Coming Soon)'].map((f, i) => (
+                                {[
+                                    `${getPlanLimit('creator').videos_per_month || 90} generation credits/month`,
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('creator').max_duration_sec || 180) / 60))} min per video`,
+                                    `${getPlanLimit('creator').max_resolution || '720p'} output (high reliability)`,
+                                    ...(publicPlanFeatures.creator || ['micro_escalation_plus', 'smart_transition_pack', 'enhanced_sfx_mix']).map(featureLabel),
+                                    (getPlanLimit('creator').can_clone ? 'Clone feature included' : 'Clone feature locked'),
+                                    (getPlanLimit('creator').priority ? 'Priority speed' : 'Standard speed'),
+                                ].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-300">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -882,11 +1201,21 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <h3 className="text-lg font-bold mb-1">Pro</h3>
                             <p className="text-gray-500 text-xs mb-5">Agencies &amp; power users</p>
                             <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">$39</span>
+                                <span className="text-3xl font-extrabold">${getPlanPrice('pro', 39)}</span>
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
-                                {['300 videos/month', '3 live templates (Skeleton AI, AI Stories, Motivation)', 'Additional templates marked Coming Soon', '5 min per video', '1080p output', 'Max priority speed', 'Clone viral shorts (Coming Soon)', 'Priority support'].map((f, i) => (
+                                {[
+                                    `${getPlanLimit('pro').videos_per_month || 150} generation credits/month`,
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('pro').max_duration_sec || 300) / 60))} min per video`,
+                                    `${getPlanLimit('pro').max_resolution || '720p'} output (optimized animation)`,
+                                    ...(publicPlanFeatures.pro || ['micro_escalation_pro', 'cinematic_transition_pack', 'enhanced_sfx_mix', 'style_consistency_lock']).map(featureLabel),
+                                    (getPlanLimit('pro').can_clone ? 'Clone feature included' : 'Clone feature locked'),
+                                    (getPlanLimit('pro').priority ? 'Max priority speed' : 'Standard speed'),
+                                    'Priority support',
+                                ].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
                                     </li>
@@ -898,6 +1227,37 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </button>
                         </div>
 
+                        {/* STUDIO ELITE */}
+                        <div className="relative p-6 rounded-2xl bg-gradient-to-b from-rose-500/[0.08] to-white/[0.02] border-2 border-rose-400/35 shadow-xl shadow-rose-500/10">
+                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-rose-400 text-black text-[10px] font-bold rounded-full tracking-wide">
+                                COMING SOON
+                            </span>
+                            <h3 className="text-lg font-bold mb-1">Studio Elite</h3>
+                            <p className="text-gray-400 text-xs mb-5">Premium creator lane</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('elite', 300)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    `${getPlanLimit('elite').videos_per_month || 350} generation credits/month`,
+                                    `Up to ${Math.max(1, Math.round(Number(getPlanLimit('elite').max_duration_sec || 420) / 60))} min per video`,
+                                    `${getPlanLimit('elite').max_resolution || '720p'} output (highest reliability)`,
+                                    ...(publicPlanFeatures.elite || ['elite_priority_lane', 'early_access_feature_waves', 'micro_escalation_pro', 'cinematic_transition_pack', 'enhanced_sfx_mix']).map(featureLabel),
+                                    '$100 / $300 / $500 top-up lanes',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-200">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-rose-300 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <button
+                                disabled
+                                className="w-full py-2.5 rounded-lg bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed text-sm font-bold">
+                                Pricing ID Pending
+                            </button>
+                        </div>
+
                         {/* DEMO PRO */}
                         <div className="relative p-6 rounded-2xl bg-gradient-to-b from-amber-500/[0.06] to-white/[0.02] border-2 border-amber-500/30 shadow-xl shadow-amber-500/5">
                             <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-amber-500 text-black text-[10px] font-bold rounded-full tracking-wide">
@@ -906,7 +1266,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <h3 className="text-lg font-bold mb-1">Demo Pro</h3>
                             <p className="text-gray-500 text-xs mb-5">Product demos, not YouTube</p>
                             <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">$150</span>
+                                <span className="text-3xl font-extrabold">${getPlanPrice('demo_pro', 150)}</span>
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
@@ -951,6 +1311,12 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <span className="font-bold">NYPTID Studio</span>
                         <span className="text-gray-600 text-sm ml-2">by NYPTID Industries</span>
                     </div>
+                    <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
+                        <a href="/skeleton-ai-video-generator.html" className="text-gray-500 hover:text-white transition-colors">Skeleton AI</a>
+                        <a href="/ai-story-video-generator.html" className="text-gray-500 hover:text-white transition-colors">AI Stories</a>
+                        <a href="/motivation-video-maker.html" className="text-gray-500 hover:text-white transition-colors">Motivation</a>
+                        <a href="/runpod-ai-video-workflow.html" className="text-gray-500 hover:text-white transition-colors">RunPod Workflow</a>
+                    </div>
                     <p className="text-gray-600 text-sm">&copy; 2026 NYPTID Industries. All rights reserved.</p>
                 </div>
             </footer>
@@ -963,13 +1329,18 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, plan, role } = useContext(AuthContext);
+    const { session, plan, role, billingActive } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [tab, setTab] = useState<'create' | 'clone' | 'thumbnails' | 'demo' | 'analytics'>('create');
 
     useEffect(() => {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
+    useEffect(() => {
+        if (!session) return;
+        if (isAdmin) return;
+        if (!billingActive) onNavigate('landing');
+    }, [session, isAdmin, billingActive, onNavigate]);
     useEffect(() => {
         if (CLONE_COMING_SOON && tab === 'clone') setTab('create');
     }, [tab]);
@@ -1021,7 +1392,7 @@ function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                 Clone
                                 {CLONE_COMING_SOON ? (
                                     <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 rounded">Soon</span>
-                                ) : plan !== 'creator' && plan !== 'pro' ? (
+                                ) : plan !== 'creator' && plan !== 'pro' && plan !== 'elite' ? (
                                     <Lock className="w-3 h-3 text-gray-500" />
                                 ) : null}
                             </button>
@@ -1095,14 +1466,19 @@ interface CreatePanelPersistedState {
     selectedTemplate: string;
     resolution: '720p' | '1080p';
     language: string;
-    creativeMode: 'auto' | 'creative';
+    creativeMode: 'auto' | 'creative' | 'script_to_short';
     creativeStep: 'topic' | 'edit' | 'generating';
     prompt: string;
     sessionId: string | null;
     creativeScenes: CreativeScene[];
     creativeTitle: string;
     creativeNarration: string;
+    creativeReferenceLockMode?: 'strict' | 'inspired';
     storyAnimationEnabled?: boolean;
+    storyVoiceId?: string;
+    storyVoiceSpeed?: number;
+    storyPacingMode?: 'standard' | 'fast' | 'very_fast';
+    artStyle?: string;
     jobId: string | null;
     ts: number;
 }
@@ -1125,11 +1501,15 @@ interface ProjectRow {
     story_animation_enabled?: boolean;
     scenes?: CreativeScene[];
     narration?: string;
+    voice_id?: string;
+    voice_speed?: number;
+    pacing_mode?: 'standard' | 'fast' | 'very_fast';
+    art_style?: string;
     error?: string;
 }
 
 function CreatePanel() {
-    const { session, plan, role } = useContext(AuthContext);
+    const { session, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
     const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
@@ -1139,7 +1519,7 @@ function CreatePanel() {
     const [loading, setLoading] = useState(false);
     const [language, setLanguage] = useState('en');
     const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
-    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative'>('auto');
+    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative' | 'script_to_short'>('auto');
     const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
@@ -1151,7 +1531,25 @@ function CreatePanel() {
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
+    const [creativeReferenceLockMode, setCreativeReferenceLockMode] = useState<'strict' | 'inspired'>('strict');
     const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
+    const [storyVoiceId, setStoryVoiceId] = useState("");
+    const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
+    const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
+    const [artStyle, setArtStyle] = useState('auto');
+    const [storyVoices, setStoryVoices] = useState<any[]>([]);
+    const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
+    const [storyPreviewLoading, setStoryPreviewLoading] = useState(false);
+    const [storyVoicesSource, setStoryVoicesSource] = useState<'unknown' | 'elevenlabs' | 'fallback'>('unknown');
+    const [storyVoicesWarning, setStoryVoicesWarning] = useState('');
+    const [sceneBuildLoading, setSceneBuildLoading] = useState(false);
+    const [sceneBuildError, setSceneBuildError] = useState<string | null>(null);
+    const [scriptScenesReady, setScriptScenesReady] = useState(false);
+    const [imageBatchSize, setImageBatchSize] = useState<3 | 5 | 8 | 15>(3);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+    const [bulkImageGenRunning, setBulkImageGenRunning] = useState(false);
+    const [bulkImageGenDone, setBulkImageGenDone] = useState(0);
+    const [bulkImageGenTotal, setBulkImageGenTotal] = useState(0);
     const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
     const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
     const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
@@ -1159,6 +1557,7 @@ function CreatePanel() {
     const [finalizeError, setFinalizeError] = useState<string | null>(null);
     const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
     const restoreDoneRef = useRef(false);
+    const hydratedSceneImagesSessionRef = useRef<string | null>(null);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
 
     useEffect(() => {
@@ -1173,7 +1572,8 @@ function CreatePanel() {
         })();
     }, []);
 
-    const canUse1080p = plan === 'creator' || plan === 'pro';
+    // 1080p is now enabled by default; backend still enforces plan/env caps.
+    const canUse1080p = true;
 
     const templates = [
         { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
@@ -1190,6 +1590,14 @@ function CreatePanel() {
         { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
         { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
     ];
+    const artStyleOptions = [
+        { id: 'auto', label: 'Auto (Model Best)', desc: 'Uses template-optimized style defaults.' },
+        { id: 'cinematic_realism', label: 'Cinematic Realism', desc: 'Photoreal cinematic look.' },
+        { id: 'commercial_polish', label: 'Commercial Polish', desc: 'Premium ad-style clarity.' },
+        { id: 'moody_noir', label: 'Moody Noir', desc: 'Dramatic low-key cinematic tone.' },
+        { id: 'bright_lifestyle', label: 'Bright Lifestyle', desc: 'Clean bright modern aesthetic.' },
+    ];
+    const supportsArtStyle = selectedTemplate !== 'skeleton';
     const templateIds = new Set(templates.map(t => t.id));
     useEffect(() => {
         if (!templateIds.has(selectedTemplate)) {
@@ -1201,12 +1609,28 @@ function CreatePanel() {
             setStoryAnimationEnabled(true);
         }
     }, [selectedTemplate, storyAnimationEnabled]);
+    useEffect(() => {
+        if (creativeMode !== 'script_to_short') {
+            setSceneBuildLoading(false);
+            setSceneBuildError(null);
+            setScriptScenesReady(false);
+            setBulkImageGenRunning(false);
+            setBulkImageGenDone(0);
+            setBulkImageGenTotal(0);
+        }
+    }, [creativeMode]);
 
     const authHeaders = (): Record<string, string> => {
         const h: Record<string, string> = { "Content-Type": "application/json" };
         if (session) h["Authorization"] = `Bearer ${session.access_token}`;
         return h;
     };
+    const fileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => reject(new Error("Failed to read reference image"));
+        reader.readAsDataURL(file);
+    });
 
     useEffect(() => {
         if (!jobId) return;
@@ -1235,14 +1659,35 @@ function CreatePanel() {
             if (saved.selectedTemplate) setSelectedTemplate(saved.selectedTemplate);
             if (saved.resolution === '720p' || saved.resolution === '1080p') setResolution(saved.resolution);
             if (typeof saved.language === 'string' && saved.language) setLanguage(saved.language);
-            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative') setCreativeMode(saved.creativeMode);
+            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative' || saved.creativeMode === 'script_to_short') setCreativeMode(saved.creativeMode);
             if (saved.creativeStep === 'topic' || saved.creativeStep === 'edit' || saved.creativeStep === 'generating') setCreativeStep(saved.creativeStep);
             if (typeof saved.prompt === 'string') setPrompt(saved.prompt);
             if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null);
-            if (Array.isArray(saved.creativeScenes)) setCreativeScenes(saved.creativeScenes);
+            if (Array.isArray(saved.creativeScenes)) {
+                setCreativeScenes(
+                    saved.creativeScenes.map((s: any) => ({
+                        ...s,
+                        // Keep heavy base64 payloads on backend storage; hydrate on demand after restore.
+                        imageData: (typeof s?.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s?.imageData,
+                    }))
+                );
+            }
             if (typeof saved.creativeTitle === 'string') setCreativeTitle(saved.creativeTitle);
             if (typeof saved.creativeNarration === 'string') setCreativeNarration(saved.creativeNarration);
+            if (saved.creativeReferenceLockMode === 'strict' || saved.creativeReferenceLockMode === 'inspired') {
+                setCreativeReferenceLockMode(saved.creativeReferenceLockMode);
+            }
             if (typeof saved.storyAnimationEnabled === 'boolean') setStoryAnimationEnabled(saved.storyAnimationEnabled);
+            if (typeof saved.storyVoiceId === 'string') setStoryVoiceId(saved.storyVoiceId);
+            if (typeof saved.storyVoiceSpeed === 'number' && Number.isFinite(saved.storyVoiceSpeed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, saved.storyVoiceSpeed)));
+            }
+            if (saved.storyPacingMode === 'standard' || saved.storyPacingMode === 'fast' || saved.storyPacingMode === 'very_fast') {
+                setStoryPacingMode(saved.storyPacingMode);
+            }
+            if (typeof saved.artStyle === 'string' && saved.artStyle) {
+                setArtStyle(saved.artStyle);
+            }
             if (typeof saved.jobId === 'string' && saved.jobId) {
                 setJobId(saved.jobId);
                 setLoading(true);
@@ -1260,7 +1705,8 @@ function CreatePanel() {
             narration: s.narration,
             visual_description: s.visual_description,
             duration_sec: s.duration_sec,
-            imageData: s.imageData,
+            // Avoid persisting large base64 image payloads to localStorage.
+            imageData: (typeof s.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s.imageData,
             generation_id: s.generation_id,
             imageError: s.imageError,
             imageLoading: s.imageLoading,
@@ -1276,7 +1722,12 @@ function CreatePanel() {
             creativeScenes: safeScenes,
             creativeTitle,
             creativeNarration,
+            creativeReferenceLockMode,
             storyAnimationEnabled,
+            storyVoiceId,
+            storyVoiceSpeed,
+            storyPacingMode,
+            artStyle,
             jobId,
             ts: Date.now(),
         };
@@ -1298,13 +1749,18 @@ function CreatePanel() {
         creativeScenes,
         creativeTitle,
         creativeNarration,
+        creativeReferenceLockMode,
         storyAnimationEnabled,
+        storyVoiceId,
+        storyVoiceSpeed,
+        storyPacingMode,
+        artStyle,
         jobId,
     ]);
 
     useEffect(() => {
         if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
-        if (!sessionId || creativeMode !== 'creative' || !session) return;
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
         let cancelled = false;
         (async () => {
             try {
@@ -1315,6 +1771,12 @@ function CreatePanel() {
                 const data = await res.json();
                 if (cancelled) return;
                 setCreativeReferenceAttached(Boolean(data?.has_reference_image));
+                if (data?.reference_lock_mode === 'strict' || data?.reference_lock_mode === 'inspired') {
+                    setCreativeReferenceLockMode(data.reference_lock_mode);
+                }
+                if (typeof data?.art_style === 'string' && data.art_style) {
+                    setArtStyle(data.art_style);
+                }
                 if (data?.has_reference_image && !creativeReferenceImage) {
                     setCreativeReferenceStatus('ready');
                 }
@@ -1324,6 +1786,42 @@ function CreatePanel() {
         })();
         return () => { cancelled = true; };
     }, [sessionId, creativeMode, session, creativeReferenceImage]);
+
+    useEffect(() => {
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
+        if (hydratedSceneImagesSessionRef.current === sessionId) return;
+        if (!creativeScenes.some((s) => !s.imageData && !!s.generation_id)) return;
+        hydratedSceneImagesSessionRef.current = sessionId;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/scene-images`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (cancelled) return;
+                const byIndex = new Map<number, string>();
+                for (const item of (data?.scene_images || [])) {
+                    if (typeof item?.scene_index === 'number' && typeof item?.image_data === 'string') {
+                        byIndex.set(item.scene_index, item.image_data);
+                    }
+                }
+                if (byIndex.size === 0) return;
+                setCreativeScenes((prev) =>
+                    prev.map((scene) => {
+                        if (scene.imageData) return scene;
+                        const hydrated = byIndex.get(scene.index);
+                        return hydrated ? { ...scene, imageData: hydrated } : scene;
+                    })
+                );
+            } catch {
+                // silent hydrate failure; user can still regenerate per-scene
+                hydratedSceneImagesSessionRef.current = null;
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeScenes]);
 
     const loadProjects = useCallback(async () => {
         if (!session) return;
@@ -1349,16 +1847,87 @@ function CreatePanel() {
         loadProjects();
     }, [createSubTab, loadProjects]);
 
+    useEffect(() => {
+        if (selectedTemplate !== 'story') return;
+        if (!session) return;
+        let cancelled = false;
+        const run = async () => {
+            setStoryVoicesLoading(true);
+            try {
+                const res = await fetch(`${API}/api/voices`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!cancelled) {
+                    const voices = Array.isArray(data?.voices) ? data.voices : [];
+                    setStoryVoices(voices);
+                    setStoryVoicesSource(data?.source === 'elevenlabs' ? 'elevenlabs' : (data?.source === 'fallback' ? 'fallback' : 'unknown'));
+                    setStoryVoicesWarning(String(data?.warning || ""));
+                    if (!storyVoiceId && voices.length > 0) {
+                        setStoryVoiceId(String(voices[0].voice_id || ""));
+                    }
+                }
+            } catch {
+                if (!cancelled) {
+                    setStoryVoices([]);
+                    setStoryVoicesSource('unknown');
+                    setStoryVoicesWarning("Voice catalog unavailable right now.");
+                }
+            } finally {
+                if (!cancelled) setStoryVoicesLoading(false);
+            }
+        };
+        void run();
+        return () => { cancelled = true; };
+    }, [selectedTemplate, session, storyVoiceId]);
+
+    const previewStoryVoice = async () => {
+        if (!session || !storyVoiceId || storyPreviewLoading) return;
+        setStoryPreviewLoading(true);
+        try {
+            const res = await fetch(`${API}/api/voices/preview`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ voice_id: storyVoiceId }),
+            });
+            if (!res.ok) throw new Error("Preview failed");
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => URL.revokeObjectURL(url);
+            void audio.play();
+        } catch {
+            alert("Voice preview failed");
+        } finally {
+            setStoryPreviewLoading(false);
+        }
+    };
+
     const handleGenerate = async () => {
         if (!prompt) return;
         if (creativeMode === 'creative') {
             await handleCreativeStart();
             return;
         }
+        if (creativeMode === 'script_to_short') {
+            await handleScriptToShortStart();
+            return;
+        }
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
+        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
+        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
         try {
+            let referenceImageDataUrl = "";
+            if (creativeReferenceImage) {
+                referenceImageDataUrl = await fileToDataUrl(creativeReferenceImage);
+            }
             const res = await fetch(`${GENERATION_API}/api/generate`, {
                 method: "POST",
                 headers: authHeaders(),
@@ -1368,6 +1937,16 @@ function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                     mode: 'auto',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    reference_image_url: referenceImageDataUrl,
+                    reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
             const data = await res.json();
@@ -1379,6 +1958,7 @@ function CreatePanel() {
     const handleRegenerateAutoScene = async (sceneIndex: number) => {
         const targetJobId = jobId || jobStatus?.job_id;
         if (!targetJobId) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
         setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
         try {
             const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
@@ -1387,6 +1967,7 @@ function CreatePanel() {
                 body: JSON.stringify({
                     job_id: targetJobId,
                     scene_index: sceneIndex,
+                    mint_mode: mintMode,
                 }),
             });
             const data = await res.json().catch(() => null);
@@ -1410,7 +1991,110 @@ function CreatePanel() {
         }
     };
 
+    const handleScriptToShortStart = async () => {
+        const scriptText = prompt.trim();
+        if (!scriptText) return;
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("Script to Short");
+        setCreativeNarration(scriptText);
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        setCreativeStep('edit');
+    };
+
+    const handleGenerateScriptToShortScenes = async () => {
+        const scriptText = (creativeMode === 'script_to_short'
+            ? creativeNarration.trim()
+            : (prompt.trim() || creativeNarration.trim())
+        );
+        if (!scriptText) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
+        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
+        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
+        setSceneBuildLoading(true);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/script`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt: scriptText,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: generationMode,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                }),
+            });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(errText || "Failed to start Script to Short");
+            }
+            const data = await res.json();
+            setSessionId(data.session_id);
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(errText || "Failed to upload reference style image");
+                }
+                setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
+            }
+            const generatedScenes: CreativeScene[] = (data.scenes || []).map((s: any, i: number) => ({
+                index: i,
+                narration: String(s?.narration || ""),
+                visual_description: String(s?.visual_description || ""),
+                duration_sec: Number(s?.duration_sec || 5),
+            }));
+            setCreativeScenes(generatedScenes.length > 0 ? generatedScenes : [{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                duration_sec: 5,
+            }]);
+            setCreativeTitle(data.title || (creativeMode === 'script_to_short' ? "Script to Short" : (prompt || "Creative Draft")));
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(scriptText);
+            }
+            setScriptScenesReady(generatedScenes.length > 0);
+        } catch (e: any) {
+            setSceneBuildError(e?.message || "Failed to generate scenes");
+        } finally {
+            setSceneBuildLoading(false);
+        }
+    };
+
     const handleCreativeStart = async () => {
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
+        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
+        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
         setScriptLoading(true);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
@@ -1423,6 +2107,15 @@ function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                     story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
             if (!res.ok) throw new Error("Failed to create session");
@@ -1433,6 +2126,7 @@ function CreatePanel() {
                 const uploadForm = new FormData();
                 uploadForm.append("session_id", data.session_id);
                 uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
                 const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
                     method: "POST",
                     headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
@@ -1447,12 +2141,16 @@ function CreatePanel() {
             }
 
             setCreativeTitle(prompt || "Untitled Short");
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(prompt || "");
+            }
             setCreativeScenes([{
                 index: 0,
                 narration: "",
                 visual_description: "",
                 duration_sec: 5,
             }]);
+            setScriptScenesReady(false);
             setCreativeStep('edit');
         } catch (e: any) {
             setCreativeReferenceStatus(creativeReferenceImage ? 'error' : 'idle');
@@ -1482,6 +2180,10 @@ function CreatePanel() {
         if (sceneIndex >= currentScenes.length || !currentScenes[sceneIndex]) return;
         const scene = currentScenes[sceneIndex];
         if (!scene.visual_description.trim()) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
+        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
+        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
         setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
@@ -1493,6 +2195,12 @@ function CreatePanel() {
                     session_id: sessionId,
                     template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
             if (!res.ok) {
@@ -1513,10 +2221,41 @@ function CreatePanel() {
         }
     };
 
+    const handleGenerateSceneImageBatch = async () => {
+        if (!sessionId) return;
+        const scenes = creativeScenesRef.current;
+        const allTargets = scenes
+            .map((scene, idx) => ({ scene, idx }))
+            .filter(({ scene }) => !!scene.visual_description.trim());
+        if (allTargets.length === 0) return;
+        const pendingTargets = allTargets.filter(({ scene }) => !scene.imageData);
+        const candidatePool = pendingTargets.length > 0 ? pendingTargets : allTargets;
+        const batchLimit = Math.max(3, Number(imageBatchSize || 3));
+        const targets = candidatePool.slice(0, batchLimit);
+        if (targets.length === 0) return;
+        setBulkImageGenRunning(true);
+        setBulkImageGenTotal(targets.length);
+        setBulkImageGenDone(0);
+        try {
+            for (const { idx } of targets) {
+                await handleGenerateSceneImage(idx);
+                setBulkImageGenDone((prev) => prev + 1);
+            }
+        } finally {
+            setBulkImageGenRunning(false);
+        }
+    };
+
     const handleUpdateScene = (index: number, field: keyof CreativeScene, value: string | number) => {
         setCreativeScenes(prev => prev.map((s, i) =>
             i === index ? { ...s, [field]: value } : s
         ));
+    };
+
+    const summarizeSceneError = (message?: string) => {
+        const text = String(message || "").trim();
+        if (!text) return "Image generation failed";
+        return text.length > 260 ? `${text.slice(0, 260)}...` : text;
     };
 
     const handleFinalize = async () => {
@@ -1533,6 +2272,10 @@ function CreatePanel() {
         setJobStatus(null);
         setJobId(null);
         setCreativeStep('generating');
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
+        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
+        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
                 method: "POST",
@@ -1543,6 +2286,16 @@ function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                     story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    subtitles_enabled: selectedTemplate === 'story' ? subtitlesEnabled : true,
+                    reference_lock_mode: creativeReferenceLockMode,
                     narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
                         narration: "",
@@ -1580,8 +2333,14 @@ function CreatePanel() {
         setCreativeScenes([]);
         setCreativeTitle("");
         setCreativeNarration("");
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
         setCreativeReferenceStatus(creativeReferenceImage ? 'ready' : 'idle');
         setCreativeReferenceAttached(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
         setJobId(null);
         setJobStatus(null);
         setLoading(false);
@@ -1608,13 +2367,28 @@ function CreatePanel() {
             } else {
                 setStoryAnimationEnabled(true);
             }
-            setCreativeMode(p.mode === 'creative' ? 'creative' : 'auto');
-            if (p.mode === 'creative') {
+            setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : (p.mode === 'creative' ? 'creative' : 'auto'));
+            if (typeof p.voice_id === 'string') setStoryVoiceId(p.voice_id);
+            if (typeof p.voice_speed === 'number' && Number.isFinite(p.voice_speed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, p.voice_speed)));
+            }
+            if (p.pacing_mode === 'standard' || p.pacing_mode === 'fast' || p.pacing_mode === 'very_fast') {
+                setStoryPacingMode(p.pacing_mode);
+            }
+            if (typeof p.art_style === 'string' && p.art_style) {
+                setArtStyle(p.art_style);
+            } else {
+                setArtStyle('auto');
+            }
+            if (p.mode === 'creative' || p.mode === 'script_to_short') {
                 setCreativeStep('edit');
                 setSessionId(p.session_id || null);
+                setSceneBuildLoading(false);
                 setCreativeScenes(Array.isArray(p.scenes) && p.scenes.length > 0 ? p.scenes : [{ index: 0, narration: "", visual_description: "", duration_sec: 5 }]);
                 setCreativeTitle(p.title || p.topic || 'Untitled Short');
                 setCreativeNarration(p.narration || "");
+                setScriptScenesReady(Boolean((p.session_id || "").trim()) && Array.isArray(p.scenes) && p.scenes.length > 0);
+                setSceneBuildError(null);
             } else if (p.job_id) {
                 setJobId(p.job_id);
                 setLoading(true);
@@ -1624,8 +2398,13 @@ function CreatePanel() {
         }
     };
 
-    if (creativeMode === 'creative' && creativeStep === 'edit') {
+    if ((creativeMode === 'creative' || creativeMode === 'script_to_short') && creativeStep === 'edit') {
     const hasNarration = creativeNarration.trim().length > 0;
+    const promptScenes = creativeScenes.filter((s) => !!s.visual_description.trim());
+    const promptSceneCount = promptScenes.length;
+    const imageReadyCount = promptScenes.filter((s) => !!s.imageData).length;
+    const allPromptedImagesReady = promptSceneCount > 0 && imageReadyCount === promptSceneCount;
+    const showGenerateScenes = creativeMode === 'creative' || creativeMode === 'script_to_short';
 
         return (
             <div className="max-w-4xl mx-auto px-6 pb-10 space-y-6">
@@ -1639,6 +2418,62 @@ function CreatePanel() {
                     </button>
                 </div>
 
+                {showGenerateScenes && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                        <p className="text-sm font-semibold text-amber-300">
+                            {creativeMode === 'script_to_short' ? 'Script to Short *IN PRE-ALPHA*' : 'Creative Scene Builder'}
+                        </p>
+                        <p className="text-xs text-amber-200/80 mt-1">Step 1: click Generate Scenes. Step 2: Generate Images in manual batches. No auto spending outside AUTO mode.</p>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <button
+                                onClick={handleGenerateScriptToShortScenes}
+                                disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
+                            >
+                                {sceneBuildLoading ? "Generating scenes..." : (scriptScenesReady ? "Regenerate Scenes" : "Generate Scenes")}
+                            </button>
+                            <select
+                                value={imageBatchSize}
+                                onChange={(e) => setImageBatchSize(Number(e.target.value) as 3 | 5 | 8 | 15)}
+                                className="bg-black/30 border border-white/[0.12] rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none"
+                                disabled={!sessionId || sceneBuildLoading || bulkImageGenRunning}
+                            >
+                                <option value={3}>Batch 3</option>
+                                <option value={5}>Batch 5</option>
+                                <option value={8}>Batch 8</option>
+                                <option value={15}>Batch 15</option>
+                            </select>
+                            <button
+                                onClick={handleGenerateSceneImageBatch}
+                                disabled={bulkImageGenRunning || !sessionId || sceneBuildLoading || promptSceneCount === 0}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white transition"
+                            >
+                                {bulkImageGenRunning ? "Generating images..." : "Generate Images"}
+                            </button>
+                            {!sessionId && (
+                                <p className="text-xs text-amber-100/90">Generate scenes first.</p>
+                            )}
+                            {(bulkImageGenRunning || bulkImageGenTotal > 0) && (
+                                <p className="text-xs text-amber-100/90">
+                                    {bulkImageGenRunning
+                                        ? `Batch progress: ${bulkImageGenDone}/${bulkImageGenTotal}`
+                                        : `Images ready: ${imageReadyCount}/${promptSceneCount}`}
+                                </p>
+                            )}
+                            {sceneBuildError && (
+                                <p className="text-xs text-red-300">{sceneBuildError}</p>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {sceneBuildLoading && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-4 flex items-center gap-3">
+                        <Loader2 className="w-4 h-4 text-cyan-300 animate-spin" />
+                        <p className="text-sm text-cyan-100">Generating scenes from your script... this can take 10-30 seconds.</p>
+                    </div>
+                )}
+
                 <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-2">
                     <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Script / Narration (voiceover for the entire short)</label>
                     <textarea
@@ -1650,6 +2485,104 @@ function CreatePanel() {
                     />
                     <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
                 </div>
+
+                {supportsArtStyle && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <p className="text-sm font-semibold text-white">Art Style</p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => setArtStyle(style.id)}
+                                    className={`rounded-lg p-3 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{style.label}</p>
+                                    <p className="text-xs text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">Voice + Pacing (Pre-Render)</p>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <select
+                                value={storyVoiceId}
+                                onChange={(e) => setStoryVoiceId(e.target.value)}
+                                className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                            >
+                                {storyVoicesLoading ? (
+                                    <option value="">Loading voices...</option>
+                                ) : storyVoices.length > 0 ? (
+                                    storyVoices.map((v: any) => (
+                                        <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                            {String(v.name || v.voice_id || "Voice")}
+                                        </option>
+                                    ))
+                                ) : (
+                                    <option value="">Default voice</option>
+                                )}
+                            </select>
+                            {storyVoicesWarning ? (
+                                <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                            ) : storyVoicesSource === 'fallback' ? (
+                                <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                            ) : null}
+                            <input
+                                type="range"
+                                min={0.8}
+                                max={1.35}
+                                step={0.05}
+                                value={storyVoiceSpeed}
+                                onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                className="w-full accent-cyan-500"
+                            />
+                            <div className="grid grid-cols-3 gap-1">
+                                {[
+                                    { id: 'standard', label: 'Standard' },
+                                    { id: 'fast', label: 'Fast' },
+                                    { id: 'very_fast', label: 'Very Fast' },
+                                ].map((p) => (
+                                    <button
+                                        key={p.id}
+                                        type="button"
+                                        onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                        className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                            storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                        }`}
+                                    >
+                                        {p.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <label className="flex items-center gap-2 text-xs text-gray-300 md:justify-end">
+                                <input
+                                    type="checkbox"
+                                    checked={subtitlesEnabled}
+                                    onChange={(e) => setSubtitlesEnabled(e.target.checked)}
+                                    className="accent-cyan-500"
+                                />
+                                Burn subtitles
+                            </label>
+                        </div>
+                    </div>
+                )}
 
                 <div className="space-y-4">
                     {creativeScenes.map((scene, idx) => (
@@ -1693,7 +2626,7 @@ function CreatePanel() {
                                 <div className="flex items-center gap-3">
                                     <button
                                         onClick={() => handleGenerateSceneImage(idx)}
-                                        disabled={scene.imageLoading || !scene.visual_description.trim()}
+                                        disabled={scene.imageLoading || !scene.visual_description.trim() || !sessionId || sceneBuildLoading}
                                         className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2">
                                         {scene.imageLoading ? (
                                             <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
@@ -1710,7 +2643,12 @@ function CreatePanel() {
                                     )}
                                 </div>
                                 {scene.imageError && (
-                                    <p className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">Error: {scene.imageError}</p>
+                                    <p
+                                        className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2"
+                                        title={scene.imageError}
+                                    >
+                                        Error: {summarizeSceneError(scene.imageError)}
+                                    </p>
                                 )}
                                 {scene.imageData && (
                                     <img src={scene.imageData} alt={`Scene ${idx + 1}`} className="rounded-lg w-full max-h-48 object-contain bg-black/40" />
@@ -1732,19 +2670,56 @@ function CreatePanel() {
                     </div>
                 )}
 
-                <button
-                    onClick={handleFinalize}
-                    disabled={loading || !hasNarration}
-                    className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
-                    {loading ? (
-                        <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
-                    ) : (
-                        <><Film className="w-5 h-5" /> Animate &amp; Render Final Video</>
-                    )}
-                </button>
+                {!allPromptedImagesReady ? (
+                    <button
+                        onClick={handleGenerateSceneImageBatch}
+                        disabled={bulkImageGenRunning || sceneBuildLoading || !sessionId || promptSceneCount === 0}
+                        className="w-full py-4 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-cyan-600/20">
+                        {bulkImageGenRunning ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Generating images...</>
+                        ) : (
+                            <><Image className="w-5 h-5" /> Generate Images</>
+                        )}
+                    </button>
+                ) : (
+                    <button
+                        onClick={handleFinalize}
+                        disabled={loading || !hasNarration || !sessionId}
+                        className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
+                        {loading ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
+                        ) : (
+                            <><Film className="w-5 h-5" /> Animate &amp; Render Final Video</>
+                        )}
+                    </button>
+                )}
 
                 {!hasNarration && (
                     <p className="text-center text-sm text-gray-600">Write your script above to render.</p>
+                )}
+                {!sessionId && (
+                    <p className="text-center text-sm text-amber-300">Generate scenes first, then render.</p>
+                )}
+                {sessionId && promptSceneCount > 0 && !allPromptedImagesReady && (
+                    <p className="text-center text-sm text-cyan-300">Generate images for all scene prompts before rendering.</p>
+                )}
+
+                {bulkImageGenRunning && (
+                    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[1px] flex items-center justify-center px-6">
+                        <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-slate-950/95 p-6 text-center space-y-3">
+                            <div className="flex items-center justify-center gap-2 text-cyan-200">
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                <p className="font-semibold">Generating images in batch...</p>
+                            </div>
+                            <p className="text-sm text-cyan-100/90">{bulkImageGenDone}/{bulkImageGenTotal} complete</p>
+                            <div className="h-2 w-full bg-white/10 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-cyan-500 transition-all"
+                                    style={{ width: `${bulkImageGenTotal > 0 ? Math.min(100, (bulkImageGenDone / bulkImageGenTotal) * 100) : 0}%` }}
+                                />
+                            </div>
+                        </div>
+                    </div>
                 )}
 
                 {jobStatus && (
@@ -1910,7 +2885,7 @@ function CreatePanel() {
                 {/* MODE TOGGLE */}
                 <div>
                     <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Creation Mode</h2>
-                    <div className="flex gap-3">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <button onClick={() => !loading && setCreativeMode('auto')}
                             className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
                                 creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
@@ -1926,6 +2901,14 @@ function CreatePanel() {
                             <Sliders className="w-5 h-5 mx-auto mb-1 text-amber-400" />
                             <div className="text-sm font-bold">Creative Control</div>
                             <div className="text-xs text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('script_to_short')}
+                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                                creativeMode === 'script_to_short' ? 'border-cyan-500 bg-cyan-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Clapperboard className="w-5 h-5 mx-auto mb-1 text-cyan-400" />
+                            <div className="text-sm font-bold">Script to Short</div>
+                            <div className="text-xs text-cyan-300 mt-0.5">*IN PRE-ALPHA*</div>
                         </button>
                     </div>
                 </div>
@@ -1957,7 +2940,7 @@ function CreatePanel() {
                             )}
                             <div className="text-lg font-bold">1080p</div>
                             <div className="text-xs text-gray-500 mt-0.5">
-                                {canUse1080p ? 'Best quality' : 'Creator plan+'}
+                                {canUse1080p ? 'Best quality' : 'Temporarily unavailable'}
                             </div>
                         </button>
                     </div>
@@ -1987,36 +2970,97 @@ function CreatePanel() {
 
                 {/* PROMPT */}
                 <div>
-                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Topic</h2>
+                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+                        {creativeMode === 'script_to_short' ? 'Script Input' : 'Topic'}
+                    </h2>
                     <div className="relative">
-                        <input
-                            type="text"
-                            value={prompt}
-                            onChange={(e) => setPrompt(e.target.value)}
-                            disabled={loading || scriptLoading}
-                            placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
-                                : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
-                                : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
-                                : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
-                                : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
-                                : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
-                                : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
-                                : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
-                                : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
-                                : selectedTemplate === 'history' ? "e.g., The fall of the Roman Empire"
-                                : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
-                                : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
-                                : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
-                                : "Enter your video topic..."}
-                            className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
-                            onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
-                        />
+                        {creativeMode === 'script_to_short' ? (
+                            <textarea
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                rows={6}
+                                placeholder="Paste your full script here. Next step is manual: open editor, click Generate Scenes, then generate image batches."
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 text-sm resize-y"
+                            />
+                        ) : (
+                            <input
+                                type="text"
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
+                                    : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
+                                    : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
+                                    : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
+                                    : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
+                                    : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
+                                    : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
+                                    : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
+                                    : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
+                                    : selectedTemplate === 'history' ? "e.g., The fall of the Roman Empire"
+                                    : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
+                                    : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
+                                    : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
+                                    : "Enter your video topic..."}
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
+                                onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
+                            />
+                        )}
                     </div>
                 </div>
 
-                {creativeMode === 'creative' && (
+                {supportsArtStyle && (
+                    <div>
+                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Art Style</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => !loading && !scriptLoading && setArtStyle(style.id)}
+                                    className={`rounded-lg p-3 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{style.label}</p>
+                                    <p className="text-xs text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">Available in Auto, Creative Control, and Script to Short. Skeleton AI uses its dedicated style system.</p>
+                    </div>
+                )}
+
+                <div>
                     <div>
                         <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Style Reference (Optional, Recommended)</h2>
+                        <div className="mb-3 grid grid-cols-2 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('strict')}
+                                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                    creativeReferenceLockMode === 'strict'
+                                        ? 'border border-violet-400/70 bg-violet-500/15 text-violet-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Strict Reference Lock
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('inspired')}
+                                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                    creativeReferenceLockMode === 'inspired'
+                                        ? 'border border-amber-400/70 bg-amber-500/15 text-amber-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Style Inspired
+                            </button>
+                        </div>
                         <label className="block rounded-xl border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-4 cursor-pointer transition">
                             <input
                                 type="file"
@@ -2039,7 +3083,7 @@ function CreatePanel() {
                                                 : 'Upload reference style image'}
                                     </p>
                                     <p className="text-xs text-gray-500 mt-1">
-                                        Applied persistently to all Creative Control image generations in this short.
+                                        Applied across this short in Auto, Creative Control, or Script to Short. Mode: {creativeReferenceLockMode === 'strict' ? 'Strict lock for maximum continuity' : 'Inspired lock for more variation'}.
                                     </p>
                                 </div>
                                 <span className="px-3 py-1 rounded-md bg-violet-600/20 text-violet-300 text-xs font-semibold">
@@ -2048,7 +3092,7 @@ function CreatePanel() {
                             </div>
                         </label>
                     </div>
-                )}
+                </div>
 
                 {creativeMode === 'creative' && selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
@@ -2072,15 +3116,95 @@ function CreatePanel() {
                     </div>
                 )}
 
+                {selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">Story Voice + Pacing</p>
+                                <p className="text-xs text-gray-500 mt-1">Choose ElevenLabs voice, tune speed, and set pacing before render.</p>
+                            </div>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice</label>
+                                <select
+                                    value={storyVoiceId}
+                                    onChange={(e) => setStoryVoiceId(e.target.value)}
+                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                                >
+                                    {storyVoicesLoading ? (
+                                        <option value="">Loading voices...</option>
+                                    ) : storyVoices.length > 0 ? (
+                                        storyVoices.map((v: any) => (
+                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                                {String(v.name || v.voice_id || "Voice")}
+                                            </option>
+                                        ))
+                                    ) : (
+                                        <option value="">Default voice</option>
+                                    )}
+                                </select>
+                                {storyVoicesWarning ? (
+                                    <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                                ) : storyVoicesSource === 'fallback' ? (
+                                    <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                                ) : null}
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
+                                <input
+                                    type="range"
+                                    min={0.8}
+                                    max={1.35}
+                                    step={0.05}
+                                    value={storyVoiceSpeed}
+                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                    className="w-full accent-cyan-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Pacing</label>
+                                <div className="grid grid-cols-3 gap-1">
+                                    {[
+                                        { id: 'standard', label: 'Standard' },
+                                        { id: 'fast', label: 'Fast' },
+                                        { id: 'very_fast', label: 'Very Fast' },
+                                    ].map((p) => (
+                                        <button
+                                            key={p.id}
+                                            type="button"
+                                            onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                            className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                                storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                            }`}
+                                        >
+                                            {p.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* GENERATE BUTTON */}
-                <button onClick={handleGenerate} disabled={loading || scriptLoading || (creativeMode === 'auto' && !prompt)}
-                    className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
+                <button onClick={handleGenerate} disabled={loading || scriptLoading || ((creativeMode === 'auto' || creativeMode === 'script_to_short') && !prompt.trim())}
+                    className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : creativeMode === 'script_to_short' ? 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
                     {scriptLoading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> {creativeReferenceStatus === 'uploading' ? 'Uploading reference style...' : 'Setting up...'}</>
                     ) : loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
                     ) : creativeMode === 'creative' ? (
                         <><Sliders className="w-5 h-5" /> Start Building Your Short</>
+                    ) : creativeMode === 'script_to_short' ? (
+                        <><Clapperboard className="w-5 h-5" /> Open Script Editor *IN PRE-ALPHA*</>
                     ) : (
                         <><Wand2 className="w-5 h-5" /> Generate at {canUse1080p ? resolution : '720p'}</>
                     )}
@@ -2208,8 +3332,8 @@ function ClonePanel() {
     const [jobStatus, setJobStatus] = useState<any>(null);
     const [loading, setLoading] = useState(false);
 
-    const canClone = plan === 'creator' || plan === 'pro';
-    const canUse1080p = plan === 'creator' || plan === 'pro';
+    const canClone = plan === 'creator' || plan === 'pro' || plan === 'elite';
+    const canUse1080p = true;
 
     useEffect(() => {
         if (!jobId) return;
@@ -2339,7 +3463,7 @@ function ClonePanel() {
                             resolution === '1080p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02]'
                         } ${!canUse1080p ? 'opacity-40 cursor-not-allowed' : ''}`}>
                         <div className="text-sm font-bold">1080p</div>
-                        <div className="text-[10px] text-gray-500">{canUse1080p ? 'Max quality' : 'Creator+'}</div>
+                        <div className="text-[10px] text-gray-500">{canUse1080p ? 'Max quality' : 'Temporarily unavailable'}</div>
                     </button>
                 </div>
 
@@ -2558,8 +3682,17 @@ function AdminAnalyticsPanel() {
                             <p className="text-xs text-gray-500 uppercase tracking-wider">Monthly Profit (proxy)</p>
                             <p className="text-2xl font-bold text-emerald-400 mt-1">{formatUsd(data.monthly_profit_usd || 0)}</p>
                             <p className="text-xs text-gray-500 mt-1">Source: {data.revenue_source || 'none'}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                Voices: {data.voice_provider_ok ? "ElevenLabs" : "Fallback"} ({data.voice_catalog_count || 0})
+                            </p>
                         </div>
                     </div>
+                    {data.voice_catalog_warning && (
+                        <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-4">
+                            <p className="text-xs text-amber-200 uppercase tracking-wider">Voice Provider Warning</p>
+                            <p className="text-sm text-amber-100 mt-1">{data.voice_catalog_warning}</p>
+                        </div>
+                    )}
 
                     <div className={`rounded-xl border p-4 ${highLoadDetected ? "border-amber-400/40 bg-amber-500/10" : "border-white/[0.08] bg-white/[0.02]"}`}>
                         <div className="flex items-center justify-between gap-4">
