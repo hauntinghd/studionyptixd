@@ -6,3 +6,4 @@ pydantic
 google-auth-oauthlib
 google-api-python-client
 paramiko
+pillow

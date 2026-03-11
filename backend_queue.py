@@ -29,6 +29,7 @@ _job_seq = 0
 _jobs_ref: dict[str, dict[str, Any]] | None = None
 _log = logging.getLogger("nyptid-studio")
 _redis_client: Redis | None = None
+_redis_healthy = True
 
 
 def _redis_enabled() -> bool:
@@ -48,8 +49,27 @@ async def _get_redis() -> Redis | None:
     if not _redis_enabled():
         return None
     if _redis_client is None:
-        _redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+        try:
+            _redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+        except Exception:
+            return None
     return _redis_client
+
+
+async def _redis_available() -> bool:
+    global _redis_healthy
+    if not _redis_enabled():
+        return False
+    redis = await _get_redis()
+    if redis is None:
+        return False
+    try:
+        await redis.ping()
+        _redis_healthy = True
+        return True
+    except Exception:
+        _redis_healthy = False
+        return False
 
 
 def init_queue_runtime(jobs_ref: dict[str, dict[str, Any]], logger: logging.Logger | None = None):
@@ -140,27 +160,31 @@ async def enqueue_generation_job(
     coro_func: Callable[..., Awaitable[Any]],
     args: tuple[Any, ...],
 ):
-    if _redis_enabled():
-        redis = await _get_redis()
-        if redis is None:
-            raise QueueFullError("Redis queue is enabled but unavailable.")
-        depth = await get_queue_depth()
-        if depth >= JOB_MAX_QUEUE_DEPTH:
-            raise QueueFullError(f"Queue is full ({JOB_MAX_QUEUE_DEPTH}). Please retry shortly.")
-        priority = _plan_queue_priority(plan)
-        if _jobs_ref is not None and job_id in _jobs_ref:
-            _jobs_ref[job_id]["queue_priority"] = priority
-            _jobs_ref[job_id]["queue_mode"] = "redis"
-            await persist_job_state(job_id, _jobs_ref[job_id])
-        payload = {
-            "job_id": job_id,
-            "task_name": getattr(coro_func, "__name__", ""),
-            "args": list(args),
-            "priority": priority,
-            "queued_at": time.time(),
-        }
-        await redis.lpush(_queue_key(priority), json.dumps(payload, ensure_ascii=True))
-        return
+    if _redis_enabled() and await _redis_available():
+        try:
+            redis = await _get_redis()
+            if redis is not None:
+                depth = await get_queue_depth()
+                if depth >= JOB_MAX_QUEUE_DEPTH:
+                    raise QueueFullError(f"Queue is full ({JOB_MAX_QUEUE_DEPTH}). Please retry shortly.")
+                priority = _plan_queue_priority(plan)
+                if _jobs_ref is not None and job_id in _jobs_ref:
+                    _jobs_ref[job_id]["queue_priority"] = priority
+                    _jobs_ref[job_id]["queue_mode"] = "redis"
+                    await persist_job_state(job_id, _jobs_ref[job_id])
+                payload = {
+                    "job_id": job_id,
+                    "task_name": getattr(coro_func, "__name__", ""),
+                    "args": list(args),
+                    "priority": priority,
+                    "queued_at": time.time(),
+                }
+                await redis.lpush(_queue_key(priority), json.dumps(payload, ensure_ascii=True))
+                return
+        except QueueFullError:
+            raise
+        except Exception as e:
+            _log.warning(f"Redis enqueue failed; falling back to inprocess queue: {e}")
 
     global _job_seq
     if len(_queued_job_meta) >= JOB_MAX_QUEUE_DEPTH:
@@ -181,7 +205,11 @@ async def dequeue_generation_job() -> dict[str, Any] | None:
     if redis is None:
         return None
     # Highest priority first (p0 -> p1 -> p2)
-    result = await redis.brpop([_queue_key(0), _queue_key(1), _queue_key(2)], timeout=2)
+    try:
+        result = await redis.brpop([_queue_key(0), _queue_key(1), _queue_key(2)], timeout=2)
+    except Exception as e:
+        _log.warning(f"Redis dequeue failed: {e}")
+        return None
     if not result:
         return None
     _key, raw = result
@@ -193,16 +221,20 @@ async def dequeue_generation_job() -> dict[str, Any] | None:
 
 
 async def get_queue_depth() -> int:
-    if _redis_enabled():
+    if _redis_enabled() and await _redis_available():
         redis = await _get_redis()
         if redis is None:
-            return 0
-        p0, p1, p2 = await asyncio.gather(
-            redis.llen(_queue_key(0)),
-            redis.llen(_queue_key(1)),
-            redis.llen(_queue_key(2)),
-        )
-        return int(p0 or 0) + int(p1 or 0) + int(p2 or 0)
+            return len(_queued_job_meta)
+        try:
+            p0, p1, p2 = await asyncio.gather(
+                redis.llen(_queue_key(0)),
+                redis.llen(_queue_key(1)),
+                redis.llen(_queue_key(2)),
+            )
+            return int(p0 or 0) + int(p1 or 0) + int(p2 or 0)
+        except Exception as e:
+            _log.warning(f"Redis queue depth read failed: {e}")
+            return len(_queued_job_meta)
     return len(_queued_job_meta)
 
 

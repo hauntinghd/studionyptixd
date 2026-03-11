@@ -40,14 +40,20 @@ def _resolve_runway_api_key() -> tuple[str, str]:
 
 
 RUNWAY_API_KEY, RUNWAY_API_KEY_SOURCE = _resolve_runway_api_key()
-RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4.5")
+# Default to lower-cost model lane unless explicitly overridden.
+RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4_turbo")
 RUNWAY_API_VERSION = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
 PRODUCT_DEMO_PUBLIC_ENABLED = os.getenv("PRODUCT_DEMO_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
+STORY_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("STORY_GLOBAL_REFERENCE_IMAGE_URL", "")
+MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL", "")
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
+IMAGE_QUALITY_BESTOF_ENABLED = os.getenv("IMAGE_QUALITY_BESTOF_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+IMAGE_QUALITY_BESTOF_COUNT = max(1, min(8, int(os.getenv("IMAGE_QUALITY_BESTOF_COUNT", "4"))))
+IMAGE_QUALITY_MIN_SCORE = float(os.getenv("IMAGE_QUALITY_MIN_SCORE", "62"))
 RUNPOD_IMAGE_FEEDBACK_ENABLED = os.getenv("RUNPOD_IMAGE_FEEDBACK_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 RUNPOD_IMAGE_FEEDBACK_SSH = os.getenv(
     "RUNPOD_IMAGE_FEEDBACK_SSH",
@@ -64,7 +70,11 @@ JOB_MAX_QUEUE_DEPTH = max(1, int(os.getenv("JOB_MAX_QUEUE_DEPTH", "300")))
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_QUEUE_ENABLED = os.getenv("REDIS_QUEUE_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "studio")
-FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "1").lower() in ("1", "true", "yes", "on")
+FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "0").lower() in ("1", "true", "yes", "on")
+SCRIPT_TO_SHORT_ENABLED = os.getenv("SCRIPT_TO_SHORT_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+STORY_ADVANCED_CONTROLS_ENABLED = os.getenv("STORY_ADVANCED_CONTROLS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+STORY_RETENTION_TUNING_ENABLED = os.getenv("STORY_RETENTION_TUNING_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+DISABLE_ALL_SFX = os.getenv("DISABLE_ALL_SFX", "1").lower() in ("1", "true", "yes", "on")
 MAINTENANCE_BANNER_ENABLED = os.getenv("MAINTENANCE_BANNER_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 MAINTENANCE_BANNER_MESSAGE = os.getenv(
     "MAINTENANCE_BANNER_MESSAGE",
@@ -73,14 +83,37 @@ MAINTENANCE_BANNER_MESSAGE = os.getenv(
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
 
+ELITE_PRICE_ID = os.getenv("PLAN_PRICE_ID_ELITE", "price_1T9uMwBL8lRmwao2Lk89pxiz").strip()
+
 STRIPE_PRICE_TO_PLAN = {
     "price_1T4eT7BL8lRmwao2hHcUbcny": "starter",
     "price_1T4eTUBL8lRmwao2EK3JDOpy": "creator",
     "price_1T4eTjBL8lRmwao2q6WkoZLH": "pro",
+    ELITE_PRICE_ID: "elite",
     "price_1T4wZLBL8lRmwao2SyYRfHdQ": "demo_pro",
 }
 
+PLAN_PRICE_USD = {
+    "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
+    "creator": float(os.getenv("PLAN_PRICE_CREATOR_USD", "30")),
+    "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
+    "elite": float(os.getenv("PLAN_PRICE_ELITE_USD", "300")),
+    "demo_pro": float(os.getenv("PLAN_PRICE_DEMO_PRO_USD", "150")),
+}
+
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
+TOPUP_PACK_PRICE_IDS = {
+    "small": os.getenv("TOPUP_PRICE_SMALL", "price_1T6mJLBL8lRmwao2jPo0DGdq").strip(),
+    "medium": os.getenv("TOPUP_PRICE_MEDIUM", "price_1T6mJXBL8lRmwao2E9djNfMA").strip(),
+    "large": os.getenv("TOPUP_PRICE_LARGE", "price_1T6mJmBL8lRmwao24qTiaau5").strip(),
+}
+TOPUP_PACKS = {}
+if TOPUP_PACK_PRICE_IDS["small"]:
+    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["small"]] = {"pack": "small", "credits": 25, "price_usd": 7.99}
+if TOPUP_PACK_PRICE_IDS["medium"]:
+    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["medium"]] = {"pack": "medium", "credits": 150, "price_usd": 27.99}
+if TOPUP_PACK_PRICE_IDS["large"]:
+    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["large"]] = {"pack": "large", "credits": 400, "price_usd": 64.99}
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 OUTPUT_DIR = Path("generated_videos")

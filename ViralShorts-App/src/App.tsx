@@ -47,7 +47,16 @@ const Logo = ({ size = 24 }: { size?: number }) => (
 
 type Plan = 'none' | 'starter' | 'creator' | 'pro' | 'elite';
 type TopupPack = { price_id: string; pack: string; credits: number; price_usd: number };
-type PlanLimit = { videos_per_month?: number; max_duration_sec?: number; max_resolution?: string; can_clone?: boolean; priority?: boolean; demo_access?: boolean };
+type PlanLimit = {
+    videos_per_month?: number;
+    animated_renders_per_month?: number;
+    non_animated_ops_per_month?: number;
+    max_duration_sec?: number;
+    max_resolution?: string;
+    can_clone?: boolean;
+    priority?: boolean;
+    demo_access?: boolean;
+};
 type PlanLimitMap = Record<string, PlanLimit>;
 type PlanFeatureMap = Record<string, string[]>;
 type PlanPriceMap = Record<string, number>;
@@ -55,6 +64,7 @@ const PRICE_IDS: Record<string, string> = {
     starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
     creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
     pro: "price_1T4eTjBL8lRmwao2q6WkoZLH",
+    elite: "price_1T9uMwBL8lRmwao2Lk89pxiz",
 };
 
 interface AuthContextType {
@@ -182,9 +192,9 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
                     setPlan((['none', 'starter', 'creator', 'pro', 'elite'].includes(incomingPlan) ? incomingPlan : 'none') as Plan);
                     setRole(data.role || 'user');
                     setBillingActive(Boolean(data.billing_active));
-                    setMonthlyCreditsRemaining(Number(data.monthly_credits_remaining || 0));
-                    setTopupCreditsRemaining(Number(data.topup_credits_remaining || 0));
-                    setCreditsTotalRemaining(Number(data.credits_total_remaining || 0));
+                    setMonthlyCreditsRemaining(Number(data.animated_credits_remaining ?? data.monthly_credits_remaining ?? 0));
+                    setTopupCreditsRemaining(Number(data.animated_topup_credits_remaining ?? data.topup_credits_remaining ?? 0));
+                    setCreditsTotalRemaining(Number(data.animated_credits_total_remaining ?? data.credits_total_remaining ?? 0));
                     setRequiresTopup(Boolean(data.requires_topup));
                     setDemoAccess(data.demo_access || false);
                     if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
@@ -604,8 +614,8 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         <h3 className="font-bold text-lg mb-4">Plan Features</h3>
                         <div className="grid grid-cols-2 gap-4 text-sm">
                             <div>
-                                <p className="text-gray-500">Generation credits/month</p>
-                                <p className="font-bold text-white">{plan === 'none' ? '0' : String(publicPlanLimits[plan]?.videos_per_month || 0)}</p>
+                                <p className="text-gray-500">Finished animated shorts/month</p>
+                                <p className="font-bold text-white">{plan === 'none' ? '0' : String(publicPlanLimits[plan]?.animated_renders_per_month || publicPlanLimits[plan]?.videos_per_month || 0)}</p>
                             </div>
                             <div>
                                 <p className="text-gray-500">Max Resolution</p>
@@ -627,37 +637,46 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                     </div>
 
                     <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-                        <h3 className="font-bold text-lg mb-4">Credits</h3>
+                        <h3 className="font-bold text-lg mb-4">Hybrid Credits</h3>
+                        <p className="text-xs text-gray-500 mb-4">
+                            Shared evenly across Skeleton AI, AI Stories, and Motivation. No hidden per-template multipliers.
+                        </p>
                         <div className="grid grid-cols-3 gap-4 text-sm">
                             <div>
-                                <p className="text-gray-500">Monthly left</p>
+                                <p className="text-gray-500">Animated monthly left</p>
                                 <p className="font-bold text-white">{monthlyCreditsRemaining}</p>
                             </div>
                             <div>
-                                <p className="text-gray-500">Top-up left</p>
+                                <p className="text-gray-500">Animated top-up left</p>
                                 <p className="font-bold text-white">{topupCreditsRemaining}</p>
                             </div>
                             <div>
-                                <p className="text-gray-500">Total left</p>
+                                <p className="text-gray-500">Animated total left</p>
                                 <p className="font-bold text-violet-300">{creditsTotalRemaining}</p>
                             </div>
                         </div>
                         {topupPacks.length > 0 && (
                             <div className="mt-5">
-                                <p className="text-gray-400 text-sm mb-3">Top-up packs (one-time purchase)</p>
-                                <div className="flex flex-wrap gap-2">
+                                <p className="text-gray-400 text-sm mb-3">Animated top-up packs (one-time purchase)</p>
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
                                     {topupPacks.map((pack) => (
-                                        <button
-                                            key={pack.price_id}
-                                            onClick={async () => {
-                                                setTopupError("");
-                                                const err = await checkoutTopup(pack.price_id);
-                                                if (err) setTopupError(err);
-                                            }}
-                                            className="px-4 py-2 bg-violet-600/80 hover:bg-violet-500 text-white rounded-lg text-sm font-medium transition"
-                                        >
-                                            {pack.credits} credits • ${pack.price_usd.toFixed(2)}
-                                        </button>
+                                        <div key={pack.price_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3">
+                                            <div className="text-sm font-semibold text-white">{pack.credits} animated credits</div>
+                                            <div className="text-xs text-gray-500 mb-2">${pack.price_usd.toFixed(2)} one-time</div>
+                                            <div className="text-[11px] text-gray-400 mb-3">
+                                                Approx {pack.credits} renders total, usable across all 3 live templates.
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    setTopupError("");
+                                                    const err = await checkoutTopup(pack.price_id);
+                                                    if (err) setTopupError(err);
+                                                }}
+                                                className="w-full px-4 py-2 bg-violet-600/80 hover:bg-violet-500 text-white rounded-lg text-sm font-medium transition"
+                                            >
+                                                Purchase Pack
+                                            </button>
+                                        </div>
                                     ))}
                                 </div>
                                 {topupError && <p className="mt-3 text-sm text-red-400">{topupError}</p>}
@@ -681,7 +700,7 @@ function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                                 {plan === 'starter' && (
                                     <button onClick={() => checkout('creator')}
                                         className="px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-violet-600/20 text-sm">
-                                        Creator $24/mo
+                                        Creator $30/mo
                                     </button>
                                 )}
                                 <button onClick={() => checkout('pro')}
@@ -747,6 +766,10 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
     ];
     const comingSoonTemplates = ['Objects Explain', 'Would You Rather', 'Scary Stories', 'Historical Epic', 'Argument Debate', 'What If', 'Business', 'Finance', 'Tech', 'Crypto'];
     const getPlanLimit = (name: string): PlanLimit => publicPlanLimits[name] || {};
+    const animatedLimit = (name: string, fallback: number): number =>
+        Number(getPlanLimit(name).animated_renders_per_month || getPlanLimit(name).videos_per_month || fallback);
+    const nonAnimatedLimit = (name: string, fallback: number): number =>
+        Number(getPlanLimit(name).non_animated_ops_per_month || animatedLimit(name, fallback) * 10);
     const getPlanPrice = (name: string, fallback: number): number => {
         const raw = publicPlanPrices[name];
         return Number.isFinite(raw) && raw > 0 ? raw : fallback;
@@ -784,8 +807,8 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <section className="pt-24 pb-4">
                     <div className="max-w-5xl mx-auto px-6">
                         <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
-                            <div className="font-semibold mb-1">Monthly credits used up</div>
-                            <div className="mb-2">You have {creditsTotalRemaining} credits left. Buy a top-up pack to keep generating today.</div>
+                            <div className="font-semibold mb-1">Animated credits used up</div>
+                            <div className="mb-2">You have {creditsTotalRemaining} animated credits left. Buy an animated top-up pack to keep rendering today.</div>
                             <div className="flex flex-wrap gap-2">
                                 {topupPacks.map((pack) => (
                                     <button
@@ -793,7 +816,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                         onClick={() => { checkoutTopup(pack.price_id); }}
                                         className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium transition"
                                     >
-                                        {pack.credits} credits • ${pack.price_usd.toFixed(2)}
+                                        {pack.credits} animated credits • ${pack.price_usd.toFixed(2)}
                                     </button>
                                 ))}
                             </div>
@@ -822,7 +845,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 
                     <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
                         Real 3D animated scenes. Premium AI voiceovers in 19 languages. 720p animation-first output.
-                        Type a topic, pick a style, and get a scroll-stopping short in minutes.
+                        Type a topic, pick a style, and get a repeatable short workflow designed to scale toward 300+ paying users.
                     </p>
 
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
@@ -839,7 +862,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 
                     <div className="grid grid-cols-4 gap-6 max-w-xl mx-auto mb-16">
                         {[
-                            { val: '42.3K', label: 'Views in 28 Days' },
+                            { val: '100K+', label: 'Total Channel Views' },
                             { val: '1080p', label: 'Max Quality' },
                             { val: '19', label: 'Languages' },
                             { val: '<5 min', label: 'Per Video' },
@@ -854,9 +877,9 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="max-w-3xl mx-auto">
                         <p className="text-xs text-gray-600 uppercase tracking-wider mb-3 text-center">Real YouTube Analytics</p>
                         <div className="rounded-2xl overflow-hidden border border-white/[0.08] shadow-2xl shadow-violet-600/5">
-                            <img src="/social-proof.png" alt="YouTube Studio analytics showing 42.3K views, 155 subscribers, 75.4% average watch percentage from NYPTID Studio generated content" className="w-full" />
+                            <img src="/social-proof.png" alt="YouTube Studio analytics showing over 100K total views from NYPTID Studio generated content" className="w-full" />
                         </div>
-                        <p className="text-xs text-gray-600 mt-3 text-center">155 subscribers. 42.3K views. 75.4% average watch. All from AI-generated shorts.</p>
+                        <p className="text-xs text-gray-600 mt-3 text-center">100K+ total views to date. Metrics are pulled from real channel analytics and updated as new proof data is added.</p>
                         <p className="text-xs text-gray-600 mt-1 text-center">Distribution today: YouTube Shorts export workflow. Direct posting to TikTok/Instagram is still marked Coming Soon.</p>
                     </div>
                 </div>
@@ -949,14 +972,14 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <div className="max-w-[1600px] mx-auto px-4 sm:px-6">
                     <div className="text-center mb-16">
                         <h2 className="text-4xl font-bold mb-4">How It Works</h2>
-                        <p className="text-gray-400 text-lg">From idea to viral short in 3 steps</p>
+                        <p className="text-gray-400 text-lg">From idea to publish-ready short in 3 steps</p>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                         {[
                             { step: '01', title: 'Choose Template & Topic', desc: 'Pick a template style and enter your topic. Our AI scriptwriter crafts hook-optimized scenes instantly.' },
                             { step: '02', title: 'AI Generates Everything', desc: 'Dedicated GPU renders real 3D scenes. Premium AI voiceover in your chosen language. All fully automated.' },
-                            { step: '03', title: 'Download & Post', desc: 'Get a production-ready MP4 with text overlays, voiceover, and optimized SEO metadata. Upload and watch it go viral.' },
+                            { step: '03', title: 'Download & Post', desc: 'Get a production-ready MP4 with text overlays, voiceover, and optimized metadata. Publish faster with a repeatable workflow.' },
                         ].map((s, i) => (
                             <div key={i} className="relative p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
                                 <div className="text-5xl font-black text-white/[0.04] absolute top-4 right-6">{s.step}</div>
@@ -1005,8 +1028,8 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <ul className="space-y-3">
                                 {[
                                     'Real 3D rendered scenes -- not slideshows',
-                                    'Transparent monthly pricing with explicit generation credits',
-                                    'Dedicated GPU infrastructure -- consistently fast',
+                                    'Hybrid billing: animated renders + non-animated ops are tracked separately',
+                                    'Dedicated GPU infrastructure with queue-based scaling at peak load',
                                     '720p output tuned for animation reliability',
                                     '19 languages including Hindi, Spanish, Japanese',
                                 ].map((item, i) => (
@@ -1025,7 +1048,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <h3 className="text-xl font-bold mb-3">Dedicated GPU Power</h3>
                             <p className="text-gray-500 leading-relaxed">
-                                Dedicated high-VRAM GPUs render every frame. No shared infrastructure, no throttling, no queue. Your generation gets full priority.
+                                Dedicated high-VRAM GPUs render every frame. During peak usage, jobs are queued and processed in priority order to keep output stable.
                             </p>
                         </div>
                         <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
@@ -1034,7 +1057,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <h3 className="text-xl font-bold mb-3">Clone Any Viral Short</h3>
                             <p className="text-gray-500 leading-relaxed">
-                                Upload a viral short that hit 100K+ views. AI detects the template, reverse-engineers the formula, and generates a new one on your topic.
+                                Upload a strong-performing short. AI detects the structure, reverse-engineers pacing, and generates a new version on your topic.
                             </p>
                         </div>
                         <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
@@ -1059,7 +1082,7 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             On the Roadmap
                         </div>
                         <h2 className="text-4xl font-bold mb-4">Coming Soon</h2>
-                        <p className="text-gray-400 text-lg max-w-2xl mx-auto">We're building the most advanced AI video platform on the planet. Here's what's next.</p>
+                        <p className="text-gray-400 text-lg max-w-2xl mx-auto">We're building Studio in focused phases so it can support sustained growth toward 300+ paying users.</p>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -1129,7 +1152,8 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <h2 className="text-4xl font-bold mb-4">Simple, Honest Pricing</h2>
                         <p className="text-gray-400 text-lg">Choose the plan that fits your output needs. Upgrade anytime as you scale.</p>
                         <p className="text-gray-500 text-xs mt-2">Plan limits and capabilities are synced from live backend config.</p>
-                        <p className="text-gray-500 text-xs mt-1">Credits are the enforceable unit. 1 completed render currently consumes 1 credit.</p>
+                        <p className="text-gray-500 text-xs mt-1">Hybrid billing: only finished animated renders consume animated credits. Script/image operations use lighter non-animated meters.</p>
+                        <p className="text-gray-500 text-xs mt-1">This structure is designed to stay sustainable while you grow toward 300+ active paying users.</p>
                         <p className="text-gray-500 text-xs mt-1">Limits are intentionally set for sustainable quality delivery at each plan tier.</p>
                     </div>
 
@@ -1144,7 +1168,9 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <ul className="space-y-2.5 mb-6">
                                 {[
-                                    `${getPlanLimit('starter').videos_per_month || 50} generation credits/month`,
+                                    `Includes ${animatedLimit('starter', 50)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('starter', 80)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
                                     '3 live templates (Skeleton AI, AI Stories, Motivation)',
                                     'Additional templates marked Coming Soon',
                                     `${Math.max(1, Math.round(Number(getPlanLimit('starter').max_duration_sec || 60) / 60))} min per video`,
@@ -1171,12 +1197,14 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <h3 className="text-lg font-bold mb-1">Creator</h3>
                             <p className="text-gray-500 text-xs mb-5">For serious creators</p>
                             <div className="flex items-baseline gap-1 mb-5">
-                                <span className="text-3xl font-extrabold">${getPlanPrice('creator', 24)}</span>
+                                <span className="text-3xl font-extrabold">${getPlanPrice('creator', 30)}</span>
                                 <span className="text-gray-500 text-sm">/mo</span>
                             </div>
                             <ul className="space-y-2.5 mb-6">
                                 {[
-                                    `${getPlanLimit('creator').videos_per_month || 90} generation credits/month`,
+                                    `Includes ${animatedLimit('creator', 90)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('creator', 150)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
                                     '3 live templates (Skeleton AI, AI Stories, Motivation)',
                                     'Additional templates marked Coming Soon',
                                     `${Math.max(1, Math.round(Number(getPlanLimit('creator').max_duration_sec || 180) / 60))} min per video`,
@@ -1206,7 +1234,9 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <ul className="space-y-2.5 mb-6">
                                 {[
-                                    `${getPlanLimit('pro').videos_per_month || 150} generation credits/month`,
+                                    `Includes ${animatedLimit('pro', 150)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('pro', 300)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
                                     '3 live templates (Skeleton AI, AI Stories, Motivation)',
                                     'Additional templates marked Coming Soon',
                                     `${Math.max(1, Math.round(Number(getPlanLimit('pro').max_duration_sec || 300) / 60))} min per video`,
@@ -1240,11 +1270,13 @@ function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <ul className="space-y-2.5 mb-6">
                                 {[
-                                    `${getPlanLimit('elite').videos_per_month || 350} generation credits/month`,
+                                    `Includes ${animatedLimit('elite', 350)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('elite', 800)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
                                     `Up to ${Math.max(1, Math.round(Number(getPlanLimit('elite').max_duration_sec || 420) / 60))} min per video`,
                                     `${getPlanLimit('elite').max_resolution || '720p'} output (highest reliability)`,
                                     ...(publicPlanFeatures.elite || ['elite_priority_lane', 'early_access_feature_waves', 'micro_escalation_pro', 'cinematic_transition_pack', 'enhanced_sfx_mix']).map(featureLabel),
-                                    '$100 / $300 / $500 top-up lanes',
+                                    '$100 / $300 / $500 animated top-up lanes',
                                 ].map((f, i) => (
                                     <li key={i} className="flex items-center gap-2 text-xs text-gray-200">
                                         <CheckCircle2 className="w-3.5 h-3.5 text-rose-300 shrink-0" />{f}
@@ -1474,11 +1506,13 @@ interface CreatePanelPersistedState {
     creativeTitle: string;
     creativeNarration: string;
     creativeReferenceLockMode?: 'strict' | 'inspired';
+    animateOutputEnabled?: boolean;
     storyAnimationEnabled?: boolean;
     storyVoiceId?: string;
     storyVoiceSpeed?: number;
     storyPacingMode?: 'standard' | 'fast' | 'very_fast';
     artStyle?: string;
+    cinematicBoostEnabled?: boolean;
     jobId: string | null;
     ts: number;
 }
@@ -1498,6 +1532,7 @@ interface ProjectRow {
     title?: string;
     resolution?: string;
     language?: string;
+    animation_enabled?: boolean;
     story_animation_enabled?: boolean;
     scenes?: CreativeScene[];
     narration?: string;
@@ -1505,11 +1540,12 @@ interface ProjectRow {
     voice_speed?: number;
     pacing_mode?: 'standard' | 'fast' | 'very_fast';
     art_style?: string;
+    cinematic_boost?: boolean;
     error?: string;
 }
 
 function CreatePanel() {
-    const { session, role } = useContext(AuthContext);
+    const { session, role, creditsTotalRemaining, requiresTopup } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
     const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
@@ -1532,11 +1568,13 @@ function CreatePanel() {
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
     const [creativeReferenceLockMode, setCreativeReferenceLockMode] = useState<'strict' | 'inspired'>('strict');
+    const [animateOutputEnabled, setAnimateOutputEnabled] = useState(true);
     const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
     const [storyVoiceId, setStoryVoiceId] = useState("");
     const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
     const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
     const [artStyle, setArtStyle] = useState('auto');
+    const [cinematicBoostEnabled, setCinematicBoostEnabled] = useState(false);
     const [storyVoices, setStoryVoices] = useState<any[]>([]);
     const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
     const [storyPreviewLoading, setStoryPreviewLoading] = useState(false);
@@ -1556,9 +1594,12 @@ function CreatePanel() {
     const [projectsLoading, setProjectsLoading] = useState(false);
     const [finalizeError, setFinalizeError] = useState<string | null>(null);
     const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
+    const [showQuickStart, setShowQuickStart] = useState(false);
+    const [quickStartStep, setQuickStartStep] = useState(0);
     const restoreDoneRef = useRef(false);
     const hydratedSceneImagesSessionRef = useRef<string | null>(null);
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
+    const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
 
     useEffect(() => {
         (async () => {
@@ -1574,6 +1615,8 @@ function CreatePanel() {
 
     // 1080p is now enabled by default; backend still enforces plan/env caps.
     const canUse1080p = true;
+    const animationCreditExhausted = !isAdmin && (requiresTopup || Number(creditsTotalRemaining) <= 0);
+    const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
 
     const templates = [
         { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
@@ -1609,6 +1652,12 @@ function CreatePanel() {
             setStoryAnimationEnabled(true);
         }
     }, [selectedTemplate, storyAnimationEnabled]);
+    useEffect(() => {
+        if (animationCreditExhausted && animateOutputEnabled) {
+            setAnimateOutputEnabled(false);
+            setStoryAnimationEnabled(false);
+        }
+    }, [animationCreditExhausted, animateOutputEnabled]);
     useEffect(() => {
         if (creativeMode !== 'script_to_short') {
             setSceneBuildLoading(false);
@@ -1677,6 +1726,7 @@ function CreatePanel() {
             if (saved.creativeReferenceLockMode === 'strict' || saved.creativeReferenceLockMode === 'inspired') {
                 setCreativeReferenceLockMode(saved.creativeReferenceLockMode);
             }
+            if (typeof saved.animateOutputEnabled === 'boolean') setAnimateOutputEnabled(saved.animateOutputEnabled);
             if (typeof saved.storyAnimationEnabled === 'boolean') setStoryAnimationEnabled(saved.storyAnimationEnabled);
             if (typeof saved.storyVoiceId === 'string') setStoryVoiceId(saved.storyVoiceId);
             if (typeof saved.storyVoiceSpeed === 'number' && Number.isFinite(saved.storyVoiceSpeed)) {
@@ -1687,6 +1737,9 @@ function CreatePanel() {
             }
             if (typeof saved.artStyle === 'string' && saved.artStyle) {
                 setArtStyle(saved.artStyle);
+            }
+            if (typeof saved.cinematicBoostEnabled === 'boolean') {
+                setCinematicBoostEnabled(saved.cinematicBoostEnabled);
             }
             if (typeof saved.jobId === 'string' && saved.jobId) {
                 setJobId(saved.jobId);
@@ -1723,11 +1776,13 @@ function CreatePanel() {
             creativeTitle,
             creativeNarration,
             creativeReferenceLockMode,
+            animateOutputEnabled,
             storyAnimationEnabled,
             storyVoiceId,
             storyVoiceSpeed,
             storyPacingMode,
             artStyle,
+            cinematicBoostEnabled,
             jobId,
             ts: Date.now(),
         };
@@ -1750,13 +1805,111 @@ function CreatePanel() {
         creativeTitle,
         creativeNarration,
         creativeReferenceLockMode,
+        animateOutputEnabled,
         storyAnimationEnabled,
         storyVoiceId,
         storyVoiceSpeed,
         storyPacingMode,
         artStyle,
+        cinematicBoostEnabled,
         jobId,
     ]);
+
+    const quickStartSteps = [
+        {
+            title: "1) Pick Template + Mode",
+            text: "Choose Skeleton AI, AI Stories, or Motivation, then select Auto, Creative Control, or Script to Short.",
+        },
+        {
+            title: "2) Set Output + Prompt",
+            text: "Pick resolution/language, write your topic or full script, then attach optional style reference if needed.",
+        },
+        {
+            title: "3) Animation Credit Gate",
+            text: "If animated credits are available, you can keep Animation ON. If not, Studio forces Slideshow Mode automatically.",
+        },
+        {
+            title: "4) Generate Flow",
+            text: "Auto: generate directly. Creative/Script to Short: Generate Scenes -> Generate Images -> Final Render.",
+        },
+    ];
+
+    useEffect(() => {
+        if (!session) return;
+        try {
+            const seen = localStorage.getItem(quickStartSeenKey) === "1";
+            setShowQuickStart(!seen);
+            setQuickStartStep(0);
+        } catch {
+            setShowQuickStart(true);
+            setQuickStartStep(0);
+        }
+    }, [session, quickStartSeenKey]);
+
+    const dismissQuickStart = (dontShowAgain: boolean) => {
+        if (dontShowAgain) {
+            try { localStorage.setItem(quickStartSeenKey, "1"); } catch { /* ignore */ }
+        }
+        setShowQuickStart(false);
+    };
+
+    const quickStartCard = (showQuickStart && createSubTab === 'builder') ? (
+        <div className="fixed bottom-4 right-4 z-40 w-[330px] max-w-[calc(100vw-2rem)] rounded-2xl border border-amber-300/35 bg-[#2a1e09]/95 shadow-2xl shadow-black/50 p-4">
+            <div className="flex items-start justify-between gap-2">
+                <div>
+                    <p className="text-xs uppercase tracking-wider text-amber-300 font-semibold">Studio Quick Start</p>
+                    <p className="text-sm font-bold text-amber-100 mt-1">{quickStartSteps[quickStartStep]?.title}</p>
+                </div>
+                <button
+                    onClick={() => dismissQuickStart(false)}
+                    className="text-amber-200/80 hover:text-white transition"
+                    aria-label="Close quick start"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+            <p className="text-xs text-amber-100/90 mt-2 leading-relaxed">
+                {quickStartSteps[quickStartStep]?.text}
+            </p>
+            <div className="mt-3 flex items-center gap-1.5">
+                {quickStartSteps.map((_, i) => (
+                    <span key={`qs-dot-${i}`} className={`h-1.5 rounded-full transition-all ${i === quickStartStep ? 'w-5 bg-amber-300' : 'w-2 bg-amber-200/40'}`} />
+                ))}
+            </div>
+            <div className="mt-4 flex items-center justify-between">
+                <button
+                    onClick={() => setQuickStartStep((s) => Math.max(0, s - 1))}
+                    disabled={quickStartStep === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 disabled:opacity-40"
+                >
+                    Back
+                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => dismissQuickStart(true)}
+                        className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 hover:bg-amber-200/10"
+                    >
+                        Don't show again
+                    </button>
+                    {quickStartStep < quickStartSteps.length - 1 ? (
+                        <button
+                            onClick={() => setQuickStartStep((s) => Math.min(quickStartSteps.length - 1, s + 1))}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-400 text-black hover:bg-amber-300"
+                        >
+                            Next
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => dismissQuickStart(false)}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-500 text-white hover:bg-emerald-400"
+                        >
+                            Got it
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    ) : null;
 
     useEffect(() => {
         if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
@@ -1917,9 +2070,9 @@ function CreatePanel() {
             return;
         }
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
-        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
-        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
-        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
@@ -1941,10 +2094,13 @@ function CreatePanel() {
                     mint_mode: mintMode,
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    animation_enabled: effectiveAnimationEnabled,
                     voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
                     voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
                     pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
                     reference_image_url: referenceImageDataUrl,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
@@ -2014,9 +2170,9 @@ function CreatePanel() {
         );
         if (!scriptText) return;
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
-        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
-        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
-        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
         const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
         setSceneBuildLoading(true);
         setSceneBuildError(null);
@@ -2038,9 +2194,12 @@ function CreatePanel() {
                     art_style: supportsArtStyle ? artStyle : 'auto',
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    animation_enabled: effectiveAnimationEnabled,
                     voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
                     voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
                     pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
                 }),
             });
             if (!res.ok) {
@@ -2092,9 +2251,9 @@ function CreatePanel() {
 
     const handleCreativeStart = async () => {
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
-        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
-        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
-        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
         setScriptLoading(true);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
@@ -2106,12 +2265,14 @@ function CreatePanel() {
                     topic: prompt || "Untitled",
                     resolution: canUse1080p ? resolution : '720p',
                     language,
-                    story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
                     voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
                     voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
                     pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
@@ -2181,9 +2342,9 @@ function CreatePanel() {
         const scene = currentScenes[sceneIndex];
         if (!scene.visual_description.trim()) return;
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
-        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
-        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
-        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
         setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
@@ -2200,6 +2361,7 @@ function CreatePanel() {
                     art_style: supportsArtStyle ? artStyle : 'auto',
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
@@ -2273,9 +2435,9 @@ function CreatePanel() {
         setJobId(null);
         setCreativeStep('generating');
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
-        const qualityMode = selectedTemplate === 'skeleton' ? 'cinematic' : 'standard';
-        const transitionStyle = selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth';
-        const microEscalationMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
                 method: "POST",
@@ -2285,12 +2447,14 @@ function CreatePanel() {
                     template: selectedTemplate,
                     resolution: canUse1080p ? resolution : '720p',
                     language,
-                    story_animation_enabled: selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' ? storyAnimationEnabled : true,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
                     voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
                     voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
                     pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
@@ -2367,6 +2531,13 @@ function CreatePanel() {
             } else {
                 setStoryAnimationEnabled(true);
             }
+            if (typeof p.animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.animation_enabled);
+            } else if (typeof p.story_animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.story_animation_enabled);
+            } else {
+                setAnimateOutputEnabled(true);
+            }
             setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : (p.mode === 'creative' ? 'creative' : 'auto'));
             if (typeof p.voice_id === 'string') setStoryVoiceId(p.voice_id);
             if (typeof p.voice_speed === 'number' && Number.isFinite(p.voice_speed)) {
@@ -2380,6 +2551,7 @@ function CreatePanel() {
             } else {
                 setArtStyle('auto');
             }
+            setCinematicBoostEnabled(Boolean(p.cinematic_boost));
             if (p.mode === 'creative' || p.mode === 'script_to_short') {
                 setCreativeStep('edit');
                 setSessionId(p.session_id || null);
@@ -2689,7 +2861,7 @@ function CreatePanel() {
                         {loading ? (
                             <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
                         ) : (
-                            <><Film className="w-5 h-5" /> Animate &amp; Render Final Video</>
+                            <><Film className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Animate & Render Final Video' : 'Render Slideshow Video'}</>
                         )}
                     </button>
                 )}
@@ -2775,12 +2947,13 @@ function CreatePanel() {
                         )}
                     </div>
                 )}
+                {quickStartCard}
             </div>
         );
     }
 
     return (
-            <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
+            <div className="max-w-3xl mx-auto px-5 pb-10 space-y-5">
                 <div className="grid grid-cols-2 gap-2 p-1 rounded-xl border border-white/[0.06] bg-white/[0.02]">
                     <button
                         onClick={() => setCreateSubTab('builder')}
@@ -2802,6 +2975,16 @@ function CreatePanel() {
                     >
                         Projects
                     </button>
+                </div>
+                <div className="flex justify-end">
+                    {!showQuickStart && (
+                        <button
+                            onClick={() => { setQuickStartStep(0); setShowQuickStart(true); }}
+                            className="text-xs px-2.5 py-1 rounded-md border border-white/10 text-gray-300 hover:text-white hover:bg-white/5 transition"
+                        >
+                            Show Quick Start
+                        </button>
+                    )}
                 </div>
 
                 {createSubTab === 'projects' && (
@@ -2855,22 +3038,22 @@ function CreatePanel() {
                 <>
                 {/* TEMPLATE PICKER */}
                 <div>
-                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Template</h2>
-                    <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Template</h2>
+                    <div className="grid grid-cols-4 md:grid-cols-7 gap-2">
                         {templates.map(t => {
                             const isLocked = !isAdmin && !PUBLIC_TEMPLATE_IDS.has(t.id);
                             return (
                                 <button key={t.id}
                                     onClick={() => !loading && !isLocked && setSelectedTemplate(t.id)}
-                                    className={`p-3 rounded-xl text-center transition-all border-2 relative ${
+                                    className={`p-2.5 rounded-lg text-center transition-all border relative ${
                                         isLocked
                                             ? 'border-white/[0.04] bg-white/[0.01] opacity-50 cursor-not-allowed'
                                             : selectedTemplate === t.id
                                                 ? 'border-violet-500 bg-violet-500/10'
                                                 : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                                     } ${loading ? 'opacity-50' : ''}`}>
-                                    <div className="text-2xl mb-1">{t.icon}</div>
-                                    <div className="text-xs font-medium truncate">{t.title}</div>
+                                    <div className="text-lg mb-0.5">{t.icon}</div>
+                                    <div className="text-[11px] font-medium truncate">{t.title}</div>
                                     {isLocked && (
                                         <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-xl">
                                             <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Coming Soon</span>
@@ -2884,52 +3067,52 @@ function CreatePanel() {
 
                 {/* MODE TOGGLE */}
                 <div>
-                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Creation Mode</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Creation Mode</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <button onClick={() => !loading && setCreativeMode('auto')}
-                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             }`}>
-                            <Wand2 className="w-5 h-5 mx-auto mb-1 text-violet-400" />
-                            <div className="text-sm font-bold">Auto</div>
-                            <div className="text-xs text-gray-500 mt-0.5">AI handles everything</div>
+                            <Wand2 className="w-4 h-4 mx-auto mb-1 text-violet-400" />
+                            <div className="text-xs font-bold">Auto</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">AI handles everything</div>
                         </button>
                         <button onClick={() => !loading && setCreativeMode('creative')}
-                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 creativeMode === 'creative' ? 'border-amber-500 bg-amber-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             }`}>
-                            <Sliders className="w-5 h-5 mx-auto mb-1 text-amber-400" />
-                            <div className="text-sm font-bold">Creative Control</div>
-                            <div className="text-xs text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
+                            <Sliders className="w-4 h-4 mx-auto mb-1 text-amber-400" />
+                            <div className="text-xs font-bold">Creative Control</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
                         </button>
                         <button onClick={() => !loading && setCreativeMode('script_to_short')}
-                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 creativeMode === 'script_to_short' ? 'border-cyan-500 bg-cyan-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             }`}>
-                            <Clapperboard className="w-5 h-5 mx-auto mb-1 text-cyan-400" />
-                            <div className="text-sm font-bold">Script to Short</div>
-                            <div className="text-xs text-cyan-300 mt-0.5">*IN PRE-ALPHA*</div>
+                            <Clapperboard className="w-4 h-4 mx-auto mb-1 text-cyan-400" />
+                            <div className="text-xs font-bold">Script to Short</div>
+                            <div className="text-[11px] text-cyan-300 mt-0.5">*IN PRE-ALPHA*</div>
                         </button>
                     </div>
                 </div>
 
                 {/* RESOLUTION PICKER */}
                 <div>
-                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Resolution</h2>
-                    <div className="flex gap-3">
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Resolution</h2>
+                    <div className="flex gap-2">
                         <button onClick={() => !loading && setResolution('720p')}
-                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 ${
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 resolution === '720p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             } ${loading ? 'opacity-50' : ''}`}>
-                            <div className="text-lg font-bold">720p</div>
-                            <div className="text-xs text-gray-500 mt-0.5">Faster generation</div>
+                            <div className="text-base font-bold">720p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Faster generation</div>
                         </button>
                         <button
                             onClick={() => {
                                 if (!canUse1080p) return;
                                 if (!loading) setResolution('1080p');
                             }}
-                            className={`flex-1 p-4 rounded-xl text-center transition-all border-2 relative ${
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border relative ${
                                 !canUse1080p ? 'opacity-50 cursor-not-allowed border-white/[0.04] bg-white/[0.01]' :
                                 resolution === '1080p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             } ${loading ? 'opacity-50' : ''}`}>
@@ -2938,8 +3121,8 @@ function CreatePanel() {
                                     <Lock className="w-3.5 h-3.5 text-gray-600" />
                                 </div>
                             )}
-                            <div className="text-lg font-bold">1080p</div>
-                            <div className="text-xs text-gray-500 mt-0.5">
+                            <div className="text-base font-bold">1080p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">
                                 {canUse1080p ? 'Best quality' : 'Temporarily unavailable'}
                             </div>
                         </button>
@@ -2949,11 +3132,11 @@ function CreatePanel() {
                 {/* LANGUAGE */}
                 {languages.length > 0 && (
                     <div>
-                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Language</h2>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Language</h2>
                         <div className="flex flex-wrap gap-2">
                             {languages.map(l => (
                                 <button key={l.code} onClick={() => !loading && setLanguage(l.code)}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all border ${
                                         language === l.code
                                             ? 'border-violet-500 bg-violet-500/10 text-violet-300'
                                             : 'border-white/[0.06] text-gray-500 hover:border-white/20'
@@ -2970,7 +3153,7 @@ function CreatePanel() {
 
                 {/* PROMPT */}
                 <div>
-                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
                         {creativeMode === 'script_to_short' ? 'Script Input' : 'Topic'}
                     </h2>
                     <div className="relative">
@@ -2981,7 +3164,7 @@ function CreatePanel() {
                                 disabled={loading || scriptLoading}
                                 rows={6}
                                 placeholder="Paste your full script here. Next step is manual: open editor, click Generate Scenes, then generate image batches."
-                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 text-sm resize-y"
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 text-sm resize-y"
                             />
                         ) : (
                             <input
@@ -3003,7 +3186,7 @@ function CreatePanel() {
                                     : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
                                     : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
                                     : "Enter your video topic..."}
-                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-sm"
                                 onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
                             />
                         )}
@@ -3012,21 +3195,21 @@ function CreatePanel() {
 
                 {supportsArtStyle && (
                     <div>
-                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Art Style</h2>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Art Style</h2>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                             {artStyleOptions.map((style) => (
                                 <button
                                     key={style.id}
                                     type="button"
                                     onClick={() => !loading && !scriptLoading && setArtStyle(style.id)}
-                                    className={`rounded-lg p-3 text-left transition border ${
+                                    className={`rounded-lg p-2.5 text-left transition border ${
                                         artStyle === style.id
                                             ? 'border-cyan-400/70 bg-cyan-500/10'
                                             : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
                                     }`}
                                 >
-                                    <p className="text-sm font-semibold text-white">{style.label}</p>
-                                    <p className="text-xs text-gray-400 mt-1">{style.desc}</p>
+                                    <p className="text-xs font-semibold text-white">{style.label}</p>
+                                    <p className="text-[11px] text-gray-400 mt-1">{style.desc}</p>
                                 </button>
                             ))}
                         </div>
@@ -3036,12 +3219,12 @@ function CreatePanel() {
 
                 <div>
                     <div>
-                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Style Reference (Optional, Recommended)</h2>
-                        <div className="mb-3 grid grid-cols-2 gap-2">
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Style Reference (Optional)</h2>
+                        <div className="mb-2 grid grid-cols-2 gap-2">
                             <button
                                 type="button"
                                 onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('strict')}
-                                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
                                     creativeReferenceLockMode === 'strict'
                                         ? 'border border-violet-400/70 bg-violet-500/15 text-violet-200'
                                         : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
@@ -3052,7 +3235,7 @@ function CreatePanel() {
                             <button
                                 type="button"
                                 onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('inspired')}
-                                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
                                     creativeReferenceLockMode === 'inspired'
                                         ? 'border border-amber-400/70 bg-amber-500/15 text-amber-200'
                                         : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
@@ -3061,7 +3244,7 @@ function CreatePanel() {
                                 Style Inspired
                             </button>
                         </div>
-                        <label className="block rounded-xl border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-4 cursor-pointer transition">
+                        <label className="block rounded-lg border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-3 cursor-pointer transition">
                             <input
                                 type="file"
                                 accept="image/*"
@@ -3075,22 +3258,67 @@ function CreatePanel() {
                             />
                             <div className="flex items-center justify-between gap-4">
                                 <div>
-                                    <p className="text-sm text-white font-medium">
+                                    <p className="text-xs text-white font-medium">
                                         {creativeReferenceImage
                                             ? creativeReferenceImage.name
                                             : creativeReferenceAttached
                                                 ? 'Reference image already attached for this project'
                                                 : 'Upload reference style image'}
                                     </p>
-                                    <p className="text-xs text-gray-500 mt-1">
+                                    <p className="text-[11px] text-gray-500 mt-1">
                                         Applied across this short in Auto, Creative Control, or Script to Short. Mode: {creativeReferenceLockMode === 'strict' ? 'Strict lock for maximum continuity' : 'Inspired lock for more variation'}.
                                     </p>
                                 </div>
-                                <span className="px-3 py-1 rounded-md bg-violet-600/20 text-violet-300 text-xs font-semibold">
+                                <span className="px-2.5 py-1 rounded-md bg-violet-600/20 text-violet-300 text-[11px] font-semibold">
                                     {creativeReferenceImage || creativeReferenceAttached ? 'Attached' : 'Recommended'}
                                 </span>
                             </div>
                         </label>
+                    </div>
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Output Type</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Animated uses Kling/FAL scene motion. Slideshow uses image-based camera motion only.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => !loading && !scriptLoading && !animationCreditExhausted && setAnimateOutputEnabled(v => !v)}
+                            disabled={loading || scriptLoading || animationCreditExhausted}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                            } disabled:opacity-50`}
+                        >
+                            {effectiveAnimationEnabled ? "Animation ON" : "Slideshow Mode"}
+                        </button>
+                    </div>
+                    {animationCreditExhausted && (
+                        <p className="text-[11px] text-amber-300 mt-2">
+                            Animated credits are exhausted. Animation is locked until renewal/top-up, so slideshow mode is forced.
+                        </p>
+                    )}
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Cinematic Boost</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Enables stricter continuity + premium transition profile (higher generation cost).
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => !loading && !scriptLoading && setCinematicBoostEnabled(v => !v)}
+                            disabled={loading || scriptLoading}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                cinematicBoostEnabled ? "bg-cyan-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                            } disabled:opacity-50`}
+                        >
+                            {cinematicBoostEnabled ? "Boost ON" : "Boost OFF"}
+                        </button>
                     </div>
                 </div>
 
@@ -3104,13 +3332,13 @@ function CreatePanel() {
                                 </p>
                             </div>
                             <button
-                                onClick={() => !loading && !scriptLoading && setStoryAnimationEnabled(v => !v)}
-                                disabled={loading || scriptLoading}
+                                onClick={() => !loading && !scriptLoading && !animationCreditExhausted && setAnimateOutputEnabled(v => !v)}
+                                disabled={loading || scriptLoading || animationCreditExhausted}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                                    storyAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                                    effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
                                 } disabled:opacity-50`}
                             >
-                                {storyAnimationEnabled ? "Animation ON" : "Animation OFF"}
+                                {effectiveAnimationEnabled ? "Animation ON" : "Animation OFF"}
                             </button>
                         </div>
                     </div>
@@ -3196,7 +3424,7 @@ function CreatePanel() {
 
                 {/* GENERATE BUTTON */}
                 <button onClick={handleGenerate} disabled={loading || scriptLoading || ((creativeMode === 'auto' || creativeMode === 'script_to_short') && !prompt.trim())}
-                    className={`w-full py-4 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : creativeMode === 'script_to_short' ? 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.99]`}>
+                    className={`w-full py-3 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : creativeMode === 'script_to_short' ? 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-lg text-base transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99]`}>
                     {scriptLoading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> {creativeReferenceStatus === 'uploading' ? 'Uploading reference style...' : 'Setting up...'}</>
                     ) : loading ? (
@@ -3206,9 +3434,10 @@ function CreatePanel() {
                     ) : creativeMode === 'script_to_short' ? (
                         <><Clapperboard className="w-5 h-5" /> Open Script Editor *IN PRE-ALPHA*</>
                     ) : (
-                        <><Wand2 className="w-5 h-5" /> Generate at {canUse1080p ? resolution : '720p'}</>
+                        <><Wand2 className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Generate Animated Short' : 'Generate Slideshow Short'} at {canUse1080p ? resolution : '720p'}</>
                     )}
                 </button>
+                {quickStartCard}
 
                 {/* JOB STATUS (auto mode) */}
                 {jobStatus && (
@@ -3581,6 +3810,7 @@ interface TrainingStatus {
 function AdminAnalyticsPanel() {
     const { session } = useContext(AuthContext);
     const [data, setData] = useState<any>(null);
+    const [billingAuditRows, setBillingAuditRows] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [bannerEnabled, setBannerEnabled] = useState(false);
@@ -3598,6 +3828,15 @@ function AdminAnalyticsPanel() {
             if (!res.ok) throw new Error(`Failed to load analytics (${res.status})`);
             const payload = await res.json();
             setData(payload);
+            const auditRes = await fetch(`${API}/api/admin/billing-audit`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (auditRes.ok) {
+                const audit = await auditRes.json();
+                setBillingAuditRows(Array.isArray(audit.rows) ? audit.rows : []);
+            } else {
+                setBillingAuditRows([]);
+            }
             setBannerEnabled(Boolean(payload.maintenance_banner_enabled));
             setBannerMessage((payload.maintenance_banner_message || "").trim() || "Studio is under high load. Queue times may be longer than usual while we scale capacity.");
         } catch (e: any) {
@@ -3765,6 +4004,40 @@ function AdminAnalyticsPanel() {
                             Total paid subscribers: <span className="text-violet-300 font-semibold">{data.total_paid_subscribers || 0}</span>
                             {" "}• Monthly revenue: <span className="text-emerald-300 font-semibold">{formatUsd(data.monthly_revenue_usd || 0)}</span>
                         </p>
+                    </div>
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">Billing Audit (status source)</h3>
+                        <p className="text-xs text-gray-500">Tracks who paid, current status, renewal timestamp, and whether status comes from Stripe or profile fallback.</p>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-xs">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-white/[0.08]">
+                                        <th className="text-left py-2 pr-3">Email</th>
+                                        <th className="text-left py-2 pr-3">Plan</th>
+                                        <th className="text-left py-2 pr-3">Stripe</th>
+                                        <th className="text-left py-2 pr-3">Source</th>
+                                        <th className="text-left py-2">Next Renewal</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {billingAuditRows.length === 0 ? (
+                                        <tr>
+                                            <td className="py-3 text-gray-500" colSpan={5}>No paid billing rows found.</td>
+                                        </tr>
+                                    ) : billingAuditRows.map((row, idx) => (
+                                        <tr key={`${row.email || 'row'}-${idx}`} className="border-b border-white/[0.05] text-gray-300">
+                                            <td className="py-2 pr-3">{row.email || '-'}</td>
+                                            <td className="py-2 pr-3">{row.plan || '-'}</td>
+                                            <td className="py-2 pr-3">{row.stripe_status || '-'}</td>
+                                            <td className="py-2 pr-3">{row.status_source || '-'}</td>
+                                            <td className="py-2">
+                                                {row.next_renewal_unix ? new Date(Number(row.next_renewal_unix) * 1000).toLocaleString() : '-'}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </>
             )}

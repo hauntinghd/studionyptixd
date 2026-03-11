@@ -23,7 +23,12 @@ async def _run_worker_loop():
     }
     log.info("Redis worker started")
     while True:
-        payload = await dequeue_generation_job()
+        try:
+            payload = await dequeue_generation_job()
+        except Exception as e:
+            log.warning(f"Queue poll failed; retrying: {e}")
+            await asyncio.sleep(1.0)
+            continue
         if not payload:
             await asyncio.sleep(0.5)
             continue

@@ -1,8 +1,91 @@
 PLAN_LIMITS = {
-    "starter": {"videos_per_month": 50, "max_duration_sec": 60, "max_resolution": "720p", "can_clone": False, "priority": False, "demo_access": False},
-    "creator": {"videos_per_month": 150, "max_duration_sec": 180, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
-    "pro": {"videos_per_month": 300, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": False},
-    "demo_pro": {"videos_per_month": 999, "max_duration_sec": 300, "max_resolution": "1080p", "can_clone": True, "priority": True, "demo_access": True},
+    "starter": {
+        "videos_per_month": 50,
+        "animated_renders_per_month": 50,
+        "non_animated_ops_per_month": 80,
+        "max_duration_sec": 60,
+        "max_resolution": "720p",
+        "can_clone": False,
+        "priority": False,
+        "demo_access": False,
+    },
+    "creator": {
+        "videos_per_month": 90,
+        "animated_renders_per_month": 90,
+        "non_animated_ops_per_month": 150,
+        "max_duration_sec": 180,
+        "max_resolution": "720p",
+        "can_clone": True,
+        "priority": True,
+        "demo_access": False,
+    },
+    "pro": {
+        "videos_per_month": 150,
+        "animated_renders_per_month": 150,
+        "non_animated_ops_per_month": 300,
+        "max_duration_sec": 300,
+        "max_resolution": "720p",
+        "can_clone": True,
+        "priority": True,
+        "demo_access": False,
+    },
+    "elite": {
+        "videos_per_month": 350,
+        "animated_renders_per_month": 350,
+        "non_animated_ops_per_month": 800,
+        "max_duration_sec": 420,
+        "max_resolution": "720p",
+        "can_clone": True,
+        "priority": True,
+        "demo_access": False,
+    },
+    "demo_pro": {
+        "videos_per_month": 240,
+        "animated_renders_per_month": 240,
+        "non_animated_ops_per_month": 350,
+        "max_duration_sec": 300,
+        "max_resolution": "720p",
+        "can_clone": True,
+        "priority": True,
+        "demo_access": True,
+    },
+}
+
+PLAN_FEATURES = {
+    "starter": [
+        "micro_escalation_lite",
+        "smart_transition_pack",
+        "balanced_sfx_mix",
+    ],
+    "creator": [
+        "micro_escalation_plus",
+        "smart_transition_pack",
+        "enhanced_sfx_mix",
+        "prompt_polish_booster",
+    ],
+    "pro": [
+        "micro_escalation_pro",
+        "cinematic_transition_pack",
+        "enhanced_sfx_mix",
+        "prompt_polish_booster",
+        "style_consistency_lock",
+    ],
+    "demo_pro": [
+        "micro_escalation_pro",
+        "cinematic_transition_pack",
+        "enhanced_sfx_mix",
+        "prompt_polish_booster",
+        "style_consistency_lock",
+    ],
+    "elite": [
+        "micro_escalation_pro",
+        "cinematic_transition_pack",
+        "enhanced_sfx_mix",
+        "prompt_polish_booster",
+        "style_consistency_lock",
+        "early_access_feature_waves",
+        "elite_priority_lane",
+    ],
 }
 
 RESOLUTION_CONFIGS = {
@@ -13,7 +96,6 @@ RESOLUTION_CONFIGS = {
 ADMIN_EMAILS = {"omatic657@gmail.com"}
 HARDCODED_PLANS = {
     "omatic657@gmail.com": "admin",
-    "alwakmyhem@gmail.com": "pro",
 }
 
 PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "story", "motivation", "objects", "wouldyourather", "scary", "history"}

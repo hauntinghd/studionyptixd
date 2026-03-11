@@ -15,6 +15,9 @@ class GenerateRequest(BaseModel):
     voice_speed: float = 1.0
     pacing_mode: str = "standard"
     art_style: str = "auto"
+    cinematic_boost: bool = False
+    animation_enabled: bool = True
+    story_animation_enabled: bool = True
     reference_image_url: str = ""
     reference_lock_mode: str = "strict"
     scenes: list = []
@@ -32,6 +35,7 @@ class SceneImageRequest(BaseModel):
     micro_escalation_mode: bool = True
     reference_lock_mode: str = "strict"
     art_style: str = "auto"
+    cinematic_boost: bool = False
 
 
 class FinalizeRequest(BaseModel):
@@ -45,12 +49,14 @@ class FinalizeRequest(BaseModel):
     micro_escalation_mode: bool = True
     narration: str = ""
     scenes: list = []
+    animation_enabled: bool = True
     story_animation_enabled: bool = True
     reference_lock_mode: str = "strict"
     voice_id: str = ""
     voice_speed: float = 1.0
     pacing_mode: str = "standard"
     art_style: str = "auto"
+    cinematic_boost: bool = False
     subtitles_enabled: bool = True
 
 

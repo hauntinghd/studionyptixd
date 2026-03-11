@@ -1,37 +1,24 @@
 SKELETON_IMAGE_PROMPT_PREFIX = ""
 
 SKELETON_IMAGE_STYLE_PREFIX = (
-    "Photorealistic 3D studio render. Unreal Engine 5 quality. "
-    "High-key commercial lighting with bright readable mids, clean subject separation, and vibrant but realistic color contrast. "
-    "No illustration, no comic art, no anime, no drawing, no sketch."
+    "Photorealistic 3D cinematic character render, Unreal Engine 5 quality. "
+    "Premium commercial lighting, clean subject separation, realistic materials, natural contrast, crisp detail. "
+    "No illustration, no cartoon, no anime, no sketch."
 )
 
 SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "MASTER CONSISTENCY RULES (apply to every scene): "
-    "Keep one continuous visual universe across all scenes. Keep the same skeleton character identity, "
-    "same skull shape, same limb proportions, same bone material, same eye style, same color grade, and same camera language. "
-    "For VS videos, lock two identities and keep both stable scene-to-scene as Character A and Character B. "
-    "Never swap identities. Never change art style. Never switch to illustration/comic/anime. "
-    "Maintain photoreal cinematic studio quality in every frame. "
-    "Use glossy white bone material with subtle glass-like specular highlights, and realistic reflective eyeballs in every scene. "
-    "Outfits must remain role-accurate and fully opaque with realistic fabric folds and stitching. "
-    "OUTFIT LOCK: keep the exact same primary outfit design for each locked character across all scenes (same base suit, same main colors, same sponsor/logo placement language, same gloves, same shoes, same accessories) unless the prompt explicitly requests a change. "
-    "For motorsport topics, lock one racing-livery identity per character and keep sponsor/logo families, patch positions, and suit color blocking consistent scene-to-scene. "
-    "Do not randomly switch brands, uniform style, logo layout, or colorway mid-video. "
-    "Maintain bright, clear readability across all scenes (avoid muddy shadows and underexposure). "
-    "If a visual detail is missing, infer from topic role while preserving the same identity lock."
+    "One continuous visual universe. Keep the same skeleton identity: skull shape, eye style, bone finish, outfit family, and color grade. "
+    "For VS videos, lock Character A and Character B identities and never swap them. "
+    "Keep outfits role-accurate, fully opaque, and consistent scene-to-scene unless a scene explicitly requests a change. "
+    "Maintain bright readability, premium cinematic detail, and stable camera language."
 )
 
 SKELETON_IMAGE_SUFFIX = (
-    "Photorealistic 3D render, Unreal Engine 5, octane render, NOT illustration, NOT cartoon, NOT comic art. "
-    "The character has a white SKULL for a head (not a human face) and BONY SKELETON HANDS, "
-    "but the entire body from neck to feet is FULLY COVERED by the outfit described above. "
-    "No bare ribcage, no exposed spine, no visible pelvis -- the clothes hide all bones below the neck. "
-    "It looks like a real person in the outfit but with a clean glossy white bone skull instead of a face, with glass-like highlights. "
-    "NOT a real human. NOT a person with skin. The head MUST be a bare white bone skull with eyeballs. "
-    "Solid clean teal-blue (#5AC8B8) studio backdrop, professional studio photography lighting. "
-    "Color grade is vibrant and premium: rich but natural saturation, bright mids, crisp highlight roll-off, readable facial skull details. "
-    "Preserve outfit continuity across the whole video: same suit identity, same logo family/placement, same color blocking."
+    "Character anatomy rules: white skull head with realistic eyeballs and bony hands only; no human skin face. "
+    "Body from neck to feet stays fully covered by the described outfit; no exposed ribcage/spine/pelvis. "
+    "Composition priority: hero subject fills the frame (medium or 3/4 shot by default), avoid tiny distant full-body unless explicitly requested. "
+    "Render as premium photoreal cinematic output with believable materials, natural perspective, clean edges, and readable facial skull detail."
 )
 
 TEMPLATE_KLING_MOTION = {
@@ -77,8 +64,8 @@ SKELETON_NEGATIVE_PROMPT = (
     "anatomy model only, medical skeleton display, skeleton without accessories, "
     "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
     "skin, flesh, muscles, human face, realistic person, "
-    "outdoor scene, room, environment, landscape, nature, buildings, "
-    "dark background, black background, white background, "
+    "empty background with no context, generic blank set, low-detail environment, "
+    "flat washed lighting, underexposed muddy shadows, "
     "blurry, low quality, watermark, text artifacts, deformed, "
     "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
     "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, "
@@ -109,19 +96,19 @@ HISTORY_NEGATIVE_PROMPT = (
 )
 
 STORY_IMAGE_PROMPT_PREFIX = (
-    "Cinematic masterpiece scene, Pixar quality 3D meets photorealistic cinematography, "
-    "emotionally resonant composition with depth of field, "
+    "Cinematic photoreal scene, Unreal Engine 5 grade realism with filmic cinematography, "
+    "emotionally resonant composition with depth of field and grounded human detail, "
     "dramatic volumetric lighting with motivated light sources, "
     "ray traced global illumination, atmospheric particles floating, "
     "lens flare, bokeh, film grain, color graded for emotional impact, "
     "character with consistent appearance centered in frame, "
-    "richly detailed fantastical environment, 8k ultra HD, award-winning visual, "
+    "richly detailed cinematic environment, 8k ultra HD, award-winning visual, "
 )
 
 STORY_NEGATIVE_PROMPT = (
-    "cartoon, anime, low poly, flat shading, chibi, "
+    "cartoon, anime, low poly, flat shading, chibi, cgi, overly rendered cg face, plastic skin, waxy skin, "
     "blurry, low quality, watermark, text artifacts, deformed, "
-    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, malformed hands, extra fingers, fused fingers, uncanny face, "
     "multiple characters unless specified, inconsistent character design, "
     "flat lighting, boring composition, stock photo feel"
 )

@@ -45,6 +45,8 @@ from backend_settings import (
     USE_XAI_VIDEO,
     PRODUCT_DEMO_PUBLIC_ENABLED,
     SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
+    STORY_GLOBAL_REFERENCE_IMAGE_URL,
+    MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL,
     USE_FAL_GROK_IMAGE,
     IMAGE_QUALITY_BESTOF_ENABLED,
     IMAGE_QUALITY_BESTOF_COUNT,
@@ -148,6 +150,10 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
+
+
+def _ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
 _deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
@@ -471,53 +477,100 @@ def _month_key(ts: float | None = None) -> str:
 
 def _wallet_for_user(user_id: str) -> dict:
     if not user_id:
-        return {"topup_credits": 0, "monthly_usage": {}, "updated_at": time.time()}
+        return {
+            "topup_credits": 0,
+            "animated_topup_credits": 0,
+            "monthly_usage": {},
+            "monthly_usage_non_animated": {},
+            "updated_at": time.time(),
+        }
     wallet = _topup_wallets.get(user_id)
     if not isinstance(wallet, dict):
-        wallet = {"topup_credits": 0, "monthly_usage": {}, "updated_at": time.time()}
+        wallet = {
+            "topup_credits": 0,
+            "animated_topup_credits": 0,
+            "monthly_usage": {},
+            "monthly_usage_non_animated": {},
+            "updated_at": time.time(),
+        }
         _topup_wallets[user_id] = wallet
-    wallet.setdefault("topup_credits", 0)
+    wallet.setdefault("topup_credits", 0)  # legacy mirror
+    wallet.setdefault("animated_topup_credits", int(wallet.get("topup_credits", 0) or 0))
     wallet.setdefault("monthly_usage", {})
+    wallet.setdefault("monthly_usage_non_animated", {})
     wallet.setdefault("updated_at", time.time())
     return wallet
 
 
-def _plan_monthly_credit_limit(plan: str) -> int:
+def _plan_monthly_animated_limit(plan: str) -> int:
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("starter", {}))
-    return int(limits.get("videos_per_month", 0) or 0)
+    return int(limits.get("animated_renders_per_month", limits.get("videos_per_month", 0)) or 0)
+
+
+def _plan_monthly_non_animated_limit(plan: str) -> int:
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("starter", {}))
+    fallback = int(limits.get("animated_renders_per_month", limits.get("videos_per_month", 0)) or 0) * 10
+    return int(limits.get("non_animated_ops_per_month", fallback) or 0)
 
 
 def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool, is_admin: bool = False) -> dict:
     if is_admin:
         return {
+            "animated_monthly_limit": 9999,
+            "animated_monthly_used": 0,
+            "animated_monthly_remaining": 9999,
+            "animated_topup_credits": 9999,
+            "animated_total_remaining": 9999,
+            "non_animated_monthly_limit": 9999,
+            "non_animated_monthly_used": 0,
+            "non_animated_monthly_remaining": 9999,
+            "requires_topup": False,
+            "month_key": _month_key(),
+            # Backward-compatible aliases.
             "monthly_limit": 9999,
             "monthly_used": 0,
             "monthly_remaining": 9999,
             "topup_credits": 9999,
             "credits_total_remaining": 9999,
-            "requires_topup": False,
-            "month_key": _month_key(),
         }
     user_id = str(user.get("id", "") or "")
     wallet = _wallet_for_user(user_id)
     mk = _month_key()
-    monthly_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
-    monthly_limit = _plan_monthly_credit_limit(effective_plan) if billing_active else 0
-    monthly_remaining = max(0, monthly_limit - monthly_used)
-    topup = int(wallet.get("topup_credits", 0) or 0)
-    total_remaining = monthly_remaining + topup
+    animated_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
+    non_animated_used = int((wallet.get("monthly_usage_non_animated", {}) or {}).get(mk, 0) or 0)
+    animated_limit = _plan_monthly_animated_limit(effective_plan) if billing_active else 0
+    non_animated_limit = _plan_monthly_non_animated_limit(effective_plan) if billing_active else 0
+    animated_remaining = max(0, animated_limit - animated_used)
+    non_animated_remaining = max(0, non_animated_limit - non_animated_used)
+    topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
+    total_remaining = animated_remaining + topup
     return {
-        "monthly_limit": monthly_limit,
-        "monthly_used": monthly_used,
-        "monthly_remaining": monthly_remaining,
-        "topup_credits": topup,
-        "credits_total_remaining": total_remaining,
+        "animated_monthly_limit": animated_limit,
+        "animated_monthly_used": animated_used,
+        "animated_monthly_remaining": animated_remaining,
+        "animated_topup_credits": topup,
+        "animated_total_remaining": total_remaining,
+        "non_animated_monthly_limit": non_animated_limit,
+        "non_animated_monthly_used": non_animated_used,
+        "non_animated_monthly_remaining": non_animated_remaining,
         "requires_topup": bool(billing_active and total_remaining <= 0),
         "month_key": mk,
+        # Backward-compatible aliases.
+        "monthly_limit": animated_limit,
+        "monthly_used": animated_used,
+        "monthly_remaining": animated_remaining,
+        "topup_credits": topup,
+        "credits_total_remaining": total_remaining,
     }
 
 
-async def _reserve_generation_credit(user: dict, effective_plan: str, billing_active: bool, is_admin: bool = False) -> tuple[bool, str, dict]:
+async def _reserve_generation_credit(
+    user: dict,
+    effective_plan: str,
+    billing_active: bool,
+    is_admin: bool = False,
+    usage_kind: str = "animated",
+) -> tuple[bool, str, dict]:
     if is_admin:
         return True, "admin", _credit_state_for_user(user, effective_plan, billing_active, is_admin=True)
     if not billing_active:
@@ -527,16 +580,26 @@ async def _reserve_generation_credit(user: dict, effective_plan: str, billing_ac
         wallet = _wallet_for_user(user_id)
         state = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
         mk = state["month_key"]
-        if state["monthly_remaining"] > 0:
+        if usage_kind == "non_animated":
+            if state["non_animated_monthly_remaining"] <= 0:
+                return False, "non_animated_limit_reached", state
+            usage = dict(wallet.get("monthly_usage_non_animated", {}) or {})
+            usage[mk] = int(usage.get(mk, 0) or 0) + 1
+            wallet["monthly_usage_non_animated"] = usage
+            wallet["updated_at"] = time.time()
+            _save_topup_wallets()
+            return True, "non_animated_monthly", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+        if state["animated_monthly_remaining"] > 0:
             usage = dict(wallet.get("monthly_usage", {}) or {})
             usage[mk] = int(usage.get(mk, 0) or 0) + 1
             wallet["monthly_usage"] = usage
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
             return True, "monthly", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
-        topup = int(wallet.get("topup_credits", 0) or 0)
+        topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
         if topup > 0:
-            wallet["topup_credits"] = topup - 1
+            wallet["animated_topup_credits"] = topup - 1
+            wallet["topup_credits"] = wallet["animated_topup_credits"]  # keep legacy mirror updated
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
             return True, "topup", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
@@ -549,7 +612,8 @@ async def _refund_generation_credit(user_id: str, source: str, month_key: str = 
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
         if source == "topup":
-            wallet["topup_credits"] = int(wallet.get("topup_credits", 0) or 0) + 1
+            wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + 1
+            wallet["topup_credits"] = wallet["animated_topup_credits"]
         else:
             mk = month_key or _month_key()
             usage = dict(wallet.get("monthly_usage", {}) or {})
@@ -573,7 +637,8 @@ async def _credit_topup_wallet(user_id: str, credits: int, source: str, stripe_s
         return
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
-        wallet["topup_credits"] = int(wallet.get("topup_credits", 0) or 0) + int(credits)
+        wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + int(credits)
+        wallet["topup_credits"] = wallet["animated_topup_credits"]
         wallet["updated_at"] = time.time()
         _save_topup_wallets()
     _append_usage_ledger({
@@ -688,6 +753,11 @@ def _bool_from_any(value, default: bool = False) -> bool:
 
 
 REFERENCE_LOCK_MODES = {"strict", "inspired"}
+TEMPLATE_DEFAULT_REFERENCE_URLS = {
+    "skeleton": str(SKELETON_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
+    "story": str(STORY_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
+    "motivation": str(MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
+}
 ART_STYLE_PRESETS = {
     "auto": "",
     "cinematic_realism": "Photoreal cinematic realism with natural skin detail, physically-plausible lighting, clean lens behavior, and premium film color grade.",
@@ -700,6 +770,17 @@ ART_STYLE_PRESETS = {
 def _normalize_reference_lock_mode(value, default: str = "strict") -> str:
     text = str(value or default).strip().lower()
     return text if text in REFERENCE_LOCK_MODES else default
+
+
+def _default_reference_for_template(template: str) -> str:
+    return str(TEMPLATE_DEFAULT_REFERENCE_URLS.get(str(template or "").strip().lower(), "") or "").strip()
+
+
+def _normalize_reference_with_default(template: str, reference_image_url: str) -> str:
+    value = str(reference_image_url or "").strip()
+    if value:
+        return value
+    return _default_reference_for_template(template)
 
 
 def _normalize_art_style(value, template: str = "", default: str = "auto") -> str:
@@ -1069,10 +1150,11 @@ def _resolve_reference_for_scene(session: dict, template: str, scene_index: int)
     rolling_ref = str(session.get("rolling_reference_image_url", "") or "")
     lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), default="strict")
     selected = skeleton_ref if template == "skeleton" and skeleton_ref else base_ref
-    if template == "skeleton" and not selected:
-        selected = SKELETON_GLOBAL_REFERENCE_IMAGE_URL
+    selected = _normalize_reference_with_default(template, selected)
     # External providers are more reliable with public HTTPS URLs than data URLs.
     if lock_mode == "strict":
+        if rolling_ref and scene_index > 0:
+            return rolling_ref
         if base_ref_public:
             return base_ref_public
         if rolling_ref:
@@ -1478,7 +1560,7 @@ VISUAL STYLE:
 
 STORY STRUCTURE (emotional arc is MANDATORY):
 1. HOOK (Scene 1): Visually stunning opening that demands attention -- a mystery, danger, or beauty
-2. SETUP (Scenes 2-3): Establish the character, their world, and what they want
+2. SETUP (Scenes 2-3): Establish the current beat's subjects, their world, and immediate stakes
 3. RISING ACTION (Scenes 4-6): Obstacles, discoveries, building tension
 4. CLIMAX (Scenes 7-9): Peak emotional moment -- beautiful, shocking, or heartbreaking
 5. RESOLUTION (Scenes 10-11): Emotional payoff, satisfying conclusion
@@ -1963,6 +2045,13 @@ Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual
 
 async def generate_script(template: str, topic: str, extra_instructions: str = "") -> dict:
     system_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
+    if template in {"skeleton", "story", "motivation"}:
+        system_prompt += (
+            "\n\nSUBJECT DIVERSITY + TEMPLATE COVERAGE RULES (MUST FOLLOW): "
+            "Avoid forcing one unchanged main character in every scene unless the topic is explicitly about one person. "
+            "Distribute scene focus across script-relevant subjects, locations, and groups while preserving continuity where the script repeats entities. "
+            "Keep outputs practical and balanced for Skeleton AI, AI Stories, and Motivation templates."
+        )
     if extra_instructions:
         system_prompt += extra_instructions
     story_script_to_short_mode = (
@@ -2062,7 +2151,21 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     )
     second = await _call_script_gen(hardened_prompt, temp=0.65)
     second_score, _ = _score_story_script_quality(second)
-    return second if second_score >= first_score else first
+    best = second if second_score >= first_score else first
+    best_score = max(first_score, second_score)
+    if story_script_to_short_mode and best_score < 80:
+        ultra_hardened = (
+            hardened_prompt
+            + "\n\nFAILSAFE OVERRIDE (MUST FOLLOW): "
+            + "Do NOT truncate. Complete all script beats in order. "
+            + "Output exactly 12-15 scenes with no premature ending and no skipped late-script events."
+        )
+        third = await _call_script_gen(ultra_hardened, temp=0.55)
+        third_score, _ = _score_story_script_quality(third)
+        if third_score >= best_score:
+            best = third
+            best_score = third_score
+    return best
 
 
 # ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
@@ -2225,7 +2328,8 @@ def _probe_video_duration_seconds(video_path: str) -> float:
 TRANSITION_STYLE_MAP = {
     "no_motion": "none",
     "none": "none",
-    "dramatic": "fadeblack",
+    "dramatic": "fade",
+    "cinematic": "fade",
     "smooth": "fade",
     "slide": "slideleft",
     "zoom": "circleopen",
@@ -2246,8 +2350,8 @@ def _normalize_transition_style(value: str | None) -> str:
 def _transition_duration_for_style(style: str) -> float:
     if style in {"snap"}:
         return 0.08
-    if style in {"dramatic", "blur"}:
-        return 0.22
+    if style in {"dramatic", "cinematic", "blur"}:
+        return 0.12
     if style in {"slide", "zoom"}:
         return 0.18
     return 0.16
@@ -2259,6 +2363,10 @@ def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
     if value is None:
         return True
     return _bool_from_any(value, True)
+
+
+def _normalize_cinematic_boost(value) -> bool:
+    return _bool_from_any(value, False)
 
 
 def _normalize_voice_speed(value, default: float = 1.0) -> float:
@@ -2851,7 +2959,12 @@ def _file_to_data_image_url(image_path: str, max_bytes: int = 8 * 1024 * 1024) -
     return f"data:{mime};base64,{b64}"
 
 
-async def _generate_image_xai_direct(prompt: str, output_path: str, reference_image_url: str = "") -> dict:
+async def _generate_image_xai_direct(
+    prompt: str,
+    output_path: str,
+    reference_image_url: str = "",
+    reference_lock_mode: str = "strict",
+) -> dict:
     """Generate image directly via xAI API. No fal.ai needed.
     Returns {"local_path": str, "cdn_url": str}.
     """
@@ -2891,8 +3004,13 @@ async def _generate_image_xai_direct(prompt: str, output_path: str, reference_im
                     log.warning(f"xAI image gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
                     await asyncio.sleep(wait)
                     continue
-                # If reference-conditioning payload is rejected by provider, retry once without reference.
+                # In strict mode, never silently drop identity lock.
                 if reference_image_url and resp.status_code in (400, 404, 422):
+                    if _normalize_reference_lock_mode(reference_lock_mode) == "strict":
+                        raise RuntimeError(
+                            f"xAI rejected strict reference image payload ({resp.status_code}); "
+                            "strict lock cannot continue without reference conditioning"
+                        )
                     payload.pop("image_url", None)
                     reference_image_url = ""
                     log.warning("xAI image reference payload rejected; retrying without reference image")
@@ -2907,7 +3025,13 @@ async def _generate_image_xai_direct(prompt: str, output_path: str, reference_im
     raise RuntimeError("xAI direct image generation failed after retries")
 
 
-async def generate_image_grok(prompt: str, output_path: str, resolution: str = "720p", reference_image_url: str = "") -> dict:
+async def generate_image_grok(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    reference_image_url: str = "",
+    reference_lock_mode: str = "strict",
+) -> dict:
     """Generate an image using Grok Imagine. Tries fal.ai first, falls back to direct xAI API.
     Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
     """
@@ -2953,7 +3077,12 @@ async def generate_image_grok(prompt: str, output_path: str, resolution: str = "
             log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
 
     log.info(f"Using direct xAI API image generation model={XAI_IMAGE_MODEL}")
-    return await _generate_image_xai_direct(prompt, output_path, reference_image_url=reference_image_url)
+    return await _generate_image_xai_direct(
+        prompt,
+        output_path,
+        reference_image_url=reference_image_url,
+        reference_lock_mode=reference_lock_mode,
+    )
 
 
 SKELETON_LORA_NAME = "nyptid_skeleton_v1.safetensors"
@@ -3046,6 +3175,7 @@ async def generate_scene_image(
     negative_prompt: str = "",
     template: str = "",
     reference_image_url: str = "",
+    reference_lock_mode: str = "strict",
 ) -> dict:
     """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
     For other templates: Grok Imagine > SDXL.
@@ -3053,6 +3183,9 @@ async def generate_scene_image(
     """
     async def _enforce_1080_image(path: str) -> None:
         if resolution != "1080p":
+            return
+        if not _ffmpeg_available():
+            log.warning("ffmpeg not found on host; skipping 1080p image upscale")
             return
         target = RESOLUTION_CONFIGS.get("1080p", {})
         out_w = int(target.get("output_width", 1080) or 1080)
@@ -3083,21 +3216,29 @@ async def generate_scene_image(
             upscaled.unlink(missing_ok=True)
             log.warning(f"Image 1080p upscale skipped for {src.name}: {err.decode()[-200:]}")
 
+    lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
     if template == "skeleton":
-        try:
-            lora_available = await check_skeleton_lora_available()
-            if lora_available:
-                await generate_image_skeleton_lora(prompt, output_path, resolution=resolution)
-                await _enforce_1080_image(output_path)
-                log.info("Skeleton image generated via LoRA (zero API cost)")
-                return {"local_path": output_path, "cdn_url": None}
-        except Exception as e:
-            log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
+        if reference_image_url and lock_mode == "strict":
+            log.info("Skipping Skeleton LoRA for strict reference lock; using conditioned generator")
+        else:
+            try:
+                lora_available = await check_skeleton_lora_available()
+                if lora_available:
+                    await generate_image_skeleton_lora(prompt, output_path, resolution=resolution)
+                    await _enforce_1080_image(output_path)
+                    log.info("Skeleton image generated via LoRA (zero API cost)")
+                    return {"local_path": output_path, "cdn_url": None}
+            except Exception as e:
+                log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
 
     if FAL_AI_KEY or XAI_API_KEY:
         try:
             if IMAGE_QUALITY_BESTOF_ENABLED and IMAGE_QUALITY_BESTOF_COUNT > 1:
                 best_count = max(2, int(IMAGE_QUALITY_BESTOF_COUNT))
+                if template in {"skeleton", "story", "motivation"}:
+                    best_count = max(best_count, 4)
+                if lock_mode == "strict" and reference_image_url and template in {"skeleton", "story"}:
+                    best_count = max(best_count, 5)
                 cand_root = Path(output_path)
                 candidates = []
                 for idx in range(best_count):
@@ -3108,6 +3249,7 @@ async def generate_scene_image(
                             cand_path,
                             resolution=resolution,
                             reference_image_url=reference_image_url,
+                            reference_lock_mode=lock_mode,
                         )
                         await _enforce_1080_image(cand_path)
                         qa = _score_generated_image_quality(cand_path, prompt=prompt, template=template)
@@ -3141,6 +3283,7 @@ async def generate_scene_image(
                             salvage_path,
                             resolution=resolution,
                             reference_image_url=reference_image_url,
+                            reference_lock_mode=lock_mode,
                         )
                         await _enforce_1080_image(salvage_path)
                         salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
@@ -3177,6 +3320,7 @@ async def generate_scene_image(
                 output_path,
                 resolution=resolution,
                 reference_image_url=reference_image_url,
+                reference_lock_mode=lock_mode,
             )
             await _enforce_1080_image(output_path)
             qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
@@ -4588,11 +4732,21 @@ def _build_skeleton_image_prompt(
     mode = _normalize_skeleton_quality_mode(quality_mode, template="skeleton")
     addon = (SKELETON_CINEMATIC_PROMPT_ADDON + " ") if mode == "cinematic" else ""
     immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
+    # Keep scene detail rich but remove duplicated eye directives that can over-constrain Grok.
+    delta = re.sub(
+        r"\b(with\s+)?realistic\s+(visible\s+)?eyeballs?[^.]*\.",
+        "",
+        str(visual_description or "").strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if not delta:
+        delta = str(visual_description or "").strip()
     return (
         SKELETON_IMAGE_STYLE_PREFIX + " "
         + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-        + "NON-NEGOTIABLE CHARACTER RULE: both eye sockets contain realistic human-like eyeballs with visible iris and wet reflective highlights in every scene. "
-        + addon + immutable + skeleton_anchor + str(visual_description or "").strip() + " "
+        + "NON-NEGOTIABLE CHARACTER RULE: both eye sockets contain realistic human-like eyeballs with visible iris and wet reflective highlights. "
+        + "COMPOSITION RULE: subject occupies most of vertical frame; prefer medium or medium-full hero framing unless scene explicitly requests wide shot. "
+        + addon + immutable + skeleton_anchor + delta + " "
         + SKELETON_IMAGE_SUFFIX
     )
 
@@ -4614,7 +4768,7 @@ def _build_story_image_prompt(
 
 def _apply_template_scene_constraints(scenes: list, template: str, quality_mode: str = "standard") -> list:
     """Harden model output so template-critical constraints cannot drift."""
-    if template not in {"skeleton", "story"}:
+    if template not in {"skeleton", "story", "motivation"}:
         return scenes
     quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
 
@@ -4658,6 +4812,8 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
                 chunks.append("The skeleton holds a role-specific prop in a cinematic environment that matches the scene request.")
             if len(chunks) < 3:
                 chunks.append("Motion cue: smooth natural arm and head movement with realistic fabric sway.")
+            if not re.search(r"\b(close[- ]?up|medium|mid[- ]?shot|three[- ]?quarter|3/4|waist[- ]?up|hero framing|fills? (the )?frame)\b", " ".join(chunks[:3]), re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + " Hero framing: medium or three-quarter shot with the subject filling most of the vertical frame."
 
             # Hard default for Skeleton AI: eyeballs must always be present.
             eyes_ok = any(
@@ -4856,7 +5012,7 @@ async def run_generation_pipeline(
         voice_speed = _normalize_voice_speed(job_state.get("voice_speed", 1.0), default=1.0)
         pacing_mode = _normalize_pacing_mode(job_state.get("pacing_mode", "standard"))
         art_style = _normalize_art_style(job_state.get("art_style", "auto"), template=template)
-        reference_image_url = str(job_state.get("reference_image_url", "") or "").strip()
+        reference_image_url = _normalize_reference_with_default(template, str(job_state.get("reference_image_url", "") or "").strip())
         reference_lock_mode = _normalize_reference_lock_mode(job_state.get("reference_lock_mode"), default="strict")
         reference_dna = job_state.get("reference_dna", {}) if isinstance(job_state.get("reference_dna"), dict) else {}
         _job_set_stage(job_id, "generating_script", 5)
@@ -4882,18 +5038,21 @@ async def run_generation_pipeline(
         fal_video_enabled = bool(FAL_AI_KEY)
         runway_video_enabled = bool(RUNWAY_API_KEY)
         use_video_engine = fal_video_enabled or runway_video_enabled
-        use_video = use_video_engine
+        animation_enabled = _bool_from_any(job_state.get("animation_enabled"), _bool_from_any(job_state.get("story_animation_enabled"), True))
+        use_video = bool(use_video_engine and animation_enabled)
         if template == "reddit":
             use_video = False
-        if template != "reddit" and not use_video_engine:
+        if template != "reddit" and animation_enabled and not use_video_engine:
             raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
-        if runway_video_enabled:
+        if not animation_enabled or template == "reddit":
+            mode_label = "static image"
+        elif runway_video_enabled:
             mode_label = "Runway (primary)"
         elif fal_video_enabled:
             mode_label = "FalAI Kling 2.1"
         else:
             mode_label = "static image"
-        jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
+        jobs[job_id]["generation_mode"] = "video" if use_video else "image"
 
         _job_set_stage(job_id, "generating_images", 10)
         jobs[job_id]["total_scenes"] = len(scenes)
@@ -4932,13 +5091,17 @@ async def run_generation_pipeline(
                 art_style=art_style,
             )
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
+            scene_reference_url = _resolve_reference_for_scene(job_state, template, i) or (
+                skeleton_reference_image_url if template == "skeleton" else reference_image_url
+            )
             img_result = await generate_scene_image(
                 full_prompt,
                 img_path,
                 resolution=resolution,
                 negative_prompt=neg_prompt,
                 template=template,
-                reference_image_url=skeleton_reference_image_url if template == "skeleton" else reference_image_url,
+                reference_image_url=scene_reference_url,
+                reference_lock_mode=reference_lock_mode,
             )
             if template == "skeleton" and not skeleton_reference_image_url and i == 0:
                 skeleton_reference_image_url = _file_to_data_image_url(img_path)
@@ -5143,16 +5306,42 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
+    user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = user.get("email", "") in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
+    can_run, _source, _state = await _reserve_generation_credit(
+        user,
+        user_plan if not is_admin else "pro",
+        billing_active,
+        is_admin=is_admin,
+        usage_kind="non_animated",
+    )
+    if not can_run:
+        raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
     _ensure_template_allowed(req.template, user)
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
     mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
     art_style = _normalize_art_style(req.art_style, template=req.template)
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
+    default_reference_url = _default_reference_for_template(req.template)
     transition_style = _normalize_transition_style(req.transition_style)
     micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
+    if cinematic_boost:
+        quality_mode = "cinematic"
+        transition_style = "cinematic"
+        micro_escalation_mode = True
+        mint_mode = True
+    if cinematic_boost:
+        quality_mode = "cinematic"
+        transition_style = "cinematic"
+        micro_escalation_mode = True
+        mint_mode = True
     voice_id = str(req.voice_id or "").strip()
     voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode)
+    animation_enabled = _bool_from_any(req.animation_enabled, _bool_from_any(req.story_animation_enabled, True))
     if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
         voice_id = ""
         voice_speed = 1.0
@@ -5196,16 +5385,19 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "quality_mode": quality_mode,
             "mint_mode": mint_mode,
             "art_style": art_style,
+            "cinematic_boost": cinematic_boost,
             "transition_style": transition_style,
             "micro_escalation_mode": micro_escalation_mode,
             "voice_id": voice_id,
             "voice_speed": voice_speed,
             "pacing_mode": pacing_mode,
-            "reference_image_url": "",
+            "animation_enabled": animation_enabled,
+            "story_animation_enabled": animation_enabled if req.template == "story" else True,
+            "reference_image_url": default_reference_url,
             "reference_lock_mode": reference_lock_mode,
             "reference_dna": {},
             "reference_quality": {},
-            "rolling_reference_image_url": "",
+            "rolling_reference_image_url": default_reference_url,
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -5224,11 +5416,13 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "art_style": art_style,
+        "cinematic_boost": cinematic_boost,
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
         "mode": "script_to_short" if script_to_short_mode else "creative",
     }
@@ -5248,6 +5442,12 @@ async def creative_create_session(body: dict, request: Request = None):
     art_style = _normalize_art_style(body.get("art_style"), template=template)
     transition_style = _normalize_transition_style(body.get("transition_style", "smooth"))
     micro_escalation_mode = _normalize_micro_escalation_mode(body.get("micro_escalation_mode"), template=template)
+    cinematic_boost = _normalize_cinematic_boost(body.get("cinematic_boost", False))
+    if cinematic_boost:
+        quality_mode = "cinematic"
+        transition_style = "cinematic"
+        micro_escalation_mode = True
+        mint_mode = True
     voice_id = str(body.get("voice_id", "") or "").strip()
     voice_speed = _normalize_voice_speed(body.get("voice_speed", 1.0), default=1.0)
     pacing_mode = _normalize_pacing_mode(body.get("pacing_mode", "standard"))
@@ -5256,13 +5456,13 @@ async def creative_create_session(body: dict, request: Request = None):
         voice_speed = 1.0
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
+    default_reference_url = _default_reference_for_template(template)
     _ensure_template_allowed(template, user)
     _user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     requested_resolution = body.get("resolution", "720p")
     resolution = _normalize_output_resolution(requested_resolution, priority_allowed=bool(plan_limits.get("priority", False)))
-    story_animation_enabled = _bool_from_any(body.get("story_animation_enabled"), True)
-    if template != "story" or resolution != "720p":
-        story_animation_enabled = True
+    animation_enabled = _bool_from_any(body.get("animation_enabled"), _bool_from_any(body.get("story_animation_enabled"), True))
+    story_animation_enabled = animation_enabled if template == "story" else True
     session_id = f"cs_{int(time.time())}_{random.randint(1000, 9999)}"
     async with _creative_sessions_lock:
         _creative_sessions[session_id] = {
@@ -5278,17 +5478,19 @@ async def creative_create_session(body: dict, request: Request = None):
             "quality_mode": quality_mode,
             "mint_mode": mint_mode,
             "art_style": art_style,
+            "cinematic_boost": cinematic_boost,
             "transition_style": transition_style,
             "micro_escalation_mode": micro_escalation_mode,
             "voice_id": voice_id,
             "voice_speed": voice_speed,
             "pacing_mode": pacing_mode,
+            "animation_enabled": animation_enabled,
             "story_animation_enabled": story_animation_enabled,
-            "reference_image_url": "",
+            "reference_image_url": default_reference_url,
             "reference_lock_mode": reference_lock_mode,
             "reference_dna": {},
             "reference_quality": {},
-            "rolling_reference_image_url": "",
+            "rolling_reference_image_url": default_reference_url,
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -5302,9 +5504,11 @@ async def creative_create_session(body: dict, request: Request = None):
         "resolution": resolution,
         "language": body.get("language", "en"),
         "art_style": art_style,
+        "cinematic_boost": cinematic_boost,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
         "session_id": session_id,
         "story_animation_enabled": story_animation_enabled,
         "scene_count": 0,
@@ -5317,11 +5521,13 @@ async def creative_create_session(body: dict, request: Request = None):
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "art_style": art_style,
+        "cinematic_boost": cinematic_boost,
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
     }
 
@@ -5427,10 +5633,12 @@ async def creative_session_status(session_id: str, request: Request = None):
         "quality_mode": _normalize_skeleton_quality_mode(session.get("quality_mode"), template=session.get("template", "")),
         "mint_mode": _normalize_mint_mode(session.get("mint_mode"), template=session.get("template", "")),
         "art_style": _normalize_art_style(session.get("art_style", "auto"), template=session.get("template", "")),
+        "cinematic_boost": _normalize_cinematic_boost(session.get("cinematic_boost", False)),
         "transition_style": _normalize_transition_style(session.get("transition_style", "smooth")),
         "micro_escalation_mode": _normalize_micro_escalation_mode(session.get("micro_escalation_mode"), template=session.get("template", "")),
         "topic": session.get("topic", ""),
         "scene_count": len(session.get("scenes", [])),
+        "animation_enabled": _bool_from_any(session.get("animation_enabled"), _bool_from_any(session.get("story_animation_enabled"), True)),
         "story_animation_enabled": _bool_from_any(session.get("story_animation_enabled"), True),
     }
 
@@ -5482,6 +5690,18 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
+    user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = user.get("email", "") in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
+    can_run, _source, _state = await _reserve_generation_credit(
+        user,
+        user_plan if not is_admin else "pro",
+        billing_active,
+        is_admin=is_admin,
+        usage_kind="non_animated",
+    )
+    if not can_run:
+        raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
     session = _get_creative_session(req.session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
@@ -5503,6 +5723,10 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode or session.get("quality_mode"), template=template)
     mint_mode = _normalize_mint_mode(req.mint_mode if req.mint_mode is not None else session.get("mint_mode"), template=template)
     art_style = _normalize_art_style(req.art_style or session.get("art_style", "auto"), template=template)
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", session.get("cinematic_boost", False)))
+    if cinematic_boost:
+        quality_mode = "cinematic"
+        mint_mode = True
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
     session["reference_lock_mode"] = reference_lock_mode
     session["art_style"] = art_style
@@ -5541,6 +5765,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
             negative_prompt=neg_prompt,
             template=template,
             reference_image_url=scene_reference,
+            reference_lock_mode=reference_lock_mode,
         )
     except Exception as e:
         should_try_moderation_rewrite = (
@@ -5580,6 +5805,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
                         negative_prompt=neg_prompt,
                         template=template,
                         reference_image_url=scene_reference,
+                        reference_lock_mode=reference_lock_mode,
                     )
                     last_retry_error = None
                     break
@@ -5624,6 +5850,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     session["quality_mode"] = quality_mode
     session["mint_mode"] = mint_mode
     session["art_style"] = art_style
+    session["cinematic_boost"] = cinematic_boost
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -5709,11 +5936,17 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode or session.get("quality_mode"), template=session.get("template", req.template))
     mint_mode = _normalize_mint_mode(req.mint_mode if req.mint_mode is not None else session.get("mint_mode"), template=session.get("template", req.template))
     art_style = _normalize_art_style(req.art_style or session.get("art_style", "auto"), template=session.get("template", req.template))
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", session.get("cinematic_boost", False)))
     transition_style = _normalize_transition_style(req.transition_style or session.get("transition_style"))
     micro_escalation_mode = _normalize_micro_escalation_mode(
         req.micro_escalation_mode if req.micro_escalation_mode is not None else session.get("micro_escalation_mode"),
         template=session.get("template", req.template),
     )
+    if cinematic_boost:
+        quality_mode = "cinematic"
+        mint_mode = True
+        transition_style = "cinematic"
+        micro_escalation_mode = True
     voice_id = str(req.voice_id or session.get("voice_id", "") or "").strip()
     voice_speed = _normalize_voice_speed(req.voice_speed if req.voice_speed is not None else session.get("voice_speed", 1.0), default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode or session.get("pacing_mode", "standard"))
@@ -5723,13 +5956,16 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         voice_speed = 1.0
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
-    story_animation_enabled = _bool_from_any(req.story_animation_enabled, _bool_from_any(session.get("story_animation_enabled"), True))
-    if session.get("template") != "story":
-        story_animation_enabled = True
+    animation_enabled = _bool_from_any(
+        req.animation_enabled,
+        _bool_from_any(session.get("animation_enabled"), _bool_from_any(req.story_animation_enabled, _bool_from_any(session.get("story_animation_enabled"), True))),
+    )
+    story_animation_enabled = animation_enabled if session.get("template") == "story" else True
     async with _creative_sessions_lock:
         session["quality_mode"] = quality_mode
         session["mint_mode"] = mint_mode
         session["art_style"] = art_style
+        session["cinematic_boost"] = cinematic_boost
         session["transition_style"] = transition_style
         session["micro_escalation_mode"] = micro_escalation_mode
         session["voice_id"] = voice_id
@@ -5737,6 +5973,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         session["pacing_mode"] = pacing_mode
         session["subtitles_enabled"] = subtitles_enabled
         session["reference_lock_mode"] = reference_lock_mode
+        session["animation_enabled"] = animation_enabled
         session["story_animation_enabled"] = story_animation_enabled
         _save_creative_sessions_to_disk()
     if not session["scenes"]:
@@ -5754,12 +5991,9 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     if not can_render:
         raise HTTPException(
             402,
-            "No generation credits left this month. Buy a top-up pack to continue.",
+            "No animated render credits left this month. Buy an animated top-up pack to continue.",
         )
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
-    if resolution != "720p":
-        story_animation_enabled = True
-        session["story_animation_enabled"] = True
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
     if total_duration > float(plan_limits.get("max_duration_sec", 60)):
         raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
@@ -5778,6 +6012,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "plan": user_plan,
         "user_id": user.get("id"),
         "created_at": time.time(),
+        "animation_enabled": animation_enabled,
         "story_animation_enabled": story_animation_enabled,
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
@@ -5804,6 +6039,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
         "story_animation_enabled": story_animation_enabled,
     })
 
@@ -5847,6 +6083,12 @@ async def _run_creative_pipeline(
         mint_mode = _normalize_mint_mode(session.get("mint_mode") if session.get("mint_mode") is not None else mint_mode, template=template)
         transition_style = _normalize_transition_style(session.get("transition_style") or transition_style)
         micro_escalation_mode = _normalize_micro_escalation_mode(session.get("micro_escalation_mode") if session.get("micro_escalation_mode") is not None else micro_escalation_mode, template=template)
+        cinematic_boost = _normalize_cinematic_boost(session.get("cinematic_boost", False))
+        if cinematic_boost:
+            quality_mode = "cinematic"
+            mint_mode = True
+            transition_style = "cinematic"
+            micro_escalation_mode = True
         voice_id = str(session.get("voice_id", "") or "").strip()
         voice_speed = _normalize_voice_speed(session.get("voice_speed", 1.0), default=1.0)
         pacing_mode = _normalize_pacing_mode(session.get("pacing_mode", "standard"))
@@ -5867,13 +6109,12 @@ async def _run_creative_pipeline(
         fal_video_enabled = bool(FAL_AI_KEY)
         runway_video_enabled = bool(RUNWAY_API_KEY)
         use_video_engine = fal_video_enabled or runway_video_enabled
-        story_animation_enabled = _bool_from_any(session.get("story_animation_enabled"), True)
-        if template == "story" and resolution == "720p" and not story_animation_enabled:
-            use_video = False
-        else:
-            use_video = use_video_engine
+        animation_enabled = _bool_from_any(session.get("animation_enabled"), _bool_from_any(session.get("story_animation_enabled"), True))
+        story_animation_enabled = _bool_from_any(session.get("story_animation_enabled"), animation_enabled)
+        use_video = bool(use_video_engine and animation_enabled)
         if use_video and not use_video_engine:
             raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
+        jobs[job_id]["animation_enabled"] = bool(animation_enabled)
         jobs[job_id]["story_animation_enabled"] = bool(story_animation_enabled)
         gen_ts = str(int(time.time() * 1000))
 
@@ -5920,6 +6161,7 @@ async def _run_creative_pipeline(
                     negative_prompt=neg_prompt,
                     template=template,
                     reference_image_url=_resolve_reference_for_scene(session, template, i),
+                    reference_lock_mode=reference_lock_mode,
                 )
                 if template == "skeleton" and not (session.get("reference_image_url") or session.get("skeleton_reference_image")) and i == 0:
                     skeleton_seed = _file_to_data_image_url(img_path)
@@ -6279,6 +6521,77 @@ async def admin_analytics(user: dict = Depends(require_auth)):
     }
 
 
+@app.get("/api/admin/billing-audit")
+async def admin_billing_audit(user: dict = Depends(require_auth)):
+    email = str(user.get("email", "") or "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not svc_key:
+        raise HTTPException(500, "Supabase not configured")
+
+    rows: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(500, "Failed to read auth users for billing audit")
+            users_data = resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+            by_email = {
+                str(u.get("email", "") or "").strip().lower(): str(u.get("id", "") or "")
+                for u in (user_list or [])
+                if u and str(u.get("email", "") or "").strip()
+            }
+
+            prof = await client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles?select=id,plan",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if prof.status_code != 200:
+                raise HTTPException(500, "Failed to read profile plans for billing audit")
+            profiles = prof.json()
+            profiles = profiles if isinstance(profiles, list) else []
+            for p in profiles:
+                plan = str((p or {}).get("plan", "none") or "none").strip().lower()
+                if not _profile_plan_is_paid(plan):
+                    continue
+                uid = str((p or {}).get("id", "") or "")
+                acct_email = ""
+                for e, eid in by_email.items():
+                    if eid == uid:
+                        acct_email = e
+                        break
+                if not acct_email:
+                    continue
+                stripe_diag = _stripe_subscription_snapshot(acct_email)
+                stripe_status = str(stripe_diag.get("status", "") or "")
+                stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing", "past_due"}
+                status_source = "stripe" if stripe_ok else "profile_fallback"
+                rows.append(
+                    {
+                        "email": acct_email,
+                        "user_id": uid,
+                        "plan": plan,
+                        "status_source": status_source,
+                        "stripe_status": stripe_status or "unknown",
+                        "billing_active": bool(stripe_ok or _profile_plan_is_paid(plan)),
+                        "next_renewal_unix": int(stripe_diag.get("next_renewal_unix", 0) or 0),
+                    }
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Admin billing audit failed: {e}")
+        raise HTTPException(500, "Billing audit failed")
+
+    rows.sort(key=lambda r: (r.get("plan", ""), r.get("email", "")))
+    return {"rows": rows, "total_paid_profiles": len(rows)}
+
+
 @app.post("/api/admin/maintenance-banner")
 async def admin_set_maintenance_banner(body: dict, user: dict = Depends(require_auth)):
     global _maintenance_banner_enabled, _maintenance_banner_message
@@ -6341,6 +6654,13 @@ async def public_config():
             "micro_escalation_max_source_scenes": MICRO_ESCALATION_MAX_SOURCE_SCENES,
             "micro_escalation_max_output_clips": MICRO_ESCALATION_MAX_OUTPUT_CLIPS,
         },
+        "billing_model": {
+            "hybrid_enabled": True,
+            "animated_credit_label": "finished animated shorts",
+            "non_animated_credit_label": "script/image operations",
+            "overage_label": "animated top-up packs",
+            "hard_stop_on_animated_exhaustion": True,
+        },
         "feature_flags": {
             "script_to_short_enabled": SCRIPT_TO_SHORT_ENABLED,
             "story_advanced_controls_enabled": STORY_ADVANCED_CONTROLS_ENABLED,
@@ -6381,6 +6701,14 @@ async def get_me(user: dict = Depends(require_auth)):
         "billing_active": billing_active,
         "limits": limits,
         "features": features,
+        "animated_credits_remaining": credit_state["animated_monthly_remaining"],
+        "animated_credits_used": credit_state["animated_monthly_used"],
+        "animated_credits_limit": credit_state["animated_monthly_limit"],
+        "animated_topup_credits_remaining": credit_state["animated_topup_credits"],
+        "animated_credits_total_remaining": credit_state["animated_total_remaining"],
+        "non_animated_ops_remaining": credit_state["non_animated_monthly_remaining"],
+        "non_animated_ops_used": credit_state["non_animated_monthly_used"],
+        "non_animated_ops_limit": credit_state["non_animated_monthly_limit"],
         "monthly_credits_remaining": credit_state["monthly_remaining"],
         "monthly_credits_used": credit_state["monthly_used"],
         "monthly_credits_limit": credit_state["monthly_limit"],
@@ -6420,12 +6748,13 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
     voice_id = str(req.voice_id or "").strip()
     voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode)
+    animation_enabled = _bool_from_any(req.animation_enabled, _bool_from_any(req.story_animation_enabled, True))
     if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
         voice_id = ""
         voice_speed = 1.0
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
-    reference_image_url = str(req.reference_image_url or "").strip()
+    reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
     reference_dna = {}
     if reference_image_url.startswith("data:image/"):
         raw_ref, _mime = _decode_data_image_url(reference_image_url)
@@ -6450,7 +6779,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         if not can_render:
             raise HTTPException(
                 402,
-                "No generation credits left this month. Buy a top-up pack to continue.",
+                "No animated render credits left this month. Buy an animated top-up pack to continue.",
             )
     else:
         credit_source = ""
@@ -6473,11 +6802,14 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "art_style": art_style,
+        "cinematic_boost": cinematic_boost,
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
+        "story_animation_enabled": animation_enabled if req.template == "story" else True,
         "reference_image_url": reference_image_url,
         "reference_lock_mode": reference_lock_mode,
         "reference_dna": reference_dna,
@@ -6499,9 +6831,11 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
             "resolution": resolution,
             "language": language,
             "art_style": art_style,
+            "cinematic_boost": cinematic_boost,
             "voice_id": voice_id,
             "voice_speed": voice_speed,
             "pacing_mode": pacing_mode,
+            "animation_enabled": animation_enabled,
             "job_id": job_id,
         })
         jobs[job_id]["project_id"] = project_id
@@ -6583,7 +6917,7 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
     art_style = _normalize_art_style(state.get("art_style", "auto"), template=template)
     reference_lock_mode = _normalize_reference_lock_mode(state.get("reference_lock_mode"), default="strict")
     reference_dna = state.get("reference_dna", {}) if isinstance(state.get("reference_dna"), dict) else {}
-    reference_image_url = str(state.get("reference_image_url", "") or "").strip()
+    reference_image_url = _normalize_reference_with_default(template, str(state.get("reference_image_url", "") or "").strip())
     scene_entry = scene_images[scene_index] if isinstance(scene_images[scene_index], dict) else {}
     scene_prompt = str(scene_entry.get("visual_description", "") or "")
     if not scene_prompt:
@@ -6625,13 +6959,15 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
     ts = int(time.time() * 1000)
     out_name = f"scene_{scene_index + 1:02d}_regen_{ts}.png"
     out_path = str(_auto_scene_dir(job_id) / out_name)
+    scene_reference_url = _resolve_reference_for_scene(state, template, scene_index) or reference_image_url
     img_result = await generate_scene_image(
         full_prompt,
         out_path,
         resolution="720p",
         negative_prompt=neg_prompt,
         template=template,
-        reference_image_url=reference_image_url,
+        reference_image_url=scene_reference_url,
+        reference_lock_mode=reference_lock_mode,
     )
 
     old_gen_id = str(scene_entry.get("generation_id", "") or "")
@@ -6708,7 +7044,7 @@ Analyze these elements:
 TEMPLATE DEFINITIONS (pick the one that matches BEST):
 - "skeleton" = 3D skeleton characters wearing topic-relevant outfits on teal/green studio background. VS comparisons, career/earnings breakdowns. One-word bold captions. Example: "NASCAR vs F1 Driver Who Makes More Money"
 - "history" = Epic cinematic historical scenes. Battles, empires, ancient events. Dramatic narrator, god rays, film grain. 2-4 word caption phrases. Example: "What Happened to the Roman Legion That Vanished"
-- "story" = Cinematic AI visual stories with emotional arc. Pixar/UE5 quality. Consistent character across scenes. Poetic narration. Minimal captions. Example: "The Last Lighthouse Keeper"
+- "story" = Cinematic AI visual stories with emotional arc. Pixar/UE5 quality. Continuity of recurring subjects/locations across scenes (do not force one unchanged protagonist). Poetic narration. Minimal captions. Example: "The Last Lighthouse Keeper"
 - "reddit" = Reddit story narration. First-person dramatic stories (AITA, TIFU). Photorealistic modern-day scenes illustrating the story. Dialogue/reaction captions. Example: "AITA for Kicking Out My Sister"
 - "top5" = Ranked countdown lists (#5 to #1). Each item dramatically different. Documentary quality visuals. Numbered captions. Example: "Top 5 Most Expensive Things Ever Sold"
 - "random" = Chaotic, fast-paced, unpredictable content. Every scene wildly different. Surreal visuals. 1-3 word reaction captions. Example: "Things That Should Not Exist"
@@ -6981,6 +7317,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
                 negative_prompt=neg_prompt,
                 template=detected_template,
                 reference_image_url=clone_skeleton_reference_image_url if detected_template == "skeleton" else "",
+                reference_lock_mode="strict",
             )
             if detected_template == "skeleton" and not clone_skeleton_reference_image_url and i == 0:
                 clone_skeleton_reference_image_url = _file_to_data_image_url(img_path)
@@ -7198,6 +7535,30 @@ def _stripe_has_active_subscription(email: str) -> bool:
         return False
 
 
+def _stripe_subscription_snapshot(email: str) -> dict:
+    """Best-effort Stripe snapshot used by admin billing audit."""
+    out = {"ok": False, "status": "", "next_renewal_unix": 0}
+    if not STRIPE_SECRET_KEY or not email:
+        return out
+    customer_id = _stripe_find_customer_id_by_email(email)
+    if not customer_id:
+        return out
+    try:
+        subs = stripe_lib.Subscription.list(customer=customer_id, status="all", limit=20)
+        ranked = list(getattr(subs, "data", []) or [])
+        if not ranked:
+            return out
+        ranked.sort(key=lambda s: int(getattr(s, "created", 0) or 0), reverse=True)
+        chosen = ranked[0]
+        out["ok"] = True
+        out["status"] = str(getattr(chosen, "status", "") or "")
+        out["next_renewal_unix"] = int(getattr(chosen, "current_period_end", 0) or 0)
+        return out
+    except Exception as e:
+        log.warning(f"Stripe subscription snapshot failed for {email}: {e}")
+        return out
+
+
 async def _supabase_find_user_id_by_email(email: str) -> str:
     svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
     if not svc_key or not SUPABASE_URL or not email:
@@ -7379,7 +7740,7 @@ async def stripe_webhook(request: Request):
                 )
                 log.info(f"Stripe webhook: credited {topup_credits} top-up credits to {user_id}")
 
-    elif event.get("type") == "customer.subscription.deleted":
+    elif event.get("type") in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         sub = event["data"]["object"]
         customer_email = str(sub.get("customer_email", "") or "")
         customer_id = str(sub.get("customer", "") or "")
@@ -7389,18 +7750,63 @@ async def stripe_webhook(request: Request):
                 customer_email = str(getattr(customer, "email", "") or "")
             except Exception as e:
                 log.warning(f"Failed to resolve Stripe customer email from {customer_id}: {e}")
-        if customer_email:
+        if not customer_email:
+            log.warning("Subscription lifecycle event received without resolvable customer email")
+            return {"status": "ok"}
+
+        event_type = str(event.get("type", "") or "")
+        status = str(sub.get("status", "") or "")
+        items = (((sub.get("items", {}) or {}).get("data", []) or []))
+        active_price_id = ""
+        if items:
+            active_price_id = str((((items[0] or {}).get("price", {}) or {}).get("id", "") or ""))
+        mapped_plan = STRIPE_PRICE_TO_PLAN.get(active_price_id, "")
+
+        try:
+            target_id = await _supabase_find_user_id_by_email(customer_email)
+            if not target_id:
+                log.warning(f"Subscription lifecycle event but no Supabase user found for {customer_email}")
+                return {"status": "ok"}
+            if event_type == "customer.subscription.deleted":
+                await _supabase_set_user_plan(target_id, "none")
+                log.info(f"Subscription deleted; downgraded {customer_email} -> none")
+            elif status in {"active", "trialing", "past_due"} and mapped_plan:
+                await _supabase_set_user_plan(target_id, mapped_plan)
+                log.info(f"Subscription lifecycle sync: {customer_email} -> {mapped_plan} ({status})")
+            elif status in {"canceled", "unpaid", "incomplete_expired"}:
+                await _supabase_set_user_plan(target_id, "none")
+                log.info(f"Subscription became inactive; downgraded {customer_email} -> none")
+        except Exception as e:
+            log.error(f"Failed subscription lifecycle sync for {customer_email}: {e}")
+
+    elif event.get("type") in {"invoice.payment_failed", "invoice.payment_succeeded"}:
+        inv = event["data"]["object"]
+        customer_email = str(inv.get("customer_email", "") or "")
+        customer_id = str(inv.get("customer", "") or "")
+        if not customer_email and customer_id and STRIPE_SECRET_KEY:
             try:
-                target_id = await _supabase_find_user_id_by_email(customer_email)
-                if target_id:
-                    await _supabase_set_user_plan(target_id, "none")
-                    log.info(f"Subscription cancelled; downgraded {customer_email} -> none")
-                else:
-                    log.warning(f"Subscription cancelled but no Supabase user found for {customer_email}")
+                customer = stripe_lib.Customer.retrieve(customer_id)
+                customer_email = str(getattr(customer, "email", "") or "")
             except Exception as e:
-                log.error(f"Failed to downgrade cancelled subscription for {customer_email}: {e}")
+                log.warning(f"Failed to resolve invoice customer email from {customer_id}: {e}")
+        if not customer_email:
+            return {"status": "ok"}
+        target_id = await _supabase_find_user_id_by_email(customer_email)
+        if not target_id:
+            return {"status": "ok"}
+        if event.get("type") == "invoice.payment_failed":
+            await _supabase_set_user_plan(target_id, "none")
+            log.info(f"Invoice payment failed; downgraded {customer_email} -> none")
         else:
-            log.warning("Subscription cancelled event received without resolvable customer email")
+            # Keep profile + Stripe lifecycle in sync on successful recurring renewals.
+            lines = (((inv.get("lines", {}) or {}).get("data", []) or []))
+            price_id = ""
+            if lines:
+                price_id = str((((lines[0] or {}).get("price", {}) or {}).get("id", "") or ""))
+            plan = STRIPE_PRICE_TO_PLAN.get(price_id, "")
+            if plan:
+                await _supabase_set_user_plan(target_id, plan)
+                log.info(f"Invoice payment succeeded; ensured {customer_email} -> {plan}")
 
     return {"status": "ok"}
 
