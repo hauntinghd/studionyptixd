@@ -8,21 +8,22 @@ SKELETON_IMAGE_STYLE_PREFIX = (
 
 SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "MASTER CONSISTENCY RULES (apply to every scene): "
-    "One continuous visual universe. Keep the same skeleton identity: skull shape, eye style, bone finish, outfit family, and color grade. "
+    "One continuous visual universe. Keep the same canonical skeleton identity: skull proportions, eye size/spacing, bone finish, clearly visible translucent body silhouette, and color grade. "
     "For VS videos, lock Character A and Character B identities and never swap them. "
-    "Keep outfits role-accurate, fully opaque, and consistent scene-to-scene unless a scene explicitly requests a change. "
+    "Do not change baseline anatomy scene-to-scene. No clothing, uniforms, armor, or costume swaps. "
     "Maintain bright readability, premium cinematic detail, and stable camera language."
 )
 
 SKELETON_IMAGE_SUFFIX = (
-    "Character anatomy rules: white skull head with realistic eyeballs and bony hands only; no human skin face. "
-    "Body from neck to feet stays fully covered by the described outfit; no exposed ribcage/spine/pelvis. "
+    "Character anatomy rules: ivory-white anatomical skeleton with realistic large eyeballs (visible iris and wet reflections), consistent skull proportions, and consistent bone structure every scene. "
+    "A clearly visible translucent soft-tissue silhouette around torso/limbs is REQUIRED in every scene, but no full human skin face. "
+    "No clothing, uniforms, armor, masks, or costumes on the skeleton body. "
     "Composition priority: hero subject fills the frame (medium or 3/4 shot by default), avoid tiny distant full-body unless explicitly requested. "
     "Render as premium photoreal cinematic output with believable materials, natural perspective, clean edges, and readable facial skull detail."
 )
 
 TEMPLATE_KLING_MOTION = {
-    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. Clothing sways and folds realistically with body movement showing fabric physics. Add micro-beat camera accents every ~1-1.5 seconds (gentle punch-in, lateral drift, or slight push) to keep momentum high without jitter. Professional studio lighting stays consistent and bright. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
+    "skeleton": "Ultra-smooth human-like natural motion: skeleton moves with realistic weight and momentum like a real person, fluid arm gestures, natural head turns with follow-through, subtle breathing chest rise-and-fall. Every joint articulates smoothly with no popping or snapping. Fingers move individually with lifelike dexterity. Eyeballs track and shift naturally with micro-saccades. The translucent body silhouette must remain clearly visible and follow motion naturally with the bones (no clothing physics). Add micro-beat camera accents every ~1-1.5 seconds (gentle punch-in, lateral drift, or slight push) to keep momentum high without jitter. Professional studio lighting stays consistent and bright. Zach D Films quality smooth cinematic motion, absolutely no robotic or jerky movement.",
     "history": "Epic cinematic camera movement: slow dolly forward through the scene, atmospheric particles drift, fabric and hair move in wind, fire flickers, dramatic lighting shifts. Film-quality motion with depth.",
     "story": "Emotional character animation: subtle facial expressions, natural body language, characters interact with environment. Cinematic camera slowly orbits or pushes in. Atmospheric lighting shifts to match mood.",
     "reddit": "Static with subtle motion: slight camera drift, ambient lighting changes, minimal character movement. Clean modern look.",
@@ -60,18 +61,19 @@ TEMPLATE_SFX_PROMPTS = {
 }
 
 SKELETON_NEGATIVE_PROMPT = (
-    "bare skeleton without clothes, naked skeleton, unclothed skeleton, skeleton with no outfit, "
-    "anatomy model only, medical skeleton display, skeleton without accessories, "
+    "clothed skeleton, skeleton in uniform, skeleton in armor, skeleton in racing suit, skeleton with costume, "
+    "helmet covering skull, mask covering skull, heavy face paint, "
+    "bare-bone skeleton without translucent body silhouette, bones-only look with no translucent body shell, "
+    "anatomy model with tiny eyes, medical chart style diagram, "
     "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
     "skin, flesh, muscles, human face, realistic person, "
     "empty background with no context, generic blank set, low-detail environment, "
     "flat washed lighting, underexposed muddy shadows, "
     "blurry, low quality, watermark, text artifacts, deformed, "
     "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
-    "transparent clothes, see-through clothes, x-ray clothes, invisible fabric, "
-    "sheer material, translucent clothing, ghostly clothes, glass clothes, "
+    "transparent clothing, see-through clothing, x-ray costume, invisible costume, "
     "jpeg artifacts, pixelated, ugly, low resolution, "
-    "inconsistent outfit between scenes, changing sponsor logos every scene, mismatched racing suit branding, "
+    "inconsistent skull geometry between scenes, changing eye size between scenes, mismatched bone shape between scenes, "
     "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
     "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose"
 )
@@ -97,11 +99,10 @@ HISTORY_NEGATIVE_PROMPT = (
 
 STORY_IMAGE_PROMPT_PREFIX = (
     "Cinematic photoreal scene, Unreal Engine 5 grade realism with filmic cinematography, "
-    "emotionally resonant composition with depth of field and grounded human detail, "
+    "emotionally resonant composition with depth of field and grounded scene detail, "
     "dramatic volumetric lighting with motivated light sources, "
     "ray traced global illumination, atmospheric particles floating, "
     "lens flare, bokeh, film grain, color graded for emotional impact, "
-    "character with consistent appearance centered in frame, "
     "richly detailed cinematic environment, 8k ultra HD, award-winning visual, "
 )
 
@@ -369,3 +370,5 @@ NEGATIVE_PROMPT = (
 
 WAN22_I2V_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 WAN22_I2V_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+WAN22_T2V_HIGH = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+WAN22_T2V_LOW = "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"

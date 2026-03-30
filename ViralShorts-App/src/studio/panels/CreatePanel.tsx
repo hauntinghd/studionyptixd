@@ -1,0 +1,3225 @@
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
+import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess } from '../shared';
+import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/StudioWidgets';
+import ChatStoryPanel from './ChatStoryPanel';
+
+interface CreativeScene {
+    index: number;
+    narration: string;
+    visual_description: string;
+    negative_prompt?: string;
+    duration_sec: number;
+    imageData?: string;
+    imageLoading?: boolean;
+    generation_id?: string;
+    imageError?: string;
+    qa_ok?: boolean;
+    qa_score?: number;
+    qa_notes?: string[];
+}
+
+interface CreatePanelPersistedState {
+    selectedTemplate: string;
+    resolution: '720p' | '1080p';
+    language: string;
+    creativeMode: 'auto' | 'creative' | 'script_to_short';
+    creativeStep: 'topic' | 'edit' | 'generating';
+    prompt: string;
+    sessionId: string | null;
+    creativeScenes: CreativeScene[];
+    creativeTitle: string;
+    creativeNarration: string;
+    creativeReferenceLockMode?: 'strict' | 'inspired';
+    animateOutputEnabled?: boolean;
+    storyAnimationEnabled?: boolean;
+    storyVoiceId?: string;
+    storyVoiceSpeed?: number;
+    storyPacingMode?: 'standard' | 'fast' | 'very_fast';
+    artStyle?: string;
+    cinematicBoostEnabled?: boolean;
+    createSubTab?: 'builder' | 'projects';
+    workspaceStage?: 'script' | 'scenes' | 'finale';
+    subtitlesEnabled?: boolean;
+    voiceProvider?: 'custom' | 'elevenlabs';
+    customVoiceId?: string;
+    voicePitch?: number;
+    captionFont?: string;
+    backgroundMusic?: string;
+    soundReferencePreset?: string;
+    jobId: string | null;
+    ts: number;
+}
+
+interface ProjectRow {
+    project_id: string;
+    template: string;
+    topic: string;
+    mode: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+    scene_count?: number;
+    session_id?: string;
+    job_id?: string;
+    output_file?: string;
+    title?: string;
+    resolution?: string;
+    language?: string;
+    animation_enabled?: boolean;
+    story_animation_enabled?: boolean;
+    scenes?: CreativeScene[];
+    narration?: string;
+    voice_id?: string;
+    voice_speed?: number;
+    pacing_mode?: 'standard' | 'fast' | 'very_fast';
+    art_style?: string;
+    cinematic_boost?: boolean;
+    error?: string;
+}
+
+function SceneImageLoadingCard({ template }: { template: string }) {
+    void template;
+    const brandLabel = 'NYPTID Studio';
+    return (
+        <div className="rounded-lg bg-black/40 p-3">
+            <div className="relative mx-auto flex h-[360px] max-h-[55vh] w-full max-w-[320px] items-center justify-center overflow-hidden rounded-md border border-violet-500/20 bg-[radial-gradient(circle_at_top,_rgba(139,92,246,0.24),_rgba(10,10,10,0.96)_55%)]">
+                <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(139,92,246,0.06),rgba(6,182,212,0.04))]" />
+                <div className="absolute h-48 w-48 rounded-full border border-cyan-400/20 animate-ping" />
+                <div className="absolute h-64 w-64 rounded-full border border-violet-400/15 animate-pulse" />
+                <div className="relative z-10 flex flex-col items-center gap-4 px-6 text-center">
+                    <div className="flex h-20 w-20 items-center justify-center rounded-full border border-white/10 bg-black/35 shadow-[0_0_45px_rgba(139,92,246,0.25)]">
+                        <Logo size={56} />
+                    </div>
+                    <div className="space-y-1">
+                        <p className="text-sm font-semibold tracking-[0.24em] text-cyan-100/90 uppercase">{brandLabel}</p>
+                        <p className="text-lg font-semibold text-white">Generating scene image</p>
+                        <p className="text-sm text-gray-300">
+                            Your logo-first preview stays here while NYPTID Studio renders the scene.
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-medium text-violet-200">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Rendering thumbnail canvas...
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const activeCustomVoiceLibrary = [
+    { id: 'studio_voice_core', name: 'Core Neutral', profile: 'Balanced all-purpose narrator', source: 'Local owned variant', available: true, defaultSpeed: 1.0, defaultPitch: 1.0 },
+    { id: 'studio_voice_hook', name: 'Hook Sprint', profile: 'Fast short-form opener energy', source: 'Local owned variant', available: true, defaultSpeed: 1.12, defaultPitch: 1.03 },
+    { id: 'studio_voice_drama', name: 'Dark Drama', profile: 'Lower, heavier dramatic delivery', source: 'Local owned variant', available: true, defaultSpeed: 0.96, defaultPitch: 0.94 },
+    { id: 'studio_voice_confession', name: 'Relatable Confession', profile: 'Confessional story tone', source: 'Local owned variant', available: true, defaultSpeed: 1.04, defaultPitch: 0.98 },
+    { id: 'studio_voice_founder', name: 'Founder Calm', profile: 'Controlled operator/founder narration', source: 'Local owned variant', available: true, defaultSpeed: 0.98, defaultPitch: 0.97 },
+    { id: 'studio_voice_punch', name: 'Viral Punch', profile: 'Sharper payoff emphasis', source: 'Local owned variant', available: true, defaultSpeed: 1.1, defaultPitch: 1.02 },
+    { id: 'studio_voice_doc', name: 'Documentary Steel', profile: 'Clean explainer authority', source: 'Local owned variant', available: true, defaultSpeed: 0.97, defaultPitch: 0.95 },
+    { id: 'studio_voice_luxe', name: 'Luxury Ad', profile: 'Premium polished ad cadence', source: 'Local owned variant', available: true, defaultSpeed: 1.01, defaultPitch: 1.01 },
+    { id: 'studio_voice_story', name: 'Storyteller Warm', profile: 'Warm cinematic storytelling', source: 'Local owned variant', available: true, defaultSpeed: 0.99, defaultPitch: 1.04 },
+    { id: 'studio_voice_intense', name: 'Intense Clarity', profile: 'Sharper urgency for conflict beats', source: 'Local owned variant', available: true, defaultSpeed: 1.08, defaultPitch: 0.97 },
+    { id: 'studio_voice_genz', name: 'Gen Z Hook', profile: 'Modern social pacing', source: 'Local owned variant', available: true, defaultSpeed: 1.14, defaultPitch: 1.05 },
+    { id: 'studio_voice_motive', name: 'Motivation Rise', profile: 'Slightly elevated inspirational tone', source: 'Local owned variant', available: true, defaultSpeed: 1.03, defaultPitch: 1.06 },
+    { id: 'studio_voice_noir', name: 'Noir Tension', profile: 'Low-key suspense delivery', source: 'Local owned variant', available: true, defaultSpeed: 0.95, defaultPitch: 0.92 },
+];
+
+const customVoiceLibrary = [
+    ...activeCustomVoiceLibrary,
+    ...Array.from({ length: 37 }, (_, index) => ({
+        id: `studio_voice_reserved_${String(index + 1).padStart(2, '0')}`,
+        name: `Reserved Slot ${String(index + 14).padStart(2, '0')}`,
+        profile: 'Reserved for future licensed or user-owned voice packs',
+        source: 'Reserved voice slot',
+        available: false,
+        defaultSpeed: 1,
+        defaultPitch: 1,
+    })),
+];
+
+const finaleCaptionFonts = ['Komika Axis', 'Montserrat Bold', 'Anton', 'Bebas Neue', 'Satoshi', 'Oswald', 'Archivo Black', 'League Spartan', 'Teko', 'Playfair Display'];
+const finaleMusicOptions = ['No Background Music'];
+const backgroundMusicComingSoon = true;
+const soundReferenceOptions = [
+    { id: 'none', label: 'No Sound Reference', desc: 'Clean default timing and effects.' },
+    { id: 'cinematic_impacts', label: 'Cinematic Impacts', desc: 'Trailer-style hits and transitions.' },
+    { id: 'dark_tension', label: 'Dark Tension', desc: 'Low suspense bed with punchy accents.' },
+    { id: 'social_hook', label: 'Social Hook', desc: 'Fast short-form pacing with crisp emphasis hits.' },
+];
+
+export default function CreatePanel() {
+    const { session, role, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
+    const [prompt, setPrompt] = useState("");
+    const [selectedTemplate, setSelectedTemplate] = useState('story');
+    const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
+    const [jobId, setJobId] = useState<string | null>(null);
+    const [jobStatus, setJobStatus] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [language, setLanguage] = useState('en');
+    const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
+    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative' | 'script_to_short'>('auto');
+    const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
+    const [sessionId, setSessionId] = useState<string | null>(null);
+    const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
+    const creativeScenesRef = useRef<CreativeScene[]>([]);
+    creativeScenesRef.current = creativeScenes;
+    const [scriptLoading, setScriptLoading] = useState(false);
+    const [creativeTitle, setCreativeTitle] = useState("");
+    const [creativeNarration, setCreativeNarration] = useState("");
+    const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
+    const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+    const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
+    const [creativeReferenceLockMode, setCreativeReferenceLockMode] = useState<'strict' | 'inspired'>('strict');
+    const [animateOutputEnabled, setAnimateOutputEnabled] = useState(true);
+    const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
+    const [storyVoiceId, setStoryVoiceId] = useState("");
+    const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
+    const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
+    const [artStyle, setArtStyle] = useState('auto');
+    const [cinematicBoostEnabled, setCinematicBoostEnabled] = useState(true);
+    const [storyVoices, setStoryVoices] = useState<any[]>([]);
+    const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
+    const [storyPreviewLoading, setStoryPreviewLoading] = useState(false);
+    const [storyVoicesSource, setStoryVoicesSource] = useState<'unknown' | 'elevenlabs' | 'fallback'>('unknown');
+    const [storyVoicesWarning, setStoryVoicesWarning] = useState('');
+    const [sceneBuildLoading, setSceneBuildLoading] = useState(false);
+    const [sceneBuildError, setSceneBuildError] = useState<string | null>(null);
+    const [scriptScenesReady, setScriptScenesReady] = useState(false);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+    const [bulkImageGenRunning, setBulkImageGenRunning] = useState(false);
+    const [bulkImageGenDone, setBulkImageGenDone] = useState(0);
+    const [bulkImageGenTotal, setBulkImageGenTotal] = useState(0);
+    const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
+    const [workspaceStage, setWorkspaceStage] = useState<'script' | 'scenes' | 'finale'>('script');
+    const [scenePromptEditorIndex, setScenePromptEditorIndex] = useState<number | null>(null);
+    const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
+    const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
+    const [projectsLoading, setProjectsLoading] = useState(false);
+    const [finalizeError, setFinalizeError] = useState<string | null>(null);
+    const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
+    const [showQuickStart, setShowQuickStart] = useState(false);
+    const [quickStartStep, setQuickStartStep] = useState(0);
+    const [voiceProvider, setVoiceProvider] = useState<'custom' | 'elevenlabs'>('custom');
+    const [customVoiceId, setCustomVoiceId] = useState(customVoiceLibrary[0].id);
+    const [voicePitch, setVoicePitch] = useState(1);
+    const [captionFont, setCaptionFont] = useState(finaleCaptionFonts[0]);
+    const [backgroundMusic, setBackgroundMusic] = useState(finaleMusicOptions[0]);
+    const [soundReferencePreset, setSoundReferencePreset] = useState(soundReferenceOptions[0].id);
+    const [templateChooserOpen, setTemplateChooserOpen] = useState(false);
+    const [subscriptionPromptOpen, setSubscriptionPromptOpen] = useState(false);
+    const [subscriptionCheckoutPlan, setSubscriptionCheckoutPlan] = useState<string | null>(null);
+    const [subscriptionPromptError, setSubscriptionPromptError] = useState<string | null>(null);
+    const [animationCreditPromptRequired, setAnimationCreditPromptRequired] = useState<number | null>(null);
+    const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
+    const restoreDoneRef = useRef(false);
+    const hydratedSceneImagesSessionRef = useRef<string | null>(null);
+    const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
+    const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
+    const pendingChatStoryTemplateStorageKey = session ? `nyptid_pending_chatstory_${session.user.id}` : "nyptid_pending_chatstory_guest";
+    const activePromptEditorScene = scenePromptEditorIndex !== null ? creativeScenes[scenePromptEditorIndex] : null;
+    const customVoicePresetMap = new Map(customVoiceLibrary.map((voice) => [voice.id, voice]));
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/languages`);
+                if (res.ok) {
+                    const { data } = await readJsonResponse<{ languages?: { code: string; name: string }[] }>(res);
+                    setLanguages(Array.isArray(data?.languages) ? data.languages : []);
+                }
+            } catch { /* silent */ }
+        })();
+    }, []);
+
+    // 1080p is now enabled by default; backend still enforces plan/env caps.
+    const canUse1080p = true;
+    const animationCreditsAvailable = Number(creditsTotalRemaining || 0);
+    const animationCreditExhausted = !isAdmin && (requiresTopup || animationCreditsAvailable <= 0);
+    const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
+    const autoModeComingSoon = selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton';
+    const cinematicBoostAlwaysOn = true;
+    const effectiveCinematicBoostEnabled = cinematicBoostAlwaysOn || cinematicBoostEnabled;
+    const defaultSkeletonStyleLockActive = selectedTemplate === 'skeleton' && !creativeReferenceImage && !creativeReferenceAttached;
+    const effectiveReferenceAttached = creativeReferenceAttached || defaultSkeletonStyleLockActive;
+    const workspaceTabs = [
+        { id: 'script', label: 'Script' },
+        { id: 'scenes', label: 'Scenes' },
+        { id: 'finale', label: 'Finale' },
+    ] as const;
+
+    const templates = [
+        { id: 'story', title: 'AI Stories', desc: 'Cinematic story shorts', icon: '🎬' },
+        { id: 'motivation', title: 'Motivation', desc: 'Powerful life advice', icon: '🔥' },
+        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
+        { id: 'chatstory', title: 'Chat Story', desc: 'Message-based premium shorts', icon: '💬' },
+        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
+        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
+        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
+        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
+        { id: 'objects', title: 'Objects Explain', desc: 'Talking objects', icon: '🔌' },
+        { id: 'wouldyourather', title: 'Would You Rather', desc: 'Impossible dilemmas', icon: '🤔' },
+        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true crime', icon: '👻' },
+        { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
+        { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
+        { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
+    ];
+    const artStyleOptions = [
+        { id: 'auto', label: 'Auto (Model Best)', desc: 'Uses template-optimized style defaults.' },
+        { id: 'cinematic_realism', label: 'Cinematic Realism', desc: 'Photoreal cinematic look.' },
+        { id: 'commercial_polish', label: 'Commercial Polish', desc: 'Premium ad-style clarity.' },
+        { id: 'moody_noir', label: 'Moody Noir', desc: 'Dramatic low-key cinematic tone.' },
+        { id: 'bright_lifestyle', label: 'Bright Lifestyle', desc: 'Clean bright modern aesthetic.' },
+    ];
+    const supportsArtStyle = selectedTemplate !== 'skeleton';
+    const publicDefaultTemplateId = 'story';
+    const templateIds = new Set(templates.map(t => t.id));
+    const liveTemplateIds = new Set(['story', 'motivation', 'skeleton', 'chatstory']);
+    const chatStoryTemplateUnlocked = hasChatStoryTemplateAccess(plan, billingActive, role);
+    const liveWorkspaceTemplates = templates.filter((template) => liveTemplateIds.has(template.id));
+    const currentTemplateMeta = templates.find((template) => template.id === selectedTemplate) || templates[0];
+    useEffect(() => {
+        if (!templateIds.has(selectedTemplate)) {
+            setSelectedTemplate(publicDefaultTemplateId);
+        }
+    }, [selectedTemplate]);
+    useEffect(() => {
+        if (selectedTemplate === 'chatstory' && !chatStoryTemplateUnlocked) {
+            setSelectedTemplate(publicDefaultTemplateId);
+        }
+    }, [selectedTemplate, chatStoryTemplateUnlocked]);
+    useEffect(() => {
+        if (!session || !chatStoryTemplateUnlocked) return;
+        try {
+            if (sessionStorage.getItem(pendingChatStoryTemplateStorageKey) !== 'chatstory') return;
+            sessionStorage.removeItem(pendingChatStoryTemplateStorageKey);
+        } catch {
+            return;
+        }
+        setCreateSubTab('builder');
+        setSelectedTemplate('chatstory');
+        setTemplateChooserOpen(false);
+        setSubscriptionPromptOpen(false);
+        setSubscriptionPromptError(null);
+    }, [session, chatStoryTemplateUnlocked, pendingChatStoryTemplateStorageKey]);
+    useEffect(() => {
+        if (selectedTemplate !== 'story' && storyAnimationEnabled !== true) {
+            setStoryAnimationEnabled(true);
+        }
+    }, [selectedTemplate, storyAnimationEnabled]);
+    useEffect(() => {
+        if (animationCreditExhausted && animateOutputEnabled) {
+            setAnimateOutputEnabled(false);
+            setStoryAnimationEnabled(false);
+        }
+    }, [animationCreditExhausted, animateOutputEnabled]);
+    useEffect(() => {
+        if (creativeMode !== 'script_to_short') {
+            setSceneBuildLoading(false);
+            setSceneBuildError(null);
+            setScriptScenesReady(false);
+            setBulkImageGenRunning(false);
+            setBulkImageGenDone(0);
+            setBulkImageGenTotal(0);
+        }
+    }, [creativeMode]);
+    useEffect(() => {
+        if (autoModeComingSoon && creativeMode === 'auto') {
+            setCreativeMode('creative');
+        }
+    }, [autoModeComingSoon, creativeMode]);
+    useEffect(() => {
+        if (cinematicBoostAlwaysOn && !cinematicBoostEnabled) {
+            setCinematicBoostEnabled(true);
+        }
+    }, [cinematicBoostAlwaysOn, cinematicBoostEnabled]);
+
+    const authHeaders = (): Record<string, string> => {
+        const h: Record<string, string> = { "Content-Type": "application/json" };
+        if (session) h["Authorization"] = `Bearer ${session.access_token}`;
+        return h;
+    };
+    const fileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => reject(new Error("Failed to read reference image"));
+        reader.readAsDataURL(file);
+    });
+    const applyCustomVoicePreset = useCallback((voiceId: string, shouldApplyTuning = true) => {
+        const preset = customVoicePresetMap.get(voiceId);
+        if (!preset || !preset.available) return;
+        setCustomVoiceId(voiceId);
+        if (shouldApplyTuning) {
+            setStoryVoiceSpeed(preset.defaultSpeed);
+            setVoicePitch(preset.defaultPitch);
+        }
+    }, [customVoicePresetMap]);
+
+    const renderWorkspaceStageTabs = () => (
+        <div className="flex flex-wrap gap-2 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-2">
+            {workspaceTabs.map((tab) => (
+                <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setWorkspaceStage(tab.id)}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                        workspaceStage === tab.id
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-black/20 text-gray-400 hover:bg-white/[0.04] hover:text-white'
+                    }`}
+                >
+                    {tab.label}
+                </button>
+            ))}
+        </div>
+    );
+    const renderCustomVoiceLibraryCard = () => (
+        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+                <div>
+                    <p className="text-sm font-semibold text-white">Finale Audio</p>
+                    <p className="mt-1 text-xs text-gray-500">
+                        Use the live Studio voice stack now. Background music stays marked as coming soon until the hosted soundtrack flow is ready.
+                    </p>
+                </div>
+                <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
+                    Custom Voices
+                </span>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Source</label>
+                    <div className="grid grid-cols-3 gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setVoiceProvider('custom')}
+                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                voiceProvider === 'custom'
+                                    ? 'bg-violet-600 text-white'
+                                    : 'bg-black/20 text-gray-300 hover:bg-white/[0.06]'
+                            }`}
+                        >
+                            Custom Library
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setVoiceProvider('elevenlabs')}
+                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                voiceProvider === 'elevenlabs'
+                                    ? 'bg-cyan-600 text-white'
+                                    : 'bg-black/20 text-gray-300 hover:bg-white/[0.06]'
+                            }`}
+                        >
+                            ElevenLabs
+                        </button>
+                        <button
+                            type="button"
+                            disabled
+                            className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-amber-200 opacity-90"
+                        >
+                            Custom Upload Soon
+                        </button>
+                    </div>
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Caption Font</label>
+                    <select
+                        value={captionFont}
+                        onChange={(e) => setCaptionFont(e.target.value)}
+                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
+                    >
+                        {finaleCaptionFonts.map((font) => (
+                            <option key={font} value={font}>{font}</option>
+                        ))}
+                    </select>
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
+                    <input
+                        type="range"
+                        min={0.8}
+                        max={1.4}
+                        step={0.05}
+                        value={storyVoiceSpeed}
+                        onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                        className="w-full accent-violet-500"
+                    />
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Pitch ({voicePitch.toFixed(2)}x)</label>
+                    <input
+                        type="range"
+                        min={0.8}
+                        max={1.2}
+                        step={0.05}
+                        value={voicePitch}
+                        onChange={(e) => setVoicePitch(Number(e.target.value))}
+                        className="w-full accent-cyan-500"
+                    />
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Language</label>
+                    <select
+                        value={language}
+                        onChange={(e) => setLanguage(e.target.value)}
+                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
+                    >
+                        {languages.length > 0 ? languages.map((lang) => (
+                            <option key={lang.code} value={lang.code}>{lang.name}</option>
+                        )) : (
+                            <option value="en">English</option>
+                        )}
+                    </select>
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Background Music</label>
+                    <select
+                        value={backgroundMusic}
+                        onChange={(e) => setBackgroundMusic(e.target.value)}
+                        disabled={backgroundMusicComingSoon}
+                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
+                    >
+                        {finaleMusicOptions.map((track) => (
+                            <option key={track} value={track}>{track}</option>
+                        ))}
+                    </select>
+                    <p className="mt-2 text-[11px] text-amber-300">Background music is coming soon. Voice, captions, and slideshow timing are the live finale controls for now.</p>
+                </div>
+            </div>
+            {voiceProvider === 'custom' ? (
+                <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Custom Voice Library</p>
+                            <p className="mt-1 text-sm text-white">50-slot owned/licensed voice rack</p>
+                        </div>
+                        <p className="text-xs text-gray-500">Only owned or licensed clones belong here.</p>
+                    </div>
+                    <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                        {customVoiceLibrary.slice(0, 13).map((voice) => (
+                            <button
+                                key={voice.id}
+                                type="button"
+                                onClick={() => voice.available && applyCustomVoicePreset(voice.id)}
+                                className={`rounded-xl border p-3 text-left transition ${
+                                    customVoiceId === voice.id
+                                        ? 'border-violet-500 bg-violet-500/10'
+                                        : 'border-white/[0.08] bg-white/[0.02] hover:border-violet-500/30'
+                                } ${voice.available ? '' : 'opacity-55'}`}
+                            >
+                                <p className="text-sm font-semibold text-white">{voice.name}</p>
+                                <p className="mt-1 text-[11px] text-gray-400">{voice.profile}</p>
+                                <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-cyan-300">{voice.source}</p>
+                            </button>
+                        ))}
+                    </div>
+                    <p className="mt-3 text-[11px] text-gray-500">
+                        The first 13 entries are active local-owned voice variants built from your current narrator source. The remaining slots are reserved for future licensed or user-supplied voices.
+                    </p>
+                </div>
+            ) : (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
+                    ElevenLabs is optional here. If its billing is disabled, Studio falls back to the custom voice stack or the default narrator.
+                </div>
+            )}
+        </div>
+    );
+    const readJsonResponse = async <T = any>(res: Response): Promise<{ data: T | null; raw: string }> => {
+        const raw = await res.text().catch(() => "");
+        if (!raw) return { data: null, raw: "" };
+        try {
+            return { data: JSON.parse(raw) as T, raw };
+        } catch {
+            return { data: null, raw };
+        }
+    };
+
+    useEffect(() => {
+        if (!jobId) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
+                if (!res.ok) return;
+                const { data } = await readJsonResponse<any>(res);
+                if (!data || typeof data !== "object") return;
+                setJobStatus(data);
+                if (data.status === "complete" || data.status === "error") {
+                    clearInterval(interval);
+                    setLoading(false);
+                }
+            } catch { /* retry */ }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [jobId]);
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!session || restoreDoneRef.current) return;
+        restoreDoneRef.current = true;
+        try {
+            const raw = localStorage.getItem(persistKey);
+            if (!raw) return;
+            const saved = JSON.parse(raw) as Partial<CreatePanelPersistedState>;
+            if (saved.selectedTemplate) setSelectedTemplate(saved.selectedTemplate);
+            if (saved.resolution === '720p' || saved.resolution === '1080p') setResolution(saved.resolution);
+            if (typeof saved.language === 'string' && saved.language) setLanguage(saved.language);
+            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative' || saved.creativeMode === 'script_to_short') setCreativeMode(saved.creativeMode);
+            if (saved.creativeStep === 'topic' || saved.creativeStep === 'edit' || saved.creativeStep === 'generating') setCreativeStep(saved.creativeStep);
+            if (typeof saved.prompt === 'string') setPrompt(saved.prompt);
+            if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null);
+            if (Array.isArray(saved.creativeScenes)) {
+                setCreativeScenes(
+                    saved.creativeScenes.map((s: any) => ({
+                        ...s,
+                        negative_prompt: typeof s?.negative_prompt === 'string' ? s.negative_prompt : "",
+                        // Keep heavy base64 payloads on backend storage; hydrate on demand after restore.
+                        imageData: (typeof s?.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s?.imageData,
+                    }))
+                );
+            }
+            if (typeof saved.creativeTitle === 'string') setCreativeTitle(saved.creativeTitle);
+            if (typeof saved.creativeNarration === 'string') setCreativeNarration(saved.creativeNarration);
+            if (saved.creativeReferenceLockMode === 'strict' || saved.creativeReferenceLockMode === 'inspired') {
+                setCreativeReferenceLockMode(saved.creativeReferenceLockMode);
+            }
+            if (typeof saved.animateOutputEnabled === 'boolean') setAnimateOutputEnabled(saved.animateOutputEnabled);
+            if (typeof saved.storyAnimationEnabled === 'boolean') setStoryAnimationEnabled(saved.storyAnimationEnabled);
+            if (typeof saved.storyVoiceId === 'string') setStoryVoiceId(saved.storyVoiceId);
+            if (typeof saved.storyVoiceSpeed === 'number' && Number.isFinite(saved.storyVoiceSpeed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, saved.storyVoiceSpeed)));
+            }
+            if (saved.storyPacingMode === 'standard' || saved.storyPacingMode === 'fast' || saved.storyPacingMode === 'very_fast') {
+                setStoryPacingMode(saved.storyPacingMode);
+            }
+            if (typeof saved.artStyle === 'string' && saved.artStyle) {
+                setArtStyle(saved.artStyle);
+            }
+            if (typeof saved.cinematicBoostEnabled === 'boolean') {
+                setCinematicBoostEnabled(Boolean(saved.cinematicBoostEnabled) || cinematicBoostAlwaysOn);
+            }
+            if (saved.createSubTab === 'builder' || saved.createSubTab === 'projects') {
+                setCreateSubTab(saved.createSubTab);
+            }
+            if (saved.workspaceStage === 'script' || saved.workspaceStage === 'scenes' || saved.workspaceStage === 'finale') {
+                setWorkspaceStage(saved.workspaceStage);
+            }
+            if (typeof saved.subtitlesEnabled === 'boolean') {
+                setSubtitlesEnabled(saved.subtitlesEnabled);
+            }
+            if (saved.voiceProvider === 'custom' || saved.voiceProvider === 'elevenlabs') {
+                setVoiceProvider(saved.voiceProvider);
+            }
+            if (typeof saved.customVoiceId === 'string' && saved.customVoiceId) {
+                applyCustomVoicePreset(saved.customVoiceId, false);
+            }
+            if (typeof saved.voicePitch === 'number' && Number.isFinite(saved.voicePitch)) {
+                setVoicePitch(Math.max(0.8, Math.min(1.2, saved.voicePitch)));
+            }
+            if (typeof saved.captionFont === 'string' && saved.captionFont) {
+                setCaptionFont(saved.captionFont);
+            }
+            if (typeof saved.backgroundMusic === 'string' && saved.backgroundMusic) {
+                setBackgroundMusic(saved.backgroundMusic);
+            }
+            if (typeof saved.soundReferencePreset === 'string' && saved.soundReferencePreset) {
+                setSoundReferencePreset(saved.soundReferencePreset);
+            }
+            if (typeof saved.jobId === 'string' && saved.jobId) {
+                setJobId(saved.jobId);
+                setLoading(true);
+            }
+        } catch {
+            // ignore malformed saved state
+        }
+    }, [session, persistKey]);
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!session || !restoreDoneRef.current) return;
+        const safeScenes = creativeScenes.map((s) => ({
+            index: s.index,
+            narration: s.narration,
+            visual_description: s.visual_description,
+            negative_prompt: s.negative_prompt || "",
+            duration_sec: s.duration_sec,
+            // Avoid persisting large base64 image payloads to localStorage.
+            imageData: (typeof s.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s.imageData,
+            generation_id: s.generation_id,
+            imageError: s.imageError,
+            imageLoading: s.imageLoading,
+        }));
+        const snapshot: CreatePanelPersistedState = {
+            selectedTemplate,
+            resolution,
+            language,
+            creativeMode,
+            creativeStep,
+            prompt,
+            sessionId,
+            creativeScenes: safeScenes,
+            creativeTitle,
+            creativeNarration,
+            creativeReferenceLockMode,
+            animateOutputEnabled,
+            storyAnimationEnabled,
+            storyVoiceId,
+            storyVoiceSpeed,
+            storyPacingMode,
+            artStyle,
+            cinematicBoostEnabled: effectiveCinematicBoostEnabled,
+            createSubTab,
+            workspaceStage,
+            subtitlesEnabled,
+            voiceProvider,
+            customVoiceId,
+            voicePitch,
+            captionFont,
+            backgroundMusic,
+            soundReferencePreset,
+            jobId,
+            ts: Date.now(),
+        };
+        try {
+            localStorage.setItem(persistKey, JSON.stringify(snapshot));
+        } catch {
+            // ignore storage quota failures
+        }
+    }, [
+        session,
+        persistKey,
+        selectedTemplate,
+        resolution,
+        language,
+        creativeMode,
+        creativeStep,
+        prompt,
+        sessionId,
+        creativeScenes,
+        creativeTitle,
+        creativeNarration,
+        creativeReferenceLockMode,
+        animateOutputEnabled,
+        storyAnimationEnabled,
+        storyVoiceId,
+        storyVoiceSpeed,
+        storyPacingMode,
+        artStyle,
+        effectiveCinematicBoostEnabled,
+        createSubTab,
+        workspaceStage,
+        subtitlesEnabled,
+        voiceProvider,
+        customVoiceId,
+        voicePitch,
+        captionFont,
+        backgroundMusic,
+        soundReferencePreset,
+        jobId,
+    ]);
+
+    const quickStartSteps = [
+        {
+            title: "1) Pick Template + Mode",
+            text: "Open Create, pick AI Stories, Motivation, Skeleton AI, or Chat Story, then stay in Creative Control or Script to Short.",
+        },
+        {
+            title: "2) Set Output + Prompt",
+            text: "Pick resolution/language, write your topic or full script, then attach optional style reference if needed.",
+        },
+        {
+            title: "3) Animation Credit Gate",
+            text: "If animation credits cover the project, you can stay animated. If not, Studio will prompt you to buy credits or continue with slideshow.",
+        },
+        {
+            title: "4) Generate Flow",
+            text: "Scene-first flow: Script -> Scenes -> Generate Scenes -> Generate Images -> Finale.",
+        },
+    ];
+
+    useEffect(() => {
+        if (!session) return;
+        try {
+            const seen = localStorage.getItem(quickStartSeenKey) === "1";
+            setShowQuickStart(!seen);
+            setQuickStartStep(0);
+        } catch {
+            setShowQuickStart(true);
+            setQuickStartStep(0);
+        }
+    }, [session, quickStartSeenKey]);
+
+    const dismissQuickStart = (dontShowAgain: boolean) => {
+        if (dontShowAgain) {
+            try { localStorage.setItem(quickStartSeenKey, "1"); } catch { /* ignore */ }
+        }
+        setShowQuickStart(false);
+    };
+
+    const quickStartCard = (showQuickStart && createSubTab === 'builder') ? (
+        <div className="fixed bottom-4 right-4 z-40 w-[330px] max-w-[calc(100vw-2rem)] rounded-2xl border border-amber-300/35 bg-[#2a1e09]/95 shadow-2xl shadow-black/50 p-4">
+            <div className="flex items-start justify-between gap-2">
+                <div>
+                    <p className="text-xs uppercase tracking-wider text-amber-300 font-semibold">Studio Quick Start</p>
+                    <p className="text-sm font-bold text-amber-100 mt-1">{quickStartSteps[quickStartStep]?.title}</p>
+                </div>
+                <button
+                    onClick={() => dismissQuickStart(false)}
+                    className="text-amber-200/80 hover:text-white transition"
+                    aria-label="Close quick start"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+            <p className="text-xs text-amber-100/90 mt-2 leading-relaxed">
+                {quickStartSteps[quickStartStep]?.text}
+            </p>
+            <div className="mt-3 flex items-center gap-1.5">
+                {quickStartSteps.map((_, i) => (
+                    <span key={`qs-dot-${i}`} className={`h-1.5 rounded-full transition-all ${i === quickStartStep ? 'w-5 bg-amber-300' : 'w-2 bg-amber-200/40'}`} />
+                ))}
+            </div>
+            <div className="mt-4 flex items-center justify-between">
+                <button
+                    onClick={() => setQuickStartStep((s) => Math.max(0, s - 1))}
+                    disabled={quickStartStep === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 disabled:opacity-40"
+                >
+                    Back
+                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => dismissQuickStart(true)}
+                        className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 hover:bg-amber-200/10"
+                    >
+                        Don't show again
+                    </button>
+                    {quickStartStep < quickStartSteps.length - 1 ? (
+                        <button
+                            onClick={() => setQuickStartStep((s) => Math.min(quickStartSteps.length - 1, s + 1))}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-400 text-black hover:bg-amber-300"
+                        >
+                            Next
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => dismissQuickStart(false)}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-500 text-white hover:bg-emerald-400"
+                        >
+                            Got it
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/status`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const { data } = await readJsonResponse<any>(res);
+                if (!data || typeof data !== "object") return;
+                if (cancelled) return;
+                setCreativeReferenceAttached(Boolean(data?.has_reference_image));
+                if (data?.reference_lock_mode === 'strict' || data?.reference_lock_mode === 'inspired') {
+                    setCreativeReferenceLockMode(data.reference_lock_mode);
+                }
+                if (typeof data?.art_style === 'string' && data.art_style) {
+                    setArtStyle(data.art_style);
+                }
+                if (data?.has_reference_image && !creativeReferenceImage) {
+                    setCreativeReferenceStatus('ready');
+                }
+            } catch {
+                // ignore restore status errors
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeReferenceImage]);
+
+    useEffect(() => {
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
+        if (hydratedSceneImagesSessionRef.current === sessionId) return;
+        if (!creativeScenes.some((s) => !s.imageData && !!s.generation_id)) return;
+        hydratedSceneImagesSessionRef.current = sessionId;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/scene-images`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const { data } = await readJsonResponse<any>(res);
+                if (!data || typeof data !== "object") return;
+                if (cancelled) return;
+                const byIndex = new Map<number, string>();
+                for (const item of (data?.scene_images || [])) {
+                    if (typeof item?.scene_index === 'number' && typeof item?.image_data === 'string') {
+                        byIndex.set(item.scene_index, item.image_data);
+                    }
+                }
+                if (byIndex.size === 0) return;
+                setCreativeScenes((prev) =>
+                    prev.map((scene) => {
+                        if (scene.imageData) return scene;
+                        const hydrated = byIndex.get(scene.index);
+                        return hydrated ? { ...scene, imageData: hydrated } : scene;
+                    })
+                );
+            } catch {
+                // silent hydrate failure; user can still regenerate per-scene
+                hydratedSceneImagesSessionRef.current = null;
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeScenes]);
+
+    const loadProjects = useCallback(async () => {
+        if (!session) return;
+        setProjectsLoading(true);
+        try {
+            const res = await fetch(`${API}/api/projects`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to load projects");
+            const { data } = await readJsonResponse<any>(res);
+            const payload = data || {};
+            setProjectDrafts((payload as any).drafts || []);
+            setProjectRenders((payload as any).renders || []);
+        } catch {
+            setProjectDrafts([]);
+            setProjectRenders([]);
+        } finally {
+            setProjectsLoading(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        if (createSubTab !== 'projects') return;
+        loadProjects();
+    }, [createSubTab, loadProjects]);
+
+    useEffect(() => {
+        if (selectedTemplate !== 'story') return;
+        if (!session) return;
+        let cancelled = false;
+        const run = async () => {
+            setStoryVoicesLoading(true);
+            try {
+                const res = await fetch(`${API}/api/voices`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                const { data } = await readJsonResponse<any>(res);
+                if (!cancelled) {
+                    const voices = Array.isArray(data?.voices) ? data.voices : [];
+                    setStoryVoices(voices);
+                    setStoryVoicesSource(data?.source === 'elevenlabs' ? 'elevenlabs' : (data?.source === 'fallback' ? 'fallback' : 'unknown'));
+                    setStoryVoicesWarning(String(data?.warning || ""));
+                    if (!storyVoiceId && voices.length > 0) {
+                        setStoryVoiceId(String(voices[0].voice_id || ""));
+                    }
+                }
+            } catch {
+                if (!cancelled) {
+                    setStoryVoices([]);
+                    setStoryVoicesSource('unknown');
+                    setStoryVoicesWarning("Voice catalog unavailable right now.");
+                }
+            } finally {
+                if (!cancelled) setStoryVoicesLoading(false);
+            }
+        };
+        void run();
+        return () => { cancelled = true; };
+    }, [selectedTemplate, session, storyVoiceId]);
+
+    const previewStoryVoice = async () => {
+        if (!session || !storyVoiceId || storyPreviewLoading) return;
+        setStoryPreviewLoading(true);
+        try {
+            const res = await fetch(`${API}/api/voices/preview`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ voice_id: storyVoiceId }),
+            });
+            if (!res.ok) throw new Error("Preview failed");
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => URL.revokeObjectURL(url);
+            void audio.play();
+        } catch {
+            alert("Voice preview failed");
+        } finally {
+            setStoryPreviewLoading(false);
+        }
+    };
+
+    const handleGenerate = async () => {
+        if (!prompt) return;
+        if (creativeMode === 'creative') {
+            await handleCreativeStart();
+            return;
+        }
+        if (creativeMode === 'script_to_short') {
+            await handleScriptToShortStart();
+            return;
+        }
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        try {
+            let referenceImageDataUrl = "";
+            if (creativeReferenceImage) {
+                referenceImageDataUrl = await fileToDataUrl(creativeReferenceImage);
+            }
+            const res = await fetch(`${GENERATION_API}/api/generate`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: 'auto',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: effectiveCinematicBoostEnabled,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    animation_enabled: effectiveAnimationEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    reference_image_url: referenceImageDataUrl,
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            const { data } = await readJsonResponse<any>(res);
+            if (data?.job_id) setJobId(data.job_id);
+            else { setLoading(false); }
+        } catch { setLoading(false); }
+    };
+
+    const handleRegenerateAutoScene = async (sceneIndex: number) => {
+        const targetJobId = jobId || jobStatus?.job_id;
+        if (!targetJobId) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
+        try {
+            const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    job_id: targetJobId,
+                    scene_index: sceneIndex,
+                    mint_mode: mintMode,
+                }),
+            });
+            const { data } = await readJsonResponse<any>(res);
+            if (!res.ok) {
+                throw new Error(data?.detail || "Failed to regenerate scene image");
+            }
+            const updatedImage = data?.image;
+            if (updatedImage) {
+                setJobStatus((prev: any) => {
+                    if (!prev) return prev;
+                    const nextImages = Array.isArray(prev.scene_images) ? [...prev.scene_images] : [];
+                    while (nextImages.length <= sceneIndex) nextImages.push(null);
+                    nextImages[sceneIndex] = updatedImage;
+                    return { ...prev, scene_images: nextImages };
+                });
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to regenerate scene image");
+        } finally {
+            setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: false }));
+        }
+    };
+
+    const handleScriptToShortStart = async () => {
+        const scriptText = prompt.trim();
+        if (!scriptText) return;
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("Script to Short");
+        setCreativeNarration(scriptText);
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        setCreativeStep('edit');
+    };
+
+    const handleGenerateScriptToShortScenes = async () => {
+        const scriptText = (creativeMode === 'script_to_short'
+            ? creativeNarration.trim()
+            : (prompt.trim() || creativeNarration.trim())
+        );
+        if (!scriptText) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
+        setSceneBuildLoading(true);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/script`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt: scriptText,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: generationMode,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: effectiveCinematicBoostEnabled,
+                    animation_enabled: effectiveAnimationEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                }),
+            });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(normalizeUpstreamErrorMessage(errText, res.status, "Failed to start Script to Short"));
+            }
+            const { data } = await readJsonResponse<any>(res);
+            if (!data || typeof data !== "object") {
+                throw new Error("Invalid Script to Short response");
+            }
+            setSessionId(data.session_id);
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(normalizeUpstreamErrorMessage(errText, refRes.status, "Failed to upload reference style image"));
+                }
+                setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
+            }
+            const generatedScenes: CreativeScene[] = (data.scenes || []).map((s: any, i: number) => ({
+                index: i,
+                narration: String(s?.narration || ""),
+                visual_description: creativeMode === 'script_to_short' ? "" : String(s?.visual_description || ""),
+                negative_prompt: String(s?.negative_prompt || ""),
+                duration_sec: Number(s?.duration_sec || 5),
+            }));
+            setCreativeScenes(generatedScenes.length > 0 ? generatedScenes : [{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                negative_prompt: "",
+                duration_sec: 5,
+            }]);
+            setCreativeTitle(data.title || (creativeMode === 'script_to_short' ? "Script to Short" : (prompt || "Creative Draft")));
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(scriptText);
+            }
+            setScriptScenesReady(generatedScenes.length > 0);
+        } catch (e: any) {
+            setSceneBuildError(e?.message || "Failed to generate scenes");
+        } finally {
+            setSceneBuildLoading(false);
+        }
+    };
+
+    const handleCreativeStart = async () => {
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setScriptLoading(true);
+        setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/session`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    topic: prompt || "Untitled",
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: effectiveCinematicBoostEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(normalizeUpstreamErrorMessage(errText, res.status, "Failed to create session"));
+            }
+            const { data } = await readJsonResponse<any>(res);
+            if (!data || typeof data !== "object") throw new Error("Invalid creative session response");
+            setSessionId(data.session_id);
+
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(normalizeUpstreamErrorMessage(errText, refRes.status, "Failed to upload reference style image"));
+                }
+                setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
+            }
+
+            setCreativeTitle(prompt || "Untitled Short");
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(prompt || "");
+            }
+            setCreativeScenes([{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                negative_prompt: "",
+                duration_sec: 5,
+            }]);
+            setScriptScenesReady(false);
+            setCreativeStep('edit');
+        } catch (e: any) {
+            setCreativeReferenceStatus(creativeReferenceImage ? 'error' : 'idle');
+            alert(e.message || "Failed to start creative session");
+        } finally {
+            setScriptLoading(false);
+        }
+    };
+
+    const handleAddScene = () => {
+        setCreativeScenes(prev => [...prev, {
+            index: prev.length,
+            narration: "",
+            visual_description: "",
+            negative_prompt: "",
+            duration_sec: 5,
+        }]);
+    };
+
+    const handleRemoveScene = (index: number) => {
+        if (creativeScenes.length <= 1) return;
+        setCreativeScenes(prev => prev.filter((_, i) => i !== index).map((s, i) => ({ ...s, index: i })));
+    };
+
+    const handleGenerateSceneImage = async (sceneIndex: number) => {
+        if (!sessionId) return;
+        const currentScenes = creativeScenesRef.current;
+        if (sceneIndex >= currentScenes.length || !currentScenes[sceneIndex]) return;
+        const scene = currentScenes[sceneIndex];
+        if (!scene.visual_description.trim()) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    prompt: scene.visual_description,
+                    negative_prompt: String(scene.negative_prompt || "").trim(),
+                    scene_index: sceneIndex,
+                    session_id: sessionId,
+                    template: selectedTemplate,
+                    resolution: canUse1080p ? resolution : '720p',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: effectiveCinematicBoostEnabled,
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            const rawBody = await res.text().catch(() => "");
+            if (!res.ok) {
+                const errText = normalizeSceneErrorMessage(rawBody || "Unknown error", res.status);
+                console.error(`Scene ${sceneIndex} image gen failed:`, res.status, errText);
+                throw new Error(errText);
+            }
+            let data: any = {};
+            try {
+                data = rawBody ? JSON.parse(rawBody) : {};
+            } catch {
+                throw new Error(normalizeSceneErrorMessage(rawBody, res.status));
+            }
+            if (typeof data?.image_data !== "string" || !data.image_data.trim()) {
+                throw new Error(normalizeSceneErrorMessage(rawBody, res.status) || "Scene image response did not contain image_data");
+            }
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? {
+                    ...s,
+                    imageData: data.image_data,
+                    imageLoading: false,
+                    generation_id: data.generation_id,
+                    qa_ok: typeof data.qa_ok === "boolean" ? data.qa_ok : true,
+                    qa_score: typeof data.qa_score === "number" ? data.qa_score : undefined,
+                    qa_notes: Array.isArray(data.qa_notes) ? data.qa_notes : [],
+                } : s
+            ));
+        } catch (err: any) {
+            const msg = err?.message || "Image generation failed";
+            console.error(`Scene ${sceneIndex} image gen error:`, msg);
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? { ...s, imageLoading: false, imageError: msg } : s
+            ));
+        }
+    };
+
+    const handleGenerateSceneImageBatch = async () => {
+        if (!sessionId) return;
+        const scenes = creativeScenesRef.current;
+        const allTargets = scenes
+            .map((scene, idx) => ({ scene, idx }))
+            .filter(({ scene }) => !!scene.visual_description.trim());
+        if (allTargets.length === 0) return;
+        const pendingTargets = allTargets.filter(({ scene }) => !scene.imageData);
+        const targets = pendingTargets.length > 0 ? pendingTargets : allTargets;
+        if (targets.length === 0) return;
+        setBulkImageGenRunning(true);
+        setBulkImageGenTotal(targets.length);
+        setBulkImageGenDone(0);
+        try {
+            for (const { idx } of targets) {
+                await handleGenerateSceneImage(idx);
+                setBulkImageGenDone((prev) => prev + 1);
+            }
+        } finally {
+            setBulkImageGenRunning(false);
+        }
+    };
+
+    const normalizeUpstreamErrorMessage = (message?: string, statusCode?: number, fallback = "Request failed") => {
+        const raw = String(message || "").trim();
+        if (!raw) return statusCode ? `${fallback} (${statusCode})` : fallback;
+        try {
+            const parsed = JSON.parse(raw);
+            const detail = parsed?.detail;
+            if (typeof detail === "string" && detail.trim()) {
+                return detail.trim();
+            }
+        } catch {
+            // plain-text or HTML response
+        }
+        const lower = raw.toLowerCase();
+        if (
+            lower.includes("cloudflare") ||
+            lower.includes("router_external_target_error") ||
+            lower.includes("application error") ||
+            lower.startsWith("<!doctype") ||
+            lower.startsWith("<html") ||
+            lower.includes("<html")
+        ) {
+            return "Studio backend is temporarily unavailable. Please retry in a few seconds.";
+        }
+        return raw;
+    };
+
+    const handleUpdateScene = (index: number, field: keyof CreativeScene, value: string | number) => {
+        setCreativeScenes(prev => prev.map((s, i) =>
+            i === index ? { ...s, [field]: value } : s
+        ));
+    };
+
+    const normalizeSceneErrorMessage = (message?: string, statusCode?: number) => {
+        const raw = String(message || "").trim();
+        if (!raw) return statusCode ? `Request failed (${statusCode})` : "Image generation failed";
+        try {
+            const parsed = JSON.parse(raw);
+            const detail = parsed?.detail;
+            if (typeof detail === "string" && detail.trim()) {
+                return detail.trim();
+            }
+        } catch {
+            // plain-text or HTML response
+        }
+        const lower = raw.toLowerCase();
+        if (lower.includes("router_external_target_error") || lower.includes("application error")) {
+            return "The public tunnel lost the image request before the generator finished. Retry once the image lane is stable.";
+        }
+        if (lower.startsWith("<!doctype") || lower.startsWith("<html") || lower.includes("<html")) {
+            if (statusCode === 524 || lower.includes("524")) {
+                return "Gateway timeout while generating image. Click Generate Image again.";
+            }
+            if (statusCode === 502 || statusCode === 503 || statusCode === 504 || lower.includes("gateway")) {
+                return "Upstream image engine is temporarily unavailable. Please retry in a few seconds.";
+            }
+            return statusCode
+                ? `Unexpected upstream HTML error (${statusCode}). Please retry.`
+                : "Unexpected upstream HTML error. Please retry.";
+        }
+        return raw;
+    };
+
+    const summarizeSceneError = (message?: string) => {
+        const text = normalizeSceneErrorMessage(message);
+        if (!text) return "Image generation failed";
+        return text.length > 260 ? `${text.slice(0, 260)}...` : text;
+    };
+
+    const summarizeSceneQaWarning = (scene: CreativeScene) => {
+        const notes = Array.isArray(scene.qa_notes) ? scene.qa_notes : [];
+        if (notes.includes('brain_prop_missing_or_wrong') && notes.includes('money_prop_missing_or_wrong')) {
+            return "Prompt mismatch: brain and money props are not clearly visible.";
+        }
+        if (notes.includes('brain_prop_missing_or_wrong')) {
+            return "Prompt mismatch: brain prop is not clearly visible.";
+        }
+        if (notes.includes('money_prop_missing_or_wrong')) {
+            return "Prompt mismatch: money prop is not clearly visible.";
+        }
+        if (notes.includes('interactive_soft_accept')) {
+            return "Prompt match is weak. Regenerate for a tighter match.";
+        }
+        return "";
+    };
+
+    const handleFinalize = async () => {
+        setFinalizeError(null);
+        if (!sessionId) {
+            setFinalizeError("No active session. Please go back and start a new project.");
+            return;
+        }
+        if (!creativeNarration.trim()) {
+            setFinalizeError("Please write a script / narration before rendering.");
+            return;
+        }
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        setCreativeStep('generating');
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    template: selectedTemplate,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: effectiveCinematicBoostEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    subtitles_enabled: selectedTemplate === 'story' ? subtitlesEnabled : true,
+                    reference_lock_mode: creativeReferenceLockMode,
+                    narration: creativeNarration,
+                    scenes: creativeScenes.map(s => ({
+                        narration: "",
+                        visual_description: s.visual_description,
+                        negative_prompt: String(s.negative_prompt || "").trim(),
+                        duration_sec: s.duration_sec,
+                    })),
+                }),
+            });
+            if (!res.ok) {
+                const { data: errData, raw: errRaw } = await readJsonResponse<any>(res);
+                const msg = errData?.detail || errRaw || `Server error (${res.status}). The backend may be overloaded - try again in a moment.`;
+                setFinalizeError(msg);
+                setLoading(false);
+                setCreativeStep('edit');
+                return;
+            }
+            const { data } = await readJsonResponse<any>(res);
+            if (!data || typeof data !== "object") {
+                setFinalizeError("Server returned an invalid response payload. Please try again.");
+                setLoading(false);
+                setCreativeStep('edit');
+                return;
+            }
+            if (data.job_id) {
+                setJobId(data.job_id);
+            } else {
+                setFinalizeError("Server returned no job ID. Please try again.");
+                setLoading(false);
+                setCreativeStep('edit');
+            }
+        } catch (err: any) {
+            setFinalizeError(err?.message || "Network error — the server may be down or overloaded. Please try again.");
+            setLoading(false);
+            setCreativeStep('edit');
+        }
+    };
+
+    const handleResetCreative = () => {
+        setCreativeStep('topic');
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("");
+        setCreativeNarration("");
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setCreativeReferenceStatus(creativeReferenceImage ? 'ready' : 'idle');
+        setCreativeReferenceAttached(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        setJobId(null);
+        setJobStatus(null);
+        setLoading(false);
+        setFinalizeError(null);
+        try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
+    };
+
+    const openTemplateChooser = () => {
+        setCreateSubTab('builder');
+        setTemplateChooserOpen(true);
+        setSubscriptionPromptOpen(false);
+        setSubscriptionPromptError(null);
+    };
+
+    const openSubscriptionPrompt = () => {
+        setTemplateChooserOpen(false);
+        setSubscriptionPromptOpen(true);
+        setSubscriptionPromptError(null);
+    };
+
+    const handleWorkspaceCreateClick = () => {
+        if (loading || scriptLoading) return;
+        openTemplateChooser();
+    };
+
+    const handleTemplateSelection = (templateId: string) => {
+        if (templateId === 'chatstory' && !chatStoryTemplateUnlocked) {
+            openSubscriptionPrompt();
+            return;
+        }
+        if (templateId !== selectedTemplate) {
+            handleResetCreative();
+        }
+        try {
+            sessionStorage.removeItem(pendingChatStoryTemplateStorageKey);
+        } catch {
+            // ignore storage failures
+        }
+        setSelectedTemplate(templateId);
+        setCreateSubTab('builder');
+        setWorkspaceStage('script');
+        if (templateId !== 'chatstory') {
+            setCreativeMode('creative');
+        }
+        setTemplateChooserOpen(false);
+        setSubscriptionPromptOpen(false);
+        setSubscriptionPromptError(null);
+    };
+
+    const handleMonthlyAccessCheckout = async (planName: 'starter' | 'creator' | 'pro') => {
+        setSubscriptionCheckoutPlan(planName);
+        setSubscriptionPromptError(null);
+        try {
+            try {
+                sessionStorage.setItem(pendingChatStoryTemplateStorageKey, 'chatstory');
+            } catch {
+                // ignore storage failures
+            }
+            const error = await checkout(planName);
+            if (error) {
+                setSubscriptionPromptError(error);
+                try {
+                    sessionStorage.removeItem(pendingChatStoryTemplateStorageKey);
+                } catch {
+                    // ignore storage failures
+                }
+            }
+        } finally {
+            setSubscriptionCheckoutPlan(null);
+        }
+    };
+
+    const openAnimationCreditPrompt = (requiredCredits: number) => {
+        setAnimationCreditPromptRequired(Math.max(1, requiredCredits));
+        setAnimationCreditPromptError(null);
+    };
+
+    const handleAnimationTopupCheckout = async (requiredCredits: number) => {
+        const recommendedPack = topupPacks.find((pack) => pack.credits >= requiredCredits) || topupPacks[topupPacks.length - 1];
+        if (!recommendedPack) {
+            setAnimationCreditPromptError('No animation credit packs are configured yet.');
+            return;
+        }
+        setAnimationCreditPromptError(null);
+        const error = await checkoutTopup(recommendedPack.price_id, 'paypal');
+        if (error) {
+            setAnimationCreditPromptError(error);
+        }
+    };
+
+    const renderWorkspaceChrome = ({ subtitle, showBack }: { subtitle: string; showBack?: boolean }) => (
+        <div className="rounded-[28px] border border-white/[0.06] bg-white/[0.02] p-4 sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-3">
+                    <div className="grid grid-cols-2 gap-2 rounded-2xl border border-white/[0.06] bg-black/20 p-1">
+                        <button
+                            type="button"
+                            onClick={handleWorkspaceCreateClick}
+                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+                                createSubTab === 'builder'
+                                    ? 'bg-violet-600 text-white'
+                                    : 'text-gray-300 hover:bg-white/[0.04] hover:text-white'
+                            }`}
+                        >
+                            Create
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setCreateSubTab('projects')}
+                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+                                createSubTab === 'projects'
+                                    ? 'bg-violet-600 text-white'
+                                    : 'text-gray-300 hover:bg-white/[0.04] hover:text-white'
+                            }`}
+                        >
+                            Projects
+                        </button>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={openTemplateChooser}
+                        className="inline-flex items-center gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-2.5 text-left text-sm font-semibold text-white transition hover:border-violet-500/40 hover:bg-violet-500/10"
+                    >
+                        <Sparkles className="h-4 w-4 text-violet-300" />
+                        {currentTemplateMeta.title}
+                    </button>
+                    {selectedTemplate === 'chatstory' ? (
+                        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-200">
+                            Monthly Template
+                        </span>
+                    ) : (
+                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
+                            Live Now
+                        </span>
+                    )}
+                </div>
+                <div className="flex items-center gap-2">
+                    {!showQuickStart && createSubTab === 'builder' && (
+                        <button
+                            onClick={() => { setQuickStartStep(0); setShowQuickStart(true); }}
+                            className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 transition hover:bg-white/5 hover:text-white"
+                        >
+                            Show Quick Start
+                        </button>
+                    )}
+                    {showBack && (
+                        <button
+                            type="button"
+                            onClick={handleResetCreative}
+                            className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/[0.06]"
+                        >
+                            <ArrowRight className="h-4 w-4 rotate-180" />
+                            Back
+                        </button>
+                    )}
+                </div>
+            </div>
+            <p className="mt-4 text-sm text-gray-400">{subtitle}</p>
+        </div>
+    );
+
+    const templateChooserModal = templateChooserOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
+            <div className="w-full max-w-5xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">Create Template</p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">Pick the live workflow you want to open</h3>
+                        <p className="mt-2 text-sm text-gray-400">Only the sellable launch templates are selectable. Everything else stays marked coming soon in the left rail.</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setTemplateChooserOpen(false)}
+                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        title="Close template picker"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    {liveWorkspaceTemplates.map((template) => {
+                        const locked = template.id === 'chatstory' && !chatStoryTemplateUnlocked;
+                        const active = selectedTemplate === template.id;
+                        return (
+                            <button
+                                key={template.id}
+                                type="button"
+                                onClick={() => handleTemplateSelection(template.id)}
+                                className={`rounded-[24px] border p-5 text-left transition ${
+                                    active
+                                        ? 'border-violet-500 bg-violet-500/10'
+                                        : 'border-white/[0.08] bg-white/[0.03] hover:border-violet-500/30 hover:bg-violet-500/[0.03]'
+                                } ${locked ? 'border-violet-500/25' : ''}`}
+                            >
+                                <div className="flex items-start justify-between gap-3">
+                                    <span className="text-2xl">{template.icon}</span>
+                                    {locked ? (
+                                        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
+                                            Monthly
+                                        </span>
+                                    ) : active ? (
+                                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
+                                            Active
+                                        </span>
+                                    ) : null}
+                                </div>
+                                <h4 className="mt-6 text-lg font-semibold text-white">{template.title}</h4>
+                                <p className="mt-2 text-sm leading-relaxed text-gray-400">{template.desc}</p>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
+    const subscriptionPromptModal = subscriptionPromptOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
+            <div className="w-full max-w-3xl rounded-[32px] border border-violet-500/20 bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">Chat Story Locked</p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">You do not have a monthly subscription yet</h3>
+                        <p className="mt-2 text-sm text-gray-400">Choose Starter, Creator, or Pro to unlock Chat Story. After PayPal confirms the month, Studio will open the template automatically.</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setSubscriptionPromptOpen(false)}
+                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        title="Close monthly plan prompt"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+                <div className="mt-6 grid gap-4 md:grid-cols-3">
+                    {[
+                        { id: 'starter', title: 'Starter', copy: 'Lowest monthly unlock. Best if you only need Chat Story access right now.' },
+                        { id: 'creator', title: 'Creator', copy: 'Mid-tier monthly access for regular channel operators.' },
+                        { id: 'pro', title: 'Pro', copy: 'Highest monthly tier for the full paid workspace lane.' },
+                    ].map((entry) => (
+                        <button
+                            key={entry.id}
+                            type="button"
+                            onClick={() => { void handleMonthlyAccessCheckout(entry.id as 'starter' | 'creator' | 'pro'); }}
+                            disabled={subscriptionCheckoutPlan !== null}
+                            className="rounded-[24px] border border-white/[0.08] bg-white/[0.03] p-5 text-left transition hover:border-violet-500/40 hover:bg-violet-500/[0.04] disabled:opacity-60"
+                        >
+                            <p className="text-lg font-semibold text-white">{entry.title}</p>
+                            <p className="mt-2 text-sm text-gray-400">{entry.copy}</p>
+                            <div className="mt-5 inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white">
+                                {subscriptionCheckoutPlan === entry.id ? (
+                                    <>
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        Redirecting...
+                                    </>
+                                ) : (
+                                    <>
+                                        Unlock with PayPal
+                                        <ArrowRight className="h-4 w-4" />
+                                    </>
+                                )}
+                            </div>
+                        </button>
+                    ))}
+                </div>
+                {subscriptionPromptError && (
+                    <p className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{subscriptionPromptError}</p>
+                )}
+            </div>
+        </div>
+    ) : null;
+
+    const animationCreditPromptModal = animationCreditPromptRequired !== null ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
+            <div className="w-full max-w-2xl rounded-[32px] border border-cyan-500/20 bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Animation Credits Needed</p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">This render needs {animationCreditPromptRequired} animation credit{animationCreditPromptRequired === 1 ? '' : 's'}</h3>
+                        <p className="mt-2 text-sm text-gray-400">You currently have {animationCreditsAvailable} available. Buy more credits with PayPal or continue in slideshow mode right now.</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setAnimationCreditPromptRequired(null)}
+                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        title="Close credit prompt"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+                <div className="mt-6 flex flex-wrap gap-3">
+                    <button
+                        type="button"
+                        onClick={() => { void handleAnimationTopupCheckout(animationCreditPromptRequired); }}
+                        className="inline-flex items-center gap-2 rounded-xl bg-cyan-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-cyan-500"
+                    >
+                        Buy Credits with PayPal
+                        <ArrowRight className="h-4 w-4" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setAnimateOutputEnabled(false);
+                            setAnimationCreditPromptRequired(null);
+                            setAnimationCreditPromptError(null);
+                        }}
+                        className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm font-semibold text-gray-200 transition hover:bg-white/[0.06]"
+                    >
+                        Continue with Slideshow
+                    </button>
+                </div>
+                {animationCreditPromptError && (
+                    <p className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{animationCreditPromptError}</p>
+                )}
+            </div>
+        </div>
+    ) : null;
+
+    const openDraftProject = async (projectId: string) => {
+        if (!session) return;
+        try {
+            const res = await fetch(`${API}/api/projects/${projectId}`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to open draft");
+            const { data } = await readJsonResponse<any>(res);
+            if (!data || typeof data !== "object") throw new Error("Draft payload was invalid");
+            const p: ProjectRow | undefined = data.project;
+            if (!p || typeof p !== "object") throw new Error("Draft project is missing");
+            setCreateSubTab('builder');
+            setSelectedTemplate(p.template || 'skeleton');
+            setPrompt(p.topic || '');
+            setWorkspaceStage('script');
+            if (p.resolution === '720p' || p.resolution === '1080p') setResolution(p.resolution);
+            if (p.language) setLanguage(p.language);
+            if (typeof p.story_animation_enabled === 'boolean') {
+                setStoryAnimationEnabled(p.story_animation_enabled);
+            } else {
+                setStoryAnimationEnabled(true);
+            }
+            if (typeof p.animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.animation_enabled);
+            } else if (typeof p.story_animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.story_animation_enabled);
+            } else {
+                setAnimateOutputEnabled(true);
+            }
+            setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : (p.mode === 'creative' ? 'creative' : 'auto'));
+            if (typeof p.voice_id === 'string') setStoryVoiceId(p.voice_id);
+            if (typeof p.voice_speed === 'number' && Number.isFinite(p.voice_speed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, p.voice_speed)));
+            }
+            if (p.pacing_mode === 'standard' || p.pacing_mode === 'fast' || p.pacing_mode === 'very_fast') {
+                setStoryPacingMode(p.pacing_mode);
+            }
+            if (typeof p.art_style === 'string' && p.art_style) {
+                setArtStyle(p.art_style);
+            } else {
+                setArtStyle('auto');
+            }
+            setCinematicBoostEnabled(Boolean(p.cinematic_boost) || cinematicBoostAlwaysOn);
+            if (p.mode === 'creative' || p.mode === 'script_to_short') {
+                const hydratedScenes: CreativeScene[] = Array.isArray(p.scenes) && p.scenes.length > 0
+                    ? p.scenes.map((s: any, i: number) => ({
+                        index: Number.isFinite(Number(s?.index)) ? Number(s.index) : i,
+                        narration: String(s?.narration || ""),
+                        visual_description: String(s?.visual_description || ""),
+                        negative_prompt: String(s?.negative_prompt || ""),
+                        duration_sec: Number(s?.duration_sec || 5),
+                        imageData: typeof s?.imageData === 'string' ? s.imageData : undefined,
+                        imageLoading: typeof s?.imageLoading === 'boolean' ? s.imageLoading : undefined,
+                        generation_id: typeof s?.generation_id === 'string' ? s.generation_id : undefined,
+                        imageError: typeof s?.imageError === 'string' ? s.imageError : undefined,
+                        qa_ok: typeof s?.qa_ok === 'boolean' ? s.qa_ok : undefined,
+                        qa_score: typeof s?.qa_score === 'number' ? s.qa_score : undefined,
+                        qa_notes: Array.isArray(s?.qa_notes) ? s.qa_notes : undefined,
+                    }))
+                    : [{ index: 0, narration: "", visual_description: "", negative_prompt: "", duration_sec: 5 }];
+                const readyPromptCount = hydratedScenes.filter((scene) => !!scene.visual_description.trim()).length;
+                const readyImageCount = hydratedScenes.filter((scene) => !!scene.imageData).length;
+                setCreativeStep('edit');
+                setSessionId(p.session_id || null);
+                setSceneBuildLoading(false);
+                setCreativeScenes(hydratedScenes);
+                setCreativeTitle(p.title || p.topic || 'Untitled Short');
+                setCreativeNarration(p.narration || "");
+                setScriptScenesReady(Boolean((p.session_id || "").trim()) && Array.isArray(p.scenes) && p.scenes.length > 0);
+                setSceneBuildError(null);
+                if (readyPromptCount > 0 && readyImageCount === readyPromptCount) {
+                    setWorkspaceStage('finale');
+                } else if (readyPromptCount > 0) {
+                    setWorkspaceStage('scenes');
+                } else {
+                    setWorkspaceStage('script');
+                }
+            } else if (p.job_id) {
+                setJobId(p.job_id);
+                setLoading(true);
+                setWorkspaceStage('finale');
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to open project");
+        }
+    };
+
+    if ((creativeMode === 'creative' || creativeMode === 'script_to_short') && creativeStep === 'edit' && createSubTab === 'builder') {
+    const hasNarration = creativeNarration.trim().length > 0;
+    const promptScenes = creativeScenes.filter((s) => !!s.visual_description.trim());
+    const promptSceneCount = promptScenes.length;
+    const imageReadyCount = promptScenes.filter((s) => !!s.imageData).length;
+    const allPromptedImagesReady = promptSceneCount > 0 && imageReadyCount === promptSceneCount;
+    const animationCreditsRequired = Math.max(1, promptSceneCount || creativeScenes.length || 1);
+    const animationCreditsShort = !isAdmin && effectiveAnimationEnabled && animationCreditsRequired > animationCreditsAvailable;
+    const showGenerateScenes = creativeMode === 'creative' || creativeMode === 'script_to_short';
+    const activeTemplateMeta = templates.find((template) => template.id === selectedTemplate);
+    const workspaceReadiness = [
+        { label: 'Script ready', done: hasNarration },
+        { label: 'Scenes planned', done: promptSceneCount > 0 },
+        { label: 'Images ready', done: allPromptedImagesReady },
+        { label: 'Finale ready', done: hasNarration && allPromptedImagesReady && Boolean(sessionId) },
+    ];
+    const activeStageCopy: Record<'script' | 'scenes' | 'finale', { title: string; description: string }> = {
+        script: {
+            title: 'Script Workspace',
+            description: creativeMode === 'script_to_short'
+                ? 'Write or paste the narration, then build scene beats. Clients can still replace every image prompt manually.'
+                : 'Lock the narration, art style, and sound direction before moving into scene generation.',
+        },
+        scenes: {
+            title: 'Scene Workspace',
+            description: 'Generate images, fix prompts scene-by-scene, and keep every beat production-ready before render.',
+        },
+        finale: {
+            title: 'Finale Workspace',
+            description: 'Lock voices, captions, pacing, and export settings before the final render.',
+        },
+    };
+
+        return (
+            <div className="w-full max-w-none pb-10 space-y-6">
+                {renderWorkspaceChrome({
+                    subtitle: activeStageCopy[workspaceStage].description,
+                    showBack: true,
+                })}
+
+                <div className="grid gap-3 md:grid-cols-4">
+                    {workspaceReadiness.map((item) => (
+                        <div key={item.label} className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.label}</p>
+                            <p className={`mt-2 text-sm font-semibold ${item.done ? 'text-emerald-200' : 'text-gray-300'}`}>
+                                {item.done ? 'Ready' : 'Pending'}
+                            </p>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="space-y-6 min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h1 className="text-xl font-bold text-white">{creativeTitle || activeTemplateMeta?.title || 'Untitled Project'}</h1>
+                        <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Control'} &middot; {resolution} &middot; {language.toUpperCase()}</p>
+                    </div>
+                    <div className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
+                        {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode'}
+                    </div>
+                </div>
+                {animationCreditsShort && (
+                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                        This project currently needs {animationCreditsRequired} animation credit{animationCreditsRequired === 1 ? '' : 's'}, but your account only has {animationCreditsAvailable}. Switch to slideshow or buy more credits before final render.
+                    </div>
+                )}
+
+                {renderWorkspaceStageTabs()}
+
+                {workspaceStage === 'scenes' && showGenerateScenes && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                        <p className="text-sm font-semibold text-amber-300">
+                            {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Scene Builder'}
+                        </p>
+                        <p className="text-xs text-amber-200/80 mt-1">
+                            {creativeMode === 'script_to_short'
+                                ? 'Generate the scene beats here, then keep every prompt editable. When you click Generate Images, Studio will walk the open scenes one by one.'
+                                : 'Start in Scenes, build the scene list, then generate images one by one across the full set before you render.'}
+                        </p>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <button
+                                onClick={handleGenerateScriptToShortScenes}
+                                disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
+                            >
+                                {sceneBuildLoading ? "Generating scenes..." : (scriptScenesReady ? "Regenerate Scenes" : "Generate Scenes")}
+                            </button>
+                            <button
+                                onClick={handleGenerateSceneImageBatch}
+                                disabled={bulkImageGenRunning || !sessionId || sceneBuildLoading || promptSceneCount === 0}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white transition"
+                            >
+                                {bulkImageGenRunning ? "Generating images..." : "Generate Images"}
+                            </button>
+                            {!sessionId && (
+                                <p className="text-xs text-amber-100/90">Generate scenes first.</p>
+                            )}
+                            {(bulkImageGenRunning || bulkImageGenTotal > 0) && (
+                                <p className="text-xs text-amber-100/90">
+                                    {bulkImageGenRunning
+                                        ? `Batch progress: ${bulkImageGenDone}/${bulkImageGenTotal}`
+                                        : `Images ready: ${imageReadyCount}/${promptSceneCount}`}
+                                </p>
+                            )}
+                            {sceneBuildError && (
+                                <p className="text-xs text-red-300">{sceneBuildError}</p>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <div>
+                            <p className="text-sm font-semibold text-white">Sound References</p>
+                            <p className="mt-1 text-xs text-gray-500">
+                                Set the intended sound language before Finale so the pacing and final VO feel coherent.
+                            </p>
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                            {soundReferenceOptions.map((option) => (
+                                <button
+                                    key={option.id}
+                                    type="button"
+                                    onClick={() => setSoundReferencePreset(option.id)}
+                                    className={`rounded-xl border p-3 text-left transition ${
+                                        soundReferencePreset === option.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-black/20 hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{option.label}</p>
+                                    <p className="mt-1 text-[11px] text-gray-400">{option.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && sceneBuildLoading && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-4 flex items-center gap-3">
+                        <Loader2 className="w-4 h-4 text-cyan-300 animate-spin" />
+                        <p className="text-sm text-cyan-100">Generating scenes from your script... this can take 10-30 seconds.</p>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-2">
+                        <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Script / Narration (voiceover for the entire short)</label>
+                        <textarea
+                            value={creativeNarration}
+                            onChange={(e) => setCreativeNarration(e.target.value)}
+                            rows={4}
+                            placeholder="Write the full voiceover script for your short here. This narration will play across all scenes..."
+                            className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y"
+                        />
+                        <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && supportsArtStyle && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <p className="text-sm font-semibold text-white">Art Style</p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => setArtStyle(style.id)}
+                                    className={`rounded-lg p-3 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{style.label}</p>
+                                    <p className="text-xs text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <div>
+                            <p className="text-sm font-semibold text-white">Sound References</p>
+                            <p className="mt-1 text-xs text-gray-500">
+                                Pick the intended sound profile now so the finale audio stack knows whether this short should feel clean, cinematic, or high-pressure.
+                            </p>
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                            {soundReferenceOptions.map((option) => (
+                                <button
+                                    key={option.id}
+                                    type="button"
+                                    onClick={() => setSoundReferencePreset(option.id)}
+                                    className={`rounded-xl border p-3 text-left transition ${
+                                        soundReferencePreset === option.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-black/20 hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{option.label}</p>
+                                    <p className="mt-1 text-[11px] text-gray-400">{option.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'finale' && renderCustomVoiceLibraryCard()}
+
+                {workspaceStage === 'finale' && selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">Voice + Pacing (Pre-Render)</p>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <select
+                                value={storyVoiceId}
+                                onChange={(e) => setStoryVoiceId(e.target.value)}
+                                className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                            >
+                                {storyVoicesLoading ? (
+                                    <option value="">Loading voices...</option>
+                                ) : storyVoices.length > 0 ? (
+                                    storyVoices.map((v: any) => (
+                                        <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                            {String(v.name || v.voice_id || "Voice")}
+                                        </option>
+                                    ))
+                                ) : (
+                                    <option value="">Default voice</option>
+                                )}
+                            </select>
+                            {storyVoicesWarning ? (
+                                <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                            ) : storyVoicesSource === 'fallback' ? (
+                                <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                            ) : null}
+                            <input
+                                type="range"
+                                min={0.8}
+                                max={1.35}
+                                step={0.05}
+                                value={storyVoiceSpeed}
+                                onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                className="w-full accent-cyan-500"
+                            />
+                            <div className="grid grid-cols-3 gap-1">
+                                {[
+                                    { id: 'standard', label: 'Standard' },
+                                    { id: 'fast', label: 'Fast' },
+                                    { id: 'very_fast', label: 'Very Fast' },
+                                ].map((p) => (
+                                    <button
+                                        key={p.id}
+                                        type="button"
+                                        onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                        className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                            storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                        }`}
+                                    >
+                                        {p.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <label className="flex items-center gap-2 text-xs text-gray-300 md:justify-end">
+                                <input
+                                    type="checkbox"
+                                    checked={subtitlesEnabled}
+                                    onChange={(e) => setSubtitlesEnabled(e.target.checked)}
+                                    className="accent-cyan-500"
+                                />
+                                Burn subtitles
+                            </label>
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'scenes' && (
+                <div className="space-y-4">
+                    {creativeScenes.map((scene, idx) => (
+                        <div key={idx} className="rounded-xl border border-white/[0.08] bg-white/[0.02] overflow-hidden">
+                            <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+                                <span className="text-sm font-bold text-violet-400">Scene {idx + 1}</span>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-1.5">
+                                        <label className="text-xs text-gray-600">Duration</label>
+                                        <select
+                                            value={scene.duration_sec}
+                                            onChange={(e) => handleUpdateScene(idx, 'duration_sec', Number(e.target.value))}
+                                            className="bg-black/30 border border-white/[0.08] rounded px-2 py-1 text-xs text-white focus:outline-none">
+                                            <option value={3}>3s</option>
+                                            <option value={4}>4s</option>
+                                            <option value={5}>5s</option>
+                                            <option value={6}>6s</option>
+                                            <option value={7}>7s</option>
+                                            <option value={8}>8s</option>
+                                            <option value={10}>10s</option>
+                                        </select>
+                                    </div>
+                                    {creativeScenes.length > 1 && (
+                                        <button onClick={() => handleRemoveScene(idx)} className="p-1 hover:bg-red-500/20 rounded transition" title="Remove scene">
+                                            <Trash2 className="w-4 h-4 text-red-400" />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="p-4 space-y-3">
+                                <div>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what this scene looks like)</label>
+                                    <textarea
+                                        value={scene.visual_description}
+                                        onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
+                                        rows={2}
+                                        placeholder="Describe the visual for this scene, e.g. 'A 3D skeleton wearing a doctor's coat in a hospital setting, dark moody lighting'"
+                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Negative Prompt (optional)</label>
+                                    <textarea
+                                        value={scene.negative_prompt || ""}
+                                        onChange={(e) => handleUpdateScene(idx, 'negative_prompt', e.target.value)}
+                                        rows={2}
+                                        placeholder="Only add what you want to avoid (this is fully user-controlled in Creative Control)."
+                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        onClick={() => handleGenerateSceneImage(idx)}
+                                        disabled={scene.imageLoading || !scene.visual_description.trim() || !sessionId || sceneBuildLoading}
+                                        className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2">
+                                        {scene.imageLoading ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
+                                        ) : scene.imageData ? (
+                                            <><Sparkles className="w-4 h-4" /> Regenerate</>
+                                        ) : (
+                                            <><Image className="w-4 h-4" /> Generate Image</>
+                                        )}
+                                    </button>
+                                    {scene.imageData && (
+                                        scene.qa_ok === false ? (
+                                            <span className="text-xs text-amber-300 flex items-center gap-1" title={summarizeSceneQaWarning(scene) || "Prompt match is weak. Regenerate for better match."}>
+                                                <CheckCircle2 className="w-3 h-3" /> Image ready (weak match)
+                                            </span>
+                                        ) : (
+                                            <span className="text-xs text-emerald-400 flex items-center gap-1">
+                                                <CheckCircle2 className="w-3 h-3" /> Image ready
+                                            </span>
+                                        )
+                                    )}
+                                    {scene.imageData && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setScenePromptEditorIndex(idx)}
+                                            className="px-3 py-2 rounded-lg border border-white/[0.08] bg-white/[0.03] text-xs font-semibold text-gray-200 transition hover:bg-white/[0.08]"
+                                        >
+                                            Edit Prompt
+                                        </button>
+                                    )}
+                                </div>
+                                {scene.imageError && (
+                                    <p
+                                        className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2"
+                                        title={scene.imageError}
+                                    >
+                                        Error: {summarizeSceneError(scene.imageError)}
+                                    </p>
+                                )}
+                                {scene.imageData && scene.qa_ok === false && (
+                                    <p className="text-xs text-amber-300 bg-amber-500/10 rounded-lg px-3 py-2">
+                                        {summarizeSceneQaWarning(scene) || "Prompt match is weak. Regenerate this scene for better adherence."}
+                                    </p>
+                                )}
+                                {scene.imageLoading && !scene.imageData && (
+                                    <SceneImageLoadingCard template={selectedTemplate} />
+                                )}
+                                {scene.imageData && (
+                                    <div className="rounded-lg bg-black/40 p-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setScenePromptEditorIndex(idx)}
+                                            className="block w-full cursor-pointer"
+                                            title="Open prompt editor"
+                                        >
+                                            <img
+                                                src={scene.imageData}
+                                                alt={`Scene ${idx + 1}`}
+                                                onClick={() => setScenePromptEditorIndex(idx)}
+                                                draggable={false}
+                                                className="mx-auto h-[360px] max-h-[55vh] w-auto max-w-full rounded-md object-contain"
+                                            />
+                                        </button>
+                                        <p className="mt-2 text-center text-[11px] text-gray-400">
+                                            Click preview to edit the exact prompt and regenerate this scene.
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                )}
+
+                {workspaceStage === 'scenes' && (
+                    <button onClick={handleAddScene}
+                        className="w-full py-3 border-2 border-dashed border-white/[0.1] hover:border-violet-500/40 rounded-xl text-gray-500 hover:text-violet-400 font-medium transition flex items-center justify-center gap-2">
+                        <Plus className="w-4 h-4" /> Add Scene
+                    </button>
+                )}
+
+                {workspaceStage === 'finale' && finalizeError && (
+                    <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 flex items-start gap-3">
+                        <X className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5 cursor-pointer" onClick={() => setFinalizeError(null)} />
+                        <p className="text-sm text-red-300">{finalizeError}</p>
+                    </div>
+                )}
+
+                {workspaceStage === 'scenes' && (!allPromptedImagesReady ? (
+                    <button
+                        onClick={handleGenerateSceneImageBatch}
+                        disabled={bulkImageGenRunning || sceneBuildLoading || !sessionId || promptSceneCount === 0}
+                        className="w-full py-4 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-cyan-600/20">
+                        {bulkImageGenRunning ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Generating images...</>
+                        ) : (
+                            <><Image className="w-5 h-5" /> Generate Images</>
+                        )}
+                    </button>
+                ) : (
+                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+                        All scene images are ready. Move to <span className="font-semibold">Finale</span> to render the full short.
+                    </div>
+                ))}
+
+                {workspaceStage === 'finale' && (
+                    <button
+                        onClick={() => {
+                            if (animationCreditsShort) {
+                                openAnimationCreditPrompt(animationCreditsRequired);
+                                return;
+                            }
+                            void handleFinalize();
+                        }}
+                        disabled={loading || !hasNarration || !sessionId}
+                        className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
+                        {loading ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
+                        ) : (
+                            <><Film className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Animate & Render Final Video' : 'Render Slideshow Video'}</>
+                        )}
+                    </button>
+                )}
+
+                {workspaceStage === 'finale' && !hasNarration && (
+                    <p className="text-center text-sm text-gray-600">Write your script above to render.</p>
+                )}
+                {workspaceStage === 'finale' && !sessionId && (
+                    <p className="text-center text-sm text-amber-300">Generate scenes first, then render.</p>
+                )}
+                {workspaceStage === 'finale' && sessionId && promptSceneCount > 0 && !allPromptedImagesReady && (
+                    <p className="text-center text-sm text-cyan-300">Generate images for all scene prompts before rendering.</p>
+                )}
+
+                {bulkImageGenRunning && (
+                    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[1px] flex items-center justify-center px-6">
+                        <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-slate-950/95 p-6 text-center space-y-3">
+                            <div className="flex items-center justify-center gap-2 text-cyan-200">
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                <p className="font-semibold">Generating images in batch...</p>
+                            </div>
+                            <p className="text-sm text-cyan-100/90">{bulkImageGenDone}/{bulkImageGenTotal} complete</p>
+                            <div className="h-2 w-full bg-white/10 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-cyan-500 transition-all"
+                                    style={{ width: `${bulkImageGenTotal > 0 ? Math.min(100, (bulkImageGenDone / bulkImageGenTotal) * 100) : 0}%` }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
+                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); setCreativeStep('edit'); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Back to Editor
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay className="w-full max-h-[500px] bg-black" src={`${GENERATION_API}/api/download/${jobStatus.output_file}`} />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                            <p className="text-gray-500 text-sm">
+                                                {jobStatus.resolution && <span className="text-violet-400 mr-2">{jobStatus.resolution}</span>}
+                                                {jobStatus.metadata?.tags?.map((t: string) => `#${t}`).join(' ')}
+                                            </p>
+                                        </div>
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                                    </div>
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" /> Download MP4
+                                    </a>
+                                    <button onClick={handleResetCreative}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Create Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} template={selectedTemplate} feature="creative" language={language} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                    </p>
+                                )}
+                                <JobDiagnostics jobStatus={jobStatus} />
+                            </div>
+                        )}
+                    </div>
+                )}
+                    </div>
+                {quickStartCard}
+                {templateChooserModal}
+                {subscriptionPromptModal}
+                {animationCreditPromptModal}
+            </div>
+        );
+    }
+
+    return (
+            <div className="w-full max-w-none pb-10 space-y-6">
+                {renderWorkspaceChrome({
+                    subtitle: createSubTab === 'projects'
+                        ? 'Open saved drafts or finished renders. Switch back to Create any time to open the template picker.'
+                        : 'Create is the only live workflow in the rail right now. Use it to open AI Stories, Motivation, Skeleton AI, or Chat Story without sacrificing workspace width.',
+                })}
+                <div className="space-y-5 min-w-0">
+
+                {createSubTab === 'projects' && (
+                    <div className="space-y-6">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-white">Your Projects</h2>
+                            <button onClick={loadProjects} className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300">Refresh</button>
+                        </div>
+                        {projectsLoading && <p className="text-sm text-gray-500">Loading projects...</p>}
+                        {!projectsLoading && (
+                            <>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Drafts</h3>
+                                    {projectDrafts.length === 0 && <p className="text-sm text-gray-500">No drafts yet.</p>}
+                                    {projectDrafts.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.topic || 'Untitled'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.mode} • {p.status} • {p.scene_count || 0} scenes</p>
+                                            </div>
+                                            <button onClick={() => openDraftProject(p.project_id)} className="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white">
+                                                Open
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-emerald-300 uppercase tracking-wider">Renders</h3>
+                                    {projectRenders.length === 0 && <p className="text-sm text-gray-500">No renders yet.</p>}
+                                    {projectRenders.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.title || p.topic || 'Untitled Render'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
+                                            </div>
+                                            {p.output_file ? (
+                                                <a href={`${GENERATION_API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
+                                            ) : (
+                                                <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {createSubTab !== 'builder' ? null : (
+                <>
+                <div className="space-y-5">
+                    <div className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-5">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div>
+                                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-violet-300">Template Workspace</p>
+                                <h2 className="mt-2 text-2xl font-bold text-white">{currentTemplateMeta.title}</h2>
+                                <p className="mt-2 text-sm text-gray-400">
+                                    {selectedTemplate === 'chatstory'
+                                        ? 'Chat Story runs in a dedicated fullscreen-style editor. Monthly access is enforced before the workspace opens.'
+                                        : 'Creative Control and Script to Short are the live build paths. Auto stays marked coming soon until the scene-first flow is tighter.'}
+                                </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={openTemplateChooser}
+                                    className="rounded-xl border border-white/[0.08] bg-black/20 px-4 py-2 text-sm font-semibold text-white transition hover:border-violet-500/40 hover:bg-violet-500/10"
+                                >
+                                    Choose Template
+                                </button>
+                                {selectedTemplate === 'chatstory' ? (
+                                    <span className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-violet-200">
+                                        Starter / Creator / Pro
+                                    </span>
+                                ) : (
+                                    <span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">
+                                        Live Template
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="space-y-5">
+                {selectedTemplate === 'chatstory' ? (
+                    <ChatStoryPanel />
+                ) : (
+                <>
+                {renderWorkspaceStageTabs()}
+                {workspaceStage === 'script' && (
+                <>
+                {/* MODE TOGGLE */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Creation Mode</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <button onClick={() => !loading && !autoModeComingSoon && setCreativeMode('auto')}
+                            disabled={autoModeComingSoon}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            } ${autoModeComingSoon ? 'opacity-55 cursor-not-allowed' : ''}`}>
+                            <Wand2 className="w-4 h-4 mx-auto mb-1 text-violet-400" />
+                            <div className="text-xs font-bold flex items-center justify-center gap-1">
+                                Auto
+                                {autoModeComingSoon && (
+                                    <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-amber-200">Soon</span>
+                                )}
+                            </div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">
+                                {autoModeComingSoon ? 'Reserved for a later public rollout.' : 'AI handles everything'}
+                            </div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('creative')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'creative' ? 'border-amber-500 bg-amber-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Sliders className="w-4 h-4 mx-auto mb-1 text-amber-400" />
+                            <div className="text-xs font-bold">Creative Control</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('script_to_short')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'script_to_short' ? 'border-cyan-500 bg-cyan-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Clapperboard className="w-4 h-4 mx-auto mb-1 text-cyan-400" />
+                            <div className="text-xs font-bold flex items-center justify-center gap-1">
+                                Script to Short
+                                <span className="rounded border border-cyan-500/40 bg-cyan-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-cyan-200">Open Beta</span>
+                            </div>
+                            <div className="text-[11px] text-cyan-300 mt-0.5">Paste a script, get editable scenes</div>
+                        </button>
+                    </div>
+                </div>
+
+                {/* RESOLUTION PICKER */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Resolution</h2>
+                    <div className="flex gap-2">
+                        <button onClick={() => !loading && setResolution('720p')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                resolution === '720p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            } ${loading ? 'opacity-50' : ''}`}>
+                            <div className="text-base font-bold">720p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Faster generation</div>
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (!canUse1080p) return;
+                                if (!loading) setResolution('1080p');
+                            }}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border relative ${
+                                !canUse1080p ? 'opacity-50 cursor-not-allowed border-white/[0.04] bg-white/[0.01]' :
+                                resolution === '1080p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            } ${loading ? 'opacity-50' : ''}`}>
+                            {!canUse1080p && (
+                                <div className="absolute top-2 right-2">
+                                    <Lock className="w-3.5 h-3.5 text-gray-600" />
+                                </div>
+                            )}
+                            <div className="text-base font-bold">1080p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">
+                                {canUse1080p ? 'Best quality' : 'Temporarily unavailable'}
+                            </div>
+                        </button>
+                    </div>
+                </div>
+
+                {/* LANGUAGE */}
+                {languages.length > 0 && (
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Language</h2>
+                        <div className="flex flex-wrap gap-2">
+                            {languages.map(l => (
+                                <button key={l.code} onClick={() => !loading && setLanguage(l.code)}
+                                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all border ${
+                                        language === l.code
+                                            ? 'border-violet-500 bg-violet-500/10 text-violet-300'
+                                            : 'border-white/[0.06] text-gray-500 hover:border-white/20'
+                                    } ${loading ? 'opacity-50' : ''}`}>
+                                    {l.name}
+                                </button>
+                            ))}
+                        </div>
+                        {language !== 'en' && (
+                            <p className="text-xs text-violet-400 mt-2">Script and voiceover will be generated in {languages.find(l => l.code === language)?.name}</p>
+                        )}
+                    </div>
+                )}
+
+                {/* PROMPT */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+                        {creativeMode === 'script_to_short' ? 'Script' : 'Topic'}
+                    </h2>
+                    <div className="relative">
+                        {creativeMode === 'script_to_short' ? (
+                            <textarea
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                rows={6}
+                                placeholder="Paste your full script here. Studio will turn it into editable scene prompts, then you can tune prompts or regenerate previews scene by scene before rendering."
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 text-sm resize-y"
+                            />
+                        ) : (
+                            <input
+                                type="text"
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
+                                    : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
+                                    : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
+                                    : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
+                                    : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
+                                    : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
+                                    : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
+                                    : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
+                                    : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
+                                    : selectedTemplate === 'history' ? "e.g., The fall of the Roman Empire"
+                                    : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
+                                    : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
+                                    : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
+                                    : "Enter your video topic..."}
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-sm"
+                                onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
+                            />
+                        )}
+                    </div>
+                </div>
+                </>
+                )}
+
+                {workspaceStage === 'scenes' && (
+                <>
+                {supportsArtStyle && (
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Art Style</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => !loading && !scriptLoading && setArtStyle(style.id)}
+                                    className={`rounded-lg p-2.5 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-xs font-semibold text-white">{style.label}</p>
+                                    <p className="text-[11px] text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">Available in Auto, Creative Control, and Script to Short. Skeleton AI uses its dedicated style system.</p>
+                    </div>
+                )}
+
+                <div>
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+                            {selectedTemplate === 'skeleton' ? 'Style Lock (Default On)' : 'Style Reference (Optional)'}
+                        </h2>
+                        <div className="mb-2 grid grid-cols-2 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('strict')}
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                                    creativeReferenceLockMode === 'strict'
+                                        ? 'border border-violet-400/70 bg-violet-500/15 text-violet-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Strict Reference Lock
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('inspired')}
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                                    creativeReferenceLockMode === 'inspired'
+                                        ? 'border border-amber-400/70 bg-amber-500/15 text-amber-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Style Inspired
+                            </button>
+                        </div>
+                        <label className="block rounded-lg border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-3 cursor-pointer transition">
+                            <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                    const f = e.target.files?.[0] || null;
+                                    setCreativeReferenceImage(f);
+                                    setCreativeReferenceStatus(f ? 'ready' : 'idle');
+                                    if (f) setCreativeReferenceAttached(false);
+                                }}
+                            />
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <p className="text-xs text-white font-medium">
+                                        {creativeReferenceImage
+                                            ? creativeReferenceImage.name
+                                            : effectiveReferenceAttached
+                                                ? (selectedTemplate === 'skeleton'
+                                                    ? 'Default Skeleton style lock active for this project'
+                                                    : 'Reference image already attached for this project')
+                                                : 'Upload reference style image'}
+                                    </p>
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        {selectedTemplate === 'skeleton'
+                                            ? `The built-in Skeleton style lock stays active unless you upload your own override. Mode: ${creativeReferenceLockMode === 'strict' ? 'Strict lock for maximum continuity' : 'Inspired lock for more variation'}.`
+                                            : `Applied across this short in Auto, Creative Control, or Script to Short. Mode: ${creativeReferenceLockMode === 'strict' ? 'Strict lock for maximum continuity' : 'Inspired lock for more variation'}.`}
+                                    </p>
+                                </div>
+                                <span className="px-2.5 py-1 rounded-md bg-violet-600/20 text-violet-300 text-[11px] font-semibold">
+                                    {creativeReferenceImage || effectiveReferenceAttached ? 'Attached' : 'Recommended'}
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Output Type</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Animated uses Kling/FAL scene motion. Slideshow uses image-based camera motion only.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => {
+                                if (loading || scriptLoading) return;
+                                if (effectiveAnimationEnabled) {
+                                    setAnimateOutputEnabled(false);
+                                    return;
+                                }
+                                if (animationCreditExhausted) {
+                                    openAnimationCreditPrompt(1);
+                                    return;
+                                }
+                                setAnimateOutputEnabled(true);
+                            }}
+                            disabled={loading || scriptLoading}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                            } disabled:opacity-50`}
+                        >
+                            {effectiveAnimationEnabled ? "Animation ON" : "Slideshow Mode"}
+                        </button>
+                    </div>
+                    {animationCreditExhausted && (
+                        <p className="text-[11px] text-amber-300 mt-2">
+                            Animation credits are not available yet. Click the toggle to buy credits with PayPal or stay in slideshow mode.
+                        </p>
+                    )}
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Cinematic Boost</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Premium continuity profile is locked on for launch quality.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            disabled
+                            className="px-2.5 py-1 rounded-md text-[11px] font-semibold transition bg-cyan-600/80 text-white disabled:opacity-100 cursor-default"
+                        >
+                            Always ON
+                        </button>
+                    </div>
+                </div>
+
+                {creativeMode === 'creative' && selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">AI Stories Animation</p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Turn OFF to render with image-based camera motion only (no Kling scene animation).
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => {
+                                    if (loading || scriptLoading) return;
+                                    if (effectiveAnimationEnabled) {
+                                        setAnimateOutputEnabled(false);
+                                        return;
+                                    }
+                                    if (animationCreditExhausted) {
+                                        openAnimationCreditPrompt(1);
+                                        return;
+                                    }
+                                    setAnimateOutputEnabled(true);
+                                }}
+                                disabled={loading || scriptLoading}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                    effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                                } disabled:opacity-50`}
+                            >
+                                {effectiveAnimationEnabled ? "Animation ON" : "Animation OFF"}
+                            </button>
+                        </div>
+                    </div>
+                )}
+                </>
+                )}
+
+                {workspaceStage === 'finale' && (
+                <>
+                {renderCustomVoiceLibraryCard()}
+                {selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">Story Voice + Pacing</p>
+                                <p className="text-xs text-gray-500 mt-1">Choose ElevenLabs voice, tune speed, and set pacing before render.</p>
+                            </div>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice</label>
+                                <select
+                                    value={storyVoiceId}
+                                    onChange={(e) => setStoryVoiceId(e.target.value)}
+                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                                >
+                                    {storyVoicesLoading ? (
+                                        <option value="">Loading voices...</option>
+                                    ) : storyVoices.length > 0 ? (
+                                        storyVoices.map((v: any) => (
+                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                                {String(v.name || v.voice_id || "Voice")}
+                                            </option>
+                                        ))
+                                    ) : (
+                                        <option value="">Default voice</option>
+                                    )}
+                                </select>
+                                {storyVoicesWarning ? (
+                                    <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                                ) : storyVoicesSource === 'fallback' ? (
+                                    <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                                ) : null}
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
+                                <input
+                                    type="range"
+                                    min={0.8}
+                                    max={1.35}
+                                    step={0.05}
+                                    value={storyVoiceSpeed}
+                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                    className="w-full accent-cyan-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Pacing</label>
+                                <div className="grid grid-cols-3 gap-1">
+                                    {[
+                                        { id: 'standard', label: 'Standard' },
+                                        { id: 'fast', label: 'Fast' },
+                                        { id: 'very_fast', label: 'Very Fast' },
+                                    ].map((p) => (
+                                        <button
+                                            key={p.id}
+                                            type="button"
+                                            onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                            className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                                storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                            }`}
+                                        >
+                                            {p.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
+                    Finale is where voice, captions, and music get locked. Generate scenes first, then use the scene editor to tune prompts before final render.
+                </div>
+                </>
+                )}
+
+                {/* GENERATE BUTTON */}
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-4">
+                    <div className="flex gap-2">
+                        {workspaceStage !== 'script' && (
+                            <button
+                                type="button"
+                                onClick={() => setWorkspaceStage(workspaceStage === 'finale' ? 'scenes' : 'script')}
+                                className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/[0.06]"
+                            >
+                                Back
+                            </button>
+                        )}
+                        {workspaceStage !== 'finale' && (
+                            <button
+                                type="button"
+                                onClick={() => setWorkspaceStage(workspaceStage === 'script' ? 'scenes' : 'finale')}
+                                className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-200 transition hover:bg-white/[0.06]"
+                            >
+                                Next
+                                <ArrowRight className="h-4 w-4" />
+                            </button>
+                        )}
+                    </div>
+                    {workspaceStage !== 'finale' && (
+                        <button
+                            onClick={handleGenerate}
+                            disabled={loading || scriptLoading || !prompt.trim()}
+                            className={`py-3 px-5 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : creativeMode === 'script_to_short' ? 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-lg text-base transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99]`}
+                        >
+                            {scriptLoading ? (
+                                <><Loader2 className="w-5 h-5 animate-spin" /> {creativeReferenceStatus === 'uploading' ? 'Uploading reference style...' : 'Setting up...'}</>
+                            ) : loading ? (
+                                <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
+                            ) : creativeMode === 'creative' ? (
+                                <><Sliders className="w-5 h-5" /> Start Building</>
+                            ) : creativeMode === 'script_to_short' ? (
+                                <><Clapperboard className="w-5 h-5" /> Build Scene Plan</>
+                            ) : (
+                                <><Wand2 className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Generate Animated Short' : 'Generate Slideshow Short'} at {canUse1080p ? resolution : '720p'}</>
+                            )}
+                        </button>
+                    )}
+                </div>
+                {quickStartCard}
+                {templateChooserModal}
+                {subscriptionPromptModal}
+                {animationCreditPromptModal}
+
+                {activePromptEditorScene && scenePromptEditorIndex !== null && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+                        <div className="w-full max-w-3xl rounded-2xl border border-white/[0.08] bg-[#0d0d11] shadow-2xl">
+                            <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
+                                <div>
+                                    <h3 className="text-base font-semibold text-white">Scene {scenePromptEditorIndex + 1} Prompt Editor</h3>
+                                    <p className="mt-1 text-xs text-gray-400">Edit the exact prompt used for this scene, then regenerate from here.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setScenePromptEditorIndex(null)}
+                                    className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                                    title="Close"
+                                >
+                                    <X className="h-4 w-4" />
+                                </button>
+                            </div>
+                            <div className="grid gap-5 p-5 md:grid-cols-[300px,1fr]">
+                                <div className="rounded-xl bg-black/40 p-2">
+                                    {activePromptEditorScene.imageData ? (
+                                        <img
+                                            src={activePromptEditorScene.imageData}
+                                            alt={`Scene ${scenePromptEditorIndex + 1}`}
+                                            className="mx-auto max-h-[420px] w-auto max-w-full rounded-lg object-contain"
+                                        />
+                                    ) : (
+                                        <div className="flex h-[320px] items-center justify-center rounded-lg border border-dashed border-white/[0.08] text-sm text-gray-500">
+                                            No preview generated yet
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Image Prompt</label>
+                                        <textarea
+                                            value={activePromptEditorScene.visual_description}
+                                            onChange={(e) => handleUpdateScene(scenePromptEditorIndex, 'visual_description', e.target.value)}
+                                            rows={7}
+                                            className="w-full resize-none rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Negative Prompt</label>
+                                        <textarea
+                                            value={activePromptEditorScene.negative_prompt || ""}
+                                            onChange={(e) => handleUpdateScene(scenePromptEditorIndex, 'negative_prompt', e.target.value)}
+                                            rows={4}
+                                            placeholder="Only add what you want to avoid."
+                                            className="w-full resize-none rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+                                        />
+                                    </div>
+                                    <div className="flex flex-wrap gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleGenerateSceneImage(scenePromptEditorIndex)}
+                                            disabled={activePromptEditorScene.imageLoading || !activePromptEditorScene.visual_description.trim() || !sessionId || sceneBuildLoading}
+                                            className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50"
+                                        >
+                                            {activePromptEditorScene.imageLoading ? 'Regenerating...' : 'Save & Regenerate'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setScenePromptEditorIndex(null)}
+                                            className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/[0.06]"
+                                        >
+                                            Done
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* JOB STATUS (auto mode) */}
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
+                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Try Again
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay
+                                    className="w-full max-h-[500px] bg-black"
+                                    src={`${GENERATION_API}/api/download/${jobStatus.output_file}`}
+                                />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                            <p className="text-gray-500 text-sm">
+                                                {jobStatus.resolution && <span className="text-violet-400 mr-2">{jobStatus.resolution}</span>}
+                                                {jobStatus.metadata?.tags?.map((t: string) => `#${t}`).join(' ')}
+                                            </p>
+                                        </div>
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                                    </div>
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" />
+                                        Download MP4
+                                    </a>
+                                    {jobStatus.resolution === '720p' && Array.isArray(jobStatus.scene_images) && jobStatus.scene_images.length > 0 && (
+                                        <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4 space-y-3">
+                                            <p className="text-xs uppercase tracking-wider text-gray-400 font-semibold">
+                                                Regenerate Scene Images (720p Training Data)
+                                            </p>
+                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                                {jobStatus.scene_images.map((sceneImg: any, idx: number) => {
+                                                    const imgUrl = String(sceneImg?.image_url || "");
+                                                    const src = imgUrl.startsWith("http") ? imgUrl : `${GENERATION_API}${imgUrl}`;
+                                                    const busy = !!regeneratingAutoScenes[idx];
+                                                    return (
+                                                        <div key={`auto-scene-${idx}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2 space-y-2">
+                                                            <div className="text-[10px] text-gray-500">Scene {idx + 1}</div>
+                                                            {imgUrl ? (
+                                                                <img src={src} alt={`Auto scene ${idx + 1}`} className="w-full h-28 object-cover rounded bg-black/40" />
+                                                            ) : (
+                                                                <div className="w-full h-28 rounded bg-black/40 flex items-center justify-center text-[10px] text-gray-600">No image</div>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleRegenerateAutoScene(idx)}
+                                                                disabled={busy}
+                                                                className="w-full py-1.5 rounded bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-[11px] font-semibold text-white"
+                                                            >
+                                                                {busy ? "Regenerating..." : "Regenerate"}
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button onClick={() => { setJobStatus(null); setJobId(null); }}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Create Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} template={selectedTemplate} feature="create" language={language} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.queue_position > 0 && jobStatus.status === 'queued' && (
+                                    <div className="flex items-center justify-center gap-2 text-sm">
+                                        <Clock className="w-4 h-4 text-violet-400" />
+                                        <p className="text-gray-400">
+                                            Position <span className="text-violet-400 font-bold">{jobStatus.queue_position}</span> of {jobStatus.queue_total} in queue
+                                        </p>
+                                    </div>
+                                )}
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                        {jobStatus.resolution && <span className="ml-1 text-violet-400">({jobStatus.resolution})</span>}
+                                    </p>
+                                )}
+                                {jobStatus.status === 'error' && (
+                                    <p className="text-center text-sm text-red-400">{jobStatus.error || 'Generation failed'}</p>
+                                )}
+                                <JobDiagnostics jobStatus={jobStatus} />
+                            </div>
+                        )}
+                    </div>
+                )}
+                </>
+                )}
+                    </div>
+                    </div>
+                </>
+                )}
+                </div>
+            </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CLONE PANEL (inside Dashboard)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+
+

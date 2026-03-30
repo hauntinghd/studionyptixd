@@ -1,0 +1,95 @@
+services:
+  - type: web
+    name: nyptid-studio-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: ./ops/run_render_service.sh
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /api/health
+    maxShutdownDelaySeconds: 120
+    disk:
+      name: studio-data
+      mountPath: /var/data
+      sizeGB: 15
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: FRONTEND_DIST_DIR
+        value: /app/ViralShorts-App/dist
+      - key: APP_DATA_DIR
+        value: /var/data
+      - key: OUTPUT_DIR
+        value: /var/data/generated_videos
+      - key: TEMP_DIR
+        value: /var/data/temp_assets
+      - key: TRAINING_DATA_DIR
+        value: /var/data/training_data
+      - key: THUMBNAIL_DIR
+        value: /var/data/thumbnails
+      - key: DEMO_UPLOAD_DIR
+        value: /var/data/demo_uploads
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: studio-queue
+          property: connectionString
+      - key: REDIS_QUEUE_ENABLED
+        value: "true"
+      - key: REDIS_QUEUE_PREFIX
+        value: studio
+      - key: JOB_QUEUE_WORKERS
+        value: "1"
+      - key: RUN_EMBEDDED_WORKER
+        value: "true"
+      - key: SITE_URL
+        value: https://studio.nyptidindustries.com
+      - key: PAYPAL_ENV
+        value: live
+      - key: IMAGE_PROVIDER_ORDER
+        value: fal
+      - key: XAI_IMAGE_FALLBACK_ENABLED
+        value: "true"
+      - key: HIDREAM_ENABLED
+        value: "false"
+      - key: HIDREAM_EDIT_ENABLED
+        value: "false"
+      - key: SKELETON_REQUIRE_WAN22
+        value: "false"
+      - key: RUNPOD_IMAGE_FEEDBACK_ENABLED
+        value: "false"
+      - key: RUNPOD_COMPOSITOR_ENABLED
+        value: "false"
+      - key: CHATSTORY_FORCE_LOCAL_TTS
+        value: "false"
+      - key: CHATSTORY_ELEVENLABS_MODEL_ID
+        value: eleven_multilingual_v2
+      - key: XAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: FAL_AI_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: COMFYUI_URL
+        sync: false
+
+  - type: keyvalue
+    name: studio-queue
+    plan: starter

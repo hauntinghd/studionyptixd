@@ -10,13 +10,15 @@ import subprocess
 import tempfile
 import logging
 import io
+import calendar
 import httpx
 import jwt
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote, urlparse, unquote
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -31,8 +33,13 @@ from backend_settings import (
     SUPABASE_JWT_SECRET,
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
+    STRIPE_TOPUP_PUBLIC_ENABLED,
+    PAYPAL_CLIENT_ID,
+    PAYPAL_CLIENT_SECRET,
+    PAYPAL_ENV,
     SITE_URL,
     FAL_AI_KEY,
+    FAL_IMAGE_BACKUP_MODEL,
     XAI_IMAGE_MODEL,
     XAI_VIDEO_MODEL,
     RUNWAY_API_KEY,
@@ -40,14 +47,49 @@ from backend_settings import (
     RUNWAY_VIDEO_MODEL,
     RUNWAY_API_VERSION,
     PLAN_PRICE_USD,
+    KLING21_STANDARD_I2V_5S_USD,
+    ANIMATION_MARKUP_MULTIPLIER,
+    ANIMATION_CREDIT_UNIT_USD,
     XAI_IMAGE_ASPECT_RATIO,
     XAI_IMAGE_RESOLUTION,
     USE_XAI_VIDEO,
     PRODUCT_DEMO_PUBLIC_ENABLED,
+    WAITLIST_ONLY_MODE,
+    WAITLIST_REQUIRE_STRIPE_PAYMENT,
     SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
     STORY_GLOBAL_REFERENCE_IMAGE_URL,
     MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL,
     USE_FAL_GROK_IMAGE,
+    IMAGE_PROVIDER_ORDER,
+    XAI_IMAGE_FALLBACK_ENABLED,
+    HIDREAM_ENABLED,
+    HIDREAM_MODEL,
+    HIDREAM_EDIT_ENABLED,
+    HIDREAM_EDIT_MODEL,
+    HIDREAM_EDIT_WEIGHT_DTYPE,
+    HIDREAM_CLIP_L,
+    HIDREAM_CLIP_G,
+    HIDREAM_T5,
+    HIDREAM_LLAMA,
+    HIDREAM_VAE,
+    HIDREAM_SHIFT,
+    HIDREAM_STEPS,
+    HIDREAM_CFG,
+    HIDREAM_SAMPLER,
+    HIDREAM_SCHEDULER,
+    WAN22_T2I_CHECKPOINT,
+    WAN22_T2I_CLIP,
+    WAN22_T2I_VAE,
+    WAN22_T2I_UNET,
+    WAN22_T2I_UNET_FP8,
+    TEMPLATE_ADAPTER_ROUTING_ENABLED,
+    TEMPLATE_ADAPTER_ROUTING,
+    IMAGE_LOCAL_PROVIDER_RETRIES,
+    IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC,
+    IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE,
+    SKELETON_REQUIRE_WAN22,
+    SKELETON_SDXL_LORA_ENABLED,
+    IMAGE_LOCAL_MIN_FILE_BYTES,
     IMAGE_QUALITY_BESTOF_ENABLED,
     IMAGE_QUALITY_BESTOF_COUNT,
     IMAGE_QUALITY_MIN_SCORE,
@@ -64,6 +106,11 @@ from backend_settings import (
     STORY_ADVANCED_CONTROLS_ENABLED,
     STORY_RETENTION_TUNING_ENABLED,
     DISABLE_ALL_SFX,
+    LONGFORM_BETA_ENABLED,
+    LONGFORM_DEFAULT_TARGET_MINUTES,
+    LONGFORM_MIN_TARGET_MINUTES,
+    LONGFORM_MAX_TARGET_MINUTES,
+    LONGFORM_MAX_SCENE_RETRIES,
     MAINTENANCE_BANNER_ENABLED,
     MAINTENANCE_BANNER_MESSAGE,
     REDIS_QUEUE_ENABLED,
@@ -74,6 +121,7 @@ from backend_settings import (
     SUPABASE_SERVICE_KEY,
     OUTPUT_DIR,
     TEMP_DIR,
+    THUMBNAIL_DIR,
     TRAINING_DATA_DIR,
 )
 from backend_catalog import (
@@ -97,6 +145,8 @@ from backend_image_prompts import (
     TEMPLATE_NEGATIVE_PROMPTS,
     NEGATIVE_PROMPT,
     WAN22_I2V_HIGH,
+    WAN22_T2V_HIGH,
+    WAN22_T2V_LOW,
 )
 from backend_models import (
     GenerateRequest,
@@ -104,10 +154,14 @@ from backend_models import (
     FinalizeRequest,
     CheckoutRequest,
     TopupCheckoutRequest,
+    WaitlistJoinRequest,
     SetPlanRequest,
     FeedbackRequest,
     ThumbnailFeedbackRequest,
     ThumbnailGenerateRequest,
+    LongFormSessionCreateRequest,
+    LongFormChapterActionRequest,
+    LongFormResolveErrorRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -142,11 +196,23 @@ except Exception:
     paramiko = None
 
 try:
-    from PIL import Image, ImageFilter, ImageStat
+    from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageStat
 except Exception:
     Image = None
+    ImageChops = None
+    ImageEnhance = None
     ImageFilter = None
     ImageStat = None
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
@@ -401,6 +467,11 @@ security = HTTPBearer(auto_error=False)
 init_queue_runtime(jobs, log)
 AUTO_SCENE_IMAGE_ROOT = Path(TRAINING_DATA_DIR) / "auto_scene_images"
 AUTO_SCENE_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+LONGFORM_SESSIONS_FILE = TEMP_DIR / "longform_sessions_store.json"
+LONGFORM_PREVIEW_DIR = TEMP_DIR / "longform_previews"
+LONGFORM_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+_longform_sessions: dict[str, dict] = {}
+_longform_sessions_lock = asyncio.Lock()
 _JOB_RETENTION_ACTIVE_SEC = 12 * 3600
 _JOB_RETENTION_FINAL_SEC = 2 * 3600
 
@@ -417,7 +488,12 @@ KPI_TARGETS = {
 }
 KPI_METRICS_PATH = TEMP_DIR / "kpi_metrics.json"
 TOPUP_WALLET_PATH = TEMP_DIR / "topup_wallets.json"
+PAYPAL_ORDERS_PATH = TEMP_DIR / "paypal_orders.json"
+PAYPAL_SUBSCRIPTIONS_PATH = TEMP_DIR / "paypal_subscriptions.json"
 USAGE_LEDGER_PATH = TEMP_DIR / "usage_ledger.jsonl"
+LANDING_NOTIFICATIONS_PATH = TEMP_DIR / "landing_notifications.json"
+LANDING_NOTIFICATIONS_LIMIT = 120
+LANDING_NOTIFICATIONS_PUBLIC_LIMIT = 25
 _kpi_metrics = {
     "total_jobs": 0,
     "completed_jobs": 0,
@@ -430,6 +506,12 @@ _kpi_metrics = {
 }
 _topup_wallets: dict[str, dict] = {}
 _topup_wallet_lock = asyncio.Lock()
+_paypal_orders: dict[str, dict] = {}
+_paypal_orders_lock = asyncio.Lock()
+_paypal_subscriptions: dict[str, dict] = {}
+_paypal_subscriptions_lock = asyncio.Lock()
+_landing_notifications: list[dict] = []
+_landing_notifications_lock = asyncio.Lock()
 
 
 def _load_kpi_metrics() -> None:
@@ -468,6 +550,143 @@ def _save_topup_wallets() -> None:
         TOPUP_WALLET_PATH.write_text(json.dumps(_topup_wallets, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+def _load_paypal_orders() -> None:
+    global _paypal_orders
+    try:
+        if PAYPAL_ORDERS_PATH.exists():
+            data = json.loads(PAYPAL_ORDERS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _paypal_orders = data
+                return
+    except Exception:
+        pass
+    _paypal_orders = {}
+
+
+def _save_paypal_orders() -> None:
+    try:
+        PAYPAL_ORDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PAYPAL_ORDERS_PATH.write_text(json.dumps(_paypal_orders, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_paypal_subscriptions() -> None:
+    global _paypal_subscriptions
+    try:
+        if PAYPAL_SUBSCRIPTIONS_PATH.exists():
+            data = json.loads(PAYPAL_SUBSCRIPTIONS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _paypal_subscriptions = data
+                return
+    except Exception:
+        pass
+    _paypal_subscriptions = {}
+
+
+def _save_paypal_subscriptions() -> None:
+    try:
+        PAYPAL_SUBSCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PAYPAL_SUBSCRIPTIONS_PATH.write_text(json.dumps(_paypal_subscriptions, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _prune_longform_sessions(max_age_seconds: int = 72 * 3600) -> None:
+    now = time.time()
+    stale = [
+        sid for sid, sess in list(_longform_sessions.items())
+        if now - float((sess or {}).get("created_at", now)) > max_age_seconds
+    ]
+    for sid in stale:
+        _longform_sessions.pop(sid, None)
+
+
+def _load_longform_sessions() -> None:
+    try:
+        if not LONGFORM_SESSIONS_FILE.exists():
+            return
+        data = json.loads(LONGFORM_SESSIONS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _longform_sessions.clear()
+            _longform_sessions.update(data)
+            _prune_longform_sessions()
+    except Exception:
+        _longform_sessions.clear()
+
+
+def _save_longform_sessions() -> None:
+    try:
+        _prune_longform_sessions()
+        LONGFORM_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LONGFORM_SESSIONS_FILE.write_text(json.dumps(_longform_sessions, ensure_ascii=True), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _mask_email_for_public(email: str) -> str:
+    raw = str(email or "").strip().lower()
+    if "@" not in raw:
+        return "a creator"
+    local, domain = raw.split("@", 1)
+    local = local.strip()
+    domain = domain.strip()
+    if not local or not domain:
+        return "a creator"
+    if len(local) <= 2:
+        safe_local = local[0] + "*"
+    else:
+        safe_local = local[:2] + ("*" * min(4, max(1, len(local) - 2)))
+    return f"{safe_local}@{domain}"
+
+
+def _load_landing_notifications() -> None:
+    global _landing_notifications
+    try:
+        if LANDING_NOTIFICATIONS_PATH.exists():
+            data = json.loads(LANDING_NOTIFICATIONS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                cleaned: list[dict] = []
+                for item in data[-LANDING_NOTIFICATIONS_LIMIT:]:
+                    if isinstance(item, dict):
+                        cleaned.append(item)
+                _landing_notifications = cleaned
+                return
+    except Exception:
+        pass
+    _landing_notifications = []
+
+
+def _save_landing_notifications() -> None:
+    try:
+        LANDING_NOTIFICATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LANDING_NOTIFICATIONS_PATH.write_text(
+            json.dumps(_landing_notifications[-LANDING_NOTIFICATIONS_LIMIT:], ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+async def _append_landing_notification(event_type: str, plan: str = "", credits: int = 0, customer_email: str = "") -> None:
+    evt_type = str(event_type or "").strip().lower()
+    if evt_type not in {"subscription", "topup"}:
+        return
+    now = time.time()
+    event = {
+        "type": evt_type,
+        "plan": str(plan or "").strip().lower(),
+        "credits": int(max(0, credits)),
+        "email_masked": _mask_email_for_public(customer_email),
+        "ts": now,
+    }
+    async with _landing_notifications_lock:
+        _landing_notifications.append(event)
+        if len(_landing_notifications) > LANDING_NOTIFICATIONS_LIMIT:
+            _landing_notifications[:] = _landing_notifications[-LANDING_NOTIFICATIONS_LIMIT:]
+        _save_landing_notifications()
 
 
 def _month_key(ts: float | None = None) -> str:
@@ -538,8 +757,9 @@ def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool
     mk = _month_key()
     animated_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
     non_animated_used = int((wallet.get("monthly_usage_non_animated", {}) or {}).get(mk, 0) or 0)
-    animated_limit = _plan_monthly_animated_limit(effective_plan) if billing_active else 0
-    non_animated_limit = _plan_monthly_non_animated_limit(effective_plan) if billing_active else 0
+    # Studio policy: slideshow/script/image generation is free; only animated renders consume top-up credits.
+    animated_limit = 0
+    non_animated_limit = 999999
     animated_remaining = max(0, animated_limit - animated_used)
     non_animated_remaining = max(0, non_animated_limit - non_animated_used)
     topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
@@ -553,7 +773,7 @@ def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool
         "non_animated_monthly_limit": non_animated_limit,
         "non_animated_monthly_used": non_animated_used,
         "non_animated_monthly_remaining": non_animated_remaining,
-        "requires_topup": bool(billing_active and total_remaining <= 0),
+        "requires_topup": bool(total_remaining <= 0),
         "month_key": mk,
         # Backward-compatible aliases.
         "monthly_limit": animated_limit,
@@ -570,54 +790,50 @@ async def _reserve_generation_credit(
     billing_active: bool,
     is_admin: bool = False,
     usage_kind: str = "animated",
+    credits_needed: int = 1,
 ) -> tuple[bool, str, dict]:
     if is_admin:
         return True, "admin", _credit_state_for_user(user, effective_plan, billing_active, is_admin=True)
-    if not billing_active:
-        return False, "subscription_required", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
     user_id = str(user.get("id", "") or "")
+    required_credits = max(1, int(credits_needed or 1))
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
         state = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
         mk = state["month_key"]
         if usage_kind == "non_animated":
-            if state["non_animated_monthly_remaining"] <= 0:
-                return False, "non_animated_limit_reached", state
+            # Non-animated work is free (slideshows/scripts/images).
             usage = dict(wallet.get("monthly_usage_non_animated", {}) or {})
             usage[mk] = int(usage.get(mk, 0) or 0) + 1
             wallet["monthly_usage_non_animated"] = usage
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
-            return True, "non_animated_monthly", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
-        if state["animated_monthly_remaining"] > 0:
-            usage = dict(wallet.get("monthly_usage", {}) or {})
-            usage[mk] = int(usage.get(mk, 0) or 0) + 1
-            wallet["monthly_usage"] = usage
-            wallet["updated_at"] = time.time()
-            _save_topup_wallets()
-            return True, "monthly", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+            return True, "non_animated_free", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
         topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
-        if topup > 0:
-            wallet["animated_topup_credits"] = topup - 1
+        if topup >= required_credits:
+            wallet["animated_topup_credits"] = topup - required_credits
             wallet["topup_credits"] = wallet["animated_topup_credits"]  # keep legacy mirror updated
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
-            return True, "topup", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+            refreshed = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+            refreshed["credits_needed"] = required_credits
+            return True, "topup", refreshed
+        state["credits_needed"] = required_credits
         return False, "topup_required", state
 
 
-async def _refund_generation_credit(user_id: str, source: str, month_key: str = "") -> None:
+async def _refund_generation_credit(user_id: str, source: str, month_key: str = "", credits: int = 1) -> None:
     if not user_id or source not in {"monthly", "topup"}:
         return
+    credit_amount = max(1, int(credits or 1))
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
         if source == "topup":
-            wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + 1
+            wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + credit_amount
             wallet["topup_credits"] = wallet["animated_topup_credits"]
         else:
             mk = month_key or _month_key()
             usage = dict(wallet.get("monthly_usage", {}) or {})
-            usage[mk] = max(0, int(usage.get(mk, 0) or 0) - 1)
+            usage[mk] = max(0, int(usage.get(mk, 0) or 0) - credit_amount)
             wallet["monthly_usage"] = usage
         wallet["updated_at"] = time.time()
         _save_topup_wallets()
@@ -707,9 +923,13 @@ def _record_kpi_for_job(job_id: str, job_state: dict) -> None:
 def _normalize_output_resolution(requested: str, priority_allowed: bool = False) -> str:
     resolution = requested if requested in RESOLUTION_CONFIGS else "720p"
     if FORCE_720P_ONLY:
+        if resolution.endswith("_landscape"):
+            return "720p_landscape"
         return "720p"
     if not priority_allowed and resolution == "1080p":
         return "720p"
+    if not priority_allowed and resolution == "1080p_landscape":
+        return "720p_landscape"
     return resolution
 
 
@@ -752,6 +972,132 @@ def _bool_from_any(value, default: bool = False) -> bool:
     return default
 
 
+LONGFORM_ALLOWED_TEMPLATES = {"story", "skeleton"}
+LONGFORM_WHISPER_MODES = {"off", "subtle", "cinematic"}
+
+
+def _longform_owner_beta_enabled(user: dict | None) -> bool:
+    if not user:
+        return False
+    email = str(user.get("email", "") or "").strip().lower()
+    return bool(LONGFORM_BETA_ENABLED and email in ADMIN_EMAILS)
+
+
+def _normalize_longform_template(value: str) -> str:
+    template = str(value or "").strip().lower()
+    return template if template in LONGFORM_ALLOWED_TEMPLATES else "story"
+
+
+def _normalize_longform_target_minutes(value) -> float:
+    try:
+        minutes = float(value)
+    except Exception:
+        minutes = float(LONGFORM_DEFAULT_TARGET_MINUTES)
+    return max(float(LONGFORM_MIN_TARGET_MINUTES), min(float(LONGFORM_MAX_TARGET_MINUTES), minutes))
+
+
+def _normalize_longform_whisper_mode(value: str) -> str:
+    mode = str(value or "subtle").strip().lower()
+    return mode if mode in LONGFORM_WHISPER_MODES else "subtle"
+
+
+def _normalize_longform_language(value: str) -> str:
+    lang = str(value or "en").strip().lower()
+    return lang if lang in SUPPORTED_LANGUAGES else "en"
+
+
+def _longform_detect_tone(template: str, topic: str, input_title: str, input_description: str) -> str:
+    text = " ".join([
+        str(template or "").strip().lower(),
+        str(topic or "").strip().lower(),
+        str(input_title or "").strip().lower(),
+        str(input_description or "").strip().lower(),
+    ])
+    if not text:
+        return "neutral"
+    horror_markers = (
+        r"\bhorror\b",
+        r"\bscary\b",
+        r"\beerie\b",
+        r"\bcreepy\b",
+        r"\bhaunt(ed|ing)?\b",
+        r"\bghost(s)?\b",
+        r"\bnightmare(s)?\b",
+        r"\bdread\b",
+        r"\bominous\b",
+        r"\bdark\b",
+        r"\bfog\b",
+        r"\bforest\b",
+        r"\bvanish(ed|ing)?\b",
+        r"\bmissing\b",
+        r"\bunsolved\b",
+        r"\bmystery\b",
+        r"\bnowhere\b",
+    )
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in horror_markers):
+        return "horror"
+    return "neutral"
+
+
+LONGFORM_HORROR_VISUAL_DIRECTIVE = (
+    "Horror tone lock: psychological dread, ominous atmosphere, eerie shadows, moody low-key lighting, drifting fog/mist, "
+    "and unsettling cinematic realism. Keep it grounded and tense. No gore, no comedy, no bright cheerful styling."
+)
+
+
+def _longform_is_horror_tone(tone: str) -> bool:
+    return str(tone or "").strip().lower() == "horror"
+
+
+def _longform_tone_locked_visual_description(visual_description: str, tone: str, template: str) -> str:
+    base = str(visual_description or "").strip()
+    if not _longform_is_horror_tone(tone):
+        return base
+    lower = base.lower()
+    if "horror tone lock:" in lower:
+        return base
+    # Keep skeleton identity strict while forcing horror-compatible environment and grade.
+    skeleton_horror_hint = ""
+    if str(template or "").strip().lower() == "skeleton":
+        skeleton_horror_hint = (
+            " Environment must fit a horror mystery beat (abandoned roads, dark forests, empty corridors, foggy night exteriors) "
+            "while preserving the same canonical skeleton identity."
+        )
+    return (base + " " + LONGFORM_HORROR_VISUAL_DIRECTIVE + skeleton_horror_hint).strip()
+
+
+def _longform_enforce_tone_on_scenes(scenes: list[dict], tone: str, template: str) -> list[dict]:
+    out: list[dict] = []
+    for raw_scene in list(scenes or []):
+        scene = dict(raw_scene or {})
+        scene["visual_description"] = _longform_tone_locked_visual_description(
+            str(scene.get("visual_description", "") or ""),
+            tone=tone,
+            template=template,
+        )
+        out.append(scene)
+    return out
+
+
+def _longform_chapter_count_for_minutes(target_minutes: float) -> int:
+    # Keep chapter granularity manageable for review/approval.
+    return max(3, min(12, int(round(float(target_minutes) * 1.1))))
+
+
+def _longform_brand_slot(index: int, total_chapters: int) -> str:
+    if index == max(0, total_chapters - 1):
+        return "outro"
+    return ""
+
+
+def _longform_title_variant(input_title: str, topic: str) -> str:
+    clean_title = str(input_title or "").strip()
+    clean_topic = str(topic or "").strip()
+    if clean_title:
+        return clean_title
+    return (clean_topic[:120] or "Long-Form Video").strip()
+
+
 REFERENCE_LOCK_MODES = {"strict", "inspired"}
 TEMPLATE_DEFAULT_REFERENCE_URLS = {
     "skeleton": str(SKELETON_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
@@ -781,6 +1127,192 @@ def _normalize_reference_with_default(template: str, reference_image_url: str) -
     if value:
         return value
     return _default_reference_for_template(template)
+
+
+def _is_template_default_reference(template: str, reference_image_url: str) -> bool:
+    current = str(reference_image_url or "").strip()
+    default_ref = _default_reference_for_template(template)
+    return bool(current and default_ref and current == default_ref)
+
+
+def _skeleton_session_has_explicit_reference(session: dict | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    return bool(
+        session.get("reference_image_uploaded")
+        or session.get("custom_reference_uploaded")
+    )
+
+
+def _skeleton_default_identity_locked(session: dict | None) -> bool:
+    return not _skeleton_session_has_explicit_reference(session)
+
+
+def _reference_url_to_local_asset_path(reference_image_url: str) -> Path | None:
+    source = str(reference_image_url or "").strip()
+    if not source:
+        return None
+    if Path(source).exists():
+        return Path(source)
+    try:
+        parsed = urlparse(source)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    rel_path = unquote(str(parsed.path or "").lstrip("/"))
+    if not rel_path:
+        return None
+    rel_parts = [part for part in Path(rel_path).parts if part not in ("..", "")]
+    if not rel_parts:
+        return None
+    candidates = (
+        Path(__file__).parent / "ViralShorts-App" / "public" / Path(*rel_parts),
+        Path(__file__).parent / "public" / Path(*rel_parts),
+    )
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+async def _read_reference_image_bytes(reference_image_url: str) -> bytes:
+    source = str(reference_image_url or "").strip()
+    if not source:
+        return b""
+    if source.startswith("data:image/"):
+        raw, _mime = _decode_data_image_url(source)
+        return raw or b""
+    local_path = _reference_url_to_local_asset_path(source)
+    if local_path is not None:
+        try:
+            return local_path.read_bytes()
+        except Exception:
+            return b""
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(source)
+        if resp.status_code >= 400:
+            return b""
+        return bytes(resp.content or b"")
+    except Exception:
+        return b""
+
+
+async def _extract_reference_profile(reference_image_url: str, template: str, lock_mode: str) -> tuple[dict, dict]:
+    source = str(reference_image_url or "").strip()
+    if not source:
+        return {}, {}
+    raw_ref = await _read_reference_image_bytes(source)
+    if not raw_ref:
+        return {}, {}
+    quality = _analyze_reference_quality(raw_ref, lock_mode=lock_mode)
+    reference_dna = _extract_reference_dna(raw_ref, template=template)
+    return reference_dna, quality
+
+
+def _billing_site_url() -> str:
+    configured = str(os.getenv("BILLING_SITE_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    site = str(SITE_URL or "").strip().rstrip("/")
+    if not site:
+        return site
+    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
+    if not match:
+        return site
+    scheme, host, suffix = match.groups()
+    host_l = host.lower()
+    for apex in ("nyptidindustries.com", "niptidindustries.com"):
+        if host_l == f"billing.{apex}":
+            return f"{scheme}{host}{suffix}"
+        if host_l == apex:
+            return f"{scheme}billing.{apex}{suffix}"
+        if host_l.endswith("." + apex):
+            return f"{scheme}billing.{apex}{suffix}"
+    return site
+
+
+def _api_public_url() -> str:
+    configured = str(os.getenv("API_PUBLIC_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    site = str(SITE_URL or "").strip().rstrip("/")
+    if not site:
+        return "https://api.nyptidindustries.com"
+    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
+    if not match:
+        return "https://api.nyptidindustries.com"
+    scheme, host, suffix = match.groups()
+    host_l = host.lower()
+    for apex in ("nyptidindustries.com", "niptidindustries.com"):
+        if host_l == f"api.{apex}":
+            return f"{scheme}{host}{suffix}"
+        if host_l in {apex, f"studio.{apex}", f"billing.{apex}"} or host_l.endswith("." + apex):
+            return f"{scheme}api.{apex}{suffix}"
+    return "https://api.nyptidindustries.com"
+
+
+def _paypal_enabled() -> bool:
+    return bool(str(PAYPAL_CLIENT_ID or "").strip() and str(PAYPAL_CLIENT_SECRET or "").strip())
+
+
+def _paypal_api_base() -> str:
+    return "https://api-m.sandbox.paypal.com" if str(PAYPAL_ENV or "").strip().lower() == "sandbox" else "https://api-m.paypal.com"
+
+
+_paypal_token_cache = {"token": "", "expires_at": 0.0}
+
+
+async def _paypal_access_token() -> str:
+    if not _paypal_enabled():
+        raise HTTPException(500, "PayPal is not configured")
+    now = time.time()
+    cached = str(_paypal_token_cache.get("token", "") or "")
+    expires_at = float(_paypal_token_cache.get("expires_at", 0.0) or 0.0)
+    if cached and (expires_at - now) > 60:
+        return cached
+    auth = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode("utf-8")).decode("ascii")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{_paypal_api_base()}/v1/oauth2/token",
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            content="grant_type=client_credentials",
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(500, f"PayPal auth failed: {resp.text[:200]}")
+    data = resp.json()
+    token = str(data.get("access_token", "") or "")
+    expires_in = int(data.get("expires_in", 0) or 0)
+    if not token:
+        raise HTTPException(500, "PayPal auth token missing")
+    _paypal_token_cache["token"] = token
+    _paypal_token_cache["expires_at"] = now + max(60, expires_in)
+    return token
+
+
+async def _paypal_request(method: str, path: str, *, json_body: dict | None = None) -> dict:
+    token = await _paypal_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        resp = await client.request(
+            method.upper(),
+            f"{_paypal_api_base()}{path}",
+            headers=headers,
+            json=json_body,
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, f"PayPal request failed: {resp.text[:400]}")
+    try:
+        return resp.json()
+    except Exception:
+        return {}
 
 
 def _normalize_art_style(value, template: str = "", default: str = "auto") -> str:
@@ -1021,9 +1553,9 @@ def _reference_dna_prompt_fragment(reference_dna: dict | None, lock_mode: str, t
         + "lighting=" + str(dna.get("lighting_style", "balanced")) + ", "
         + "contrast=" + str(dna.get("contrast_style", "cinematic")) + ", "
         + "sharpness=" + str(dna.get("sharpness_style", "clean")) + ". "
-        + ("Maintain exact identity/outfit continuity scene-to-scene. " if lock_mode == "strict" else "Preserve style while allowing pose/composition variety. ")
+        + ("Maintain exact identity/anatomy continuity scene-to-scene. " if lock_mode == "strict" else "Preserve style while allowing pose/composition variety. ")
         + (
-            "For skeleton keep skull geometry, outfit, and logo family unchanged."
+            "For skeleton keep skull geometry, eye size/spacing, bone finish, and a clearly visible translucent body silhouette unchanged."
             if template == "skeleton"
             else (
                 "For story keep recurring subjects, key locations, and grade continuity consistent when the script indicates recurrence."
@@ -1031,6 +1563,43 @@ def _reference_dna_prompt_fragment(reference_dna: dict | None, lock_mode: str, t
                 else "Keep subject styling and grading consistent across scenes."
             )
         )
+    )
+
+
+def _canonical_skeleton_anchor() -> str:
+    return (
+        "CONSISTENCY ANCHOR -- use one unchanged canonical skeleton identity in every scene: "
+        "ivory-white anatomical skeleton, large realistic eyeballs with visible iris, "
+        "clearly visible translucent soft-tissue silhouette around torso/limbs, identical skull proportions and bone structure, "
+        "preserve anatomy and the translucent body shell even when the scene requests role-specific props or wardrobe. "
+    )
+
+
+def _skeleton_has_explicit_outfit_request(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    if re.search(r"\b(no clothing|shirtless|nude|naked|bare(?:\s+body)?|no outfit)\b", raw):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"spacesuit|space suit|astronaut|helmet|visor|chef|chef hat|apron|hoodie|jacket|coat|robe|uniform|armor|costume|"
+            r"suit|tuxedo|dress|shirt|pants|gloves|boots|scrubs|jersey|cloak|cape|mask|gown|lab coat"
+            r")\b",
+            raw,
+        )
+    )
+
+
+def _skeleton_outfit_coverage_lock(text: str) -> str:
+    if not _skeleton_has_explicit_outfit_request(text):
+        return ""
+    return (
+        "WARDROBE LOCK: keep the requested outfit or uniform physically worn over the same canonical Jerry-style skeleton. "
+        "The clothing must enclose the torso, pelvis, shoulders, arms, and legs wherever the outfit covers them. "
+        "Do not leave the ribcage, spine, pelvis, or limb bones visibly exposed outside the clothing, and do not render transparent clothes that reveal the full skeleton body underneath. "
+        "The glass-like body shell and same eyes still exist, but the body should look properly dressed inside the outfit rather than naked bones wearing accessories."
     )
 
 
@@ -1067,6 +1636,486 @@ def _build_scene_prompt_with_reference(
     return prefix + delta
 
 
+def _build_skeleton_identity_passthrough_prompt(
+    visual_description: str,
+    reference_dna: dict | None = None,
+) -> str:
+    delta = _sanitize_skeleton_scene_delta(str(visual_description or "").strip())
+    if not delta:
+        return (
+            "Show the canonical Jerry-style NYPTID skeleton first: ivory-white anatomical skeleton, "
+            "large realistic human-like eyeballs clearly visible in both eye sockets with readable iris and pupil, "
+            "and a continuous translucent glass-like skin shell clearly visible over the full body, hugging the skull, face, neck, torso, arms, hands, and legs like real transparent skin."
+        )
+    delta_l = delta.lower()
+    internal_markers = (
+        "cell", "cells", "immune", "fever", "virus", "bacteria", "bloodstream", "pyrogen",
+        "hypothalamus", "neuron", "brain chemistry", "organ", "microscopic", "microshot",
+        "macro shot", "inside the body", "inside body", "cutaway", "close-up of tissue",
+    )
+    internal_focus = any(marker in delta_l for marker in internal_markers)
+    ref = reference_dna or {}
+    ref_bits: list[str] = []
+    lighting = str(ref.get("lighting_style", "") or "").strip()
+    contrast = str(ref.get("contrast_style", "") or "").strip()
+    if lighting or contrast:
+        ref_bits.append(
+            "Keep the default Jerry reference grade: "
+            + " ".join(part for part in [lighting, contrast] if part).strip()
+            + "."
+        )
+    outfit_lock = _skeleton_outfit_coverage_lock(delta)
+    anchor = (
+        "Always show the canonical Jerry-style NYPTID skeleton first and keep visible skeleton anatomy in frame: "
+        "ivory-white anatomical skeleton, large realistic human-like eyeballs clearly visible in both eye sockets with readable iris and pupil, "
+        "never empty sockets, never missing eyes, continuous translucent glass-like skin shell clearly visible over the full body, "
+        "hugging the skull, face, neck, torso, arms, hands, and legs like real transparent skin, never bare bones-only look, never faint shell, never x-ray look."
+    )
+    if internal_focus:
+        bridge = (
+            "Render the requested microscopic or internal subject as a zoom-in / cutaway happening inside the skeleton's "
+            "arm, torso, blood, or tissue while some part of the skeleton remains visible in frame."
+        )
+    else:
+        bridge = "The skeleton remains the main on-screen subject while following the user's scene request."
+    return " ".join([anchor, bridge, outfit_lock, f"USER SCENE REQUEST: {delta}", *ref_bits]).strip()
+
+
+def _build_creative_passthrough_scene_prompt(
+    template: str,
+    visual_description: str,
+    quality_mode: str = "standard",
+    skeleton_anchor: str = "",
+    reference_dna: dict | None = None,
+    reference_lock_mode: str = "strict",
+    art_style: str = "auto",
+) -> str:
+    # Passthrough must honor the user's prompt. Skeleton is the only exception:
+    # it keeps a minimal identity anchor so the subject never stops being Jerry-style skeleton.
+    if str(template or "").strip().lower() == "skeleton":
+        return _build_skeleton_identity_passthrough_prompt(
+            visual_description,
+            reference_dna=reference_dna,
+        )
+    return str(visual_description or "").strip()
+
+
+def _augment_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return str(base_negative or "").strip()
+    extras: list[str] = []
+    has_brain = bool(re.search(r"\bbrain\b", text))
+    has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text))
+    has_table = bool(re.search(r"\btable|desk|countertop\b", text))
+    has_damage_cues = bool(re.search(r"\b(crack|cracks|fracture|fractured|chip|chipped|bruise|bruises|damaged|damage)\b", text))
+    has_tired_cues = bool(re.search(r"\b(tired|fatigued|weary|slouch|slouched|hunch|hunched|droop|drooping|exhausted)\b", text))
+    if has_brain:
+        extras.extend([
+            "smooth sphere as brain replacement",
+            "fruit instead of brain",
+            "brain without visible folds",
+        ])
+    if has_money:
+        extras.extend([
+            "coins-only replacing money pile",
+            "blank paper replacing banknotes",
+            "missing cash stack",
+        ])
+    if has_brain and has_money:
+        extras.extend([
+            "extra random glowing orb replacing required props",
+            "missing one of the two required props",
+        ])
+    if has_table:
+        extras.extend([
+            "standing pose with no table",
+            "missing tabletop surface",
+            "floating props with no table context",
+            "arched portal behind skeleton",
+            "backlit doorway behind skeleton",
+            "altar pedestal replacing table",
+            "props on floor instead of table",
+            "monocle",
+            "eye patch",
+            "missing one eye",
+        ])
+    if has_damage_cues:
+        extras.extend([
+            "pristine undamaged bones",
+            "perfectly clean intact skeleton",
+            "no cracks on bones",
+            "no bruising marks",
+        ])
+    if has_tired_cues:
+        extras.extend([
+            "upright heroic posture",
+            "confident energetic stance",
+        ])
+    parts = [str(base_negative or "").strip()] if str(base_negative or "").strip() else []
+    if extras:
+        parts.append(", ".join(dict.fromkeys(extras)))
+    return ", ".join([p for p in parts if p]).strip(", ")
+
+
+def _relax_skeleton_negative_prompt_for_passthrough(base_negative: str, prompt: str) -> str:
+    text = str(prompt or "").strip().lower()
+    neg = str(base_negative or "").strip()
+    if not neg:
+        return neg
+    wants_damage = bool(re.search(r"\b(crack|cracks|fracture|fractured|chip|chipped|bruise|bruises|damaged|damage)\b", text))
+    wants_tired = bool(re.search(r"\b(tired|fatigued|weary|slouch|slouched|hunch|hunched|droop|drooping|exhausted)\b", text))
+    parts = [p.strip() for p in neg.split(",") if p and p.strip()]
+    out: list[str] = []
+    for part in parts:
+        pl = part.lower()
+        if wants_damage and ("broken bones" in pl or "dislocated joints" in pl):
+            continue
+        if wants_tired and ("unnatural pose" in pl or "mannequin" in pl):
+            continue
+        out.append(part)
+    return ", ".join(out).strip(", ")
+
+
+def _truncate_words(text: str, max_words: int = 120) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return ""
+    words = raw.split(" ")
+    if len(words) <= max_words:
+        return raw
+    return " ".join(words[:max_words]).strip()
+
+
+def _shortform_delivery_hints(text: str, template: str = "") -> list[str]:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not raw:
+        return []
+    hints: list[str] = []
+    if re.search(r"\b(shorts?|short-form|short form|thumbnail|thumbnails?|viral short|reel|reels)\b", raw):
+        hints.extend([
+            "vertical 9:16 short-form composition",
+            "thumbnail-readable centered subject",
+            "clean uncluttered background with large readable props",
+        ])
+    if re.search(r"\bmust\s+be\s+able\s+to\s+work\b|\bno\s+matter\s+what\b", raw):
+        hints.append("high-clarity production framing with reliable readable composition")
+    if re.search(r"\b(create|generate)\s+images?\s+for\s+shorts?\b", raw):
+        hints.append("strong subject separation and prop readability for short-form cover frames")
+    if str(template or "").strip().lower() == "skeleton" and hints:
+        hints.append("keep skull, both eyes, and upper torso instantly readable at first glance")
+    seen: set[str] = set()
+    out: list[str] = []
+    for hint in hints:
+        key = hint.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(hint.strip())
+    return out
+
+
+def _sanitize_skeleton_scene_delta(text: str) -> str:
+    """Remove instructions that conflict with canonical Skeleton identity."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return ""
+    cleaned = raw
+    nonvisual_patterns = [
+        r"\bit\s+must\s+be\s+able\s+to\s+work\s+and\s+create\s+images?\s+for\s+shorts?\b",
+        r"\bmust\s+be\s+able\s+to\s+work\s+and\s+create\s+images?\s+for\s+shorts?\b",
+        r"\bmust\s+be\s+able\s+to\s+work\b",
+        r"\b(?:create|generate)\s+images?\s+for\s+shorts?\b",
+        r"\bno\s+matter\s+what\b",
+    ]
+    for pat in nonvisual_patterns:
+        cleaned = re.sub(pat, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(a|an|the)\s+sits\b", "sits", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(a|an|the)\s+is\b", "is", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.")
+    return cleaned or raw
+
+
+def _extract_scene_content_lock(prompt: str) -> str:
+    raw = str(prompt or "")
+    m = re.search(
+        r"SCENE CONTENT LOCK\s*\(must be visible and preserved\):\s*(.*?)\s*SCENE PRIORITY RULE:",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        return re.sub(r"\s+", " ", str(m.group(1) or "")).strip(" .")
+    return ""
+
+
+def _compact_skeleton_local_prompt(prompt: str) -> str:
+    raw = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    if not raw:
+        return raw
+    delivery_hints = _shortform_delivery_hints(raw, template="skeleton")
+    scene = _sanitize_skeleton_scene_delta(_extract_scene_content_lock(raw) or raw)
+    scene = re.sub(
+        r"keep every explicitly requested prop/object/action visible and readable in frame\.?",
+        "",
+        scene,
+        flags=re.IGNORECASE,
+    )
+    scene = re.sub(r"\s+", " ", scene).strip(" .")
+    scene_l = scene.lower()
+    needs_table = bool(re.search(r"\b(table|desk|countertop)\b", scene_l))
+    needs_brain = "brain" in scene_l
+    needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", scene_l))
+    needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
+    explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    parts: list[str] = [
+        "photoreal cinematic 3D render",
+        "canonical ivory-white anatomical skeleton",
+        "both eyes visible with realistic iris reflections",
+        "clearly visible translucent glass-like body shell",
+        "natural bone color with neutral grading, not x-ray not radiograph",
+    ]
+    parts.append("requested outfit is fully worn and covers the body correctly" if explicit_outfit_request else "no clothing no costume no armor")
+    if re.search(r"\bdark\b|\bnight\b|\blow[- ]?light\b", scene_l):
+        parts.append("dark moody room lighting")
+    prompt_parts: list[str] = [", ".join(parts) + "."]
+    prompt_parts.append(f"Scene: {_truncate_words(scene, 56)}.")
+    if explicit_outfit_request:
+        prompt_parts.append(_skeleton_outfit_coverage_lock(scene))
+    if needs_table:
+        prompt_parts.append(
+            "Skeleton is seated behind a real table and the tabletop is clearly visible across the lower foreground. "
+            "Both forearms or hands rest on or directly above the tabletop."
+        )
+    if needs_brain and needs_money:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(
+            f"On the table are exactly two {glow}props: one realistic human brain with visible gyri/sulci folds and one pile/stack of paper cash banknotes, both clearly visible and not replaced by spheres."
+        )
+    elif needs_brain:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(
+            f"Show one {glow}realistic human brain with visible gyri/sulci folds (never a smooth sphere)."
+        )
+    elif needs_money:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(
+            f"Show one {glow}pile/stack of paper cash banknotes clearly visible on the table."
+        )
+    prompt_parts.append(
+        "Medium or three-quarter shot, subject fills frame, ultra sharp focus, high contrast, no text, no watermark."
+    )
+    prompt_parts.append(
+        "Glass-shell lock: transparent glass-like skin hugs the skull, torso, arms, and legs tightly like a real outer body shell, "
+        "not a halo, not a bubble, not a portal, and not a glowing arch behind the subject."
+    )
+    if delivery_hints:
+        prompt_parts.append("Short-form lock: " + "; ".join(delivery_hints) + ".")
+    return _truncate_words(" ".join(prompt_parts), 120)
+
+
+def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
+    raw = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    scene = _sanitize_skeleton_scene_delta(_extract_scene_content_lock(raw) or raw)
+    scene_l = scene.lower()
+    needs_table = bool(re.search(r"\b(table|desk|countertop)\b", scene_l))
+    needs_brain = "brain" in scene_l
+    needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", scene_l))
+    needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
+    props = []
+    if needs_brain:
+        props.append(
+            ("glowing " if needs_glow else "")
+            + "human brain with visible gyri and sulci folds"
+        )
+    if needs_money:
+        props.append(
+            ("glowing " if needs_glow else "")
+            + "pile of paper cash banknotes"
+        )
+    props_text = " and ".join(props) if props else "scene props"
+    placement = "on the table" if needs_table else "in front of the skeleton"
+    explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    base = (
+        "photoreal 3D cinematic render, dark room, transparent-glass anatomical skeleton with both eyes visible, natural ivory bone color, no x-ray/radiograph look, "
+        "glass shell wraps tightly around skull torso arms and legs like transparent skin, never a halo or portal. "
+        "skeleton seated behind a real table, medium shot, sharp focus, tabletop spans the lower foreground with hands resting on or just above the tabletop. "
+        f"Mandatory props: {props_text} {placement}. "
+        "Both mandatory props are large and obvious in foreground on the tabletop. "
+        "Do not omit either prop. Do not replace props with spheres/balls. "
+        "On table: brain plus money. On table: brain plus money."
+    )
+    if explicit_outfit_request:
+        base += " " + _skeleton_outfit_coverage_lock(scene)
+    if not needs_table:
+        base = base.replace("skeleton seated at table, ", "")
+    return _truncate_words(base, 86)
+
+
+def _extract_skeleton_scene_delta_for_fast_path(prompt: str) -> str:
+    raw = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    if not raw:
+        return ""
+    scene = _extract_scene_content_lock(raw)
+    if scene:
+        return _sanitize_skeleton_scene_delta(scene)
+    match = re.search(
+        r"Scene:\s*(.*?)(?:\s+(?:Skeleton is seated|Show exactly|Glass-shell lock:|Short-form lock:|Match the reference skeleton anatomy exactly:)|$)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return _sanitize_skeleton_scene_delta(match.group(1))
+    return _sanitize_skeleton_scene_delta(raw)
+
+
+def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
+    scene = _extract_skeleton_scene_delta_for_fast_path(prompt)
+    scene_l = scene.lower()
+    needs_table = bool(re.search(r"\b(table|desk|countertop)\b", scene_l))
+    needs_brain = "brain" in scene_l
+    needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", scene_l))
+    needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
+    dark_room = bool(re.search(r"\b(dark|night|shadowy|moody|low[- ]?light)\b", scene_l))
+    explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    prompt_parts = [
+        "Single skeleton subject only.",
+        ("Dark room." if dark_room else "Cinematic room interior."),
+        "Photoreal 3D render.",
+        "Anatomical skeleton with large realistic eyes and transparent glass skin tightly wrapped around the skull, torso, arms, and legs.",
+        "No second skeleton and no extra person.",
+    ]
+    if needs_table:
+        prompt_parts.append(
+            "Skeleton sits behind a real table with the tabletop clearly visible across the lower foreground and both hands near or on the tabletop."
+        )
+    else:
+        prompt_parts.append("Medium shot of the skeleton in a readable cinematic scene.")
+    if explicit_outfit_request:
+        prompt_parts.append(_skeleton_outfit_coverage_lock(scene))
+    if needs_brain and needs_money:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(
+            f"Exactly two props on the tabletop: one realistic {glow}human brain with visible folds and one {glow}pile of paper cash banknotes."
+        )
+    elif needs_brain:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(f"One realistic {glow}human brain is clearly visible.")
+    elif needs_money:
+        glow = "glowing " if needs_glow else ""
+        prompt_parts.append(f"One {glow}pile of paper cash banknotes is clearly visible.")
+    else:
+        prompt_parts.append(scene.rstrip(". ") + ".")
+    prompt_parts.append("Medium or three-quarter portrait shot, sharp focus, realistic lighting.")
+    return _truncate_words(" ".join(part for part in prompt_parts if part).strip(), 90)
+
+
+def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
+    text = str(prompt or "").lower()
+    explicit_outfit_request = _skeleton_has_explicit_outfit_request(text)
+    tokens = [
+        "blurry",
+        "low quality",
+        "text",
+        "watermark",
+        "cartoon",
+        "anime",
+        "painting",
+        "clothed skeleton",
+        "armor",
+        "costume",
+        "empty eye sockets",
+        "missing eye",
+        "monocle",
+        "eyepatch",
+        "glowing eyes",
+        "human skin face",
+        "human bust statue",
+        "severed head",
+        "head sculpture",
+        "no translucent shell",
+        "bare bones only",
+        "x-ray style",
+        "radiograph style",
+        "fluoroscopy look",
+        "neon blue xray glow",
+        "medical scan visualization",
+    ]
+    if explicit_outfit_request:
+        tokens = [t for t in tokens if t not in {"clothed skeleton", "armor", "costume"}]
+        tokens.extend([
+            "exposed ribcage outside clothing",
+            "exposed pelvis outside clothing",
+            "transparent outfit revealing full skeleton body",
+            "naked skeleton body with only accessories",
+        ])
+    if "brain" in text:
+        tokens.extend([
+            "smooth ball instead of brain",
+            "fruit instead of brain",
+            "missing brain",
+        ])
+    if re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text):
+        tokens.extend([
+            "coins-only money",
+            "blank paper instead of cash",
+            "missing money stack",
+        ])
+    if re.search(r"\b(table|desk|countertop)\b", text):
+        tokens.extend([
+            "standing pose no table",
+            "floating props without table",
+            "empty table with no props",
+        ])
+    base = str(base_negative or "").strip()
+    merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
+    if base:
+        merged = f"{base}, {merged}"
+    return _truncate_words(merged, 95)
+
+
+def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
+    text = str(prompt or "").lower()
+    tokens = [
+        "blurry",
+        "low quality",
+        "text",
+        "watermark",
+        "duplicate subject",
+        "two skeletons",
+        "extra skeleton",
+        "extra person",
+        "crowd",
+        "reflection duplicate",
+        "glass display case",
+        "glass dome",
+        "portal",
+        "archway",
+        "window frame",
+        "xray",
+        "radiograph",
+        "medical scan",
+        "gems",
+        "crystals",
+        "candle",
+        "bowl",
+        "cup",
+        "extra props",
+        "background made of money",
+        "lying down pose",
+    ]
+    if "brain" in text:
+        tokens.extend(["missing brain", "fruit instead of brain", "orb instead of brain"])
+    if re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text):
+        tokens.extend(["missing money", "coins only", "blank paper instead of cash"])
+    if re.search(r"\b(table|desk|countertop)\b", text):
+        tokens.extend(["no table", "standing pose", "floating props", "empty tabletop"])
+    base = str(base_negative or "").strip()
+    merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
+    if base:
+        merged = f"{base}, {merged}"
+    return _truncate_words(merged, 110)
+
+
 def _score_generated_image_quality(image_path: str, prompt: str = "", template: str = "") -> dict:
     """Heuristic image quality scorer used for best-of candidate selection."""
     if Image is None or ImageStat is None:
@@ -1088,6 +2137,22 @@ def _score_generated_image_quality(image_path: str, prompt: str = "", template: 
             if ImageFilter is not None:
                 edge_img = gray.filter(ImageFilter.FIND_EDGES)
                 edge_strength = float(ImageStat.Stat(edge_img).mean[0])
+            shell_ratio = 0.0
+            shell_to_bone_ratio = 0.0
+            subject_height_ratio = 0.0
+            subject_width_ratio = 0.0
+            brain_color_ratio = 0.0
+            money_color_ratio = 0.0
+            brain_component_area_ratio = 0.0
+            money_component_area_ratio = 0.0
+            brain_edge_density = 0.0
+            brain_round_area_ratio = 0.0
+            money_rect_area_ratio = 0.0
+            prop_component_count = 0
+            seated_full_body_required = False
+            bone_r_mean = 0.0
+            bone_g_mean = 0.0
+            bone_b_mean = 0.0
 
             def _clamp01(v: float) -> float:
                 if v <= 0.0:
@@ -1122,6 +2187,206 @@ def _score_generated_image_quality(image_path: str, prompt: str = "", template: 
             if template == "skeleton" and ("eyes" in prompt.lower() or "eyeballs" in prompt.lower()) and edge_strength < 14:
                 score -= 5.0
                 notes.append("weak_eye_detail")
+            if template == "skeleton" and np is not None and ImageFilter is not None:
+                try:
+                    arr = np.asarray(rgb).astype(np.float32)
+                    r = arr[:, :, 0]
+                    g = arr[:, :, 1]
+                    b = arr[:, :, 2]
+                    maxc = np.maximum(np.maximum(r, g), b)
+                    minc = np.minimum(np.minimum(r, g), b)
+                    sat_arr = np.zeros_like(maxc, dtype=np.float32)
+                    np.divide((maxc - minc), np.maximum(maxc, 1e-6), out=sat_arr, where=maxc > 1e-6)
+                    sat_arr *= 255.0
+                    lum_arr = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                    neutral = (
+                        (np.abs(r - g) < 40.0)
+                        & (np.abs(g - b) < 40.0)
+                        & (np.abs(r - b) < 52.0)
+                    )
+                    bone = ((lum_arr > 150.0) & (sat_arr < 95.0) & neutral)
+                    bone_px = int(bone.sum())
+                    if bone_px > 1500:
+                        try:
+                            bone_r_mean = float(r[bone].mean())
+                            bone_g_mean = float(g[bone].mean())
+                            bone_b_mean = float(b[bone].mean())
+                        except Exception:
+                            bone_r_mean = 0.0
+                            bone_g_mean = 0.0
+                            bone_b_mean = 0.0
+                        # Penalize blue radiograph/X-ray drift; reward natural ivory balance.
+                        if bone_b_mean > (bone_r_mean + 10.0) and bone_b_mean > (bone_g_mean + 6.0):
+                            score -= 16.0
+                            notes.append("xray_style_drift")
+                        elif bone_r_mean >= (bone_b_mean - 4.0) and bone_g_mean >= (bone_b_mean - 6.0):
+                            score += 6.0
+                        ys, xs = np.where(bone)
+                        if ys.size > 0 and xs.size > 0:
+                            subject_height_ratio = float((ys.max() - ys.min() + 1)) / float(max(1, h))
+                            subject_width_ratio = float((xs.max() - xs.min() + 1)) / float(max(1, w))
+                            if subject_height_ratio < 0.42:
+                                score -= 9.0
+                                notes.append("subject_too_small")
+                            if subject_width_ratio < 0.18:
+                                score -= 7.0
+                                notes.append("subject_too_narrow")
+                        bone_img = Image.fromarray((bone.astype(np.uint8) * 255), mode="L")
+                        ring = ImageChops.subtract(
+                            bone_img.filter(ImageFilter.MaxFilter(size=41)),
+                            bone_img.filter(ImageFilter.MaxFilter(size=9)),
+                        ).filter(ImageFilter.GaussianBlur(radius=3.5))
+                        ring_arr = np.asarray(ring).astype(np.float32) / 255.0
+                        shell_like = (
+                            (ring_arr > 0.08)
+                            & (lum_arr > 26.0)
+                            & (lum_arr < 190.0)
+                            & (b > (r * 0.90))
+                            & (g > (r * 0.82))
+                        )
+                        shell_px = int(shell_like.sum())
+                        ring_px = int((ring_arr > 0.08).sum())
+                        shell_ratio = float(shell_px) / float(max(1, ring_px))
+                        shell_to_bone_ratio = float(shell_px) / float(max(1, bone_px))
+                        if shell_ratio < 0.045:
+                            score -= 22.0
+                            notes.append("missing_translucent_shell")
+                        elif shell_ratio < 0.085:
+                            score -= 10.0
+                            notes.append("weak_translucent_shell")
+                        if shell_to_bone_ratio < 0.16:
+                            score -= 12.0
+                            notes.append("shell_not_visible_enough")
+                    else:
+                        score -= 34.0
+                        notes.append("not_skeleton_structure")
+
+                    prompt_l = str(prompt or "").lower()
+                    needs_brain = "brain" in prompt_l
+                    needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", prompt_l))
+                    seated_full_body_required = bool(
+                        re.search(r"\b(sit|sits|seated|sitting)\b", prompt_l)
+                        or re.search(r"\b(table|desk|countertop)\b", prompt_l)
+                    )
+                    if needs_brain or needs_money:
+                        y0 = int(h * 0.50)
+                        y1 = int(h * 0.97)
+                        x0 = int(w * 0.16)
+                        x1 = int(w * 0.84)
+                        if y1 > y0 and x1 > x0:
+                            rr = r[y0:y1, x0:x1]
+                            gg = g[y0:y1, x0:x1]
+                            bb = b[y0:y1, x0:x1]
+                            if rr.size > 0:
+                                brain_mask = (
+                                    (rr > (gg + 10.0))
+                                    & (gg > (bb + 3.0))
+                                    & (rr > 75.0)
+                                )
+                                money_mask = (
+                                    (gg > (rr + 8.0))
+                                    & (gg > (bb + 8.0))
+                                    & (gg > 65.0)
+                                )
+                                brain_color_ratio = float(brain_mask.mean())
+                                money_color_ratio = float(money_mask.mean())
+                                if cv2 is not None:
+                                    try:
+                                        roi = arr[y0:y1, x0:x1].astype(np.uint8)
+                                        gray_roi = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+                                        edges_roi = cv2.Canny(gray_roi, 48, 132)
+                                        if needs_brain:
+                                            brain_u8 = (brain_mask.astype(np.uint8) * 255)
+                                            comp_count, labels, stats, _ = cv2.connectedComponentsWithStats(brain_u8, connectivity=8)
+                                            if comp_count > 1:
+                                                areas = stats[1:, cv2.CC_STAT_AREA]
+                                                largest_idx = int(1 + np.argmax(areas))
+                                                largest = int(areas.max())
+                                                brain_component_area_ratio = float(largest) / float(max(1, brain_u8.size))
+                                                comp_sel = labels == largest_idx
+                                                if comp_sel.any():
+                                                    brain_edge_density = float((edges_roi[comp_sel] > 0).mean())
+                                        if needs_money:
+                                            money_u8 = (money_mask.astype(np.uint8) * 255)
+                                            comp_count2, labels2, stats2, _ = cv2.connectedComponentsWithStats(money_u8, connectivity=8)
+                                            if comp_count2 > 1:
+                                                areas2 = stats2[1:, cv2.CC_STAT_AREA]
+                                                largest2 = int(areas2.max())
+                                                money_component_area_ratio = float(largest2) / float(max(1, money_u8.size))
+                                        # Shape fallback to reduce false negatives when lighting grade desaturates props.
+                                        cnts, _ = cv2.findContours(edges_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                        roi_h, roi_w = gray_roi.shape[:2]
+                                        roi_area = float(max(1, roi_h * roi_w))
+                                        for c in cnts:
+                                            area = float(cv2.contourArea(c))
+                                            if area < roi_area * 0.0018:
+                                                continue
+                                            x, y, ww, hh = cv2.boundingRect(c)
+                                            if ww < 6 or hh < 6:
+                                                continue
+                                            fill = area / float(max(1, ww * hh))
+                                            peri = float(cv2.arcLength(c, True))
+                                            circ = (4.0 * 3.14159265 * area / (peri * peri)) if peri > 1e-6 else 0.0
+                                            aspect = float(ww) / float(max(1, hh))
+                                            local_ratio = area / roi_area
+                                            # Brain-like rounded prop in lower half.
+                                            if y > int(roi_h * 0.45) and 0.42 <= circ <= 1.25 and 0.0022 <= local_ratio <= 0.18:
+                                                brain_round_area_ratio = max(brain_round_area_ratio, local_ratio)
+                                            # Money-like rectangular stacks in lower half.
+                                            if (
+                                                y > int(roi_h * 0.45)
+                                                and 1.2 <= aspect <= 6.0
+                                                and fill >= 0.28
+                                                and local_ratio >= 0.0015
+                                            ):
+                                                money_rect_area_ratio = max(money_rect_area_ratio, local_ratio)
+                                        # Layout fallback: count distinct non-bone foreground props in lower ROI.
+                                        bone_roi = bone[y0:y1, x0:x1] if isinstance(bone, np.ndarray) else None
+                                        lum_roi = lum_arr[y0:y1, x0:x1]
+                                        sat_roi = sat_arr[y0:y1, x0:x1]
+                                        if bone_roi is not None and bone_roi.shape == lum_roi.shape:
+                                            prop_seed = (
+                                                (lum_roi > 18.0)
+                                                & (lum_roi < 236.0)
+                                                & (sat_roi > 14.0)
+                                                & (~bone_roi)
+                                            )
+                                            prop_u8 = (prop_seed.astype(np.uint8) * 255)
+                                            comp_n, comp_labels, comp_stats, _ = cv2.connectedComponentsWithStats(prop_u8, connectivity=8)
+                                            for ci in range(1, int(comp_n)):
+                                                area = int(comp_stats[ci, cv2.CC_STAT_AREA])
+                                                if area < int(roi_area * 0.0017):
+                                                    continue
+                                                y_comp = int(comp_stats[ci, cv2.CC_STAT_TOP])
+                                                if y_comp < int(roi_h * 0.42):
+                                                    continue
+                                                prop_component_count += 1
+                                    except Exception:
+                                        pass
+
+                                layout_has_two_props = prop_component_count >= 2
+                                brain_present_by_shape = brain_round_area_ratio >= 0.0030
+                                money_present_by_shape = money_rect_area_ratio >= 0.0022
+                                if needs_brain and needs_money and layout_has_two_props:
+                                    brain_present_by_shape = True
+                                    money_present_by_shape = True
+                                brain_fail_count = int(brain_color_ratio < 0.012) + int(brain_component_area_ratio < 0.0023) + int(brain_edge_density < 0.038)
+                                money_fail_count = int(money_color_ratio < 0.007) + int(money_component_area_ratio < 0.0018)
+                                brain_bad = needs_brain and (brain_fail_count >= 2) and not brain_present_by_shape
+                                money_bad = needs_money and (money_fail_count >= 2) and not money_present_by_shape
+                                if brain_bad:
+                                    score -= 16.0
+                                    notes.append("brain_prop_missing_or_wrong")
+                                if money_bad:
+                                    score -= 14.0
+                                    notes.append("money_prop_missing_or_wrong")
+                    if seated_full_body_required:
+                        # Reject skull-only closeups for seated/table prompts.
+                        if subject_height_ratio < 0.55 or subject_width_ratio < 0.24:
+                            score -= 18.0
+                            notes.append("full_skeleton_not_visible")
+                except Exception:
+                    pass
 
             score = max(0.0, min(100.0, score))
             return {
@@ -1135,6 +2400,21 @@ def _score_generated_image_quality(image_path: str, prompt: str = "", template: 
                     "contrast": round(contrast, 2),
                     "saturation": round(sat, 2),
                     "edge_strength": round(edge_strength, 2),
+                    "shell_ratio": round(shell_ratio, 3),
+                    "shell_to_bone_ratio": round(shell_to_bone_ratio, 3),
+                    "subject_height_ratio": round(subject_height_ratio, 3),
+                    "subject_width_ratio": round(subject_width_ratio, 3),
+                    "brain_color_ratio": round(brain_color_ratio, 4),
+                    "money_color_ratio": round(money_color_ratio, 4),
+                    "brain_component_area_ratio": round(brain_component_area_ratio, 4),
+                    "money_component_area_ratio": round(money_component_area_ratio, 4),
+                    "brain_edge_density": round(brain_edge_density, 4),
+                    "brain_round_area_ratio": round(brain_round_area_ratio, 4),
+                    "money_rect_area_ratio": round(money_rect_area_ratio, 4),
+                    "prop_component_count": int(prop_component_count),
+                    "bone_r_mean": round(bone_r_mean, 2),
+                    "bone_g_mean": round(bone_g_mean, 2),
+                    "bone_b_mean": round(bone_b_mean, 2),
                 },
                 "notes": notes,
             }
@@ -1142,7 +2422,77 @@ def _score_generated_image_quality(image_path: str, prompt: str = "", template: 
         return {"score": 0.0, "ok": False, "reason": f"scoring_error:{e}"}
 
 
+def _image_quality_min_score(template: str = "", lock_mode: str = "strict", has_reference: bool = False) -> float:
+    base = float(IMAGE_QUALITY_MIN_SCORE)
+    t = str(template or "").strip().lower()
+    if t == "skeleton":
+        floor = max(64.0, base * 0.96)
+        if str(lock_mode or "").strip().lower() == "strict":
+            floor = max(floor, 69.0 if has_reference else 66.0)
+        return floor
+    if t == "story":
+        return max(base, 64.0)
+    return base
+
+
+def _image_quality_gate(
+    qa: dict,
+    template: str = "",
+    lock_mode: str = "strict",
+    has_reference: bool = False,
+    prompt: str = "",
+) -> tuple[bool, float]:
+    threshold = _image_quality_min_score(template=template, lock_mode=lock_mode, has_reference=has_reference)
+    score = float((qa or {}).get("score", 0.0) or 0.0)
+    ok = score >= threshold
+    t = str(template or "").strip().lower()
+    if t == "skeleton":
+        notes = set(str(n or "").strip().lower() for n in list((qa or {}).get("notes", []) or []))
+        hard_fail = {
+            "not_skeleton_structure",
+            "full_skeleton_not_visible",
+            "missing_translucent_shell",
+            "shell_not_visible_enough",
+        }
+        if notes.intersection(hard_fail):
+            ok = False
+    return ok, threshold
+
+
+def _skeleton_notes_are_severe(notes: list[str] | set[str] | tuple[str, ...]) -> bool:
+    raw = set(str(n or "").strip().lower() for n in list(notes or []))
+    return bool(
+        "not_skeleton_structure" in raw
+        or "full_skeleton_not_visible" in raw
+    )
+
+
+def _interactive_soft_accept_notes(notes: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+    cleaned: list[str] = []
+    for n in list(notes or []):
+        val = str(n or "").strip().lower()
+        if not val:
+            continue
+        if val in {
+            "brain_prop_missing_or_wrong",
+            "money_prop_missing_or_wrong",
+            "subject_too_small",
+            "full_skeleton_not_visible",
+        }:
+            # Interactive mode can return the best available frame; avoid hard mismatch messaging in UI.
+            continue
+        if val not in cleaned:
+            cleaned.append(val)
+    if "interactive_soft_accept" not in cleaned:
+        cleaned.append("interactive_soft_accept")
+    return cleaned
+
+
 def _resolve_reference_for_scene(session: dict, template: str, scene_index: int) -> str:
+    if str(template or "").strip().lower() == "skeleton" and _skeleton_default_identity_locked(session):
+        # For Skeleton AI, keep the built-in Jerry identity reference fixed across every
+        # generation unless the user explicitly uploads a different custom reference.
+        return _default_reference_for_template("skeleton")
     base_ref_public = str(session.get("reference_image_public_url", "") or "")
     base_ref_inline = str(session.get("reference_image_url", "") or "")
     base_ref = base_ref_public or base_ref_inline
@@ -1284,6 +2634,10 @@ def _persist_env_overrides(updates: dict[str, str]) -> None:
 
 _load_kpi_metrics()
 _load_topup_wallets()
+_load_paypal_orders()
+_load_paypal_subscriptions()
+_load_landing_notifications()
+_load_longform_sessions()
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -1301,20 +2655,181 @@ def _profile_plan_is_paid(plan: str) -> bool:
     return normalized in PLAN_LIMITS
 
 
-def _billing_active_for_user(user: Optional[dict]) -> bool:
-    """Resolve paid access with a resilient profile-plan fallback."""
+CHAT_STORY_ALLOWED_PLANS = {"starter", "creator", "pro"}
+
+
+def _paypal_subscription_lookup_keys(user_id: str = "", email: str = "") -> list[str]:
+    keys: list[str] = []
+    normalized_user_id = str(user_id or "").strip()
+    normalized_email = str(email or "").strip().lower()
+    if normalized_user_id:
+        keys.append(normalized_user_id)
+    if normalized_email and normalized_email not in keys:
+        keys.append(normalized_email)
+    return keys
+
+
+def _paypal_subscription_record_for_user(user: Optional[dict]) -> dict:
     if not user:
-        return False
-    email = str(user.get("email", "") or "").strip()
+        return {}
+    normalized_user_id = str((user or {}).get("id", "") or "").strip()
+    normalized_email = str((user or {}).get("email", "") or "").strip().lower()
+    for key in _paypal_subscription_lookup_keys(normalized_user_id, normalized_email):
+        record = _paypal_subscriptions.get(key)
+        if isinstance(record, dict):
+            return dict(record)
+    best_record: dict = {}
+    best_sort = -1.0
+    for record in list(_paypal_subscriptions.values()):
+        if not isinstance(record, dict):
+            continue
+        record_user_id = str(record.get("user_id", "") or "").strip()
+        record_email = str(record.get("email", "") or "").strip().lower()
+        if normalized_user_id and record_user_id == normalized_user_id:
+            pass
+        elif normalized_email and record_email == normalized_email:
+            pass
+        else:
+            continue
+        sort_value = max(
+            float(record.get("period_end_unix", 0) or 0),
+            float(record.get("updated_at", 0) or 0),
+            float(record.get("created_at", 0) or 0),
+        )
+        if sort_value >= best_sort:
+            best_record = dict(record)
+            best_sort = sort_value
+    return best_record
+
+
+def _paypal_subscription_snapshot_for_user(user: Optional[dict]) -> dict:
+    out = {
+        "known": False,
+        "provider": "",
+        "plan": "none",
+        "record_plan": "none",
+        "billing_active": False,
+        "next_renewal_unix": 0,
+        "next_renewal_source": "",
+        "billing_anchor_unix": 0,
+        "status": "",
+        "expired": False,
+    }
+    record = _paypal_subscription_record_for_user(user)
+    if not record:
+        return out
+    plan = str(record.get("plan", "none") or "none").strip().lower()
+    period_end_unix = int(record.get("period_end_unix", 0) or 0)
+    billing_anchor_unix = int(
+        record.get("period_start_unix", 0)
+        or record.get("captured_at", 0)
+        or record.get("created_at", 0)
+        or 0
+    )
+    status = str(record.get("status", "") or "").strip().lower()
+    now_unix = int(time.time())
+    active = (
+        plan in CHAT_STORY_ALLOWED_PLANS
+        and status in {"active", "captured"}
+        and period_end_unix > now_unix
+    )
+    out.update(
+        {
+            "known": True,
+            "provider": "paypal_manual",
+            "plan": plan if active else "none",
+            "record_plan": plan if plan in CHAT_STORY_ALLOWED_PLANS else "none",
+            "billing_active": active,
+            "next_renewal_unix": period_end_unix if active else 0,
+            "next_renewal_source": "paypal_manual" if active else "",
+            "billing_anchor_unix": billing_anchor_unix,
+            "status": status or ("expired" if period_end_unix > 0 and period_end_unix <= now_unix else ""),
+            "expired": bool(period_end_unix > 0 and period_end_unix <= now_unix and not active),
+        }
+    )
+    return out
+
+
+def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
+    out = {
+        "billing_active": False,
+        "plan": "none",
+        "source": "",
+        "next_renewal_unix": 0,
+        "next_renewal_source": "",
+        "billing_anchor_unix": 0,
+        "manual_record_present": False,
+    }
+    if not user:
+        return out
+    email = str((user or {}).get("email", "") or "").strip().lower()
     if email in ADMIN_EMAILS:
-        return True
-    if _stripe_has_active_subscription(email):
-        return True
-    stored_plan = str(user.get("plan", "none") or "none")
-    if _profile_plan_is_paid(stored_plan):
+        out.update(
+            {
+                "billing_active": True,
+                "plan": "pro",
+                "source": "admin",
+            }
+        )
+        return out
+    manual_snapshot = _paypal_subscription_snapshot_for_user(user)
+    out["manual_record_present"] = bool(manual_snapshot.get("known"))
+    if manual_snapshot.get("billing_active"):
+        out.update(
+            {
+                "billing_active": True,
+                "plan": str(manual_snapshot.get("plan", "none") or "none"),
+                "source": str(manual_snapshot.get("provider", "paypal_manual") or "paypal_manual"),
+                "next_renewal_unix": int(manual_snapshot.get("next_renewal_unix", 0) or 0),
+                "next_renewal_source": str(manual_snapshot.get("next_renewal_source", "") or ""),
+                "billing_anchor_unix": int(manual_snapshot.get("billing_anchor_unix", 0) or 0),
+            }
+        )
+        return out
+    stripe_diag = _stripe_subscription_snapshot(email) if email else {}
+    stripe_status = str(stripe_diag.get("status", "") or "").strip().lower()
+    stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing", "past_due"}
+    if stripe_ok:
+        stripe_plan = str(stripe_diag.get("plan", "") or "").strip().lower()
+        stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
+        effective_plan = stripe_plan if stripe_plan in PLAN_LIMITS else stored_plan if stored_plan in PLAN_LIMITS else "none"
+        out.update(
+            {
+                "billing_active": True,
+                "plan": effective_plan,
+                "source": "stripe",
+                "next_renewal_unix": int(stripe_diag.get("next_renewal_unix", 0) or 0),
+                "next_renewal_source": str(stripe_diag.get("next_renewal_source", "") or ""),
+                "billing_anchor_unix": int(stripe_diag.get("paid_at_unix", 0) or 0),
+            }
+        )
+        return out
+    stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
+    if _profile_plan_is_paid(stored_plan) and not bool(manual_snapshot.get("known")):
         log.warning("Stripe check failed/inactive; allowing paid access via profile plan for %s", email)
+        out.update(
+            {
+                "billing_active": True,
+                "plan": stored_plan,
+                "source": "profile_fallback",
+            }
+        )
+        return out
+    return out
+
+
+def _billing_active_for_user(user: Optional[dict]) -> bool:
+    """Resolve paid access across Stripe and manual PayPal monthly access."""
+    return bool((_paid_access_snapshot_for_user(user) or {}).get("billing_active"))
+
+
+def _chat_story_access_for_user(user: Optional[dict]) -> bool:
+    if _is_admin_user(user):
         return True
-    return False
+    if not _billing_active_for_user(user):
+        return False
+    normalized_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
+    return normalized_plan in CHAT_STORY_ALLOWED_PLANS
 
 
 def _ensure_template_allowed(template: str, user: Optional[dict]):
@@ -1357,6 +2872,10 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
 
         if not plan or plan == "free":
             plan = "none"
+
+        manual_snapshot = _paypal_subscription_snapshot_for_user({"id": user_id, "email": email, "plan": plan})
+        if manual_snapshot.get("billing_active"):
+            plan = str(manual_snapshot.get("plan", plan) or plan)
 
         return {"id": user_id, "email": email, "plan": plan}
     except jwt.exceptions.PyJWTError:
@@ -1416,29 +2935,24 @@ async def get_user_plan(user: dict) -> dict:
 # ─── xAI Grok Script Generation ───────────────────────────────────────────────
 
 TEMPLATE_SYSTEM_PROMPTS = {
-    "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where skeleton characters in detailed outfits deliver rapid-fire comparisons. The reference channel is CrypticScience.
+    "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where a canonical skeleton identity delivers rapid-fire comparisons. The reference channel is CrypticScience.
 
 CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Keep each visual_description SIMPLE but DETAILED, with a HARD MAX of 3 sentences:
-- Sentence 1: exact outfit + identity lock details first (full body outfit, colors, logos/brand family, accessories).
+- Sentence 1: exact skeleton identity lock details first (same skull proportions, same eyes, same bone finish, same clearly visible translucent body silhouette).
 - Sentence 2: pose + prop + camera framing.
 - Sentence 3: motion/action cues only (what moves and how).
 Never exceed 3 sentences. Prefer 2-3 concise sentences over long paragraphs.
 
 THE SKELETON CHARACTER RULES (STRICT):
-- Think of it as a REAL PERSON wearing a full outfit, but with a SKULL for a head and SKELETON HANDS. The body under the clothes is NOT visible -- clothes cover everything from neck to feet.
-- The skull is glossy ivory-white with detailed bone texture. Realistic human eyeballs in the sockets with colored iris and wet shine.
-- CLOTHING (CRITICAL -- THIS IS THE MOST IMPORTANT RULE): The skeleton MUST be wearing a COMPLETE outfit that COVERS THE ENTIRE BODY from neck to feet:
-  * If it's a pilot: full navy pilot uniform with epaulettes, tie, pants, shoes -- NO bare ribcage showing
-  * If it's a doctor: full white lab coat BUTTONED UP over scrubs, stethoscope, dress pants, shoes -- NO bare spine showing
-  * If it's a race driver (NASCAR/F1/etc): full racing suit zipped to the collar, gloves, boots -- NO bare bones showing
-  * ONLY the skull face and bony hands should be visible. The rest of the body is HIDDEN by opaque clothes.
-  * Clothes fit like on a real person with proper draping, wrinkles, and fabric weight.
-  * OUTFIT LOCK: For each character identity, keep one exact outfit design across all scenes (same base suit, same main colors, same sponsor/logo style language, same accessories). Do not drift outfit style scene-to-scene unless explicitly requested.
+- One canonical skeleton identity across all scenes: same skull geometry, same eye spacing/size, same bone proportions, same finish.
+- The skull and body are ivory-white anatomical bone. Realistic human-like eyeballs with visible iris and wet highlights are always present.
+- A clearly visible translucent soft-tissue silhouette around torso/limbs is required in every scene.
+- Default to NO clothing, uniforms, armor, helmets, masks, or costumes on the skeleton body unless the user's topic/script explicitly requests a specific outfit for that scene.
 - ONE skeleton per scene unless it's a VS/comparison shot (max 2)
 - Always FULL BODY visible from head to toe, centered in frame
 - EVERY scene the skeleton must be DOING something with ultra-smooth human-like natural motion -- fluid arm gestures, natural head turns, realistic weight and momentum. Zach D Films quality movement. NEVER stiff, robotic, or jerky motion.
 
-BACKGROUND: Solid clean teal/mint green (#5AC8B8) studio backdrop. Smooth gradient lighting. No environments, rooms, or outdoor scenes.
+BACKGROUND: Scene-appropriate background for the topic (studio, city, arena, historical, etc.) is allowed, but skeleton identity must stay unchanged.
 
 CAMERA AND LIGHTING:
 - Professional studio photography lighting: key light from upper-left, fill light from right, rim light on edges
@@ -1456,13 +2970,13 @@ MOTION DIRECTION (for animation -- include this in visual_description):
 - Describe what MOVES: "skeleton gestures with right hand," "money bills drift slowly downward," "skeleton turns head to face camera"
 - Describe the ENERGY: "confident stance, skeleton leans forward assertively" or "skeleton shrugs with palms up"
 - ALL motion must be ultra-smooth and human-like with natural weight and follow-through, like a real person moving. Fluid transitions, no snapping between poses.
-- Clothing must sway and fold realistically with the body movement showing proper fabric physics
+- Clearly visible translucent silhouette and bone articulation should move naturally with body motion (no fabric physics)
 - Eyes must track and shift naturally with subtle micro-movements
 - Keep motion SUBTLE and realistic -- no wild jumping or dancing. Zach D Films quality smooth cinematic motion.
 
 STRUCTURE (10 scenes, 45-50 seconds):
 1. HOOK: "[A] vs [B] -- who makes more?" plus an immediate numeric stake in the first line (example: "$250M vs $500M over 10 years"). Skeleton looking directly at camera, arms crossed
-2. SETUP: Context scene. Both skeletons in their outfits facing each other
+2. SETUP: Context scene. Both skeletons with the same canonical anatomy style facing each other
 3-5. THING A DEEP DIVE: Three scenes with specific salary facts, skeleton A in action poses with props
 6-8. THING B DEEP DIVE: Three scenes with specific salary facts, skeleton B in action poses with props
 9. FACE-OFF: Both skeletons side by side, winner is slightly larger/taller, dramatic split lighting
@@ -1488,7 +3002,7 @@ Output valid JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "1-2 sentence narration with real facts",
-      "visual_description": "A skeleton character (skull head, skeleton hands, but body fully covered by clothes) wearing [EXACT DETAILED OUTFIT that covers the ENTIRE body: e.g. a navy blue pilot uniform with gold epaulettes, navy tie, pressed navy pants, black dress shoes -- no bare bones visible except skull and hands]. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed] and holding [SPECIFIC PROP: e.g. a pilot helmet in right hand]. [Camera angle: e.g. medium shot, slight low angle]. Background: solid clean teal-blue studio. [Motion cue: e.g. skeleton gestures with right hand].",
+      "visual_description": "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette, same identity as previous scenes, full body visible. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed] and holding [SPECIFIC PROP: e.g. trophy, steering wheel, clipboard]. [Camera angle: e.g. medium shot, slight low angle]. Background matches topic context (not fixed) while character identity remains unchanged. [Motion cue: e.g. skeleton gestures with right hand].",
       "text_overlay": "ONE_WORD"
     }
   ],
@@ -1496,7 +3010,7 @@ Output valid JSON:
   "tags": ["tag1", "tag2"]
 }
 
-Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with the outfit description FIRST (e.g. "A skeleton character wearing a full navy surgeon's scrubs with stethoscope..."). The outfit is the MOST IMPORTANT part -- it defines WHO the skeleton represents. Keep outfit consistency locked for each character across all 10 scenes unless explicitly instructed otherwise. Never write a bare skeleton without clothing. Each visual_description must be 1-3 sentences (hard max 3), covering outfit lock, pose/props/camera, and motion.""",
+Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with canonical skeleton identity lock FIRST (same skull/eyes/bone proportions/clearly visible translucent silhouette). Keep identity consistency locked across all 10 scenes. Only introduce clothing/costume details when the user's topic/script explicitly asks for them. Each visual_description must be 1-3 sentences (hard max 3), covering identity lock, pose/props/camera, and motion.""",
 
     "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
 
@@ -2045,6 +3559,9 @@ Output valid JSON with title, scenes (scene_num, duration_sec, narration, visual
 
 async def generate_script(template: str, topic: str, extra_instructions: str = "") -> dict:
     system_prompt = TEMPLATE_SYSTEM_PROMPTS.get(template, TEMPLATE_SYSTEM_PROMPTS["random"])
+    topic_text = str(topic or "").strip()
+    script_to_short_mode = "SCRIPT-TO-SHORT MODE" in str(extra_instructions or "")
+    comparison_topic = bool(re.search(r"\b(vs\.?|versus)\b", topic_text, re.IGNORECASE))
     if template in {"skeleton", "story", "motivation"}:
         system_prompt += (
             "\n\nSUBJECT DIVERSITY + TEMPLATE COVERAGE RULES (MUST FOLLOW): "
@@ -2052,36 +3569,197 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             "Distribute scene focus across script-relevant subjects, locations, and groups while preserving continuity where the script repeats entities. "
             "Keep outputs practical and balanced for Skeleton AI, AI Stories, and Motivation templates."
         )
+    system_prompt += (
+        "\n\nTOPIC LOCK (MUST FOLLOW): Stay tightly anchored to the user's exact topic or source script. "
+        "Do not drift into adjacent themes, generic filler, or unrelated examples. "
+        "Every scene must clearly visualize a concrete beat from the provided topic/script so the resulting prompts are directly renderable."
+    )
+    if comparison_topic:
+        system_prompt += (
+            "\n\nCOMPARISON LOCK (MUST FOLLOW): The topic is a direct comparison. "
+            "Keep both sides of the comparison visible throughout the structure, escalate the contrast scene by scene, "
+            "and make the payoff or tradeoff explicit instead of drifting into a generic monologue."
+        )
+    if template == "skeleton":
+        system_prompt += (
+            "\n\nSKELETON OUTFIT RULE: The canonical skeleton identity stays the same across scenes. "
+            "Default to no clothing, but if the user's topic or source script explicitly requests a specific outfit or uniform for a scene, preserve that outfit while keeping the same skull, eyes, bone finish, and translucent body silhouette."
+        )
     if extra_instructions:
         system_prompt += extra_instructions
     story_script_to_short_mode = (
         template == "story"
-        and "SCRIPT-TO-SHORT MODE (PRE-ALPHA)" in str(extra_instructions or "")
+        and "SCRIPT-TO-SHORT MODE" in str(extra_instructions or "")
     )
-    async def _call_script_gen(prompt_text: str, temp: float = 0.8) -> dict:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {XAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "grok-3-mini-fast",
-                    "messages": [
-                        {"role": "system", "content": prompt_text},
-                        {"role": "user", "content": f"Create a viral short about: {topic}"},
-                    ],
-                    "temperature": temp,
-                },
+
+    def _split_script_fragment_once(fragment: str) -> tuple[str, str] | None:
+        source = re.sub(r"\s+", " ", str(fragment or "").strip())
+        if len(source) < 70:
+            return None
+        split_patterns = [
+            r"(?<=[,;:])\s+",
+            r"\s+(?=(?:when|while|because|after|before|then|but|so)\b)",
+            r"\s+-\s+",
+        ]
+        for pattern in split_patterns:
+            parts = [part.strip(" ,;:-") for part in re.split(pattern, source, maxsplit=1) if part.strip(" ,;:-")]
+            if len(parts) == 2 and len(parts[0]) >= 24 and len(parts[1]) >= 24:
+                return (parts[0], parts[1])
+        midpoint = len(source) // 2
+        split_at = source.rfind(" ", 0, midpoint + 1)
+        if split_at <= 20:
+            split_at = source.find(" ", midpoint)
+        if split_at <= 20 or split_at >= len(source) - 20:
+            return None
+        left = source[:split_at].strip(" ,;:-")
+        right = source[split_at + 1 :].strip(" ,;:-")
+        if len(left) < 24 or len(right) < 24:
+            return None
+        return (left, right)
+
+    def _split_script_into_fallback_beats(source_text: str, min_count: int, max_count: int) -> list[str]:
+        text = re.sub(r"\s+", " ", str(source_text or "").strip())
+        if not text:
+            return []
+        base_parts = [part.strip(" ,;:-") for part in re.split(r"(?<=[.!?])\s+", text) if part.strip(" ,;:-")]
+        beats = list(base_parts or [text])
+        while len(beats) < min_count:
+            longest_index = max(range(len(beats)), key=lambda idx: len(beats[idx]))
+            split_pair = _split_script_fragment_once(beats[longest_index])
+            if not split_pair:
+                break
+            beats[longest_index : longest_index + 1] = [split_pair[0], split_pair[1]]
+        if len(beats) <= max_count:
+            return beats
+        target_count = max_count
+        chunk_size = max(1, (len(beats) + target_count - 1) // target_count)
+        grouped: list[str] = []
+        for start in range(0, len(beats), chunk_size):
+            grouped.append(" ".join(beats[start : start + chunk_size]).strip())
+        return grouped[:max_count]
+
+    def _fallback_scene_overlay(fragment: str) -> str:
+        stop_words = {
+            "the", "and", "that", "with", "from", "your", "this", "into", "when",
+            "then", "they", "them", "their", "have", "will", "over", "because",
+            "under", "after", "before", "while", "where", "about", "called",
+        }
+        words = re.findall(r"[A-Za-z0-9']+", str(fragment or ""))
+        picks: list[str] = []
+        for raw in words:
+            token = raw.strip().lower()
+            if len(token) < 3 or token in stop_words:
+                continue
+            picks.append(token.upper())
+            if len(picks) >= 2:
+                break
+        return " ".join(picks) if picks else "NEXT BEAT"
+
+    def _fallback_visual_description(scene_text: str) -> str:
+        beat = re.sub(r"\s+", " ", str(scene_text or "").strip().rstrip("."))
+        if template == "story":
+            if _story_scene_prefers_explainer_visuals(beat):
+                return (
+                    f"Cinematic photoreal explainer scene illustrating: {beat}. "
+                    "Readable anatomy or mechanism detail, vertical short-video framing, dramatic but clear lighting, and concept-first visual storytelling."
+                )
+            return (
+                f"Cinematic photoreal scene illustrating: {beat}. "
+                "Dark readable grading, grounded realism, vertical short-video framing, and strong emotional clarity."
             )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start == -1 or end == 0:
-                raise ValueError("No JSON found in Grok response")
-            return json.loads(content[start:end])
+        if template == "motivation":
+            return (
+                f"Cinematic motivational scene illustrating: {beat}. "
+                "Premium ad-style lighting, realistic human subject, vertical short-video framing, and decisive body language."
+            )
+        return (
+            f"Photoreal cinematic scene illustrating: {beat}. "
+            "Vertical short-video framing, clean subject focus, and premium lighting."
+        )
+
+    def _build_script_to_short_fallback() -> dict:
+        if template == "story":
+            min_scenes, max_scenes = 10, 12
+        elif template == "motivation":
+            min_scenes, max_scenes = 8, 10
+        else:
+            min_scenes, max_scenes = 8, 10
+        beats = _split_script_into_fallback_beats(topic_text, min_count=min_scenes, max_count=max_scenes)
+        if not beats:
+            beats = [topic_text or "Short-form script beat"]
+        scene_count = max(1, len(beats))
+        base_duration = 55.0 if template == "story" else 48.0
+        scene_duration = max(3.5, min(6.5, round(base_duration / scene_count, 2)))
+        scenes: list[dict] = []
+        for idx, beat in enumerate(beats, start=1):
+            narration = beat.strip()
+            scenes.append(
+                {
+                    "scene_num": idx,
+                    "duration_sec": scene_duration,
+                    "narration": narration,
+                    "visual_description": _fallback_visual_description(narration),
+                    "text_overlay": _fallback_scene_overlay(narration),
+                }
+            )
+        title_words = re.findall(r"[A-Za-z0-9']+", topic_text)[:8]
+        title = " ".join(title_words).strip() or ("AI Story" if template == "story" else "Motivation Short")
+        return {
+            "title": title,
+            "scenes": scenes,
+            "description": title,
+            "tags": [template, "shorts", "nyptid"],
+        }
+
+    async def _call_script_gen(prompt_text: str, temp: float = 0.8) -> dict:
+        user_prompt = (
+            "Adapt this exact source script into an editable short-form scene plan. "
+            "Do not invent a new premise, do not skip late beats, and do not replace the core story.\n\n"
+            f"SOURCE SCRIPT:\n{topic_text}"
+            if script_to_short_mode
+            else "Create a viral short that stays tightly anchored to this exact topic.\n\n"
+                 f"TOPIC:\n{topic_text}"
+        )
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        "https://api.x.ai/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {XAI_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "grok-3-mini-fast",
+                            "messages": [
+                                {"role": "system", "content": prompt_text},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "temperature": temp,
+                        },
+                    )
+                if resp.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                    wait_seconds = (attempt + 1) * 2
+                    log.warning(
+                        f"Script generation upstream returned {resp.status_code}; retrying in {wait_seconds}s "
+                        f"(attempt {attempt + 1}/3, template={template}, script_to_short={script_to_short_mode})"
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                if start == -1 or end == 0:
+                    raise ValueError("No JSON found in Grok response")
+                return json.loads(content[start:end])
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(attempt + 1)
+                    continue
+        raise last_error if last_error is not None else RuntimeError("Script generation failed")
 
     def _score_story_script_quality(data: dict) -> tuple[int, list[str]]:
         scenes = data.get("scenes", [])
@@ -2126,7 +3804,16 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             notes.append("weak_camera_motion_language")
         return (max(0, min(score, 100)), notes)
 
-    first = await _call_script_gen(system_prompt, temp=0.8)
+    try:
+        first = await _call_script_gen(system_prompt, temp=0.8)
+    except Exception as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if script_to_short_mode and status_code in {429, 500, 502, 503, 504}:
+            log.warning(
+                f"Script-to-short upstream unavailable ({status_code}); using local scene-plan fallback for template={template}"
+            )
+            return _build_script_to_short_fallback()
+        raise
     if template != "story":
         return first
 
@@ -2171,9 +3858,207 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
 # ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
 
 
+async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-3-mini-fast",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON found in xAI response")
+    return json.loads(content[start:end])
+
+
+def _normalize_longform_scenes_for_render(scenes: list) -> list:
+    normalized = []
+    for idx, raw_scene in enumerate(scenes or []):
+        scene = dict(raw_scene or {})
+        narration = str(scene.get("narration", "") or "").strip()
+        visual_description = str(scene.get("visual_description", "") or "").strip()
+        if not narration:
+            narration = f"Chapter beat {idx + 1}."
+        if not visual_description:
+            visual_description = narration or f"Scene {idx + 1} visual"
+        # Long-form chapter previews and final render are hard-locked to 5s/scene.
+        duration = 5.0
+        scene["narration"] = narration
+        scene["visual_description"] = visual_description
+        scene["scene_num"] = int(scene.get("scene_num", idx + 1) or (idx + 1))
+        scene["duration_sec"] = round(duration, 2)
+        normalized.append(scene)
+    return normalized
+
+
+def _scale_scene_durations_to_target(scenes: list, target_sec: float) -> list:
+    # Hard lock pacing to 5s per scene for deterministic sync.
+    scaled = []
+    for idx, raw in enumerate(scenes or []):
+        scene = dict(raw or {})
+        scene["scene_num"] = int(scene.get("scene_num", idx + 1) or (idx + 1))
+        scene["duration_sec"] = 5.0
+        scaled.append(scene)
+    return scaled
+
+
+def _longform_chapter_retention_score(chapter: dict) -> int:
+    scenes = chapter.get("scenes", []) if isinstance(chapter, dict) else []
+    if not isinstance(scenes, list) or not scenes:
+        return 0
+    score = 100
+    if len(scenes) < 6:
+        score -= 18
+    if len(scenes) > 16:
+        score -= 8
+    narrations = " ".join(str((s or {}).get("narration", "") or "") for s in scenes).lower()
+    visuals = " ".join(str((s or {}).get("visual_description", "") or "") for s in scenes).lower()
+    if not re.search(r"\b(hook|twist|reveal|stakes|conflict|turn)\b", narrations):
+        score -= 20
+    if not re.search(r"\b(camera|motion|moves|tracking|dolly|pan)\b", visuals):
+        score -= 14
+    if not re.search(r"\b(why|because|therefore|but|however)\b", narrations):
+        score -= 10
+    return max(0, min(100, score))
+
+
+def _remove_nyptid_mentions(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    kept = [s.strip() for s in sentences if s.strip() and "nyptid studio" not in s.lower()]
+    if kept:
+        return " ".join(kept).strip()
+    return ""
+
+
+def _longform_apply_brand_slot(chapter: dict, brand_slot: str, input_title: str) -> dict:
+    out = dict(chapter or {})
+    scenes = list(out.get("scenes") or [])
+    if not scenes:
+        out["scenes"] = scenes
+        return out
+    normalized_slot = str(brand_slot or "").strip().lower()
+
+    # Strip any accidental early NYPTID mentions from generated copy.
+    for i, raw_scene in enumerate(scenes):
+        scene = dict(raw_scene or {})
+        cleaned = _remove_nyptid_mentions(str(scene.get("narration", "") or ""))
+        scene["narration"] = cleaned if cleaned else f"Chapter beat {i + 1}."
+        scenes[i] = scene
+
+    if normalized_slot != "outro":
+        out["scenes"] = scenes
+        return out
+
+    brand_line = "Built with NYPTID Studio. Create your next full video in NYPTID Studio."
+    target = dict(scenes[-1] or {})
+    existing = str(target.get("narration", "") or "").strip()
+    if "nyptid studio" not in existing.lower():
+        target["narration"] = (existing + " " + brand_line).strip() if existing else brand_line
+    scenes[-1] = target
+    out["scenes"] = scenes
+    return out
+
+
+async def _generate_longform_chapter(
+    template: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    chapter_index: int,
+    chapter_count: int,
+    chapter_target_sec: float,
+    language: str = "en",
+    brand_slot: str = "",
+    fix_note: str = "",
+) -> dict:
+    tone = _longform_detect_tone(template, topic, input_title, input_description)
+    lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
+    scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    system_prompt = (
+        "You are writing one chapter of a long-form YouTube video package for NYPTID Studio. "
+        "Output strict JSON with keys: chapter_title, chapter_summary, scenes, chapter_description. "
+        f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay. "
+        "narration must be concise and engaging; visual_description must be render-ready and specific. "
+        "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat."
+    )
+    if template == "skeleton":
+        system_prompt += (
+            " Skeleton identity is hard-locked: same skull geometry, same eye size/spacing, same bone finish, "
+            "same translucent body silhouette in every scene; no clothing/costume changes."
+        )
+    if tone == "horror":
+        system_prompt += (
+            " Tone lock: psychological horror / eerie mystery. Every visual_description must explicitly include unsettling setting cues "
+            "(e.g., fog, abandoned roads, low-key lighting, looming shadows, empty interiors, or night exteriors). "
+            "Narration and visual_description must describe the same beat. Avoid generic upbeat intro language and avoid graphic gore."
+        )
+    if language != "en":
+        system_prompt += f" Narration must be in {lang_name}. visual_description must remain in English."
+
+    user_prompt = (
+        f"Topic: {topic}\n"
+        f"Video title constraint: {input_title}\n"
+        f"Video description constraint: {input_description}\n"
+        f"Chapter {chapter_index + 1} of {chapter_count}, target chapter duration: {int(chapter_target_sec)} seconds.\n"
+        "The chapter must push the story forward with strong pacing and retention.\n"
+    )
+    if str(brand_slot or "").strip().lower() == "outro":
+        user_prompt += (
+            "Include one natural NYPTID Studio mention only in the final scene narration of this chapter. "
+            "Do not place branding in earlier scenes.\n"
+        )
+    else:
+        user_prompt += "Do not mention NYPTID Studio in this chapter.\n"
+    if tone == "horror":
+        user_prompt += (
+            "Mood directive: this chapter should feel like a chilling horror mystery with escalating dread, "
+            "uneasy silence, and ominous visual beats.\n"
+        )
+    if fix_note:
+        user_prompt += f"Fix note from owner review: {fix_note}\n"
+
+    chapter_data = await _xai_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=90)
+    raw_scenes = chapter_data.get("scenes", [])
+    scenes = _normalize_longform_scenes_for_render(raw_scenes)
+    scenes = _scale_scene_durations_to_target(scenes, chapter_target_sec)
+    scenes = _longform_enforce_tone_on_scenes(scenes, tone=tone, template=template)
+    chapter_total_sec = round(float(len(scenes) * 5.0), 2)
+    out = {
+        "index": int(chapter_index),
+        "title": str(chapter_data.get("chapter_title", f"Chapter {chapter_index + 1}") or f"Chapter {chapter_index + 1}"),
+        "summary": str(chapter_data.get("chapter_summary", "") or ""),
+        "tone": str(tone),
+        "target_sec": chapter_total_sec,
+        "scenes": scenes,
+        "status": "pending_review",
+        "retry_count": 0,
+        "brand_slot": brand_slot,
+        "viral_score": 0,
+    }
+    out = _longform_apply_brand_slot(out, brand_slot, input_title=input_title)
+    out["viral_score"] = _longform_chapter_retention_score(out)
+    return out
+
+
 async def generate_voiceover(text: str, output_path: str, template: str = "random",
-                             override_voice_id: str = "", language: str = "en",
-                             override_speed: float | None = None) -> dict:
+                              override_voice_id: str = "", language: str = "en",
+                              override_speed: float | None = None) -> dict:
     """Generate voiceover with word-level timestamps for caption sync.
     Returns {"audio_path": str, "word_timings": list[dict]} where each timing is
     {"word": str, "start": float, "end": float}.
@@ -2366,7 +4251,7 @@ def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
 
 
 def _normalize_cinematic_boost(value) -> bool:
-    return _bool_from_any(value, False)
+    return _bool_from_any(value, True)
 
 
 def _normalize_voice_speed(value, default: float = 1.0) -> float:
@@ -2580,15 +4465,17 @@ def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str
         res_h = video_height
         is_landscape = res_w > res_h
     else:
-        res_w = 1080 if resolution == "1080p" else 720
-        res_h = 1920 if resolution == "1080p" else 1280
-        is_landscape = False
+        cfg = RESOLUTION_CONFIGS.get(resolution, RESOLUTION_CONFIGS.get("720p", {}))
+        res_w = int(cfg.get("output_width", 720) or 720)
+        res_h = int(cfg.get("output_height", 1280) or 1280)
+        is_landscape = res_w > res_h
 
     skeleton_pro_style = (template == "skeleton" and not is_landscape)
+    is_1080 = str(resolution).startswith("1080p")
 
     if skeleton_pro_style:
-        font_size = 84 if resolution == "1080p" else 60
-        outline = 3 if resolution == "1080p" else 2
+        font_size = 84 if is_1080 else 60
+        outline = 3 if is_1080 else 2
         shadow = 2
         margin_v = int(res_h * 0.14)
         spacing = 0
@@ -2723,51 +4610,1106 @@ async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: f
         return ""
 
 
+_active_comfyui_url = str(COMFYUI_URL or "").strip().rstrip("/")
 
 
-async def _run_comfyui_workflow(workflow: dict, output_node: str, output_type: str = "images") -> dict:
+def _comfyui_candidate_urls() -> list[str]:
+    candidates: list[str] = []
+    for raw in (
+        _active_comfyui_url,
+        COMFYUI_URL,
+        "http://127.0.0.1:8188",
+    ):
+        base = str(raw or "").strip().rstrip("/")
+        if not base:
+            continue
+        if base not in candidates:
+            candidates.append(base)
+    return candidates
+
+
+_COMFYUI_OBJECT_INFO_TTL_SEC = 120
+_comfyui_object_info_cache: dict[str, dict] = {}
+_image_provider_fail_until: dict[str, float] = {}
+_image_provider_fail_counts: dict[str, int] = {}
+_image_provider_success_counts: dict[str, int] = {}
+_image_provider_fallback_total = 0
+_image_provider_fallback_pairs: dict[str, int] = {}
+_HIDREAM_AVAILABILITY_TTL_SEC = max(5, int(os.getenv("HIDREAM_AVAILABILITY_TTL_SEC", "30") or 30))
+_HIDREAM_STALE_OK_SEC = max(_HIDREAM_AVAILABILITY_TTL_SEC, int(os.getenv("HIDREAM_STALE_OK_SEC", "180") or 180))
+_WAN22_T2I_AVAILABILITY_TTL_SEC = max(5, int(os.getenv("WAN22_T2I_AVAILABILITY_TTL_SEC", "30") or 30))
+_WAN22_T2I_STALE_OK_SEC = max(_WAN22_T2I_AVAILABILITY_TTL_SEC, int(os.getenv("WAN22_T2I_STALE_OK_SEC", "180") or 180))
+# Interactive defaults are tuned for local-only lanes (WAN/SDXL) when paid xAI fallback is disabled.
+HIDREAM_INTERACTIVE_ATTEMPTS = max(1, int(os.getenv("HIDREAM_INTERACTIVE_ATTEMPTS", "1") or 1))
+HIDREAM_INTERACTIVE_MAX_WAIT_SEC = max(30, int(os.getenv("HIDREAM_INTERACTIVE_MAX_WAIT_SEC", "75") or 75))
+HIDREAM_REFERENCE_STRICT_DENOISE = max(0.18, min(0.75, float(os.getenv("HIDREAM_REFERENCE_STRICT_DENOISE", "0.44") or 0.44)))
+HIDREAM_REFERENCE_INSPIRED_DENOISE = max(0.22, min(0.82, float(os.getenv("HIDREAM_REFERENCE_INSPIRED_DENOISE", "0.58") or 0.58)))
+HIDREAM_REFERENCE_UPSCALE_METHOD = str(os.getenv("HIDREAM_REFERENCE_UPSCALE_METHOD", "lanczos") or "lanczos").strip() or "lanczos"
+WAN22_INTERACTIVE_ATTEMPTS = max(1, int(os.getenv("WAN22_INTERACTIVE_ATTEMPTS", "6") or 6))
+WAN22_INTERACTIVE_MAX_WAIT_SEC = max(18, int(os.getenv("WAN22_INTERACTIVE_MAX_WAIT_SEC", "35") or 35))
+WAN22_INTERACTIVE_LATENT_ATTEMPTS = max(1, int(os.getenv("WAN22_INTERACTIVE_LATENT_ATTEMPTS", "4") or 4))
+WAN22_INTERACTIVE_LATENT_MAX_WAIT_SEC = max(30, int(os.getenv("WAN22_INTERACTIVE_LATENT_MAX_WAIT_SEC", "70") or 70))
+WAN22_PREFER_FP16 = str(os.getenv("WAN22_PREFER_FP16", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+_hidream_availability_cache: dict[str, float | bool | str] = {
+    "checked_ts": 0.0,
+    "ready": False,
+    "last_ok_ts": 0.0,
+    "last_error": "",
+    "model_name": "",
+    "clip_l": "",
+    "clip_g": "",
+    "t5_name": "",
+    "llama_name": "",
+    "vae_name": "",
+}
+_hidream_edit_availability_cache: dict[str, float | bool | str] = {
+    "checked_ts": 0.0,
+    "ready": False,
+    "last_ok_ts": 0.0,
+    "last_error": "",
+    "model_name": "",
+    "clip_l": "",
+    "clip_g": "",
+    "t5_name": "",
+    "llama_name": "",
+    "vae_name": "",
+}
+_wan22_t2i_availability_cache: dict[str, float | bool | str] = {
+    "checked_ts": 0.0,
+    "ready": False,
+    "last_ok_ts": 0.0,
+    "last_error": "",
+    "mode": "",
+    "ckpt_name": "",
+    "unet_name": "",
+}
+
+
+def _extract_comfy_choice_list(raw_value) -> list[str]:
+    if isinstance(raw_value, (tuple, list)):
+        if len(raw_value) >= 2 and isinstance(raw_value[1], dict):
+            options = raw_value[1].get("options")
+            if isinstance(options, (tuple, list)):
+                return [str(v) for v in options if str(v or "").strip()]
+        if raw_value and isinstance(raw_value[0], (tuple, list)):
+            return [str(v) for v in raw_value[0] if str(v or "").strip()]
+        return [str(v) for v in raw_value if str(v or "").strip()]
+    return []
+
+
+def _extract_comfy_node_choices(node_info: dict, input_name: str) -> list[str]:
+    if not isinstance(node_info, dict):
+        return []
+    input_spec = node_info.get("input", {})
+    if not isinstance(input_spec, dict):
+        return []
+    for section in ("required", "optional"):
+        section_spec = input_spec.get(section, {})
+        if not isinstance(section_spec, dict):
+            continue
+        if input_name in section_spec:
+            return _extract_comfy_choice_list(section_spec.get(input_name))
+    return []
+
+
+async def _get_comfyui_object_info(node_name: str | None = None) -> dict:
+    global _active_comfyui_url
+    cache_suffix = (node_name or "__all__").strip()
+    now = time.time()
+    last_error = None
+    for base_url in _comfyui_candidate_urls():
+        cache_key = f"{base_url}|{cache_suffix}"
+        cached = _comfyui_object_info_cache.get(cache_key)
+        if cached and (now - float(cached.get("ts", 0))) <= _COMFYUI_OBJECT_INFO_TTL_SEC:
+            return dict(cached.get("data", {}))
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                url = f"{base_url}/object_info"
+                if node_name:
+                    url = f"{url}/{node_name}"
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict):
+                    _comfyui_object_info_cache[cache_key] = {"ts": now, "data": data}
+                    _active_comfyui_url = base_url
+                    return data
+        except Exception as e:
+            last_error = e
+            continue
+    if last_error:
+        log.warning(f"ComfyUI object_info lookup failed for '{cache_suffix}': {last_error}")
+    return {}
+
+
+async def _get_comfyui_node_choices(node_name: str, input_name: str) -> list[str]:
+    info = await _get_comfyui_object_info(node_name)
+    node_info = info.get(node_name) if isinstance(info, dict) else None
+    if not isinstance(node_info, dict) and isinstance(info, dict):
+        # Some ComfyUI builds return node payload directly for /object_info/<node>.
+        node_info = info
+    return _extract_comfy_node_choices(node_info or {}, input_name)
+
+
+def _resolve_comfy_choice(preferred: str, choices: list[str], label: str) -> str:
+    want = str(preferred or "").strip()
+    if not choices:
+        return want
+    if want in choices:
+        return want
+    want_name = Path(want).name.lower()
+    for candidate in choices:
+        cand = str(candidate or "").strip()
+        if cand and Path(cand).name.lower() == want_name:
+            if cand != want:
+                log.warning(f"{label} '{want}' missing; using matching available '{cand}'")
+            return cand
+    selected = str(choices[0] or "").strip() or want
+    if selected != want:
+        log.warning(f"{label} '{want}' missing; using available '{selected}'")
+    return selected
+
+
+def _normalize_image_provider_key(provider: str) -> str:
+    key = str(provider or "").strip().lower()
+    if key in {"hidream", "hidream-i1", "hidream_i1"}:
+        return "hidream"
+    if key in {"wan", "wan22", "wan2.2"}:
+        return "wan22"
+    if key in {"sdxl", "comfy", "comfyui", "local"}:
+        return "sdxl"
+    if key in {"xai", "grok", "fal"}:
+        return "xai"
+    return key
+
+
+def _provider_cooldown_remaining(provider: str) -> float:
+    key = _normalize_image_provider_key(provider)
+    until = float(_image_provider_fail_until.get(key, 0.0) or 0.0)
+    return max(0.0, until - time.time())
+
+
+def _provider_is_available(provider: str) -> bool:
+    return _provider_cooldown_remaining(provider) <= 0.0
+
+
+def _provider_mark_success(provider: str) -> None:
+    key = _normalize_image_provider_key(provider)
+    _image_provider_success_counts[key] = int(_image_provider_success_counts.get(key, 0) or 0) + 1
+    _image_provider_fail_until.pop(key, None)
+
+
+def _provider_mark_failure(provider: str, reason: str = "", cooldown_sec: int | None = None) -> None:
+    key = _normalize_image_provider_key(provider)
+    _image_provider_fail_counts[key] = int(_image_provider_fail_counts.get(key, 0) or 0) + 1
+    cool = int(IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC if cooldown_sec is None else cooldown_sec)
+    if cool > 0:
+        _image_provider_fail_until[key] = time.time() + cool
+    if reason:
+        log.warning(f"Image provider '{key}' failure: {reason}")
+
+
+def _record_provider_fallback(from_provider: str, to_provider: str = "next") -> None:
+    global _image_provider_fallback_total
+    src = _normalize_image_provider_key(from_provider)
+    dst = _normalize_image_provider_key(to_provider)
+    pair = f"{src}->{dst}"
+    _image_provider_fallback_total += 1
+    _image_provider_fallback_pairs[pair] = int(_image_provider_fallback_pairs.get(pair, 0) or 0) + 1
+
+
+def _provider_cooldown_snapshot() -> dict:
+    out: dict[str, int] = {}
+    for key in sorted(set(list(_image_provider_fail_until.keys()) + list(_image_provider_fail_counts.keys()))):
+        rem = int(round(_provider_cooldown_remaining(key)))
+        if rem > 0:
+            out[key] = rem
+    return out
+
+
+def _ensure_generated_image_valid(path: str) -> None:
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(f"generated image missing: {path}")
+    size = int(p.stat().st_size or 0)
+    if size < int(IMAGE_LOCAL_MIN_FILE_BYTES):
+        raise RuntimeError(
+            f"generated image too small ({size} bytes < {IMAGE_LOCAL_MIN_FILE_BYTES}): {p.name}"
+        )
+
+
+def _apply_skeleton_glass_shell(rgb: "Image.Image", aggressive: bool = False) -> "Image.Image":
+    if Image is None or ImageFilter is None or np is None:
+        return rgb
+    try:
+        arr = np.asarray(rgb).astype(np.float32)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return rgb
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
+        maxc = np.maximum(np.maximum(r, g), b)
+        minc = np.minimum(np.minimum(r, g), b)
+        sat = np.zeros_like(maxc, dtype=np.float32)
+        np.divide((maxc - minc), np.maximum(maxc, 1e-6), out=sat, where=maxc > 1e-6)
+        sat *= 255.0
+        lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        lum_floor = 138.0 if aggressive else 150.0
+        sat_ceiling = 112.0 if aggressive else 96.0
+        neutral = (
+            (np.abs(r - g) < 42.0)
+            & (np.abs(g - b) < 42.0)
+            & (np.abs(r - b) < 54.0)
+        )
+        bone_mask = ((lum > lum_floor) & (sat < sat_ceiling) & neutral).astype(np.uint8) * 255
+        bone_count = int((bone_mask > 0).sum())
+        if bone_count <= 2500:
+            return rgb
+        bone_img = Image.fromarray(bone_mask, mode="L")
+        outer_soft = bone_img.filter(ImageFilter.MaxFilter(size=53 if aggressive else 43)).filter(
+            ImageFilter.GaussianBlur(radius=8.5 if aggressive else 6.2)
+        )
+        core_soft = bone_img.filter(ImageFilter.MaxFilter(size=19 if aggressive else 13)).filter(
+            ImageFilter.GaussianBlur(radius=4.4 if aggressive else 3.2)
+        )
+        outer_arr = np.asarray(outer_soft).astype(np.float32) / 255.0
+        core_arr = np.asarray(core_soft).astype(np.float32) / 255.0
+        ring_arr = np.clip(outer_arr - core_arr, 0.0, 1.0)
+        core_fill = np.clip(core_arr * 0.60, 0.0, 1.0)
+        not_bone = (bone_mask < 64).astype(np.float32)
+        ring_gain = 0.24 if aggressive else 0.20
+        fill_gain = 0.16 if aggressive else 0.12
+        alpha = np.clip((ring_arr * ring_gain + core_fill * fill_gain) * not_bone, 0.0, 0.30 if aggressive else 0.25)[:, :, None]
+        shell_color = np.zeros_like(arr)
+        shell_color[:, :, 0] = 154.0
+        shell_color[:, :, 1] = 188.0
+        shell_color[:, :, 2] = 222.0
+        arr = arr * (1.0 - alpha) + shell_color * alpha
+        edge = outer_soft.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=1.2))
+        edge_arr = np.asarray(edge).astype(np.float32) / 255.0
+        edge_alpha = np.clip(edge_arr * 0.10, 0.0, 0.13 if aggressive else 0.11)[:, :, None]
+        highlight = np.full_like(arr, 238.0)
+        arr = arr * (1.0 - edge_alpha) + highlight * edge_alpha
+
+        h = arr.shape[0]
+        y = np.arange(h, dtype=np.int32)[:, None]
+        yy = np.repeat(y, arr.shape[1], axis=1)
+        max_eye = np.maximum(np.maximum(arr[:, :, 0], arr[:, :, 1]), arr[:, :, 2])
+        min_eye = np.minimum(np.minimum(arr[:, :, 0], arr[:, :, 1]), arr[:, :, 2])
+        chroma_eye = max_eye - min_eye
+        blue_bias = (arr[:, :, 2] > (arr[:, :, 0] + 10.0)) & (arr[:, :, 2] > (arr[:, :, 1] + 6.0))
+        yellow_bias = (arr[:, :, 0] > (arr[:, :, 1] + 8.0)) & (arr[:, :, 1] > (arr[:, :, 2] + 8.0))
+        eye_glow = (
+            (yy < int(h * 0.55))
+            & (max_eye > 188.0)
+            & ((chroma_eye > 22.0) | blue_bias | yellow_bias)
+        )
+        if eye_glow.any():
+            eye_alpha = eye_glow.astype(np.float32)[:, :, None] * (0.74 if aggressive else 0.66)
+            eye_target = np.zeros_like(arr)
+            eye_target[:, :, 0] = 188.0
+            eye_target[:, :, 1] = 194.0
+            eye_target[:, :, 2] = 206.0
+            arr = arr * (1.0 - eye_alpha) + eye_target * eye_alpha
+        return Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8), mode="RGB")
+    except Exception:
+        return rgb
+
+
+def _prompt_prefers_dark_reference_scene(prompt: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(dark|night|noir|shadow|shadowy|moody|dim|dramatic|cinematic|low[- ]key|storm|rain|thunder|black background)\b",
+            str(prompt or ""),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _prepare_skeleton_reference_conditioning_image(source_path: str, prompt: str = "") -> str:
+    if Image is None:
+        return source_path
+    ref_dir = TEMP_DIR / "runtime_reference_inputs"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    out_path = ref_dir / f"hidream_ref_subject_{int(time.time() * 1000)}_{random.randint(1000, 9999)}.png"
+    try:
+        with Image.open(source_path) as im:
+            base_rgba = im.convert("RGBA")
+            base_rgb = base_rgba.convert("RGB")
+            if np is None:
+                out = _apply_skeleton_glass_shell(base_rgb, aggressive=True)
+                out.save(out_path, format="PNG", optimize=True)
+                return str(out_path)
+
+            arr = np.asarray(base_rgb).astype(np.float32)
+            h, w = arr.shape[:2]
+            if h < 16 or w < 16:
+                out = _apply_skeleton_glass_shell(base_rgb, aggressive=True)
+                out.save(out_path, format="PNG", optimize=True)
+                return str(out_path)
+
+            border_px = max(4, min(18, max(1, min(h, w) // 18)))
+            border = np.concatenate(
+                [
+                    arr[:border_px, :, :].reshape(-1, 3),
+                    arr[-border_px:, :, :].reshape(-1, 3),
+                    arr[:, :border_px, :].reshape(-1, 3),
+                    arr[:, -border_px:, :].reshape(-1, 3),
+                ],
+                axis=0,
+            )
+            bg = np.median(border, axis=0)
+            bg_lum = float(bg.mean())
+            maxc = np.max(arr, axis=2)
+            minc = np.min(arr, axis=2)
+            lum = 0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]
+            sat = maxc - minc
+            diff = np.max(np.abs(arr - bg[None, None, :]), axis=2)
+
+            base_mask = (
+                (diff > 20.0)
+                | (lum > (bg_lum + 9.0))
+                | ((sat < 65.0) & (lum > (bg_lum + 6.0)))
+            )
+            neutral_bone = (
+                (lum > max(114.0, bg_lum + 5.0))
+                & (sat < 68.0)
+                & (np.abs(arr[:, :, 0] - arr[:, :, 1]) < 42.0)
+                & (np.abs(arr[:, :, 1] - arr[:, :, 2]) < 42.0)
+            )
+            mask = (base_mask | neutral_bone).astype(np.uint8) * 255
+
+            if cv2 is not None:
+                close_kernel = np.ones((9, 9), dtype=np.uint8)
+                dilate_kernel = np.ones((31, 31), dtype=np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+                bone_u8 = (neutral_bone.astype(np.uint8) * 255)
+                mask = np.maximum(mask, cv2.dilate(bone_u8, dilate_kernel, iterations=1))
+                components, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+                if components > 1:
+                    areas = stats[1:, cv2.CC_STAT_AREA]
+                    largest_idx = int(1 + np.argmax(areas))
+                    mask = (labels == largest_idx).astype(np.uint8) * 255
+            else:
+                mask_img = Image.fromarray(mask, mode="L")
+                mask_img = mask_img.filter(ImageFilter.MaxFilter(size=17)).filter(ImageFilter.GaussianBlur(radius=2.2))
+                bone_img = Image.fromarray((neutral_bone.astype(np.uint8) * 255), mode="L")
+                bone_img = bone_img.filter(ImageFilter.MaxFilter(size=31))
+                mask = np.maximum(np.asarray(mask_img), np.asarray(bone_img))
+
+            subject_pixels = np.argwhere(mask > 20)
+            if subject_pixels.size == 0:
+                out = _apply_skeleton_glass_shell(base_rgb, aggressive=True)
+                out.save(out_path, format="PNG", optimize=True)
+                return str(out_path)
+
+            y0, x0 = subject_pixels.min(axis=0)
+            y1, x1 = subject_pixels.max(axis=0)
+            span_h = max(1, int(y1 - y0 + 1))
+            span_w = max(1, int(x1 - x0 + 1))
+            pad_x = max(24, int(span_w * 0.18))
+            pad_y = max(24, int(span_h * 0.16))
+            x0 = max(0, int(x0 - pad_x))
+            y0 = max(0, int(y0 - pad_y))
+            x1 = min(w, int(x1 + pad_x))
+            y1 = min(h, int(y1 + pad_y))
+
+            crop_rgba = base_rgba.crop((x0, y0, x1, y1))
+            crop_mask = Image.fromarray(mask, mode="L").crop((x0, y0, x1, y1))
+            if ImageFilter is not None:
+                crop_mask = crop_mask.filter(ImageFilter.MaxFilter(size=13)).filter(ImageFilter.GaussianBlur(radius=3.4))
+            crop_rgba.putalpha(crop_mask)
+
+            canvas_w, canvas_h = base_rgba.size
+            dark_prompt = _prompt_prefers_dark_reference_scene(prompt)
+            bg_rgb = (12, 16, 24) if dark_prompt else (28, 36, 46)
+            canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg_rgb, 255))
+
+            subject_w, subject_h = crop_rgba.size
+            target_w = int(canvas_w * 0.54)
+            target_h = int(canvas_h * 0.72)
+            scale = min(
+                float(target_w) / float(max(1, subject_w)),
+                float(target_h) / float(max(1, subject_h)),
+            )
+            resized = crop_rgba.resize(
+                (
+                    max(1, int(round(subject_w * scale))),
+                    max(1, int(round(subject_h * scale))),
+                ),
+                Image.LANCZOS,
+            )
+            paste_x = max(0, (canvas_w - resized.width) // 2)
+            paste_y = max(0, int(canvas_h * 0.10))
+            if paste_y + resized.height > canvas_h:
+                paste_y = max(0, (canvas_h - resized.height) // 2)
+            canvas.alpha_composite(resized, (paste_x, paste_y))
+
+            conditioned = _apply_skeleton_glass_shell(canvas.convert("RGB"), aggressive=True)
+            conditioned.save(out_path, format="PNG", optimize=True)
+            return str(out_path)
+    except Exception as e:
+        log.warning(f"Skeleton reference conditioning preprocess skipped ({Path(source_path).name}): {e}")
+        try:
+            with Image.open(source_path) as im:
+                out = _apply_skeleton_glass_shell(im.convert("RGB"), aggressive=True)
+                out.save(out_path, format="PNG", optimize=True)
+                return str(out_path)
+        except Exception:
+            return source_path
+
+
+def _postprocess_generated_image(path: str, provider: str = "", template: str = "", aggressive: bool = False) -> None:
+    """Light local post-process to recover detail from WAN latent stills."""
+    if Image is None or ImageFilter is None:
+        return
+    provider_key = _normalize_image_provider_key(provider)
+    p = Path(path)
+    if not p.exists() or p.stat().st_size <= 0:
+        return
+    t = str(template or "").strip().lower()
+    # Keep this narrow: only touch templates where WAN latent softness hurts UX.
+    if t not in {"skeleton", "story", "motivation"}:
+        return
+    try:
+        with Image.open(p) as im:
+            rgb = im.convert("RGB")
+            out = rgb
+            if provider_key == "wan22":
+                sharpen_percent = 260 if (t == "skeleton" and aggressive) else (240 if t == "skeleton" else 190)
+                out = rgb.filter(ImageFilter.UnsharpMask(radius=2, percent=sharpen_percent, threshold=2))
+                if ImageEnhance is not None:
+                    if t == "skeleton":
+                        out = ImageEnhance.Contrast(out).enhance(1.10 if aggressive else 1.08)
+                    else:
+                        out = ImageEnhance.Contrast(out).enhance(1.05)
+            elif t == "skeleton" and ImageEnhance is not None:
+                out = ImageEnhance.Contrast(out).enhance(1.03 if aggressive else 1.02)
+
+            if t == "skeleton":
+                out = _apply_skeleton_glass_shell(out, aggressive=aggressive or provider_key in {"hidream", "hidream-i1", "hidream_i1"})
+
+            out.save(str(p), format="PNG", optimize=True)
+    except Exception as e:
+        log.warning(f"Generated image post-process skipped ({p.name}): {e}")
+
+
+async def _resolve_wan22_t2i_runtime_assets() -> dict:
+    ckpt_choices = await _get_comfyui_node_choices("CheckpointLoaderSimple", "ckpt_name")
+    clip_choices = await _get_comfyui_node_choices("CLIPLoader", "clip_name")
+    vae_choices = await _get_comfyui_node_choices("VAELoader", "vae_name")
+    unet_choices = await _get_comfyui_node_choices("UNETLoader", "unet_name")
+
+    ckpt_name = WAN22_T2I_CHECKPOINT
+    if ckpt_choices and ckpt_name not in ckpt_choices:
+        wan_exact = [c for c in ckpt_choices if "wan" in c.lower() and "t2i" in c.lower()]
+        wan_generic = [
+            c for c in ckpt_choices
+            if "wan" in c.lower() and "t2v" not in c.lower() and "i2v" not in c.lower()
+        ]
+        selected = (wan_exact or wan_generic or [None])[0]
+        if selected:
+            log.warning(f"Configured WAN22 checkpoint missing; auto-using available checkpoint '{selected}'")
+            ckpt_name = selected
+
+    clip_name = WAN22_T2I_CLIP
+    if clip_choices and clip_name not in clip_choices:
+        clip_candidates = [c for c in clip_choices if "umt5" in c.lower() or "wan" in c.lower()]
+        selected_clip = (clip_candidates or [None])[0]
+        if selected_clip:
+            log.warning(f"Configured WAN22 clip missing; auto-using '{selected_clip}'")
+            clip_name = selected_clip
+    if clip_choices and clip_name not in clip_choices:
+        clip_name = str((clip_choices or [""])[0] or "")
+
+    vae_name = WAN22_T2I_VAE
+    if vae_choices and vae_name not in vae_choices:
+        # Prefer the WAN 2.1 VAE when available because Comfy's Wan 2.2 low/high T2V lanes decode correctly with it.
+        preferred = next((c for c in vae_choices if "wan_2.1_vae" in str(c).lower()), None)
+        selected_vae = preferred or (next((c for c in vae_choices if "wan" in str(c).lower()), None))
+        if selected_vae:
+            log.warning(f"Configured WAN22 VAE missing; auto-using '{selected_vae}'")
+            vae_name = str(selected_vae)
+    if vae_choices and vae_name not in vae_choices:
+        vae_name = str((vae_choices or [""])[0] or "")
+
+    # Prefer real WAN2.2 TI2V UNET path when available.
+    ti2v_unet_name = ""
+    if unet_choices:
+        preferred_unets: list[str] = []
+        for candidate in [WAN22_T2I_UNET, WAN22_T2I_UNET_FP8]:
+            c = str(candidate or "").strip()
+            if c:
+                preferred_unets.append(c)
+        for preferred_unet in preferred_unets:
+            if preferred_unet in unet_choices:
+                ti2v_unet_name = preferred_unet
+                break
+        if not ti2v_unet_name:
+            ti2v_pool = [str(u) for u in unet_choices if "wan2.2" in str(u).lower() and "ti2v" in str(u).lower()]
+            fp16_ti2v = next((u for u in ti2v_pool if "fp16" in u.lower()), "")
+            fp8_ti2v = next((u for u in ti2v_pool if "fp8" in u.lower()), "")
+            ti2v_unet_name = fp16_ti2v or fp8_ti2v or (ti2v_pool[0] if ti2v_pool else "")
+
+    # Latent-mode fallback should prefer WAN 2.1 VAE if present.
+    # WAN 2.2 VAE can fail decode for 16-channel latents in some ComfyUI Wan graph paths.
+    latent_vae_name = str(vae_name or "")
+    if vae_choices:
+        wan21_vae = next(
+            (
+                str(c)
+                for c in vae_choices
+                if "wan_2.1_vae" in str(c).lower()
+                or "wan2.1_vae" in str(c).lower()
+                or ("wan" in str(c).lower() and "2.1" in str(c).lower())
+            ),
+            "",
+        )
+        non22_wan_vae = next(
+            (str(c) for c in vae_choices if "wan" in str(c).lower() and "2.2" not in str(c).lower()),
+            "",
+        )
+        any_wan_vae = next((str(c) for c in vae_choices if "wan" in str(c).lower()), "")
+        latent_vae_name = wan21_vae or non22_wan_vae or any_wan_vae or latent_vae_name
+
+    low_unet_name = ""
+    high_unet_name = ""
+
+    def _pick_wan22_t2v_noise(kind: str) -> str:
+        pool = [
+            str(u) for u in unet_choices
+            if "wan2.2" in str(u).lower() and "t2v" in str(u).lower() and f"{kind}_noise" in str(u).lower()
+        ]
+        if not pool:
+            return ""
+        # Prefer fp16 for best quality; fallback to fp8-scaled when fp16 is unavailable.
+        fp16 = next((u for u in pool if "fp16" in u.lower()), "")
+        if fp16:
+            return fp16
+        fp8 = next((u for u in pool if "fp8" in u.lower()), "")
+        return fp8 or pool[0]
+
+    low_unet_name = _pick_wan22_t2v_noise("low")
+    high_unet_name = _pick_wan22_t2v_noise("high")
+    if not low_unet_name:
+        low_unet_name = next((str(u) for u in unet_choices if "wan" in str(u).lower() and "t2v" in str(u).lower() and "low" in str(u).lower()), "")
+    if not high_unet_name:
+        high_unet_name = next((str(u) for u in unet_choices if "wan" in str(u).lower() and "t2v" in str(u).lower() and "high" in str(u).lower()), "")
+
+    if ti2v_unet_name and clip_name and vae_name:
+        return {
+            "mode": "ti2v_unet",
+            "ckpt_name": "",
+            "clip_name": clip_name,
+            "vae_name": vae_name,
+            "unet_name": ti2v_unet_name,
+            "low_unet_name": "",
+            "high_unet_name": "",
+        }
+
+    if ckpt_choices and ckpt_name in ckpt_choices:
+        return {
+            "mode": "checkpoint",
+            "ckpt_name": ckpt_name,
+            "clip_name": clip_name,
+            "vae_name": vae_name,
+            "unet_name": "",
+            "low_unet_name": "",
+            "high_unet_name": "",
+        }
+
+    # Fallback local mode: synthesize a still via Wan 2.2 low/high T2V lanes.
+    if clip_name and vae_name and low_unet_name and high_unet_name:
+        if latent_vae_name and latent_vae_name != vae_name:
+            log.warning(
+                f"WAN latent fallback forcing compatible VAE '{latent_vae_name}' "
+                f"(configured/default was '{vae_name}')"
+            )
+        log.warning(
+            "WAN22 checkpoint missing; using local WAN latent fallback "
+            f"(low='{low_unet_name}', high='{high_unet_name}', vae='{latent_vae_name or vae_name}')"
+        )
+        return {
+            "mode": "latent",
+            "ckpt_name": "",
+            "clip_name": clip_name,
+            "vae_name": latent_vae_name or vae_name,
+            "unet_name": "",
+            "low_unet_name": low_unet_name,
+            "high_unet_name": high_unet_name,
+        }
+
+    if ckpt_choices and ckpt_name not in ckpt_choices:
+        wan_unets = [u for u in unet_choices if "wan" in str(u).lower()]
+        ckpt_preview = ", ".join(ckpt_choices[:6]) or "none"
+        unet_preview = ", ".join(wan_unets[:6]) or "none"
+        raise RuntimeError(
+            "WAN22 text-to-image checkpoint not found in ComfyUI checkpoints. "
+            f"Configured='{WAN22_T2I_CHECKPOINT}'. Available checkpoints: {ckpt_preview}. "
+            f"Detected WAN UNETs (video models): {unet_preview}. "
+            f"Expected WAN UNET names include '{WAN22_T2I_UNET}' or '{WAN22_T2I_UNET_FP8}' "
+            f"(preferred TI2V) or '{WAN22_T2V_HIGH}'/'{WAN22_T2V_LOW}' (fallback split T2V)."
+        )
+
+    raise RuntimeError("WAN22 text-to-image assets unavailable on ComfyUI")
+
+
+async def _resolve_hidream_runtime_assets_for_model(
+    model_hint: str,
+    *,
+    enabled: bool,
+    label: str,
+    weight_dtype: str = "default",
+) -> dict:
+    if not enabled:
+        raise RuntimeError(f"{label} is disabled by configuration")
+    unet_choices = await _get_comfyui_node_choices("UNETLoader", "unet_name")
+    clip_choices = await _get_comfyui_node_choices("QuadrupleCLIPLoader", "clip_name1")
+    vae_choices = await _get_comfyui_node_choices("VAELoader", "vae_name")
+
+    model_name = _resolve_comfy_choice(model_hint, unet_choices, label)
+    clip_l_name = _resolve_comfy_choice(HIDREAM_CLIP_L, clip_choices, "HiDream clip_l")
+    clip_g_name = _resolve_comfy_choice(HIDREAM_CLIP_G, clip_choices, "HiDream clip_g")
+    t5_name = _resolve_comfy_choice(HIDREAM_T5, clip_choices, "HiDream t5xxl")
+    llama_name = _resolve_comfy_choice(HIDREAM_LLAMA, clip_choices, "HiDream llama")
+    vae_name = _resolve_comfy_choice(HIDREAM_VAE, vae_choices, "HiDream VAE")
+
+    missing: list[str] = []
+    if not model_name:
+        missing.append("diffusion model")
+    if not clip_l_name:
+        missing.append("clip_l")
+    if not clip_g_name:
+        missing.append("clip_g")
+    if not t5_name:
+        missing.append("t5xxl")
+    if not llama_name:
+        missing.append("llama")
+    if not vae_name:
+        missing.append("vae")
+    if missing:
+        raise RuntimeError(f"{label} assets unavailable on ComfyUI: missing " + ", ".join(missing))
+
+    return {
+        "model_name": model_name,
+        "weight_dtype": str(weight_dtype or "default"),
+        "clip_l_name": clip_l_name,
+        "clip_g_name": clip_g_name,
+        "t5_name": t5_name,
+        "llama_name": llama_name,
+        "vae_name": vae_name,
+    }
+
+
+async def _resolve_hidream_runtime_assets() -> dict:
+    return await _resolve_hidream_runtime_assets_for_model(
+        HIDREAM_MODEL,
+        enabled=HIDREAM_ENABLED,
+        label="HiDream I1 diffusion model",
+        weight_dtype="default",
+    )
+
+
+async def _resolve_hidream_edit_runtime_assets() -> dict:
+    return await _resolve_hidream_runtime_assets_for_model(
+        HIDREAM_EDIT_MODEL,
+        enabled=HIDREAM_EDIT_ENABLED,
+        label="HiDream E1.1 diffusion model",
+        weight_dtype=HIDREAM_EDIT_WEIGHT_DTYPE,
+    )
+
+
+def _normalize_template_adapter_route(route: dict | None) -> dict:
+    raw = route if isinstance(route, dict) else {}
+    loras: list[dict] = []
+    for item in list(raw.get("loras", []) or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            continue
+        try:
+            strength_model = float(item.get("strength_model", 0.7) or 0.7)
+        except Exception:
+            strength_model = 0.7
+        try:
+            strength_clip = float(item.get("strength_clip", strength_model) or strength_model)
+        except Exception:
+            strength_clip = strength_model
+        loras.append(
+            {
+                "name": name,
+                "strength_model": max(-2.0, min(2.0, strength_model)),
+                "strength_clip": max(-2.0, min(2.0, strength_clip)),
+            }
+        )
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "checkpoint": str(raw.get("checkpoint", "sd_xl_base_1.0.safetensors") or "sd_xl_base_1.0.safetensors").strip(),
+        "prepend_trigger": str(raw.get("prepend_trigger", "") or "").strip(),
+        "prompt_suffix": str(raw.get("prompt_suffix", "") or "").strip(),
+        "negative_suffix": str(raw.get("negative_suffix", "") or "").strip(),
+        "apply_prompt_globally": bool(raw.get("apply_prompt_globally", True)),
+        "loras": loras,
+    }
+
+
+def _resolve_template_adapter_route(template: str, override_route: dict | None = None) -> dict:
+    base = _normalize_template_adapter_route((TEMPLATE_ADAPTER_ROUTING or {}).get("default", {}))
+    if not TEMPLATE_ADAPTER_ROUTING_ENABLED:
+        base["enabled"] = False
+        base["loras"] = []
+    key = str(template or "").strip().lower()
+    raw = None
+    if isinstance(override_route, dict):
+        raw = override_route
+    elif key:
+        raw = (TEMPLATE_ADAPTER_ROUTING or {}).get(key)
+    if isinstance(raw, dict):
+        overlay = _normalize_template_adapter_route(raw)
+        merged = dict(base)
+        raw_keys = set(str(k) for k in raw.keys())
+        for field in ("enabled", "checkpoint", "prepend_trigger", "prompt_suffix", "negative_suffix", "apply_prompt_globally"):
+            if field not in raw_keys:
+                continue
+            value = overlay.get(field)
+            if isinstance(value, bool) or isinstance(value, str):
+                merged[field] = value
+        if "loras" in raw_keys:
+            merged["loras"] = list(overlay.get("loras", []))
+        return merged
+    return base
+
+
+def _apply_template_prompt_route(
+    template: str,
+    prompt: str,
+    negative_prompt: str = "",
+    provider: str = "",
+    adapter_route: dict | None = None,
+) -> tuple[str, str, dict]:
+    route = _resolve_template_adapter_route(template, override_route=adapter_route)
+    out_prompt = str(prompt or "").strip()
+    out_negative = str(negative_prompt or "").strip()
+    if not route.get("enabled", True):
+        return out_prompt, out_negative, route
+    if route.get("apply_prompt_globally", True):
+        trigger = str(route.get("prepend_trigger", "") or "").strip()
+        if trigger and trigger.lower() not in out_prompt.lower():
+            out_prompt = f"{trigger}, {out_prompt}" if out_prompt else trigger
+        suffix = str(route.get("prompt_suffix", "") or "").strip()
+        if suffix:
+            out_prompt = f"{out_prompt} {suffix}".strip()
+        neg_suffix = str(route.get("negative_suffix", "") or "").strip()
+        if neg_suffix:
+            out_negative = f"{out_negative}, {neg_suffix}".strip(", ").strip()
+    return out_prompt, out_negative, route
+
+
+async def _resolve_checkpoint_name(preferred: str, fallback: str = "sd_xl_base_1.0.safetensors") -> str:
+    want = str(preferred or "").strip() or fallback
+    choices = await _get_comfyui_node_choices("CheckpointLoaderSimple", "ckpt_name")
+    if not choices:
+        return want
+    if want in choices:
+        return want
+    if fallback in choices:
+        log.warning(f"Checkpoint '{want}' missing; using fallback '{fallback}'")
+        return fallback
+    selected = str(choices[0] or "").strip() or want
+    log.warning(f"Checkpoint '{want}' missing; using available '{selected}'")
+    return selected
+
+
+async def _resolve_available_loras(loras: list[dict]) -> list[dict]:
+    if not loras:
+        return []
+    names = await _get_comfyui_node_choices("LoraLoader", "lora_name")
+    if not names:
+        if loras:
+            log.warning("ComfyUI LoraLoader has no available LoRA entries; skipping configured adapter LoRAs")
+        return []
+    available = set(str(n or "").strip() for n in names)
+    resolved: list[dict] = []
+    for lora in loras:
+        name = str((lora or {}).get("name", "") or "").strip()
+        if not name:
+            continue
+        if name in available:
+            resolved.append(lora)
+        else:
+            log.warning(f"Adapter LoRA not found on ComfyUI, skipping: {name}")
+    return resolved
+
+
+def _build_sdxl_workflow_with_loras(
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    checkpoint_name: str,
+    loras: list[dict],
+    upscale: bool = False,
+    upscale_factor: float = 1.0,
+    filename_prefix: str = "nyptid_gen",
+) -> tuple[dict, str]:
+    workflow: dict[str, dict] = {}
+    node_i = 1
+
+    def _nid() -> str:
+        nonlocal node_i
+        out = str(node_i)
+        node_i += 1
+        return out
+
+    ckpt_id = _nid()
+    workflow[ckpt_id] = {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {"ckpt_name": checkpoint_name},
+    }
+
+    model_ref = [ckpt_id, 0]
+    clip_ref = [ckpt_id, 1]
+    vae_ref = [ckpt_id, 2]
+
+    for lora in list(loras or []):
+        lora_id = _nid()
+        workflow[lora_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": str(lora.get("name", "") or "").strip(),
+                "strength_model": float(lora.get("strength_model", 0.7) or 0.7),
+                "strength_clip": float(lora.get("strength_clip", 0.7) or 0.7),
+                "model": model_ref,
+                "clip": clip_ref,
+            },
+        }
+        model_ref = [lora_id, 0]
+        clip_ref = [lora_id, 1]
+
+    latent_id = _nid()
+    workflow[latent_id] = {
+        "class_type": "EmptyLatentImage",
+        "inputs": {"width": int(width), "height": int(height), "batch_size": 1},
+    }
+
+    pos_id = _nid()
+    workflow[pos_id] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": prompt, "clip": clip_ref},
+    }
+
+    neg_id = _nid()
+    workflow[neg_id] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": negative_prompt, "clip": clip_ref},
+    }
+
+    sampler_id = _nid()
+    workflow[sampler_id] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "seed": random.randint(0, 2**32),
+            "steps": 30,
+            "cfg": 7.5,
+            "sampler_name": "dpmpp_2m",
+            "scheduler": "karras",
+            "denoise": 1.0,
+            "model": model_ref,
+            "positive": [pos_id, 0],
+            "negative": [neg_id, 0],
+            "latent_image": [latent_id, 0],
+        },
+    }
+
+    decode_samples_ref = [sampler_id, 0]
+    if upscale:
+        upscale_id = _nid()
+        workflow[upscale_id] = {
+            "class_type": "LatentUpscaleBy",
+            "inputs": {
+                "samples": [sampler_id, 0],
+                "scale_by": float(upscale_factor),
+                "upscale_method": "bislerp",
+            },
+        }
+        sampler2_id = _nid()
+        workflow[sampler2_id] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**32),
+                "steps": 15,
+                "cfg": 7.0,
+                "sampler_name": "dpmpp_2m",
+                "scheduler": "karras",
+                "denoise": 0.4,
+                "model": model_ref,
+                "positive": [pos_id, 0],
+                "negative": [neg_id, 0],
+                "latent_image": [upscale_id, 0],
+            },
+        }
+        decode_samples_ref = [sampler2_id, 0]
+
+    vae_decode_id = _nid()
+    workflow[vae_decode_id] = {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": decode_samples_ref, "vae": vae_ref},
+    }
+
+    save_id = _nid()
+    workflow[save_id] = {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": filename_prefix, "images": [vae_decode_id, 0]},
+    }
+    return workflow, save_id
+
+
+
+
+async def _run_comfyui_workflow(
+    workflow: dict,
+    output_node: str,
+    output_type: str = "images",
+    max_wait_sec: int = 900,
+    poll_interval_sec: float = 2.0,
+) -> dict:
     """Submit a workflow to ComfyUI and wait for the specified output node to complete."""
-    async with httpx.AsyncClient(timeout=900) as client:
-        resp = await client.post(f"{COMFYUI_URL}/prompt", json={"prompt": workflow})
-        if resp.status_code != 200:
-            log.error(f"ComfyUI rejected workflow ({resp.status_code}): {resp.text[:1000]}")
-        resp.raise_for_status()
-        prompt_id = resp.json()["prompt_id"]
+    global _active_comfyui_url
+    last_error = None
+    for base_url in _comfyui_candidate_urls():
+        try:
+            client_timeout = max(20, min(900, int(max_wait_sec) + 30))
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
+                resp = await client.post(f"{base_url}/prompt", json={"prompt": workflow})
+                if resp.status_code != 200:
+                    if resp.status_code in (404, 502, 503, 504):
+                        raise RuntimeError(f"ComfyUI endpoint unavailable ({resp.status_code}) at {base_url}")
+                    log.error(f"ComfyUI rejected workflow ({resp.status_code}) on {base_url}: {resp.text[:1000]}")
+                    resp.raise_for_status()
+                prompt_id = resp.json()["prompt_id"]
+                _active_comfyui_url = base_url
 
-        for poll_i in range(450):
-            await asyncio.sleep(2)
-            history = await client.get(f"{COMFYUI_URL}/history/{prompt_id}")
-            hist_data = history.json()
-            if prompt_id in hist_data:
-                outputs = hist_data[prompt_id].get("outputs", {})
-                if output_node in outputs:
-                    node_out = outputs[output_node]
-                    if node_out.get(output_type):
-                        return node_out
-                    for key in ("videos", "gifs", "images"):
-                        if node_out.get(key):
-                            return node_out
-                status = hist_data[prompt_id].get("status", {})
-                if status.get("status_str") == "error":
-                    raise RuntimeError(f"ComfyUI workflow error: {status.get('messages', 'unknown')}")
-                if poll_i % 30 == 0 and poll_i > 0:
-                    log.info(f"ComfyUI workflow still running... {poll_i * 2}s elapsed")
-        raise TimeoutError("ComfyUI workflow timed out after 900s")
+                wait_s = max(6, int(max_wait_sec))
+                poll_s = max(0.5, float(poll_interval_sec))
+                max_polls = max(1, int(wait_s / poll_s))
+                for poll_i in range(max_polls):
+                    await asyncio.sleep(poll_s)
+                    history = await client.get(f"{base_url}/history/{prompt_id}")
+                    history.raise_for_status()
+                    hist_data = history.json()
+                    if prompt_id in hist_data:
+                        outputs = hist_data[prompt_id].get("outputs", {})
+                        if output_node in outputs:
+                            node_out = outputs[output_node]
+                            if node_out.get(output_type):
+                                return node_out
+                            for key in ("videos", "gifs", "images"):
+                                if node_out.get(key):
+                                    return node_out
+                        status = hist_data[prompt_id].get("status", {})
+                        if status.get("status_str") == "error":
+                            raise RuntimeError(f"ComfyUI workflow error: {status.get('messages', 'unknown')}")
+                        elapsed_s = int((poll_i + 1) * poll_s)
+                        if poll_i > 0 and elapsed_s % 30 == 0:
+                            log.info(f"ComfyUI workflow still running on {base_url}... {elapsed_s}s elapsed")
+                raise TimeoutError(f"ComfyUI workflow timed out after {wait_s}s on {base_url}")
+        except Exception as e:
+            if isinstance(e, TimeoutError):
+                last_error = e
+                log.warning(f"ComfyUI endpoint timed out ({base_url}): {e}")
+                break
+            last_error = e
+            log.warning(f"ComfyUI endpoint failed ({base_url}): {e}")
+            continue
+    raise RuntimeError(f"All ComfyUI endpoints failed: {last_error}")
 
 
 async def _download_comfyui_file(file_info: dict, output_path: str):
     """Download a generated file (image or video frame) from ComfyUI."""
-    async with httpx.AsyncClient(timeout=120) as client:
-        filename = file_info["filename"]
-        subfolder = file_info.get("subfolder", "")
-        ftype = file_info.get("type", "output")
-        url = f"{COMFYUI_URL}/view?filename={filename}&subfolder={subfolder}&type={ftype}"
-        resp = await client.get(url)
-        with open(output_path, "wb") as f:
-            f.write(resp.content)
+    global _active_comfyui_url
+    filename = file_info["filename"]
+    subfolder = file_info.get("subfolder", "")
+    ftype = file_info.get("type", "output")
+    last_error = None
+    for base_url in _comfyui_candidate_urls():
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                url = f"{base_url}/view?filename={filename}&subfolder={subfolder}&type={ftype}"
+                resp = await client.get(url)
+                resp.raise_for_status()
+                with open(output_path, "wb") as f:
+                    f.write(resp.content)
+                _active_comfyui_url = base_url
+                return
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(f"ComfyUI file download failed for {filename}: {last_error}")
 
 
 GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
+FAL_FLUX_SCHNELL_URL = "https://fal.run/fal-ai/flux/schnell"
+
+
+def _normalize_fal_image_backup_model(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    if key in {"grok", "grok_imagine", "grok-imagine", "xai", "xai_grok"}:
+        return "grok_imagine"
+    if key in {"flux", "flux_schnell", "flux-schnell", "flux1_schnell", "flux.1-schnell"}:
+        return "flux_schnell"
+    return "flux_schnell"
+
+
+def _fal_image_size_for_resolution(resolution: str) -> str:
+    raw = str(resolution or "").strip().lower()
+    if raw.endswith("_landscape"):
+        return "landscape_16_9"
+    if raw == "1080p":
+        return "portrait_16_9"
+    return "portrait_16_9"
+
+
+async def _generate_image_fal_flux_schnell(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+) -> dict:
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "prompt": str(prompt or "").strip(),
+        "image_size": _fal_image_size_for_resolution(resolution),
+        "num_inference_steps": 4,
+        "num_images": 1,
+        "guidance_scale": 3.5,
+        "output_format": "png",
+        "enable_safety_checker": True,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(FAL_FLUX_SCHNELL_URL, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError("FLUX schnell via fal.ai failed (" + str(resp.status_code) + "): " + resp.text[:300])
+        data = resp.json()
+    images = data.get("images", []) if isinstance(data, dict) else []
+    if not images:
+        raise RuntimeError("FLUX schnell returned no images")
+    cdn_url = str((images[0] or {}).get("url", "") or "")
+    if not cdn_url:
+        raise RuntimeError("FLUX schnell returned no image URL")
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        img_resp = await client.get(cdn_url)
+        if img_resp.status_code != 200:
+            raise RuntimeError("Failed to download FLUX schnell image")
+        with open(output_path, "wb") as f:
+            f.write(img_resp.content)
+    log.info(f"FLUX schnell (fal.ai) saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+    gen_id = await _save_training_candidate(prompt, output_path, source="fal_flux_schnell")
+    return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
 
 
 _pending_training: dict[str, dict] = {}
@@ -2962,6 +5904,7 @@ def _file_to_data_image_url(image_path: str, max_bytes: int = 8 * 1024 * 1024) -
 async def _generate_image_xai_direct(
     prompt: str,
     output_path: str,
+    resolution: str = "720p",
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
 ) -> dict:
@@ -2972,12 +5915,13 @@ async def _generate_image_xai_direct(
         raise RuntimeError("XAI_API_KEY not configured")
 
     headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    aspect = "16:9" if str(resolution or "").strip().lower().endswith("_landscape") else XAI_IMAGE_ASPECT_RATIO
     payload = {
         "model": XAI_IMAGE_MODEL,
         "prompt": prompt,
         "n": 1,
         "response_format": "url",
-        "aspect_ratio": XAI_IMAGE_ASPECT_RATIO,
+        "aspect_ratio": aspect,
         "resolution": XAI_IMAGE_RESOLUTION,
     }
     if reference_image_url:
@@ -3032,12 +5976,21 @@ async def generate_image_grok(
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
 ) -> dict:
-    """Generate an image using Grok Imagine. Tries fal.ai first, falls back to direct xAI API.
-    Returns {"local_path": str, "cdn_url": str} so Kling can use the URL directly.
+    """Generate an image using the configured remote fallback lane.
+    Returns {"local_path": str, "cdn_url": str} so animation backends can reuse the CDN URL directly.
     """
-    if USE_FAL_GROK_IMAGE and FAL_AI_KEY:
+    fal_model = _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL)
+    if FAL_AI_KEY:
         try:
-            aspect = "9:16"
+            if reference_image_url:
+                fal_model = "grok_imagine"
+            if fal_model == "flux_schnell":
+                return await _generate_image_fal_flux_schnell(
+                    prompt,
+                    output_path,
+                    resolution=resolution,
+                )
+            aspect = "16:9" if str(resolution or "").strip().lower().endswith("_landscape") else "9:16"
             headers = {
                 "Authorization": "Key " + FAL_AI_KEY,
                 "Content-Type": "application/json",
@@ -3050,7 +6003,10 @@ async def generate_image_grok(
             }
             if reference_image_url:
                 payload["image_url"] = reference_image_url
-                log.info(f"Fal Grok image conditioning enabled: {'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}")
+                log.info(
+                    f"Fal Grok image conditioning enabled: "
+                    f"{'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}"
+                )
 
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
@@ -3070,101 +6026,784 @@ async def generate_image_grok(
                 with open(output_path, "wb") as f:
                     f.write(img_resp.content)
 
-            log.info(f"Grok Imagine (fal.ai) saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
-            gen_id = await _save_training_candidate(prompt, output_path, source="grok_imagine")
+            log.info(
+                f"Fal remote image saved via {fal_model}: {output_path} "
+                f"({Path(output_path).stat().st_size / 1024:.0f} KB)"
+            )
+            gen_id = await _save_training_candidate(prompt, output_path, source=f"fal_{fal_model}")
             return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
         except Exception as e:
-            log.warning(f"Fal.ai Grok Imagine failed, falling back to direct xAI: {e}")
+            log.warning(f"Fal remote image fallback failed ({fal_model}), falling back to direct xAI: {e}")
 
+    if not XAI_API_KEY:
+        raise RuntimeError("No remote image fallback configured (Fal and xAI unavailable)")
     log.info(f"Using direct xAI API image generation model={XAI_IMAGE_MODEL}")
     return await _generate_image_xai_direct(
         prompt,
         output_path,
+        resolution=resolution,
         reference_image_url=reference_image_url,
         reference_lock_mode=reference_lock_mode,
     )
 
 
-SKELETON_LORA_NAME = "nyptid_skeleton_v1.safetensors"
-SKELETON_LORA_STRENGTH = 0.85
-SKELETON_TRIGGER_TOKEN = "nyptid_skeleton"
-SKELETON_LORA_NEGATIVE = "blurry, low quality, text, watermark, deformed, ugly, bad anatomy, non-skeleton, human skin, flesh, muscles, realistic human, cartoon, anime, painting, 2D, illustration, transparent clothes, see-through clothes, x-ray clothes, invisible fabric, naked skeleton, broken bones, dislocated joints, extra limbs, missing limbs, empty eye sockets, no eyes, hollow eyes, robotic motion, stiff pose, jerky movement"
+SKELETON_LORA_CANDIDATES = [
+    "nyptid_skeleton_base_identity_v2.safetensors",
+    "nyptid_skeleton_glass_v1.safetensors",
+]
+SKELETON_LORA_STRENGTH = 0.72
+SKELETON_TRIGGER_TOKEN = "nyptid_skeleton_glass"
+SKELETON_LORA_NEGATIVE = "blurry, low quality, text, watermark, deformed, ugly, bad anatomy, non-skeleton, human skin, flesh, muscles, realistic human, cartoon, anime, painting, 2D, illustration, clothed skeleton, skeleton in uniform, skeleton in armor, skeleton in costume, helmet covering skull, mask covering skull, bare-bone skeleton without translucent body silhouette, bones-only look with no translucent body shell, broken bones, dislocated joints, extra limbs, missing limbs, empty eye sockets, no eyes, hollow eyes, robotic motion, stiff pose, jerky movement, x-ray scan, radiograph, medical imaging, glowing portal, glass display case, glass dome, terrarium, pod, capsule, archway, window frame"
+SKELETON_LORA_REFINEMENT_NEGATIVE = "glass display case, glass dome, pod, capsule, archway, doorway, window frame, x-ray scan, radiograph, medical imaging, detached shell, shell hovering away from body, bones-only silhouette"
+
+
+async def _get_active_skeleton_lora_name() -> str | None:
+    """Resolve the preferred available skeleton LoRA name from ComfyUI."""
+    for base_url in _comfyui_candidate_urls():
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{base_url}/object_info/LoraLoader")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    lora_list = data.get("LoraLoader", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+                    for candidate in SKELETON_LORA_CANDIDATES:
+                        if candidate in lora_list:
+                            return candidate
+        except Exception:
+            continue
+    return None
 
 
 async def check_skeleton_lora_available() -> bool:
-    """Check if the skeleton LoRA exists on the ComfyUI server."""
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{COMFYUI_URL}/object_info/LoraLoader")
-            if resp.status_code == 200:
-                data = resp.json()
-                lora_list = data.get("LoraLoader", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
-                return SKELETON_LORA_NAME in lora_list
-    except Exception:
-        pass
-    return False
+    """Check if a preferred skeleton LoRA exists on the ComfyUI server."""
+    if not SKELETON_SDXL_LORA_ENABLED:
+        return False
+    if not _configured_local_image_provider_order():
+        return False
+    return (await _get_active_skeleton_lora_name()) is not None
 
 
-async def generate_image_skeleton_lora(prompt: str, output_path: str, resolution: str = "720p") -> str:
-    """Generate skeleton image using fine-tuned LoRA on ComfyUI SDXL."""
+async def generate_image_hidream_t2i(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    allow_default_negative: bool = True,
+    max_wait_sec: int = 900,
+    runtime_assets: Optional[dict] = None,
+) -> str:
+    """Generate an image via HiDream-I1 on ComfyUI."""
     config = RESOLUTION_CONFIGS[resolution]
-    lora_prompt = f"{SKELETON_TRIGGER_TOKEN}, {prompt}"
-
+    pos = str(prompt or "").strip()
+    neg = str(negative_prompt or "").strip()
+    if not neg and allow_default_negative:
+        neg = NEGATIVE_PROMPT
+    hidream_steps = int(HIDREAM_STEPS)
+    if int(max_wait_sec or 0) <= max(90, HIDREAM_INTERACTIVE_MAX_WAIT_SEC + 5):
+        hidream_steps = min(hidream_steps, 16)
+    runtime = dict(runtime_assets or (await _resolve_hidream_runtime_assets()) or {})
     workflow = {
-        "4": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
-        },
-        "10": {
-            "class_type": "LoraLoader",
+        "54": {
+            "class_type": "QuadrupleCLIPLoader",
             "inputs": {
-                "lora_name": SKELETON_LORA_NAME,
-                "strength_model": SKELETON_LORA_STRENGTH,
-                "strength_clip": SKELETON_LORA_STRENGTH,
-                "model": ["4", 0],
-                "clip": ["4", 1],
+                "clip_name1": str(runtime.get("clip_l_name", "")),
+                "clip_name2": str(runtime.get("clip_g_name", "")),
+                "clip_name3": str(runtime.get("t5_name", "")),
+                "clip_name4": str(runtime.get("llama_name", "")),
             },
         },
-        "5": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
+        "55": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": str(runtime.get("vae_name", ""))},
         },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": lora_prompt, "clip": ["10", 1]},
+        "69": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": str(runtime.get("model_name", "")),
+                "weight_dtype": str(runtime.get("weight_dtype", "default") or "default"),
+            },
         },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": SKELETON_LORA_NEGATIVE, "clip": ["10", 1]},
+        "70": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {"shift": float(HIDREAM_SHIFT), "model": ["69", 0]},
+        },
+        "53": {
+            "class_type": "EmptySD3LatentImage",
+            "inputs": {"width": int(config["gen_width"]), "height": int(config["gen_height"]), "batch_size": 1},
+        },
+        "16": {
+            "class_type": "CLIPTextEncodeHiDream",
+            "inputs": {
+                "clip": ["54", 0],
+                "clip_l": pos,
+                "clip_g": pos,
+                "t5xxl": pos,
+                "llama": pos,
+            },
+        },
+        "40": {
+            "class_type": "CLIPTextEncodeHiDream",
+            "inputs": {
+                "clip": ["54", 0],
+                "clip_l": neg,
+                "clip_g": neg,
+                "t5xxl": neg,
+                "llama": neg,
+            },
         },
         "3": {
             "class_type": "KSampler",
             "inputs": {
                 "seed": random.randint(0, 2**32),
-                "steps": 35,
-                "cfg": 7.0,
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
+                "steps": hidream_steps,
+                "cfg": float(HIDREAM_CFG),
+                "sampler_name": str(HIDREAM_SAMPLER or "euler"),
+                "scheduler": str(HIDREAM_SCHEDULER or "simple"),
                 "denoise": 1.0,
-                "model": ["10", 0],
-                "positive": ["6", 0],
-                "negative": ["7", 0],
-                "latent_image": ["5", 0],
+                "model": ["70", 0],
+                "positive": ["16", 0],
+                "negative": ["40", 0],
+                "latent_image": ["53", 0],
             },
         },
         "8": {
             "class_type": "VAEDecode",
-            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+            "inputs": {"samples": ["3", 0], "vae": ["55", 0]},
         },
         "9": {
             "class_type": "SaveImage",
-            "inputs": {"filename_prefix": "nyptid_skeleton_lora", "images": ["8", 0]},
+            "inputs": {"filename_prefix": "nyptid_hidream_t2i", "images": ["8", 0]},
         },
     }
+    result = await _run_comfyui_workflow(workflow, "9", "images", max_wait_sec=max_wait_sec, poll_interval_sec=2.0)
+    await _download_comfyui_file(result["images"][0], output_path)
+    return output_path
+
+
+async def _materialize_reference_image_input(reference_image_url: str, template: str = "", prompt: str = "") -> tuple[str, bool]:
+    source = str(reference_image_url or "").strip()
+    if not source:
+        raise RuntimeError("Reference image source missing")
+    existing = Path(source)
+    if existing.exists():
+        if str(template or "").strip().lower() == "skeleton":
+            processed = _prepare_skeleton_reference_conditioning_image(str(existing), prompt=prompt)
+            return str(processed), str(processed) != str(existing)
+        return str(existing), False
+
+    raw = b""
+    mime = "image/png"
+    if source.startswith("data:image/"):
+        raw, mime = _decode_data_image_url(source)
+    else:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.get(source)
+            resp.raise_for_status()
+            raw = resp.content
+            mime = str(resp.headers.get("content-type", "") or mime).split(";", 1)[0].strip() or mime
+    if not raw:
+        raise RuntimeError("Reference image source was empty")
+
+    ext = ".png"
+    mime_l = mime.lower()
+    if "jpeg" in mime_l or "jpg" in mime_l:
+        ext = ".jpg"
+    elif "webp" in mime_l:
+        ext = ".webp"
+    elif "png" not in mime_l:
+        try:
+            if source.lower().endswith(".jpg") or source.lower().endswith(".jpeg"):
+                ext = ".jpg"
+            elif source.lower().endswith(".webp"):
+                ext = ".webp"
+        except Exception:
+            pass
+
+    ref_dir = TEMP_DIR / "runtime_reference_inputs"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    out_path = ref_dir / f"hidream_ref_{int(time.time() * 1000)}_{random.randint(1000, 9999)}{ext}"
+    out_path.write_bytes(raw)
+    if str(template or "").strip().lower() == "skeleton":
+        processed = _prepare_skeleton_reference_conditioning_image(str(out_path), prompt=prompt)
+        try:
+            Path(out_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return str(processed), True
+    return str(out_path), True
+
+
+async def generate_image_hidream_reference_locked(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    template: str = "",
+    reference_image_url: str = "",
+    reference_lock_mode: str = "strict",
+    allow_default_negative: bool = True,
+    max_wait_sec: int = 900,
+    runtime_assets: Optional[dict] = None,
+) -> str:
+    """Generate a HiDream image edit using the uploaded reference image as the latent starting point."""
+    if not str(reference_image_url or "").strip():
+        return await generate_image_hidream_t2i(
+            prompt,
+            output_path,
+            resolution=resolution,
+            negative_prompt=negative_prompt,
+            allow_default_negative=allow_default_negative,
+            max_wait_sec=max_wait_sec,
+            runtime_assets=runtime_assets,
+        )
+
+    config = RESOLUTION_CONFIGS[resolution]
+    pos = str(prompt or "").strip()
+    neg = str(negative_prompt or "").strip()
+    if not neg and allow_default_negative:
+        neg = NEGATIVE_PROMPT
+    runtime = dict(runtime_assets or (await _resolve_hidream_edit_runtime_assets()) or {})
+    hidream_steps = int(HIDREAM_STEPS)
+    if int(max_wait_sec or 0) <= max(90, HIDREAM_INTERACTIVE_MAX_WAIT_SEC + 5):
+        hidream_steps = min(hidream_steps, 18)
+    ref_path = ""
+    cleanup_ref = False
+    try:
+        ref_path, cleanup_ref = await _materialize_reference_image_input(reference_image_url, template=template, prompt=prompt)
+        uploaded_name = await _upload_image_to_comfyui(ref_path)
+        target_mp = max(0.6, round((float(config["gen_width"]) * float(config["gen_height"])) / 1_000_000.0, 2))
+        lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
+        denoise = HIDREAM_REFERENCE_STRICT_DENOISE if lock_mode == "strict" else HIDREAM_REFERENCE_INSPIRED_DENOISE
+        prompt_l = str(prompt or "").strip().lower()
+        cfg = float(HIDREAM_CFG)
+        if re.search(r"\b(table|desk|countertop|brain|money|cash|banknotes?|holding|sits?|standing|walk|room|office|background)\b", prompt_l):
+            denoise = min(0.82, denoise + 0.04)
+        scene_override_prompt = bool(
+            re.search(
+                r"\b(table|desk|countertop|chair|seated|sitting|brain|money|cash|banknotes?|dark room|office|studio|battlefield|throne|street|city|forest|desert|indoors|interior|outdoor|background)\b",
+                prompt_l,
+            )
+        )
+        if scene_override_prompt:
+            denoise = max(denoise, 0.76 if lock_mode == "strict" else 0.84)
+            cfg = min(8.9, cfg + 0.8)
+        table_edit_prompt = bool(re.search(r"\b(table|desk|countertop)\b", prompt_l)) and bool(
+            re.search(r"\b(sits?|seated|sitting)\b", prompt_l)
+        )
+        if table_edit_prompt:
+            denoise = max(denoise, 0.84 if lock_mode == "strict" else 0.90)
+            cfg = min(9.2, cfg + 0.4)
+
+        workflow = {
+            "54": {
+                "class_type": "QuadrupleCLIPLoader",
+                "inputs": {
+                    "clip_name1": str(runtime.get("clip_l_name", "")),
+                    "clip_name2": str(runtime.get("clip_g_name", "")),
+                    "clip_name3": str(runtime.get("t5_name", "")),
+                    "clip_name4": str(runtime.get("llama_name", "")),
+                },
+            },
+            "55": {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": str(runtime.get("vae_name", ""))},
+            },
+            "69": {
+                "class_type": "UNETLoader",
+                "inputs": {
+                    "unet_name": str(runtime.get("model_name", "")),
+                    "weight_dtype": str(runtime.get("weight_dtype", "default") or "default"),
+                },
+            },
+            "70": {
+                "class_type": "ModelSamplingSD3",
+                "inputs": {"shift": float(HIDREAM_SHIFT), "model": ["69", 0]},
+            },
+            "90": {
+                "class_type": "LoadImage",
+                "inputs": {"image": uploaded_name},
+            },
+            "91": {
+                "class_type": "ImageScaleToTotalPixels",
+                "inputs": {
+                    "image": ["90", 0],
+                    "upscale_method": HIDREAM_REFERENCE_UPSCALE_METHOD,
+                    "megapixels": float(target_mp),
+                    "resolution_steps": 64,
+                },
+            },
+            "92": {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": ["91", 0], "vae": ["55", 0]},
+            },
+            "16": {
+                "class_type": "CLIPTextEncodeHiDream",
+                "inputs": {
+                    "clip": ["54", 0],
+                    "clip_l": pos,
+                    "clip_g": pos,
+                    "t5xxl": pos,
+                    "llama": pos,
+                },
+            },
+            "40": {
+                "class_type": "CLIPTextEncodeHiDream",
+                "inputs": {
+                    "clip": ["54", 0],
+                    "clip_l": neg,
+                    "clip_g": neg,
+                    "t5xxl": neg,
+                    "llama": neg,
+                },
+            },
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": hidream_steps,
+                    "cfg": float(cfg),
+                    "sampler_name": str(HIDREAM_SAMPLER or "euler"),
+                    "scheduler": str(HIDREAM_SCHEDULER or "simple"),
+                    "denoise": float(denoise),
+                    "model": ["70", 0],
+                    "positive": ["16", 0],
+                    "negative": ["40", 0],
+                    "latent_image": ["92", 0],
+                },
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["3", 0], "vae": ["55", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_hidream_ref", "images": ["8", 0]},
+            },
+        }
+        result = await _run_comfyui_workflow(workflow, "9", "images", max_wait_sec=max_wait_sec, poll_interval_sec=2.0)
+        await _download_comfyui_file(result["images"][0], output_path)
+        return output_path
+    except Exception as e:
+        log.warning(f"HiDream E1.1 reference-conditioned generation failed, falling back to txt2img: {e}")
+        return await generate_image_hidream_t2i(
+            prompt,
+            output_path,
+            resolution=resolution,
+            negative_prompt=negative_prompt,
+            allow_default_negative=allow_default_negative,
+            max_wait_sec=max_wait_sec,
+            runtime_assets=runtime_assets,
+        )
+    finally:
+        if cleanup_ref and ref_path:
+            try:
+                Path(ref_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+async def generate_image_skeleton_lora(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    source_image_path: str = "",
+    denoise: float = 1.0,
+    negative_prompt: str = "",
+) -> str:
+    """Generate or refine a skeleton image using the Jerry glass-shell SDXL LoRA on ComfyUI."""
+    config = RESOLUTION_CONFIGS[resolution]
+    active_lora_name = await _get_active_skeleton_lora_name()
+    if not active_lora_name:
+        raise RuntimeError("No preferred skeleton LoRA is available on ComfyUI.")
+    prompt_text = str(prompt or "").strip()
+    if source_image_path:
+        lora_prompt = (
+            f"{SKELETON_TRIGGER_TOKEN}, {prompt_text}, preserve the exact composition, pose, props, and framing from the source image. "
+            "Add a clear translucent glass-like body shell wrapped tightly around the skeleton anatomy. "
+            "The shell must hug the skeleton body, not become a separate dome, display case, portal, archway, or window."
+        ).strip()
+    else:
+        lora_prompt = f"{SKELETON_TRIGGER_TOKEN}, {prompt_text}".strip()
+    neg_text = ", ".join(
+        part for part in [str(negative_prompt or "").strip(), SKELETON_LORA_NEGATIVE, SKELETON_LORA_REFINEMENT_NEGATIVE if source_image_path else ""] if part
+    )
+
+    if source_image_path and Path(source_image_path).exists():
+        uploaded_name = await _upload_image_to_comfyui(source_image_path)
+        target_mp = max(0.6, round((float(config["gen_width"]) * float(config["gen_height"])) / 1_000_000.0, 2))
+        workflow = {
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+            },
+            "99": {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "lora_name": active_lora_name,
+                    "strength_model": SKELETON_LORA_STRENGTH,
+                    "strength_clip": SKELETON_LORA_STRENGTH,
+                    "model": ["1", 0],
+                    "clip": ["1", 1],
+                },
+            },
+            "2": {
+                "class_type": "LoadImage",
+                "inputs": {"image": uploaded_name},
+            },
+            "3": {
+                "class_type": "ImageScaleToTotalPixels",
+                "inputs": {
+                    "image": ["2", 0],
+                    "upscale_method": "lanczos",
+                    "megapixels": float(target_mp),
+                    "resolution_steps": 64,
+                },
+            },
+            "4": {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": ["3", 0], "vae": ["1", 2]},
+            },
+            "5": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": lora_prompt, "clip": ["99", 1]},
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": neg_text, "clip": ["99", 1]},
+            },
+            "7": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": 12,
+                    "cfg": 6.4,
+                    "sampler_name": "dpmpp_2m",
+                    "scheduler": "karras",
+                    "denoise": float(max(0.18, min(0.55, denoise))),
+                    "model": ["99", 0],
+                    "positive": ["5", 0],
+                    "negative": ["6", 0],
+                    "latent_image": ["4", 0],
+                },
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["7", 0], "vae": ["1", 2]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_skeleton_lora_refine", "images": ["8", 0]},
+            },
+        }
+    else:
+        workflow = {
+            "4": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+            },
+            "10": {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "lora_name": active_lora_name,
+                    "strength_model": SKELETON_LORA_STRENGTH,
+                    "strength_clip": SKELETON_LORA_STRENGTH,
+                    "model": ["4", 0],
+                    "clip": ["4", 1],
+                },
+            },
+            "5": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": lora_prompt, "clip": ["10", 1]},
+            },
+            "7": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": neg_text, "clip": ["10", 1]},
+            },
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": 35,
+                    "cfg": 7.0,
+                    "sampler_name": "dpmpp_2m",
+                    "scheduler": "karras",
+                    "denoise": 1.0,
+                    "model": ["10", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                },
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_skeleton_lora", "images": ["8", 0]},
+            },
+        }
 
     result = await _run_comfyui_workflow(workflow, "9", "images")
     await _download_comfyui_file(result["images"][0], output_path)
-    log.info(f"Skeleton LoRA image generated: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
+    log.info(
+        f"Skeleton LoRA image generated via {active_lora_name}: "
+        f"{output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)"
+    )
+    return output_path
+
+
+async def generate_image_wan22_t2i(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    allow_default_negative: bool = True,
+    max_wait_sec: int = 900,
+    runtime_assets: Optional[dict] = None,
+) -> str:
+    """Generate an image via WAN 2.2 text-to-image on ComfyUI."""
+    config = RESOLUTION_CONFIGS[resolution]
+    neg = str(negative_prompt or "").strip()
+    if not neg and allow_default_negative:
+        neg = NEGATIVE_PROMPT
+    runtime = dict(runtime_assets or (await _resolve_wan22_t2i_runtime_assets()) or {})
+    mode = str(runtime.get("mode", "checkpoint"))
+    ckpt_name = str(runtime.get("ckpt_name", ""))
+    clip_name = str(runtime.get("clip_name", ""))
+    vae_name = str(runtime.get("vae_name", ""))
+    unet_name = str(runtime.get("unet_name", ""))
+    low_unet_name = str(runtime.get("low_unet_name", ""))
+    high_unet_name = str(runtime.get("high_unet_name", ""))
+
+    if mode == "ti2v_unet":
+        prompt_l = str(prompt or "").lower()
+        semantic_heavy = any(
+            token in prompt_l
+            for token in ["brain", "money", "cash", "banknote", "table", "desk", "countertop", "glow", "glowing"]
+        )
+        steps = 20 if semantic_heavy else 16
+        cfg_scale = 4.4 if semantic_heavy else 3.6
+        sampler_name = "euler"
+        scheduler = "simple"
+        workflow = {
+            "71": {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": clip_name, "type": "wan", "device": "default"},
+            },
+            "72": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["71", 0], "text": neg},
+            },
+            "89": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["71", 0], "text": prompt},
+            },
+            "73": {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": vae_name},
+            },
+            "76": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": unet_name, "weight_dtype": "default"},
+            },
+            "82": {
+                "class_type": "ModelSamplingSD3",
+                "inputs": {"model": ["76", 0], "shift": 5.0},
+            },
+            "74": {
+                "class_type": "EmptyHunyuanLatentVideo",
+                "inputs": {
+                    "width": int(config["gen_width"]),
+                    "height": int(config["gen_height"]),
+                    "length": 1,
+                    "batch_size": 1,
+                },
+            },
+            "81": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": steps,
+                    "cfg": cfg_scale,
+                    "sampler_name": sampler_name,
+                    "scheduler": scheduler,
+                    "denoise": 1.0,
+                    "model": ["82", 0],
+                    "positive": ["89", 0],
+                    "negative": ["72", 0],
+                    "latent_image": ["74", 0],
+                },
+            },
+            "87": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["81", 0], "vae": ["73", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_wan22_t2i", "images": ["87", 0]},
+            },
+        }
+    elif mode == "latent":
+        # Local WAN fallback: use low/high T2V lanes to synthesize a still frame.
+        # Keep latent length at 1 for still-image generation to avoid upstream request timeouts.
+        latent_length = 1
+        prompt_l = str(prompt or "").lower()
+        semantic_heavy = any(
+            token in prompt_l
+            for token in ["brain", "money", "cash", "banknote", "table", "desk", "countertop", "glow", "glowing"]
+        )
+        total_steps = 12 if semantic_heavy else 9
+        low_noise_end = 6 if semantic_heavy else 4
+        cfg_scale = 4.8 if semantic_heavy else 3.0
+        workflow = {
+            "71": {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": clip_name, "type": "wan", "device": "default"},
+            },
+            "72": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["71", 0], "text": neg},
+            },
+            "89": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["71", 0], "text": prompt},
+            },
+            "73": {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": vae_name},
+            },
+            "76": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": low_unet_name, "weight_dtype": "default"},
+            },
+            "75": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": high_unet_name, "weight_dtype": "default"},
+            },
+            "82": {
+                "class_type": "ModelSamplingSD3",
+                "inputs": {"model": ["76", 0], "shift": 5.0},
+            },
+            "86": {
+                "class_type": "ModelSamplingSD3",
+                "inputs": {"model": ["75", 0], "shift": 5.0},
+            },
+            "74": {
+                "class_type": "EmptyHunyuanLatentVideo",
+                "inputs": {
+                    "width": int(config["gen_width"]),
+                    "height": int(config["gen_height"]),
+                    "length": latent_length,
+                    "batch_size": 1,
+                },
+            },
+            "81": {
+                "class_type": "KSamplerAdvanced",
+                "inputs": {
+                    "model": ["82", 0],
+                    "add_noise": "enable",
+                    "noise_seed": random.randint(0, 2**32),
+                    "steps": total_steps,
+                    "cfg": cfg_scale,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "positive": ["89", 0],
+                    "negative": ["72", 0],
+                    "latent_image": ["74", 0],
+                    "start_at_step": 0,
+                    "end_at_step": low_noise_end,
+                    "return_with_leftover_noise": "enable",
+                },
+            },
+            "78": {
+                "class_type": "KSamplerAdvanced",
+                "inputs": {
+                    "model": ["86", 0],
+                    "add_noise": "disable",
+                    "noise_seed": 0,
+                    "steps": total_steps,
+                    "cfg": cfg_scale,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "positive": ["89", 0],
+                    "negative": ["72", 0],
+                    "latent_image": ["81", 0],
+                    "start_at_step": low_noise_end,
+                    "end_at_step": total_steps,
+                    "return_with_leftover_noise": "disable",
+                },
+            },
+            "87": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["78", 0], "vae": ["73", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_wan22_t2i", "images": ["87", 0]},
+            },
+        }
+    else:
+        workflow = {
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**32),
+                    "steps": 32,
+                    "cfg": 4.5,
+                    "sampler_name": "uni_pc_bh2",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                },
+            },
+            "4": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": ckpt_name},
+            },
+            "5": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
+            },
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["4", 1]},
+            },
+            "7": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": neg, "clip": ["4", 1]},
+            },
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "nyptid_wan22_t2i", "images": ["8", 0]},
+            },
+        }
+        if clip_name and vae_name:
+            workflow["30"] = {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": clip_name, "type": "wan"},
+            }
+            workflow["31"] = {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": vae_name},
+            }
+            workflow["6"]["inputs"]["clip"] = ["30", 0]
+            workflow["7"]["inputs"]["clip"] = ["30", 0]
+            workflow["8"]["inputs"]["vae"] = ["31", 0]
+
+    result = await _run_comfyui_workflow(workflow, "9", "images", max_wait_sec=max_wait_sec, poll_interval_sec=2.0)
+    await _download_comfyui_file(result["images"][0], output_path)
     return output_path
 
 
@@ -3176,6 +6815,10 @@ async def generate_scene_image(
     template: str = "",
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
+    best_of_enabled: bool = True,
+    salvage_enabled: bool = True,
+    interactive_fast: bool = False,
+    prompt_passthrough: bool = False,
 ) -> dict:
     """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
     For other templates: Grok Imagine > SDXL.
@@ -3217,7 +6860,110 @@ async def generate_scene_image(
             log.warning(f"Image 1080p upscale skipped for {src.name}: {err.decode()[-200:]}")
 
     lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
+    if template == "skeleton" and _is_template_default_reference(template, reference_image_url):
+        log.info("Skeleton default style lock active: using reference DNA only and skipping direct image conditioning")
+        reference_image_url = ""
+    has_reference = bool(str(reference_image_url or "").strip())
+    template_adapter_route = _resolve_template_adapter_route(template)
+    if not prompt_passthrough:
+        prompt, negative_prompt, template_adapter_route = _apply_template_prompt_route(
+            template=template,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            provider="scene_image",
+            adapter_route=template_adapter_route,
+        )
     if template == "skeleton":
+        if prompt_passthrough:
+            negative_prompt = _relax_skeleton_negative_prompt_for_passthrough(negative_prompt, prompt)
+        else:
+            negative_prompt = _augment_skeleton_negative_prompt(negative_prompt, prompt)
+
+    def _skeleton_repair_prompt(base_prompt: str) -> str:
+        if template != "skeleton":
+            return base_prompt
+        prompt_l = str(base_prompt or "").lower()
+        wants_damage = bool(
+            re.search(r"\b(crack|cracks|fracture|fractured|chip|chipped|bruise|bruises|damaged|damage)\b", prompt_l)
+        )
+        wants_tired = bool(
+            re.search(r"\b(tired|fatigued|weary|slouch|slouched|hunch|hunched|droop|drooping|exhausted)\b", prompt_l)
+        )
+        damage_lock = (
+            "DAMAGE DETAIL LOCK: preserve any requested damage cues (cracks, fractures, chips, bruising) clearly on bones."
+            if wants_damage
+            else ""
+        )
+        tired_lock = (
+            "POSTURE LOCK: preserve requested fatigue cues with slouched shoulders, slight forward head, and low-energy gait."
+            if wants_tired
+            else ""
+        )
+        outfit_lock = _skeleton_outfit_coverage_lock(base_prompt)
+        return (
+            f"{base_prompt} "
+            + "CRITICAL QUALITY LOCK: identical canonical skeleton identity, ultra-crisp skull and eye detail, "
+            + "readable anatomical structure, high-contrast lighting, sharp cinematic focus, "
+            + ("clearly visible translucent body silhouette, requested wardrobe stays correctly worn and body-covering. " if outfit_lock else "clearly visible translucent body silhouette, no clothing or costume. ")
+            + "Canonical ivory bone color only; never x-ray/radiograph/CT scan look, never neon-blue medical scan aesthetics. "
+            + "Do not omit scene props: every explicitly requested object/action must be visible. "
+            + "Never replace requested props with generic spheres/balls. "
+            + (damage_lock + " " if damage_lock else "")
+            + (tired_lock + " " if tired_lock else "")
+            + (outfit_lock + " " if outfit_lock else "")
+            + "Glass-shell visibility must be obvious (not faint): medium-opacity translucent shell around the skeleton form."
+        ).strip()
+    if template == "skeleton" and interactive_fast and not has_reference:
+        try:
+            lora_available = await check_skeleton_lora_available()
+            if lora_available:
+                fast_prompt = _build_skeleton_lora_fast_prompt(prompt)
+                fast_negative = _build_skeleton_lora_fast_negative(negative_prompt, prompt)
+                await generate_image_skeleton_lora(
+                    fast_prompt,
+                    output_path,
+                    resolution=resolution,
+                    negative_prompt=fast_negative,
+                )
+                await _enforce_1080_image(output_path)
+                _ensure_generated_image_valid(output_path)
+                qa = _score_generated_image_quality(output_path, prompt=fast_prompt, template=template)
+                qa_gate_ok, qa_gate_min = _image_quality_gate(
+                    qa,
+                    template=template,
+                    lock_mode=lock_mode,
+                    has_reference=False,
+                    prompt=fast_prompt,
+                )
+                base_result = {
+                    "local_path": output_path,
+                    "cdn_url": None,
+                    "provider": "skeleton_lora",
+                    "qa_score": qa.get("score", 0.0),
+                    "qa_ok": bool(qa_gate_ok),
+                    "qa_min_score": qa_gate_min,
+                    "qa_notes": list(qa.get("notes", []) or []),
+                    "attempt": 1,
+                }
+                if qa_gate_ok:
+                    log.info("Skeleton interactive fast path generated via Jerry LoRA")
+                    return base_result
+                notes = _interactive_soft_accept_notes(base_result["qa_notes"])
+                if not _skeleton_notes_are_severe(notes):
+                    base_result["qa_ok"] = False
+                    base_result["qa_notes"] = notes
+                    log.info(
+                        "Skeleton interactive fast path soft-accepted via Jerry LoRA "
+                        f"(score={float(base_result['qa_score'] or 0.0):.2f}, min={qa_gate_min:.2f})"
+                    )
+                    return base_result
+                log.warning(
+                    "Skeleton interactive fast path failed QA; falling back to configured providers "
+                    f"(score={float(base_result['qa_score'] or 0.0):.2f}, notes={base_result['qa_notes']})"
+                )
+        except Exception as e:
+            log.warning(f"Skeleton interactive fast path failed, falling back to configured providers: {e}")
+    if template == "skeleton" and SKELETON_SDXL_LORA_ENABLED:
         if reference_image_url and lock_mode == "strict":
             log.info("Skipping Skeleton LoRA for strict reference lock; using conditioned generator")
         else:
@@ -3231,14 +6977,472 @@ async def generate_scene_image(
             except Exception as e:
                 log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
 
-    if FAL_AI_KEY or XAI_API_KEY:
+    provider_order = _configured_image_provider_order()
+    skeleton_wan_lock = template == "skeleton" and bool(SKELETON_REQUIRE_WAN22)
+    if interactive_fast and template == "skeleton":
+        if skeleton_wan_lock:
+            # Strict skeleton mode must stay WAN-only.
+            provider_order = ["wan22"]
+        else:
+            compact = _configured_local_image_provider_order()
+            if compact:
+                provider_order = compact
+    if not provider_order:
+        provider_order = ["wan22"] if skeleton_wan_lock else _configured_image_provider_order()
+    precooled = [p for p in provider_order if not _provider_is_available(p)]
+    if precooled:
+        provider_order = [p for p in provider_order if _provider_is_available(p)]
+        if not provider_order:
+            if skeleton_wan_lock:
+                provider_order = ["wan22"]
+            elif XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
+                provider_order = ["fal"]
+            else:
+                provider_order = ["sdxl"]
+        for p in precooled:
+            rem = int(round(_provider_cooldown_remaining(p)))
+            log.warning(f"Image provider '{_normalize_image_provider_key(p)}' is cooling down ({rem}s left); skipping early")
+    xai_aliases = {"xai", "grok", "fal"}
+    hidream_requested = any(_normalize_image_provider_key(p) == "hidream" for p in provider_order)
+    hidream_ready: Optional[bool] = None
+    hidream_edit_ready: Optional[bool] = None
+    if hidream_requested:
+        hidream_ready = await check_hidream_available()
+        if has_reference:
+            hidream_edit_ready = await check_hidream_edit_available()
+    if hidream_requested and not hidream_ready:
+        provider_order = [p for p in provider_order if _normalize_image_provider_key(p) != "hidream"]
+        if not provider_order:
+            raise RuntimeError("HiDream is the only configured image provider, but HiDream assets are unavailable.")
+        _provider_mark_failure("hidream", "hidream_unavailable", cooldown_sec=max(120, IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC))
+        log.warning("HiDream unavailable; skipping HiDream provider in this request")
+    if hidream_requested and has_reference and hidream_ready and hidream_edit_ready is False:
+        log.warning("HiDream E1.1 edit assets unavailable; reference edits will fall back to I1 img2img behavior")
+    wan_requested = any(_normalize_image_provider_key(p) == "wan22" for p in provider_order)
+    wan_t2i_ready: Optional[bool] = None
+    if wan_requested:
+        wan_t2i_ready = await check_wan22_t2i_available()
+        if template == "skeleton" and bool(SKELETON_REQUIRE_WAN22) and not wan_t2i_ready:
+            raise RuntimeError(
+                "Skeleton generation blocked: WAN2.2 text-to-image is unavailable and fallback is disabled."
+            )
+    if IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE and wan_requested:
+        if wan_t2i_ready is None:
+            wan_t2i_ready = await check_wan22_t2i_available()
+        if not wan_t2i_ready:
+            provider_order = [p for p in provider_order if _normalize_image_provider_key(p) != "wan22"]
+            if not provider_order:
+                provider_order = ["sdxl"]
+            _provider_mark_failure("wan22", "wan22_t2i_unavailable", cooldown_sec=max(120, IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC))
+            log.warning("WAN22 T2I unavailable; skipping WAN provider in this request")
+    cooled = [p for p in provider_order if not _provider_is_available(p)]
+    if cooled:
+        provider_order = [p for p in provider_order if _provider_is_available(p)]
+        if not provider_order:
+            if skeleton_wan_lock:
+                provider_order = ["wan22"]
+            elif XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
+                provider_order = ["fal"]
+            else:
+                provider_order = ["sdxl"]
+        for p in cooled:
+            rem = int(round(_provider_cooldown_remaining(p)))
+            log.warning(f"Image provider '{_normalize_image_provider_key(p)}' is cooling down ({rem}s left); skipping")
+
+    async def _local_provider_result(provider: str) -> dict | None:
+        provider_key = str(provider or "").strip().lower()
+        attempts = max(1, int(IMAGE_LOCAL_PROVIDER_RETRIES))
+        if provider_key not in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2", "sdxl", "comfy", "comfyui", "local"}:
+            return None
+        hidream_runtime_assets: dict | None = None
+        wan_runtime_assets: dict | None = None
+        wan_runtime_mode = ""
+        compact_skeleton_prompt = _compact_skeleton_local_prompt(prompt) if template == "skeleton" else prompt
+        skeleton_source_prompt = prompt if (template == "skeleton" and prompt_passthrough) else compact_skeleton_prompt
+        compact_skeleton_negative = (
+            str(negative_prompt or "").strip()
+            if prompt_passthrough
+            else _compact_skeleton_negative_prompt(negative_prompt, skeleton_source_prompt)
+            if template == "skeleton"
+            else negative_prompt
+        )
+        compact_prop_first_prompt = (
+            _compact_skeleton_prop_first_prompt(prompt)
+            if template == "skeleton"
+            else prompt
+        )
+        if interactive_fast:
+            if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
+                provider_wait_sec = HIDREAM_INTERACTIVE_MAX_WAIT_SEC
+            else:
+                provider_wait_sec = WAN22_INTERACTIVE_MAX_WAIT_SEC if provider_key in {"wan", "wan22", "wan2.2"} else 12
+        else:
+            provider_wait_sec = 900
+        if template == "skeleton":
+            # Keep retries bounded in interactive mode while still giving local providers a fair chance.
+            if interactive_fast:
+                if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
+                    attempts = HIDREAM_INTERACTIVE_ATTEMPTS
+                    provider_wait_sec = HIDREAM_INTERACTIVE_MAX_WAIT_SEC
+                    if has_reference:
+                        # Public interactive requests route through a tunnel with a hard timeout budget.
+                        # Reference-conditioned HiDream passes take materially longer than plain txt2img,
+                        # so keep them to a single pass and soft-accept the first usable frame.
+                        attempts = 1
+                    try:
+                        hidream_runtime_assets = await (
+                            _resolve_hidream_edit_runtime_assets()
+                            if has_reference
+                            else _resolve_hidream_runtime_assets()
+                        )
+                    except Exception:
+                        hidream_runtime_assets = None
+                elif provider_key in {"wan", "wan22", "wan2.2"}:
+                    try:
+                        wan_runtime_assets = await _resolve_wan22_t2i_runtime_assets()
+                        wan_runtime_mode = str((wan_runtime_assets or {}).get("mode", "") or "")
+                    except Exception:
+                        wan_runtime_assets = None
+                        wan_runtime_mode = ""
+                    if wan_runtime_mode == "latent":
+                        # Missing WAN T2I checkpoint: latent fallback can work but needs a longer single pass.
+                        attempts = WAN22_INTERACTIVE_LATENT_ATTEMPTS
+                        provider_wait_sec = WAN22_INTERACTIVE_LATENT_MAX_WAIT_SEC
+                    else:
+                        attempts = WAN22_INTERACTIVE_ATTEMPTS
+                        provider_wait_sec = WAN22_INTERACTIVE_MAX_WAIT_SEC
+                    prompt_lc = skeleton_source_prompt.lower()
+                    has_table_scene = bool(re.search(r"\b(table|desk|countertop)\b", prompt_lc))
+                    has_brain = "brain" in prompt_lc
+                    has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", prompt_lc))
+                    if has_table_scene and has_brain and has_money:
+                        # Complex two-prop scenes need a wider candidate pool to avoid weak compositions.
+                        attempts = max(attempts, 8)
+                else:
+                    attempts = 2
+            else:
+                attempts = max(attempts, 2)
+        best_soft_result: dict | None = None
+        best_soft_path = Path(output_path).with_name(
+            Path(output_path).stem + f"_{provider_key}_best_soft" + (Path(output_path).suffix or ".png")
+        )
+        last_err: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                attempt_prompt = prompt
+                attempt_negative = negative_prompt
+                if template == "skeleton":
+                    if prompt_passthrough:
+                        attempt_prompt = skeleton_source_prompt
+                        attempt_negative = compact_skeleton_negative
+                    elif interactive_fast:
+                        if attempt == 1:
+                            attempt_prompt = skeleton_source_prompt
+                        elif attempt == 2:
+                            attempt_prompt = compact_prop_first_prompt
+                        elif attempt == 3:
+                            attempt_prompt = (
+                                compact_prop_first_prompt
+                                + " strict prop framing: full tabletop visible. left side brain with clear folds. right side pile of cash banknotes."
+                            ).strip()
+                        elif attempt == 4:
+                            attempt_prompt = (
+                                compact_prop_first_prompt
+                                + " frontal medium shot. full ribcage and skull visible. both props in foreground on tabletop."
+                            ).strip()
+                        elif attempt == 5:
+                            attempt_prompt = (
+                                compact_prop_first_prompt
+                                + " camera closer to tabletop so both brain and money are large and obvious."
+                            ).strip()
+                        else:
+                            attempt_prompt = (
+                                compact_prop_first_prompt
+                                + " no human head statue, no bust sculpture, only full anatomical skeleton seated at table."
+                            ).strip()
+                        attempt_negative = _compact_skeleton_negative_prompt(negative_prompt, attempt_prompt)
+                    else:
+                        attempt_prompt = skeleton_source_prompt
+                        attempt_negative = compact_skeleton_negative
+                if provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"} and template == "skeleton":
+                    if prompt_passthrough:
+                        # Creative prompt passthrough means use the scene text exactly.
+                        attempt_prompt = skeleton_source_prompt
+                    else:
+                        attempt_prompt = _skeleton_repair_prompt(skeleton_source_prompt)
+                        if attempt > 1:
+                            attempt_prompt = (
+                                attempt_prompt
+                                + " HARD FRAMING LOCK: subject fills most of frame, ultra-sharp focus, no haze, no motion blur."
+                            ).strip()
+                        if attempt >= 3:
+                            attempt_prompt = (
+                                attempt_prompt
+                                + " STRICT PROP LOCK: all requested objects must be clearly visible and recognizable in-frame."
+                            ).strip()
+                if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
+                    if has_reference:
+                        await generate_image_hidream_reference_locked(
+                            attempt_prompt,
+                            output_path,
+                            resolution=resolution,
+                            negative_prompt=attempt_negative,
+                            template=template,
+                            reference_image_url=reference_image_url,
+                            reference_lock_mode=lock_mode,
+                            allow_default_negative=not prompt_passthrough,
+                            max_wait_sec=provider_wait_sec,
+                            runtime_assets=hidream_runtime_assets,
+                        )
+                    else:
+                        await generate_image_hidream_t2i(
+                            attempt_prompt,
+                            output_path,
+                            resolution=resolution,
+                            negative_prompt=attempt_negative,
+                            allow_default_negative=not prompt_passthrough,
+                            max_wait_sec=provider_wait_sec,
+                            runtime_assets=hidream_runtime_assets,
+                        )
+                if provider_key in {"wan", "wan22", "wan2.2"}:
+                    await generate_image_wan22_t2i(
+                        attempt_prompt,
+                        output_path,
+                        resolution=resolution,
+                        negative_prompt=attempt_negative,
+                        allow_default_negative=not prompt_passthrough,
+                        max_wait_sec=provider_wait_sec,
+                        runtime_assets=wan_runtime_assets,
+                    )
+                elif provider_key in {"sdxl", "comfy", "comfyui", "local"}:
+                    await generate_image_comfyui(
+                        attempt_prompt,
+                        output_path,
+                        resolution=resolution,
+                        negative_prompt=attempt_negative,
+                        allow_default_negative=not prompt_passthrough,
+                        template=template,
+                        adapter_route=template_adapter_route,
+                        max_wait_sec=provider_wait_sec,
+                    )
+                if template == "skeleton" and provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"}:
+                    try:
+                        lora_available = await check_skeleton_lora_available()
+                    except Exception:
+                        lora_available = False
+                    if lora_available:
+                        refine_prompt_l = str(attempt_prompt or "").lower()
+                        wants_glass_refine = (
+                            has_reference
+                            or "glass" in refine_prompt_l
+                            or "translucent" in refine_prompt_l
+                            or "shell" in refine_prompt_l
+                            or "table" in refine_prompt_l
+                            or "brain" in refine_prompt_l
+                            or bool(re.search(r"\b(money|cash|banknotes?)\b", refine_prompt_l))
+                        )
+                        if wants_glass_refine:
+                            refine_path = str(Path(output_path).with_name(Path(output_path).stem + "_glass_refine.png"))
+                            refine_denoise = 0.24 if has_reference else 0.30
+                            try:
+                                await generate_image_skeleton_lora(
+                                    attempt_prompt,
+                                    refine_path,
+                                    resolution=resolution,
+                                    source_image_path=output_path,
+                                    denoise=refine_denoise,
+                                    negative_prompt=attempt_negative,
+                                )
+                                shutil.move(refine_path, output_path)
+                                log.info(f"Applied Jerry glass-shell LoRA refinement via SDXL ({provider_key} -> skeleton refine)")
+                            except Exception as refine_err:
+                                Path(refine_path).unlink(missing_ok=True)
+                                log.warning(f"Jerry glass-shell LoRA refinement skipped: {refine_err}")
+                await _enforce_1080_image(output_path)
+                _postprocess_generated_image(output_path, provider=provider_key, template=template)
+                _ensure_generated_image_valid(output_path)
+                qa_prompt = skeleton_source_prompt if template == "skeleton" else prompt
+                qa = _score_generated_image_quality(output_path, prompt=qa_prompt, template=template)
+                qa_gate_ok, qa_gate_min = _image_quality_gate(
+                    qa,
+                    template=template,
+                    lock_mode=lock_mode,
+                    has_reference=has_reference,
+                    prompt=qa_prompt,
+                )
+                if template == "skeleton" and interactive_fast:
+                    current_score = float(qa.get("score", 0.0) or 0.0)
+                    best_score = float((best_soft_result or {}).get("qa_score", -1.0))
+                    if best_soft_result is None or current_score > best_score:
+                        try:
+                            shutil.copyfile(output_path, str(best_soft_path))
+                        except Exception:
+                            pass
+                        best_soft_result = {
+                            "local_path": output_path,
+                            "cdn_url": None,
+                            "provider": provider_key,
+                            "qa_score": current_score,
+                            "qa_ok": bool(qa_gate_ok),
+                            "qa_min_score": qa_gate_min,
+                            "qa_notes": list(qa.get("notes", [])),
+                            "attempt": attempt,
+                        }
+                if template == "skeleton" and not qa_gate_ok and attempt < attempts:
+                    log.warning(
+                        f"Skeleton image below QA gate via '{provider_key}' (attempt {attempt}/{attempts}, score={qa.get('score', 0.0):.2f}, "
+                        f"min={qa_gate_min:.2f}); retrying."
+                    )
+                    continue
+                if template == "skeleton" and not qa_gate_ok and attempt >= attempts:
+                    if interactive_fast and has_reference and provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
+                        notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
+                        if not _skeleton_notes_are_severe(notes):
+                            _provider_mark_success(provider_key)
+                            return {
+                                "local_path": output_path,
+                                "cdn_url": None,
+                                "provider": provider_key,
+                                "qa_score": qa.get("score", 0.0),
+                                "qa_ok": False,
+                                "qa_min_score": qa_gate_min,
+                                "qa_notes": notes,
+                                "attempt": attempt,
+                            }
+                    if interactive_fast and best_soft_result is not None:
+                        best_notes = list(best_soft_result.get("qa_notes", []) or [])
+                        severe = _skeleton_notes_are_severe(best_notes)
+                        if not severe:
+                            if best_soft_path.exists():
+                                try:
+                                    shutil.copyfile(str(best_soft_path), output_path)
+                                except Exception:
+                                    pass
+                            notes = _interactive_soft_accept_notes(best_soft_result.get("qa_notes", []) or [])
+                            best_soft_result["qa_notes"] = notes
+                            best_soft_result["qa_ok"] = False
+                            _provider_mark_success(provider_key)
+                            best_soft_path.unlink(missing_ok=True)
+                            log.warning(
+                                f"Interactive fast-mode soft-accepted skeleton image via '{provider_key}' "
+                                f"(score={best_soft_result.get('qa_score', 0.0):.2f}, notes={best_soft_result.get('qa_notes', [])})"
+                            )
+                            return best_soft_result
+                    raise RuntimeError(
+                        f"Skeleton QA gate failed for provider '{provider_key}' after {attempts} attempts "
+                        f"(score={qa.get('score', 0.0):.2f}, min={qa_gate_min:.2f}, notes={qa.get('notes', [])})"
+                    )
+                _provider_mark_success(provider_key)
+                best_soft_path.unlink(missing_ok=True)
+                return {
+                    "local_path": output_path,
+                    "cdn_url": None,
+                    "provider": provider_key,
+                    "qa_score": qa.get("score", 0.0),
+                    "qa_ok": bool(qa_gate_ok),
+                    "qa_min_score": qa_gate_min,
+                    "qa_notes": qa.get("notes", []),
+                    "attempt": attempt,
+                }
+            except Exception as err:
+                last_err = err
+                err_l = str(err or "").lower()
+                # Avoid stacking timed-out WAN jobs (they can still be running in ComfyUI and consume VRAM).
+                if (
+                    interactive_fast
+                    and provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"}
+                    and ("timed out" in err_l or "timeout" in err_l)
+                ):
+                    break
+                if attempt < attempts:
+                    await asyncio.sleep(min(5, attempt))
+        if interactive_fast and template == "skeleton" and best_soft_result is not None:
+            best_notes = list(best_soft_result.get("qa_notes", []) or [])
+            severe = _skeleton_notes_are_severe(best_notes)
+            if not severe:
+                if best_soft_path.exists():
+                    try:
+                        shutil.copyfile(str(best_soft_path), output_path)
+                    except Exception:
+                        pass
+                notes = _interactive_soft_accept_notes(best_soft_result.get("qa_notes", []) or [])
+                best_soft_result["qa_notes"] = notes
+                best_soft_result["qa_ok"] = False
+                _provider_mark_success(provider_key)
+                best_soft_path.unlink(missing_ok=True)
+                log.warning(
+                    f"Interactive fast-mode returning best available skeleton image via '{provider_key}' "
+                    f"(score={best_soft_result.get('qa_score', 0.0):.2f}, notes={best_soft_result.get('qa_notes', [])})"
+                )
+                return best_soft_result
+        best_soft_path.unlink(missing_ok=True)
+        _provider_mark_failure(provider_key, reason=str(last_err or "unknown_error"))
+        mode_suffix = f" (mode={wan_runtime_mode})" if wan_runtime_mode else ""
+        raise RuntimeError(f"provider '{provider_key}' failed after {attempts} attempts{mode_suffix}: {last_err}")
+
+    last_local_provider_err: Exception | None = None
+    best_soft_local_result: dict | None = None
+    xai_index = next((i for i, p in enumerate(provider_order) if p in xai_aliases), len(provider_order))
+    local_providers = list(provider_order[:xai_index])
+    for idx, provider in enumerate(local_providers):
+        provider_norm = _normalize_image_provider_key(provider)
+        next_provider = local_providers[idx + 1] if (idx + 1) < len(local_providers) else ""
         try:
-            if IMAGE_QUALITY_BESTOF_ENABLED and IMAGE_QUALITY_BESTOF_COUNT > 1:
+            local_result = await _local_provider_result(provider)
+            if local_result:
+                if (
+                    template == "skeleton"
+                    and interactive_fast
+                    and provider_norm in {"hidream", "wan22"}
+                    and not bool(local_result.get("qa_ok", False))
+                    and bool(next_provider)
+                    and not skeleton_wan_lock
+                ):
+                    score = float(local_result.get("qa_score", 0.0) or 0.0)
+                    best_score = float((best_soft_local_result or {}).get("qa_score", -1.0) or -1.0)
+                    if best_soft_local_result is None or score > best_score:
+                        best_soft_local_result = dict(local_result)
+                    _record_provider_fallback(provider, next_provider)
+                    log.warning(
+                        f"Skeleton interactive: '{provider_norm}' soft result score={score:.2f}; trying next local provider '{_normalize_image_provider_key(next_provider)}'"
+                    )
+                    continue
+                if (
+                    template == "skeleton"
+                    and interactive_fast
+                    and best_soft_local_result is not None
+                    and not bool(local_result.get("qa_ok", False))
+                ):
+                    current = float(local_result.get("qa_score", 0.0) or 0.0)
+                    best = float(best_soft_local_result.get("qa_score", 0.0) or 0.0)
+                    if current >= best:
+                        return local_result
+                    return best_soft_local_result
+                return local_result
+        except Exception as local_err:
+            last_local_provider_err = local_err
+            _record_provider_fallback(provider, "next")
+            log.warning(f"Local image provider '{provider}' failed, trying next: {local_err}")
+    if best_soft_local_result is not None:
+        return best_soft_local_result
+
+    xai_enabled = (
+        XAI_IMAGE_FALLBACK_ENABLED
+        and any(p in xai_aliases for p in provider_order)
+        and bool(FAL_AI_KEY or XAI_API_KEY)
+    )
+    if xai_enabled:
+        try:
+            if best_of_enabled and IMAGE_QUALITY_BESTOF_ENABLED and IMAGE_QUALITY_BESTOF_COUNT > 1:
                 best_count = max(2, int(IMAGE_QUALITY_BESTOF_COUNT))
                 if template in {"skeleton", "story", "motivation"}:
                     best_count = max(best_count, 4)
                 if lock_mode == "strict" and reference_image_url and template in {"skeleton", "story"}:
                     best_count = max(best_count, 5)
+                if template == "skeleton":
+                    best_count = max(best_count, 5)
+                    if lock_mode == "strict" and has_reference:
+                        best_count = max(best_count, 6)
                 cand_root = Path(output_path)
                 candidates = []
                 for idx in range(best_count):
@@ -3253,17 +7457,28 @@ async def generate_scene_image(
                         )
                         await _enforce_1080_image(cand_path)
                         qa = _score_generated_image_quality(cand_path, prompt=prompt, template=template)
+                        gate_ok, gate_min = _image_quality_gate(
+                            qa,
+                            template=template,
+                            lock_mode=lock_mode,
+                            has_reference=has_reference,
+                            prompt=prompt,
+                        )
+                        qa["gate_ok"] = gate_ok
+                        qa["gate_min_score"] = gate_min
                         candidates.append({"path": cand_path, "result": cand_result, "qa": qa, "idx": idx})
                         log.info(
                             f"Best-of candidate {idx+1}/{best_count} score={qa.get('score', 0.0)} "
-                            f"ok={qa.get('ok', False)} notes={','.join(qa.get('notes', []))}"
+                            f"gate_ok={qa.get('gate_ok', False)} min={qa.get('gate_min_score', 0.0)} "
+                            f"notes={','.join(qa.get('notes', []))}"
                         )
                     except Exception as cand_err:
                         log.warning(f"Best-of candidate {idx+1}/{best_count} failed: {cand_err}")
                 if not candidates:
                     raise RuntimeError("all best-of image candidates failed")
 
-                winner = max(candidates, key=lambda c: float(c.get("qa", {}).get("score", 0.0)))
+                acceptable = [c for c in candidates if bool(c.get("qa", {}).get("gate_ok", False))]
+                winner = max((acceptable or candidates), key=lambda c: float(c.get("qa", {}).get("score", 0.0)))
                 winner_path = str(winner["path"])
                 winner_result = dict(winner["result"])
                 winner_qa = dict(winner.get("qa", {}))
@@ -3271,12 +7486,13 @@ async def generate_scene_image(
                     shutil.copyfile(winner_path, output_path)
                 winner_result["local_path"] = output_path
                 winner_result["qa_score"] = winner_qa.get("score", 0.0)
-                winner_result["qa_ok"] = bool(winner_qa.get("ok", False))
+                winner_result["qa_ok"] = bool(winner_qa.get("gate_ok", False))
+                winner_result["qa_min_score"] = winner_qa.get("gate_min_score", _image_quality_min_score(template=template, lock_mode=lock_mode, has_reference=has_reference))
                 winner_result["qa_notes"] = winner_qa.get("notes", [])
                 # Story salvage pass: if winner is still below threshold, do one extra high-realism attempt.
-                if template == "story" and not winner_result["qa_ok"]:
+                if salvage_enabled and template == "story" and not winner_result["qa_ok"]:
                     try:
-                        salvage_prompt = f"{prompt} {STORY_REALISM_REFINEMENT}"
+                        salvage_prompt = f"{prompt} {_story_salvage_refinement_for_scene(prompt)}"
                         salvage_path = str(cand_root.with_name(f"{cand_root.stem}_salvage{cand_root.suffix or '.png'}"))
                         salvage_result = await generate_image_grok(
                             salvage_prompt,
@@ -3287,20 +7503,78 @@ async def generate_scene_image(
                         )
                         await _enforce_1080_image(salvage_path)
                         salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                        salvage_gate_ok, salvage_gate_min = _image_quality_gate(
+                            salvage_qa,
+                            template=template,
+                            lock_mode=lock_mode,
+                            has_reference=has_reference,
+                            prompt=salvage_prompt,
+                        )
+                        salvage_qa["gate_ok"] = salvage_gate_ok
+                        salvage_qa["gate_min_score"] = salvage_gate_min
                         if float(salvage_qa.get("score", 0.0)) > float(winner_result.get("qa_score", 0.0)):
                             shutil.copyfile(salvage_path, output_path)
                             winner_result = dict(salvage_result)
                             winner_result["local_path"] = output_path
                             winner_result["qa_score"] = salvage_qa.get("score", 0.0)
-                            winner_result["qa_ok"] = bool(salvage_qa.get("ok", False))
+                            winner_result["qa_ok"] = bool(salvage_qa.get("gate_ok", False))
+                            winner_result["qa_min_score"] = salvage_qa.get("gate_min_score", winner_result.get("qa_min_score", 0.0))
                             winner_result["qa_notes"] = salvage_qa.get("notes", [])
                             log.info(f"Story salvage image replaced winner, score={winner_result['qa_score']}")
                         Path(salvage_path).unlink(missing_ok=True)
                     except Exception as salvage_err:
                         log.warning(f"Story salvage pass failed: {salvage_err}")
+                if salvage_enabled and template == "skeleton" and not winner_result["qa_ok"]:
+                    for salvage_idx in range(1):
+                        try:
+                            salvage_prompt = _skeleton_repair_prompt(prompt)
+                            salvage_path = str(cand_root.with_name(f"{cand_root.stem}_skeleton_repair_{salvage_idx}{cand_root.suffix or '.png'}"))
+                            salvage_result = await generate_image_grok(
+                                salvage_prompt,
+                                salvage_path,
+                                resolution=resolution,
+                                reference_image_url=reference_image_url,
+                                reference_lock_mode=lock_mode,
+                            )
+                            await _enforce_1080_image(salvage_path)
+                            salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                            salvage_gate_ok, salvage_gate_min = _image_quality_gate(
+                                salvage_qa,
+                                template=template,
+                                lock_mode=lock_mode,
+                                has_reference=has_reference,
+                                prompt=salvage_prompt,
+                            )
+                            salvage_qa["gate_ok"] = salvage_gate_ok
+                            salvage_qa["gate_min_score"] = salvage_gate_min
+                            if (
+                                salvage_gate_ok
+                                or float(salvage_qa.get("score", 0.0)) > float(winner_result.get("qa_score", 0.0))
+                            ):
+                                shutil.copyfile(salvage_path, output_path)
+                                winner_result = dict(salvage_result)
+                                winner_result["local_path"] = output_path
+                                winner_result["qa_score"] = salvage_qa.get("score", 0.0)
+                                winner_result["qa_ok"] = bool(salvage_qa.get("gate_ok", False))
+                                winner_result["qa_min_score"] = salvage_qa.get("gate_min_score", winner_result.get("qa_min_score", 0.0))
+                                winner_result["qa_notes"] = salvage_qa.get("notes", [])
+                                log.info(
+                                    f"Skeleton repair pass {salvage_idx + 1}/1 score={winner_result['qa_score']} "
+                                    f"ok={winner_result['qa_ok']}"
+                                )
+                            Path(salvage_path).unlink(missing_ok=True)
+                            if winner_result["qa_ok"]:
+                                break
+                        except Exception as salvage_err:
+                            log.warning(f"Skeleton repair pass {salvage_idx + 1}/1 failed: {salvage_err}")
                 if not winner_result["qa_ok"]:
+                    if template == "skeleton":
+                        raise RuntimeError(
+                            "Skeleton best-of candidates failed QA gate "
+                            f"(score={winner_result.get('qa_score', 0.0)}, notes={winner_result.get('qa_notes', [])})"
+                        )
                     log.warning(
-                        f"Best-of winner below threshold {IMAGE_QUALITY_MIN_SCORE}: "
+                        f"Best-of winner below threshold {winner_result.get('qa_min_score', IMAGE_QUALITY_MIN_SCORE)}: "
                         f"score={winner_result['qa_score']} path={Path(output_path).name}"
                     )
                 else:
@@ -3324,12 +7598,20 @@ async def generate_scene_image(
             )
             await _enforce_1080_image(output_path)
             qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
+            qa_gate_ok, qa_gate_min = _image_quality_gate(
+                qa,
+                template=template,
+                lock_mode=lock_mode,
+                has_reference=has_reference,
+                prompt=prompt,
+            )
             result["qa_score"] = qa.get("score", 0.0)
-            result["qa_ok"] = bool(qa.get("ok", False))
+            result["qa_ok"] = bool(qa_gate_ok)
+            result["qa_min_score"] = qa_gate_min
             result["qa_notes"] = qa.get("notes", [])
-            if template == "story" and not result["qa_ok"]:
+            if salvage_enabled and template == "story" and not result["qa_ok"]:
                 try:
-                    salvage_prompt = f"{prompt} {STORY_REALISM_REFINEMENT}"
+                    salvage_prompt = f"{prompt} {_story_salvage_refinement_for_scene(prompt)}"
                     salvage_path = str(Path(output_path).with_name(Path(output_path).stem + "_salvage" + Path(output_path).suffix))
                     salvage_result = await generate_image_grok(
                         salvage_prompt,
@@ -3339,116 +7621,285 @@ async def generate_scene_image(
                     )
                     await _enforce_1080_image(salvage_path)
                     salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                    salvage_gate_ok, salvage_gate_min = _image_quality_gate(
+                        salvage_qa,
+                        template=template,
+                        lock_mode=lock_mode,
+                        has_reference=has_reference,
+                        prompt=salvage_prompt,
+                    )
                     if float(salvage_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
                         shutil.copyfile(salvage_path, output_path)
                         result = dict(salvage_result)
                         result["local_path"] = output_path
                         result["qa_score"] = salvage_qa.get("score", 0.0)
-                        result["qa_ok"] = bool(salvage_qa.get("ok", False))
+                        result["qa_ok"] = bool(salvage_gate_ok)
+                        result["qa_min_score"] = salvage_gate_min
                         result["qa_notes"] = salvage_qa.get("notes", [])
                         log.info(f"Story single-pass salvage improved image score={result['qa_score']}")
                     Path(salvage_path).unlink(missing_ok=True)
                 except Exception as salvage_err:
                     log.warning(f"Story single-pass salvage failed: {salvage_err}")
+            if salvage_enabled and template == "skeleton" and not result["qa_ok"]:
+                for salvage_idx in range(1):
+                    try:
+                        salvage_prompt = _skeleton_repair_prompt(prompt)
+                        salvage_path = str(Path(output_path).with_name(Path(output_path).stem + f"_skeleton_repair_{salvage_idx}" + Path(output_path).suffix))
+                        salvage_result = await generate_image_grok(
+                            salvage_prompt,
+                            salvage_path,
+                            resolution=resolution,
+                            reference_image_url=reference_image_url,
+                            reference_lock_mode=lock_mode,
+                        )
+                        await _enforce_1080_image(salvage_path)
+                        salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
+                        salvage_gate_ok, salvage_gate_min = _image_quality_gate(
+                            salvage_qa,
+                            template=template,
+                            lock_mode=lock_mode,
+                            has_reference=has_reference,
+                            prompt=salvage_prompt,
+                        )
+                        if salvage_gate_ok or float(salvage_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
+                            shutil.copyfile(salvage_path, output_path)
+                            result = dict(salvage_result)
+                            result["local_path"] = output_path
+                            result["qa_score"] = salvage_qa.get("score", 0.0)
+                            result["qa_ok"] = bool(salvage_gate_ok)
+                            result["qa_min_score"] = salvage_gate_min
+                            result["qa_notes"] = salvage_qa.get("notes", [])
+                            log.info(f"Skeleton single-pass repair {salvage_idx + 1}/1 score={result['qa_score']} ok={result['qa_ok']}")
+                        Path(salvage_path).unlink(missing_ok=True)
+                        if result["qa_ok"]:
+                            break
+                    except Exception as salvage_err:
+                        log.warning(f"Skeleton single-pass repair {salvage_idx + 1}/1 failed: {salvage_err}")
+            if template == "skeleton" and not bool(result.get("qa_ok", False)):
+                if interactive_fast:
+                    notes = _interactive_soft_accept_notes(result.get("qa_notes", []) or [])
+                    if not _skeleton_notes_are_severe(notes):
+                        result["qa_notes"] = notes
+                        result["qa_ok"] = False
+                        return result
+                raise RuntimeError(
+                    "Skeleton single-pass generation failed QA gate "
+                    f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
+                )
             return result
         except Exception as e:
             log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
 
-    await generate_image_comfyui(prompt, output_path, resolution=resolution, negative_prompt=negative_prompt)
+    for provider in provider_order[xai_index + 1:]:
+        try:
+            local_result = await _local_provider_result(provider)
+            if local_result:
+                return local_result
+        except Exception as local_err:
+            last_local_provider_err = local_err
+            _record_provider_fallback(provider, "next")
+            log.warning(f"Post-xAI local provider '{provider}' failed: {local_err}")
+
+    if template == "skeleton" and interactive_fast:
+        if last_local_provider_err is not None:
+            raise RuntimeError(str(last_local_provider_err))
+        raise RuntimeError("Skeleton interactive generation exhausted WAN2.2 attempt budget")
+
+    safe_route = dict(template_adapter_route or {})
+    safe_route["enabled"] = False
+    safe_route["loras"] = []
+    await generate_image_comfyui(
+        prompt,
+        output_path,
+        resolution=resolution,
+        negative_prompt=negative_prompt,
+        allow_default_negative=not prompt_passthrough,
+        template=template,
+        adapter_route=safe_route,
+        max_wait_sec=(16 if interactive_fast else 900),
+    )
     await _enforce_1080_image(output_path)
+    _ensure_generated_image_valid(output_path)
     qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
-    return {"local_path": output_path, "cdn_url": None, "qa_score": qa.get("score", 0.0), "qa_ok": bool(qa.get("ok", False)), "qa_notes": qa.get("notes", [])}
-
-
-async def generate_image_comfyui(prompt: str, output_path: str, resolution: str = "720p", negative_prompt: str = "") -> str:
-    """Fallback: generate image via ComfyUI SDXL on RunPod."""
-    config = RESOLUTION_CONFIGS[resolution]
-    neg = negative_prompt or NEGATIVE_PROMPT
-
-    workflow = {
-        "3": {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": random.randint(0, 2**32),
-                "steps": 30,
-                "cfg": 7.5,
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
-                "denoise": 1.0,
-                "model": ["4", 0],
-                "positive": ["6", 0],
-                "negative": ["7", 0],
-                "latent_image": ["5", 0],
-            },
-        },
-        "4": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
-        },
-        "5": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": config["gen_width"], "height": config["gen_height"], "batch_size": 1},
-        },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["4", 1]},
-        },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": neg, "clip": ["4", 1]},
-        },
-        "8": {
-            "class_type": "VAEDecode",
-            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {"filename_prefix": "nyptid_gen", "images": ["8", 0]},
-        },
+    qa_gate_ok, qa_gate_min = _image_quality_gate(
+        qa,
+        template=template,
+        lock_mode=lock_mode,
+        has_reference=has_reference,
+        prompt=prompt,
+    )
+    if template == "skeleton" and not qa_gate_ok:
+        if interactive_fast:
+            notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
+            if not _skeleton_notes_are_severe(notes):
+                return {
+                    "local_path": output_path,
+                    "cdn_url": None,
+                    "qa_score": qa.get("score", 0.0),
+                    "qa_ok": False,
+                    "qa_min_score": qa_gate_min,
+                    "qa_notes": notes,
+                }
+        raise RuntimeError(
+            "Skeleton fallback generation failed QA gate "
+            f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
+        )
+    return {
+        "local_path": output_path,
+        "cdn_url": None,
+        "qa_score": qa.get("score", 0.0),
+        "qa_ok": bool(qa_gate_ok),
+        "qa_min_score": qa_gate_min,
+        "qa_notes": qa.get("notes", []),
     }
 
-    if config.get("upscale"):
-        workflow["10"] = {
-            "class_type": "LatentUpscaleBy",
-            "inputs": {
-                "samples": ["3", 0],
-                "scale_by": config["upscale_factor"],
-                "upscale_method": "bislerp",
-            },
-        }
-        workflow["11"] = {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": random.randint(0, 2**32),
-                "steps": 15,
-                "cfg": 7.0,
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
-                "denoise": 0.4,
-                "model": ["4", 0],
-                "positive": ["6", 0],
-                "negative": ["7", 0],
-                "latent_image": ["10", 0],
-            },
-        }
-        workflow["8"]["inputs"]["samples"] = ["11", 0]
 
-    result = await _run_comfyui_workflow(workflow, "9", "images")
+async def generate_image_comfyui(
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    allow_default_negative: bool = True,
+    template: str = "",
+    adapter_route: Optional[dict] = None,
+    max_wait_sec: int = 900,
+) -> str:
+    """Generate image via ComfyUI SDXL with optional template adapter stack."""
+    config = RESOLUTION_CONFIGS[resolution]
+    route = _resolve_template_adapter_route(template, override_route=adapter_route)
+    checkpoint_name = await _resolve_checkpoint_name(route.get("checkpoint", "sd_xl_base_1.0.safetensors"))
+    loras = []
+    if route.get("enabled", True):
+        loras = await _resolve_available_loras(list(route.get("loras", []) or []))
+    if loras:
+        lora_names = ", ".join(str(l.get("name", "")) for l in loras)
+        log.info(f"Applying adapter route for template '{template or 'default'}': {lora_names}")
+    safe_negative_prompt = str(negative_prompt or "").strip()
+    if not safe_negative_prompt and allow_default_negative:
+        safe_negative_prompt = NEGATIVE_PROMPT
+    workflow, output_node = _build_sdxl_workflow_with_loras(
+        prompt=str(prompt or "").strip(),
+        negative_prompt=safe_negative_prompt,
+        width=int(config["gen_width"]),
+        height=int(config["gen_height"]),
+        checkpoint_name=checkpoint_name,
+        loras=loras,
+        upscale=bool(config.get("upscale")),
+        upscale_factor=float(config.get("upscale_factor", 1.0) or 1.0),
+        filename_prefix="nyptid_gen",
+    )
+    result = await _run_comfyui_workflow(workflow, output_node, "images", max_wait_sec=max_wait_sec, poll_interval_sec=2.0)
     await _download_comfyui_file(result["images"][0], output_path)
     return output_path
 
 
+async def check_hidream_available(force_refresh: bool = False) -> bool:
+    """Best-effort HiDream availability with short TTL and stale-OK guard."""
+    now = time.time()
+    checked_ts = float(_hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
+    if not force_refresh and checked_ts > 0 and (now - checked_ts) <= _HIDREAM_AVAILABILITY_TTL_SEC:
+        return bool(_hidream_availability_cache.get("ready", False))
+    try:
+        assets = await _resolve_hidream_runtime_assets()
+        _hidream_availability_cache["checked_ts"] = now
+        _hidream_availability_cache["ready"] = True
+        _hidream_availability_cache["last_ok_ts"] = now
+        _hidream_availability_cache["last_error"] = ""
+        _hidream_availability_cache["model_name"] = str((assets or {}).get("model_name", "") or "")
+        _hidream_availability_cache["clip_l"] = str((assets or {}).get("clip_l_name", "") or "")
+        _hidream_availability_cache["clip_g"] = str((assets or {}).get("clip_g_name", "") or "")
+        _hidream_availability_cache["t5_name"] = str((assets or {}).get("t5_name", "") or "")
+        _hidream_availability_cache["llama_name"] = str((assets or {}).get("llama_name", "") or "")
+        _hidream_availability_cache["vae_name"] = str((assets or {}).get("vae_name", "") or "")
+        return True
+    except Exception as e:
+        _hidream_availability_cache["checked_ts"] = now
+        _hidream_availability_cache["ready"] = False
+        _hidream_availability_cache["last_error"] = str(e)
+        last_ok_ts = float(_hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+        if last_ok_ts > 0 and (now - last_ok_ts) <= _HIDREAM_STALE_OK_SEC:
+            age = int(now - last_ok_ts)
+            log.warning(f"HiDream probe failed but using stale healthy state ({age}s old): {e}")
+            return True
+        return False
+
+
+async def check_hidream_edit_available(force_refresh: bool = False) -> bool:
+    """Best-effort HiDream E1.1 availability with short TTL and stale-OK guard."""
+    now = time.time()
+    checked_ts = float(_hidream_edit_availability_cache.get("checked_ts", 0.0) or 0.0)
+    if not force_refresh and checked_ts > 0 and (now - checked_ts) <= _HIDREAM_AVAILABILITY_TTL_SEC:
+        return bool(_hidream_edit_availability_cache.get("ready", False))
+    try:
+        assets = await _resolve_hidream_edit_runtime_assets()
+        _hidream_edit_availability_cache["checked_ts"] = now
+        _hidream_edit_availability_cache["ready"] = True
+        _hidream_edit_availability_cache["last_ok_ts"] = now
+        _hidream_edit_availability_cache["last_error"] = ""
+        _hidream_edit_availability_cache["model_name"] = str((assets or {}).get("model_name", "") or "")
+        _hidream_edit_availability_cache["clip_l"] = str((assets or {}).get("clip_l_name", "") or "")
+        _hidream_edit_availability_cache["clip_g"] = str((assets or {}).get("clip_g_name", "") or "")
+        _hidream_edit_availability_cache["t5_name"] = str((assets or {}).get("t5_name", "") or "")
+        _hidream_edit_availability_cache["llama_name"] = str((assets or {}).get("llama_name", "") or "")
+        _hidream_edit_availability_cache["vae_name"] = str((assets or {}).get("vae_name", "") or "")
+        return True
+    except Exception as e:
+        _hidream_edit_availability_cache["checked_ts"] = now
+        _hidream_edit_availability_cache["ready"] = False
+        _hidream_edit_availability_cache["last_error"] = str(e)
+        last_ok_ts = float(_hidream_edit_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+        if last_ok_ts > 0 and (now - last_ok_ts) <= _HIDREAM_STALE_OK_SEC:
+            age = int(now - last_ok_ts)
+            log.warning(f"HiDream E1.1 probe failed but using stale healthy state ({age}s old): {e}")
+            return True
+        return False
+
+
 async def check_wan22_available() -> bool:
     """Check if the Wan 2.2 I2V models exist on the ComfyUI server."""
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{COMFYUI_URL}/object_info")
-            if resp.status_code == 200:
-                content = resp.text
-                return WAN22_I2V_HIGH.split(".")[0] in content or "wan2.2" in content.lower()
-    except Exception as e:
-        log.warning(f"Wan 2.2 availability check failed: {e}")
+    global _active_comfyui_url
+    for base_url in _comfyui_candidate_urls():
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{base_url}/object_info")
+                if resp.status_code == 200:
+                    content = resp.text
+                    if WAN22_I2V_HIGH.split(".")[0] in content or "wan2.2" in content.lower():
+                        _active_comfyui_url = base_url
+                        return True
+        except Exception as e:
+            log.warning(f"Wan 2.2 availability check failed on {base_url}: {e}")
     return False
+
+
+async def check_wan22_t2i_available(force_refresh: bool = False) -> bool:
+    """Best-effort WAN T2I availability with short TTL and stale-OK guard."""
+    now = time.time()
+    checked_ts = float(_wan22_t2i_availability_cache.get("checked_ts", 0.0) or 0.0)
+    if not force_refresh and checked_ts > 0 and (now - checked_ts) <= _WAN22_T2I_AVAILABILITY_TTL_SEC:
+        return bool(_wan22_t2i_availability_cache.get("ready", False))
+    try:
+        assets = await _resolve_wan22_t2i_runtime_assets()
+        _wan22_t2i_availability_cache["checked_ts"] = now
+        _wan22_t2i_availability_cache["ready"] = True
+        _wan22_t2i_availability_cache["last_ok_ts"] = now
+        _wan22_t2i_availability_cache["last_error"] = ""
+        _wan22_t2i_availability_cache["mode"] = str((assets or {}).get("mode", "") or "")
+        _wan22_t2i_availability_cache["ckpt_name"] = str((assets or {}).get("ckpt_name", "") or "")
+        _wan22_t2i_availability_cache["unet_name"] = str((assets or {}).get("unet_name", "") or "")
+        return True
+    except Exception as e:
+        _wan22_t2i_availability_cache["checked_ts"] = now
+        _wan22_t2i_availability_cache["ready"] = False
+        _wan22_t2i_availability_cache["last_error"] = str(e)
+        last_ok_ts = float(_wan22_t2i_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+        if last_ok_ts > 0 and (now - last_ok_ts) <= _WAN22_T2I_STALE_OK_SEC:
+            age = int(now - last_ok_ts)
+            log.warning(
+                f"WAN22 T2I probe failed but using stale healthy state ({age}s old): {e}"
+            )
+            return True
+        return False
 
 
 RUNPOD_SSH_HOST = "root@69.30.85.41"
@@ -3733,7 +8184,7 @@ async def animate_image_runway_video(image_path: str, prompt: str, output_clip_p
 
 
 async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
-    """Animate a scene image using Runway first, then FalAI Kling fallback."""
+    """Animate a scene image, preferring local Wan 2.2 for skeleton flows when requested."""
     provider_errors = []
     try:
         requested_duration = float(duration_sec)
@@ -3741,6 +8192,27 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
         requested_duration = 5.0
     # FalAI Kling I2V accepts only 5s or 10s durations.
     kling_duration = 10 if requested_duration >= 7.5 else 5
+
+    if prefer_wan:
+        try:
+            wan_ready = await check_wan22_available()
+        except Exception:
+            wan_ready = False
+        if wan_ready:
+            wan_clip_path = str(Path(output_dir_path) / ("wan_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            try:
+                # 5s @ ~16fps is ~80 frames, keep slightly above for smoothness.
+                target_frames = max(49, int(round(max(3.0, requested_duration) * 16)))
+                await animate_image_wan22(
+                    image_path=image_path,
+                    prompt=prompt,
+                    output_clip_path=wan_clip_path,
+                    num_frames=target_frames,
+                )
+                return {"type": "wan_clip", "path": wan_clip_path}
+            except Exception as e:
+                provider_errors.append("wan22: " + str(e))
+                log.warning(f"Wan 2.2 scene animation failed, trying fallback providers: {e}")
 
     if RUNWAY_API_KEY:
         runway_clip_path = str(Path(output_dir_path) / ("runway_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
@@ -3780,20 +8252,37 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
 
 async def _upload_image_to_comfyui(image_path: str) -> str:
     """Upload an image to ComfyUI's input directory via HTTP API."""
-    filename = "nyptid_scene_" + str(int(time.time() * 1000)) + ".png"
-    img_bytes = Path(image_path).read_bytes()
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            f"{COMFYUI_URL}/upload/image",
-            files={"image": (filename, img_bytes, "image/png")},
-            data={"overwrite": "true"},
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"ComfyUI image upload failed ({resp.status_code}): {resp.text[:200]}")
-        result = resp.json()
-        uploaded_name = result.get("name", filename)
-    log.info(f"Image uploaded to ComfyUI via HTTP: {uploaded_name}")
-    return uploaded_name
+    src = Path(image_path)
+    suffix = src.suffix.lower() or ".png"
+    mime = "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        mime = "image/jpeg"
+        suffix = ".jpg"
+    elif suffix == ".webp":
+        mime = "image/webp"
+    filename = "nyptid_scene_" + str(int(time.time() * 1000)) + suffix
+    img_bytes = src.read_bytes()
+    global _active_comfyui_url
+    last_error = None
+    for base_url in _comfyui_candidate_urls():
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"{base_url}/upload/image",
+                    files={"image": (filename, img_bytes, mime)},
+                    data={"overwrite": "true"},
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"ComfyUI image upload failed ({resp.status_code}): {resp.text[:200]}")
+                result = resp.json()
+                uploaded_name = result.get("name", filename)
+                _active_comfyui_url = base_url
+                log.info(f"Image uploaded to ComfyUI via HTTP: {uploaded_name} ({base_url})")
+                return uploaded_name
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(f"ComfyUI image upload failed on all endpoints: {last_error}")
 
 
 async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: str, num_frames: int = 81) -> str:
@@ -3867,8 +8356,8 @@ async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: st
                 "denoise": 1.0,
                 "model": ["1", 0],
                 "positive": ["8", 0],
-                "negative": ["8", 2],
-                "latent_image": ["8", 1],
+                "negative": ["8", 1],
+                "latent_image": ["8", 2],
             },
         },
         "12": {
@@ -4141,6 +8630,171 @@ async def _merge_sfx_track(sfx_paths: list[str], scenes: list, output_path: str)
     return ""
 
 
+def _audio_track_exists(path: str) -> bool:
+    p = Path(str(path or "").strip())
+    return bool(p and p.exists() and p.stat().st_size > 0)
+
+
+async def _generate_spooky_bgm_track(total_duration_sec: float, output_path: str, whisper_mode: str = "subtle") -> str:
+    """Create a spooky background music bed for horror long-form videos."""
+    duration = max(6.0, float(total_duration_sec or 0.0))
+    fade_out_start = max(0.0, duration - 2.0)
+    seed_clip = str(TEMP_DIR / f"bgm_seed_{int(time.time() * 1000)}.mp3")
+    mood_hint = "subtle" if whisper_mode == "off" else ("cinematic tension" if whisper_mode == "cinematic" else "dark atmospheric")
+    bgm_prompt = (
+        "Instrumental cinematic horror ambience music bed, haunting low drones, distant eerie textures, "
+        "slow tension build, no vocals, no speech, no abrupt stingers, seamless loop quality, "
+        f"{mood_hint} tone under narration"
+    )
+
+    try:
+        if ELEVENLABS_API_KEY:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    "https://api.elevenlabs.io/v1/sound-generation",
+                    headers={
+                        "xi-api-key": ELEVENLABS_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "text": bgm_prompt,
+                        "duration_seconds": 22.0,
+                        "prompt_influence": 0.62,
+                    },
+                )
+            if resp.status_code in (200, 201):
+                with open(seed_clip, "wb") as f:
+                    f.write(resp.content)
+                if _audio_track_exists(seed_clip):
+                    cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-stream_loop",
+                        "-1",
+                        "-i",
+                        seed_clip,
+                        "-t",
+                        str(duration),
+                        "-af",
+                        f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out_start}:d=2.0,apad=pad_dur=0.8",
+                        "-ar",
+                        "44100",
+                        "-ac",
+                        "1",
+                        output_path,
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.communicate()
+                    if proc.returncode == 0 and _audio_track_exists(output_path):
+                        return output_path
+        # Fallback: synthesize a low-key eerie bed locally.
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=54:sample_rate=44100:duration={duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=81:sample_rate=44100:duration={duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anoisesrc=color=pink:amplitude=0.025:sample_rate=44100:duration={duration}",
+            "-filter_complex",
+            (
+                "[0:a]volume=0.16[a0];"
+                "[1:a]volume=0.09,lowpass=f=900[a1];"
+                "[2:a]highpass=f=140,lowpass=f=1500,volume=0.10[a2];"
+                f"[a0][a1][a2]amix=inputs=3:duration=longest:normalize=0,"
+                f"afade=t=in:st=0:d=1.0,afade=t=out:st={fade_out_start}:d=2.0,apad=pad_dur=0.8[aout]"
+            ),
+            "-map",
+            "[aout]",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            output_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and _audio_track_exists(output_path):
+            return output_path
+    except Exception as e:
+        log.warning(f"Horror BGM generation failed (non-fatal): {e}")
+    finally:
+        Path(seed_clip).unlink(missing_ok=True)
+
+    return ""
+
+
+async def _mix_ambience_tracks(sfx_track: str, bgm_track: str, output_path: str) -> str:
+    """Mix scene SFX and background music into one ambience track."""
+    has_sfx = _audio_track_exists(sfx_track)
+    has_bgm = _audio_track_exists(bgm_track)
+    if not has_sfx and not has_bgm:
+        return ""
+
+    if has_sfx and has_bgm:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            sfx_track,
+            "-i",
+            bgm_track,
+            "-filter_complex",
+            (
+                "[0:a]volume=1.0[sfx];"
+                "[1:a]volume=0.55,highpass=f=40,lowpass=f=6500[bgm];"
+                "[sfx][bgm]amix=inputs=2:duration=longest:dropout_transition=2,"
+                "alimiter=limit=0.93,apad=pad_dur=0.8[aout]"
+            ),
+            "-map",
+            "[aout]",
+            "-c:a",
+            "libmp3lame",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            output_path,
+        ]
+    else:
+        src = sfx_track if has_sfx else bgm_track
+        # Normalize to one consistent MP3 stream for downstream ffmpeg graph.
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            src,
+            "-af",
+            "apad=pad_dur=0.8",
+            "-c:a",
+            "libmp3lame",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            output_path,
+        ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    if proc.returncode == 0 and _audio_track_exists(output_path):
+        return output_path
+    return ""
+
+
 async def _composite_video_on_runpod(
     scene_clips: list[Path],
     audio_path: str,
@@ -4340,6 +8994,7 @@ async def composite_video(
     use_svd: bool = False,
     subtitle_path: str = None,
     sfx_paths: list[str] = None,
+    bgm_track: str = "",
     transition_style: str = "smooth",
     micro_escalation_mode: bool = False,
 ) -> str:
@@ -4416,6 +9071,10 @@ async def composite_video(
     if sfx_paths and any(sfx_paths):
         sfx_track_path = str(TEMP_DIR / ("sfx_full_" + job_ts + ".mp3"))
         sfx_track = await _merge_sfx_track(sfx_paths, scenes, sfx_track_path)
+    ambience_track = ""
+    if sfx_track or _audio_track_exists(bgm_track):
+        ambience_path = str(TEMP_DIR / ("ambience_full_" + job_ts + ".mp3"))
+        ambience_track = await _mix_ambience_tracks(sfx_track, bgm_track, ambience_path)
 
     if RUNPOD_COMPOSITOR_ENABLED:
         try:
@@ -4424,12 +9083,14 @@ async def composite_video(
                 audio_path,
                 output_path,
                 subtitle_path=subtitle_path,
-                sfx_track=sfx_track,
+                sfx_track=ambience_track,
                 transition_style=transition_style,
                 clip_durations=working_durations,
             )
             for clip in set(scene_clips + working_clips):
                 clip.unlink(missing_ok=True)
+            if ambience_track:
+                Path(ambience_track).unlink(missing_ok=True)
             if sfx_track:
                 Path(sfx_track).unlink(missing_ok=True)
             log.info("Final compositing offloaded to RunPod")
@@ -4491,7 +9152,7 @@ async def composite_video(
     if not merged_video.exists() or merged_video.stat().st_size == 0:
         raise RuntimeError("FFmpeg concat produced no output file")
 
-    has_sfx = sfx_track and Path(sfx_track).exists()
+    has_sfx = ambience_track and Path(ambience_track).exists()
 
     if subtitle_path and Path(subtitle_path).exists():
         sub_abs = str(Path(subtitle_path).resolve()).replace("\\", "/").replace(":", "\\:")
@@ -4500,7 +9161,7 @@ async def composite_video(
                 "ffmpeg", "-y",
                 "-i", str(merged_video),
                 "-i", audio_path,
-                "-i", sfx_track,
+                "-i", ambience_track,
                 "-vf", f"ass={sub_abs}",
                 "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
                 "-map", "0:v", "-map", "[aout]",
@@ -4528,7 +9189,7 @@ async def composite_video(
                 "ffmpeg", "-y",
                 "-i", str(merged_video),
                 "-i", audio_path,
-                "-i", sfx_track,
+                "-i", ambience_track,
                 "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
@@ -4581,6 +9242,8 @@ async def composite_video(
         clip.unlink(missing_ok=True)
     concat_file.unlink(missing_ok=True)
     merged_video.unlink(missing_ok=True)
+    if ambience_track:
+        Path(ambience_track).unlink(missing_ok=True)
     if sfx_track:
         Path(sfx_track).unlink(missing_ok=True)
 
@@ -4597,6 +9260,7 @@ def _normalize_scenes_for_render(scenes: list) -> list:
         scene = dict(raw_scene or {})
         narration = str(scene.get("narration", "") or "").strip()
         visual_description = str(scene.get("visual_description", "") or "").strip()
+        negative_prompt = str(scene.get("negative_prompt", "") or "").strip()
         if not visual_description:
             visual_description = narration or f"Scene {idx + 1} visual"
         try:
@@ -4606,6 +9270,7 @@ def _normalize_scenes_for_render(scenes: list) -> list:
         duration = max(3.5, min(duration, 10.0))
         scene["narration"] = narration
         scene["visual_description"] = visual_description
+        scene["negative_prompt"] = negative_prompt
         scene["duration_sec"] = round(duration, 2)
         normalized.append(scene)
     return normalized
@@ -4633,11 +9298,90 @@ STORY_CINEMATIC_PROMPT_ADDON = (
     "Keep every composition readable in vertical format and avoid static idle center-framing. "
     "Avoid washed contrast, muddy shadows, low-detail backgrounds, and stock-photo framing."
 )
+STORY_EXPLAINER_CONSISTENCY_PROMPT = (
+    "MASTER STORY CONSISTENCY RULES (apply to every scene): "
+    "Keep one continuous visual universe across all scenes, but do not force a recurring protagonist or human presenter. "
+    "For concept-heavy beats, preserve continuity through recurring anatomy, objects, mechanisms, environments, color grade, and camera language. "
+    "Prioritize the core concept, process, body system, object, or environment the beat is explaining. "
+    "Use readable cinematic layouts that make the mechanism obvious at phone-screen size."
+)
+STORY_EXPLAINER_CINEMATIC_PROMPT_ADDON = (
+    "CINEMATIC STORY UPGRADE RULES: visualize the mechanism directly with premium explainer cinematography. "
+    "Use readable cutaway views, macro detail, layered depth, motivated lighting, and vertical-friendly composition. "
+    "Prefer anatomy, systems, heat, cells, objects, environments, diagrams, or process visuals when they explain the beat more clearly than a person on screen. "
+    "Avoid defaulting to a single human character unless the beat explicitly requires one."
+)
 STORY_REALISM_REFINEMENT = (
     "Realism lock: photoreal human skin texture, natural pores, physically plausible hands and fingers, "
     "natural eye reflections, grounded facial proportions, realistic fabric micro-detail, and non-plastic materials. "
     "No CGI waxiness, no uncanny face, no extra fingers, no malformed hands."
 )
+STORY_EXPLAINER_REALISM_REFINEMENT = (
+    "Realism lock: premium photoreal explainer visual with medically and physically plausible anatomy, "
+    "clear body-system visualization, readable objects and environments, grounded materials, and crisp cinematic lighting. "
+    "No stock-photo spokesperson, no random presenter, no irrelevant repeated character, no plastic CGI anatomy, and no abstract blob shapes replacing the core concept."
+)
+
+
+def _story_scene_prefers_explainer_visuals(text: str) -> bool:
+    source = str(text or "").strip().lower()
+    if not source:
+        return False
+    human_hits = len(re.findall(r"\b(man|woman|person|people|character|protagonist|hero|lead|worker|student|doctor|patient|he|she|they|someone|guy|girl)\b", source))
+    explainer_hits = len(re.findall(
+        r"\b(fever|immune|immune system|pyrogen|pyrogens|hypothalamus|thermostat|temperature|degrees|thermometer|infection|bacteria|virus|viruses|body|blood|blood vessels|cells|cell|chemical|signals|sweat|sweating|muscles|brain|anatomy|organ|organs|disease|symptom|mechanism|process|science|medical|biology|physiology|system)\b",
+        source,
+    ))
+    concept_hits = len(re.findall(
+        r"\b(explains?|how it works|why it happens|what happens|step by step|cause|effect|reaction|response|cool down|heat|cooling|reproduce|reset)\b",
+        source,
+    ))
+    return explainer_hits >= 2 or (explainer_hits >= 1 and concept_hits >= 1) or (explainer_hits >= 1 and human_hits == 0)
+
+
+def _configured_image_provider_order() -> list[str]:
+    provider_order = [
+        str(p or "").strip().lower()
+        for p in str(IMAGE_PROVIDER_ORDER or "").split(",")
+        if str(p or "").strip()
+    ]
+    if provider_order:
+        return provider_order
+    if XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
+        return ["fal"]
+    return ["hidream", "wan22", "sdxl"] if HIDREAM_ENABLED else ["wan22", "sdxl"]
+
+
+def _configured_local_image_provider_order() -> list[str]:
+    local_providers: list[str] = []
+    for provider in _configured_image_provider_order():
+        key = _normalize_image_provider_key(provider)
+        if key in {"hidream", "wan22", "sdxl"} and key not in local_providers:
+            local_providers.append(key)
+    return local_providers
+
+
+def _story_prompt_prefix_for_scene(visual_description: str) -> str:
+    if _story_scene_prefers_explainer_visuals(visual_description):
+        return (
+            "Cinematic photoreal explainer scene, Unreal Engine 5 grade realism with filmic cinematography, "
+            "emotionally resonant composition with depth of field and grounded concept detail, "
+            "dramatic volumetric lighting with motivated light sources, ray traced global illumination, "
+            "atmospheric particles, lens behavior, film grain, and richly detailed cinematic environment, 8k ultra HD, "
+        )
+    return TEMPLATE_PROMPT_PREFIXES.get("story", "")
+
+
+def _story_consistency_prompt_for_scene(visual_description: str) -> str:
+    return STORY_EXPLAINER_CONSISTENCY_PROMPT if _story_scene_prefers_explainer_visuals(visual_description) else STORY_MASTER_CONSISTENCY_PROMPT
+
+
+def _story_cinematic_addon_for_scene(visual_description: str) -> str:
+    return STORY_EXPLAINER_CINEMATIC_PROMPT_ADDON if _story_scene_prefers_explainer_visuals(visual_description) else STORY_CINEMATIC_PROMPT_ADDON
+
+
+def _story_salvage_refinement_for_scene(prompt: str) -> str:
+    return STORY_EXPLAINER_REALISM_REFINEMENT if _story_scene_prefers_explainer_visuals(prompt) else STORY_REALISM_REFINEMENT
 
 
 def _normalize_skeleton_quality_mode(value: str | None, template: str = "skeleton") -> str:
@@ -4653,8 +9397,20 @@ def _normalize_skeleton_quality_mode(value: str | None, template: str = "skeleto
 
 
 def _normalize_mint_mode(value, template: str) -> bool:
-    default_on = template in {"skeleton", "story"}
+    t = str(template or "").strip().lower()
+    # Skeleton prompts already pass through strong template constraints; mint rewrite
+    # can over-truncate scene-specific objects/actions in creative control.
+    if t == "skeleton":
+        return False
+    default_on = t in {"story"}
     return _bool_from_any(value, default=default_on)
+
+
+def _creative_prompt_passthrough_enabled(session: dict | None) -> bool:
+    """When enabled, Creative Control uses the user's scene prompt verbatim."""
+    if not isinstance(session, dict):
+        return True
+    return _bool_from_any(session.get("prompt_passthrough"), True)
 
 
 def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = True) -> list:
@@ -4676,8 +9432,8 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
         if not chunks:
             if template == "skeleton":
                 chunks = [
-                    "A fully clothed skeleton character wearing a role-accurate outfit from neck to feet appears in a detailed cinematic environment.",
-                    "The skeleton takes a clear action pose with a role-specific prop while camera framing emphasizes conflict and readability.",
+                    "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a detailed cinematic environment.",
+                    "The skeleton takes a clear action pose with role-specific props while camera framing emphasizes conflict and readability.",
                     "Motion begins instantly with smooth human-like momentum and directional continuity into the next shot.",
                 ]
             else:
@@ -4692,33 +9448,69 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
             chunks.append("")
 
         if template == "skeleton":
-            if "skeleton" not in chunks[0].lower():
-                chunks[0] = f"A skeleton character {chunks[0][0].lower() + chunks[0][1:]}" if chunks[0] else \
-                    "A skeleton character appears in a cinematic environment."
-            if "wearing" not in chunks[0].lower():
-                chunks[0] = chunks[0].rstrip(".!?") + " wearing a fully opaque role-accurate outfit from neck to feet."
+            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a detailed cinematic environment."
+            first_chunk = chunks[0].strip()
+            explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
+            if not re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE) or not re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE):
+                first_chunk = f"{skeleton_lock} {first_chunk}".strip()
+            if explicit_outfit_request:
+                first_chunk = first_chunk.rstrip(".!?") + ". Keep any explicitly requested outfit visible while preserving the same canonical skeleton anatomy."
+            elif not re.search(r"\b(no clothing|no costume|no uniforms?|no armor)\b", first_chunk, re.IGNORECASE):
+                first_chunk = first_chunk.rstrip(".!?") + ". No clothing, uniforms, armor, or costumes."
+            chunks[0] = first_chunk
+            if not explicit_outfit_request:
+                chunks[1] = re.sub(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume)\b", "props", chunks[1], flags=re.IGNORECASE)
             if not re.search(r"\b(environment|background|street|city|desert|forest|interior|exterior|battlefield|temple|rome|studio)\b", chunks[0], re.IGNORECASE):
                 chunks[0] = chunks[0].rstrip(".!?") + " In a detailed environment matching the scene request."
-            if not re.search(r"\b(holding|aiming|running|facing|fighting|action|pose|gestur|turning|pointing)\b", chunks[1], re.IGNORECASE):
+            if not re.search(r"\b(holding|aiming|running|facing|fighting|action|pose|gestur|turning|pointing|sit|sits|seated|sitting)\b", chunks[1], re.IGNORECASE):
                 chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
                     "The skeleton takes a clear action pose with a role-specific prop and readable composition."
+            combined = " ".join(chunks[:3])
+            has_table = bool(re.search(r"\b(table|desk|countertop)\b", combined, re.IGNORECASE))
+            has_sit = bool(re.search(r"\b(sit|sits|seated|sitting)\b", combined, re.IGNORECASE))
+            has_brain = bool(re.search(r"\bbrain\b", combined, re.IGNORECASE))
+            has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", combined, re.IGNORECASE))
+            if has_table and not has_sit:
+                chunks[1] = chunks[1].rstrip(".!?") + ". Skeleton is clearly seated at the table."
+            if has_brain and has_money and not re.search(r"\b(two|both)\b", combined, re.IGNORECASE):
+                chunks[2] = chunks[2].rstrip(".!?") + ". Keep both required props visible: one brain and one pile of money."
+            if not re.search(r"\b(prop|object|item|scene request|requested)\b", " ".join(chunks[:3]), re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + ". Keep all explicitly requested props/objects visible and readable."
             if not re.search(r"\b(motion|camera|moves|moving|drift|continuity|momentum)\b", chunks[2], re.IGNORECASE):
                 chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
                     "Motion begins instantly with smooth momentum and directional continuity."
         else:
-            if not re.search(r"\b(character|protagonist|person|figure|subject|crowd|group|family|worker)\b", chunks[0], re.IGNORECASE):
-                chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
-                    "The primary subject(s) for this script beat are clearly visible."
-            if not re.search(r"\b(environment|background|setting|location|interior|exterior)\b", chunks[0], re.IGNORECASE):
-                chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment."
-            if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding)\b", chunks[1], re.IGNORECASE):
-                chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
-                    "The subject(s) perform a clear action with visible stakes."
-            if not re.search(r"\b(camera|motion|continuity|transition)\b", chunks[2], re.IGNORECASE):
-                chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
-                    "Camera and subject motion preserve smooth continuity into the next scene."
+            explainer_visuals = template == "story" and _story_scene_prefers_explainer_visuals(" ".join(chunks[:3]))
+            if explainer_visuals:
+                if not re.search(r"\b(anatomy|mechanism|process|system|cells?|organs?|brain|blood|temperature|infection|bacteria|virus|heat|sweat|diagram|cutaway|thermometer|molecule)\b", chunks[0], re.IGNORECASE):
+                    chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
+                        "The core mechanism or body-system concept for this script beat is clearly visible."
+                if not re.search(r"\b(environment|background|setting|location|interior|exterior|cutaway|macro|inside|within)\b", chunks[0], re.IGNORECASE):
+                    chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment or readable cutaway view."
+                if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding|flow|circulat|heat|signal|response|reaction|change)\b", chunks[1], re.IGNORECASE):
+                    chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                        "Show the mechanism actively happening with visible cause-and-effect and readable stakes."
+                if not re.search(r"\b(camera|motion|continuity|transition|cutaway|macro|push)\b", chunks[2], re.IGNORECASE):
+                    chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                        "Camera movement and visual continuity should track the process clearly into the next scene."
+            else:
+                if not re.search(r"\b(character|protagonist|person|figure|subject|crowd|group|family|worker)\b", chunks[0], re.IGNORECASE):
+                    chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
+                        "The primary subject(s) for this script beat are clearly visible."
+                if not re.search(r"\b(environment|background|setting|location|interior|exterior)\b", chunks[0], re.IGNORECASE):
+                    chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment."
+                if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding)\b", chunks[1], re.IGNORECASE):
+                    chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                        "The subject(s) perform a clear action with visible stakes."
+                if not re.search(r"\b(camera|motion|continuity|transition)\b", chunks[2], re.IGNORECASE):
+                    chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                        "Camera and subject motion preserve smooth continuity into the next scene."
 
-        scene["visual_description"] = " ".join([c.strip() for c in chunks[:3] if c and c.strip()]).strip()
+        scene["visual_description"] = " ".join([
+            c.strip().rstrip(".!?") + "."
+            for c in chunks[:3]
+            if c and c.strip()
+        ]).strip()
         compiled.append(scene)
     return compiled
 
@@ -4729,23 +9521,78 @@ def _build_skeleton_image_prompt(
     quality_mode: str = "cinematic",
     immutable_context: str = "",
 ) -> str:
+    def _scene_object_lock(scene_text: str) -> str:
+        text = str(scene_text or "").strip().lower()
+        if not text:
+            return ""
+        rules: list[str] = []
+        has_brain = bool(re.search(r"\bbrain\b", text))
+        has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text))
+        has_table = bool(re.search(r"\btable|desk|countertop\b", text))
+        has_glow = bool(re.search(r"\b(glow|glowing|emissive|light[- ]?emitting|luminous)\b", text))
+        if has_table:
+            rules.append(
+                "TABLE LOCK: skeleton is seated at a table/desk and the tabletop is clearly visible in frame."
+            )
+            rules.append(
+                "PROP PLACEMENT LOCK: required props are on/above the tabletop, not random floating orbs unless explicitly requested."
+            )
+        if has_brain:
+            rules.append(
+                "BRAIN PROP LOCK: show one clearly identifiable human brain with realistic gyri/sulci folds (not a smooth sphere, fruit, or generic ball)."
+            )
+        if has_money:
+            rules.append(
+                "MONEY PROP LOCK: show one clearly identifiable pile/stack of paper cash banknotes (not coins-only, not blank paper scraps)."
+            )
+        if has_brain and has_money:
+            rules.append("OBJECT COUNT LOCK: include both required props (brain and money) in the same shot and keep both readable.")
+        if has_glow and (has_brain or has_money):
+            rules.append(
+                "GLOW LOCK: each requested glowing prop must visibly emit soft bloom/light so the glow is obvious at phone-screen size."
+            )
+        return " ".join(rules).strip()
+
     mode = _normalize_skeleton_quality_mode(quality_mode, template="skeleton")
     addon = (SKELETON_CINEMATIC_PROMPT_ADDON + " ") if mode == "cinematic" else ""
     immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
-    # Keep scene detail rich but remove duplicated eye directives that can over-constrain Grok.
-    delta = re.sub(
-        r"\b(with\s+)?realistic\s+(visible\s+)?eyeballs?[^.]*\.",
-        "",
-        str(visual_description or "").strip(),
-        flags=re.IGNORECASE,
+    delta = _sanitize_skeleton_scene_delta(str(visual_description or "").strip())
+    explicit_outfit_request = bool(re.search(r"\b(suit|tuxedo|armor|uniform|costume|hoodie|jacket|dress|shirt|pants|coat|robe|scrubs|jersey)\b", delta, re.IGNORECASE))
+    object_lock = _scene_object_lock(delta)
+    glow_lock = ""
+    if re.search(r"\b(glow|glowing|emissive|neon|luminescen|light[- ]?emitting)\b", delta, re.IGNORECASE):
+        glow_lock = (
+            "PROP LIGHTING LOCK: any requested glowing object must visibly emit light/bloom and be clearly identifiable on-screen. "
+        )
+    scene_mandate = (
+        "SCENE CONTENT LOCK (must be visible and preserved): "
+        + delta
+        + ". Keep every explicitly requested prop/object/action visible and readable in frame."
     ).strip()
-    if not delta:
-        delta = str(visual_description or "").strip()
     return (
         SKELETON_IMAGE_STYLE_PREFIX + " "
+        + scene_mandate + " "
+        + (
+            "SCENE PRIORITY RULE: preserve requested setting, pose, action, props, object count, and any explicitly requested outfit from the scene content lock while keeping the same canonical skeleton anatomy. "
+            if explicit_outfit_request
+            else "SCENE PRIORITY RULE: preserve requested setting, pose, action, props, and object count from the scene content lock; ignore any clothing/costume directives to preserve canonical skeleton identity. "
+        )
+        + (object_lock + " " if object_lock else "")
+        + glow_lock
         + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
-        + "NON-NEGOTIABLE CHARACTER RULE: both eye sockets contain realistic human-like eyeballs with visible iris and wet reflective highlights. "
-        + "COMPOSITION RULE: subject occupies most of vertical frame; prefer medium or medium-full hero framing unless scene explicitly requests wide shot. "
+        + "NON-NEGOTIABLE CHARACTER RULE: use the exact same canonical anatomical skeleton in every scene: ivory-white skull and bones, large realistic eyeballs with visible iris and wet reflective highlights, clearly visible translucent soft-tissue silhouette around torso/limbs, identical skull proportions and eye spacing. "
+        + "COLOR/RENDER RULE: realistic photographic rendering with natural ivory bone tones; never x-ray, radiograph, CT, fluoroscopy, or neon-blue scan aesthetics. "
+        + "EYE RULE: eyes must be realistic and non-glowing; no emissive, neon, laser, or light-emitting eyes. Any glow in scene is only from props/environment, never from eye sockets. "
+        + "CANONICAL LOOK LOCK: this is NEVER a bare-bones model. A clear glass-like translucent human shell must visibly wrap all shown body regions (head, torso, arms, hands, pelvis, legs when visible) with bones clearly seen through it. "
+        + "VISIBILITY LOCK: the translucent shell must be clearly noticeable at phone-screen size, with medium-opacity glass edges and subtle interior translucency around the skeleton form. "
+        + "ANATOMY LOCK: skull-only face geometry, never human skin/flesh face features. "
+        + "HAIR LOCK: no human hair, scalp, beard, eyebrows, eyelashes, wig, or hairstyle elements. "
+        + (
+            "NON-NEGOTIABLE STYLE RULE: if the scene explicitly requests clothing, keep that wardrobe visible while preserving the same skeleton identity, translucent shell, and anatomy. "
+            if explicit_outfit_request
+            else "NON-NEGOTIABLE STYLE RULE: no clothing, uniforms, armor, or costumes on the skeleton body. "
+        )
+        + "COMPOSITION RULE: subject occupies most of vertical 9:16 frame; prefer medium or medium-full hero framing unless scene explicitly requests wide shot. "
         + addon + immutable + skeleton_anchor + delta + " "
         + SKELETON_IMAGE_SUFFIX
     )
@@ -4757,11 +9604,11 @@ def _build_story_image_prompt(
     immutable_context: str = "",
 ) -> str:
     mode = _normalize_skeleton_quality_mode(quality_mode, template="story")
-    addon = (STORY_CINEMATIC_PROMPT_ADDON + " ") if mode == "cinematic" else ""
+    addon = (_story_cinematic_addon_for_scene(visual_description) + " ") if mode == "cinematic" else ""
     immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
     return (
-        TEMPLATE_PROMPT_PREFIXES.get("story", "") + " "
-        + STORY_MASTER_CONSISTENCY_PROMPT + " "
+        _story_prompt_prefix_for_scene(visual_description) + " "
+        + _story_consistency_prompt_for_scene(visual_description) + " "
         + addon + immutable + str(visual_description or "").strip()
     ).strip()
 
@@ -4784,9 +9631,9 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
         if not chunks:
             if template == "skeleton":
                 chunks = [
-                    "A skeleton character wearing a fully opaque role-accurate outfit from neck to feet stands centered in frame.",
-                    "The skeleton holds a role-specific prop in a cinematic environment matching the scene request.",
-                    "Motion cue: smooth natural arm and head movement with realistic fabric sway.",
+                    "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette stands centered in frame.",
+                    "The skeleton holds role-specific props in a cinematic environment matching the scene request.",
+                    "Motion cue: smooth natural arm and head movement with realistic momentum.",
                 ]
             else:
                 chunks = [
@@ -4798,22 +9645,42 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
             chunks = chunks[:3]
 
         if template == "skeleton":
-            first = chunks[0]
-            if "skeleton" not in first.lower():
-                if first:
-                    first = f"A skeleton character {first[0].lower() + first[1:]}"
-                else:
-                    first = "A skeleton character is centered in frame."
-            if "wearing" not in first.lower():
-                first = first.rstrip(".!?") + " wearing a full opaque outfit from neck to feet."
-            chunks[0] = first
+            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette is centered in frame."
+            first_chunk = chunks[0].strip()
+            explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
+            if not re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE) or not re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE):
+                first_chunk = f"{skeleton_lock} {first_chunk}".strip()
+            if explicit_outfit_request:
+                first_chunk = first_chunk.rstrip(".!?") + ". Keep any explicitly requested outfit visible while preserving the same canonical skeleton anatomy."
+            elif not re.search(r"\b(no clothing|no costume|no uniforms?|no armor)\b", first_chunk, re.IGNORECASE):
+                first_chunk = first_chunk.rstrip(".!?") + ". No clothing, uniforms, armor, or costumes."
+            chunks[0] = first_chunk
 
             if len(chunks) < 2:
-                chunks.append("The skeleton holds a role-specific prop in a cinematic environment that matches the scene request.")
+                chunks.append("The skeleton holds role-specific props in a cinematic environment that matches the scene request.")
             if len(chunks) < 3:
-                chunks.append("Motion cue: smooth natural arm and head movement with realistic fabric sway.")
+                chunks.append("Motion cue: smooth natural arm and head movement with realistic momentum.")
+            # Some scene prompts come through as a single sentence. Ensure secondary chunk exists before mutating it.
+            if not explicit_outfit_request:
+                chunks[1] = re.sub(
+                    r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume)\b",
+                    "props",
+                    chunks[1],
+                    flags=re.IGNORECASE,
+                )
+            combined = " ".join(chunks[:3])
+            has_table = bool(re.search(r"\b(table|desk|countertop)\b", combined, re.IGNORECASE))
+            has_sit = bool(re.search(r"\b(sit|sits|seated|sitting)\b", combined, re.IGNORECASE))
+            has_brain = bool(re.search(r"\bbrain\b", combined, re.IGNORECASE))
+            has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", combined, re.IGNORECASE))
+            if has_table and not has_sit:
+                chunks[1] = chunks[1].rstrip(".!?") + ". Skeleton is clearly seated at the table."
+            if has_brain and has_money and not re.search(r"\b(two|both)\b", combined, re.IGNORECASE):
+                chunks[2] = chunks[2].rstrip(".!?") + ". Keep both required props visible: one brain and one pile of money."
+            if not re.search(r"\b(prop|object|item|scene request|requested)\b", " ".join(chunks[:3]), re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + ". Keep all explicitly requested props/objects visible and readable."
             if not re.search(r"\b(close[- ]?up|medium|mid[- ]?shot|three[- ]?quarter|3/4|waist[- ]?up|hero framing|fills? (the )?frame)\b", " ".join(chunks[:3]), re.IGNORECASE):
-                chunks[1] = chunks[1].rstrip(".!?") + " Hero framing: medium or three-quarter shot with the subject filling most of the vertical frame."
+                chunks[1] = chunks[1].rstrip(".!?") + ". Hero framing: medium or three-quarter shot with the subject filling most of the vertical frame."
 
             # Hard default for Skeleton AI: eyeballs must always be present.
             eyes_ok = any(
@@ -4821,24 +9688,38 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
                 for c in chunks[:3]
             )
             if not eyes_ok:
-                chunks[0] = chunks[0].rstrip(".!?") + " with realistic visible eyeballs in both eye sockets."
-            elif not re.search(r"\beyeball|eyeballs|iris|pupil\b", chunks[0], re.IGNORECASE):
-                chunks[0] = chunks[0].rstrip(".!?") + " Keep realistic eyeballs with visible iris detail."
+                chunks[0] = chunks[0].rstrip(".!?") + " Keep realistic visible eyeballs in both eye sockets."
         else:
+            explainer_visuals = template == "story" and _story_scene_prefers_explainer_visuals(" ".join(chunks[:3]))
             first = chunks[0]
-            if not re.search(r"\b(main character|protagonist|hero|lead|character|person|subject|crowd|group|family|worker)\b", first, re.IGNORECASE):
-                if first:
-                    first = f"The key subject(s) for this beat {first[0].lower() + first[1:]}"
-                else:
-                    first = "The key subject(s) for this beat are clearly visible."
-            if not re.search(r"\b(environment|setting|location|interior|exterior|city|street|room|forest|desert|studio)\b", first, re.IGNORECASE):
-                first = first.rstrip(".!?") + " in a specific cinematic environment."
-            chunks[0] = first
+            if explainer_visuals:
+                if not re.search(r"\b(anatomy|mechanism|process|system|cells?|organs?|brain|blood|temperature|infection|bacteria|virus|heat|sweat|diagram|cutaway|thermometer|molecule)\b", first, re.IGNORECASE):
+                    if first:
+                        first = f"The key concept or mechanism for this beat {first[0].lower() + first[1:]}"
+                    else:
+                        first = "The key concept or mechanism for this beat is clearly visible."
+                if not re.search(r"\b(environment|setting|location|interior|exterior|city|street|room|forest|desert|studio|cutaway|macro|inside|within)\b", first, re.IGNORECASE):
+                    first = first.rstrip(".!?") + " in a specific cinematic environment or readable cutaway view."
+                chunks[0] = first
 
-            if len(chunks) < 2:
-                chunks.append("The subject(s) perform a clear action with visible emotional stakes and readable composition.")
-            if len(chunks) < 3:
-                chunks.append("Motion cue: camera and subject movement preserve scene-to-scene continuity.")
+                if len(chunks) < 2:
+                    chunks.append("Show the process actively happening with readable cause-and-effect and visible stakes.")
+                if len(chunks) < 3:
+                    chunks.append("Motion cue: camera movement and transitions preserve visual continuity while explaining the mechanism.")
+            else:
+                if not re.search(r"\b(main character|protagonist|hero|lead|character|person|subject|crowd|group|family|worker)\b", first, re.IGNORECASE):
+                    if first:
+                        first = f"The key subject(s) for this beat {first[0].lower() + first[1:]}"
+                    else:
+                        first = "The key subject(s) for this beat are clearly visible."
+                if not re.search(r"\b(environment|setting|location|interior|exterior|city|street|room|forest|desert|studio)\b", first, re.IGNORECASE):
+                    first = first.rstrip(".!?") + " in a specific cinematic environment."
+                chunks[0] = first
+
+                if len(chunks) < 2:
+                    chunks.append("The subject(s) perform a clear action with visible emotional stakes and readable composition.")
+                if len(chunks) < 3:
+                    chunks.append("Motion cue: camera and subject movement preserve scene-to-scene continuity.")
 
         if quality_mode == "cinematic":
             if not re.search(r"\b(high[- ]stakes|danger|conflict|urgent|impact|tension|emotional stakes)\b", chunks[0], re.IGNORECASE):
@@ -4846,13 +9727,17 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
             if len(chunks) < 2:
                 chunks.append("Dynamic 24-35mm low-angle cinematic framing with volumetric rim lighting and deep subject separation.")
             elif not re.search(r"\b(lens|camera|low-angle|over-shoulder|dolly|framing|rim light|volumetric)\b", chunks[1], re.IGNORECASE):
-                chunks[1] = chunks[1].rstrip(".!?") + " Dynamic 24-35mm cinematic framing with low-angle depth and volumetric rim lighting."
+                chunks[1] = chunks[1].rstrip(".!?") + ". Dynamic 24-35mm cinematic framing with low-angle depth and volumetric rim lighting."
             if len(chunks) < 3:
                 chunks.append("Motion starts instantly with smooth human-like momentum and carries continuity into the next shot.")
             elif not re.search(r"\b(motion|moves|moving|turns|gestures|drift|camera|continuity)\b", chunks[2], re.IGNORECASE):
-                chunks[2] = chunks[2].rstrip(".!?") + " Motion starts instantly with smooth momentum and clear directional continuity."
+                chunks[2] = chunks[2].rstrip(".!?") + ". Motion starts instantly with smooth momentum and clear directional continuity."
 
-        scene["visual_description"] = " ".join(chunks[:3]).strip()
+        scene["visual_description"] = " ".join([
+            c.strip().rstrip(".!?") + "."
+            for c in chunks[:3]
+            if c and c.strip()
+        ]).strip()
         constrained.append(scene)
     return constrained
 
@@ -4970,7 +9855,12 @@ def _job_diag_finalize(job_id: str):
         month_key = str(job.get("credit_month_key", "") or "")
         if user_id and source in {"monthly", "topup"}:
             try:
-                asyncio.create_task(_refund_generation_credit(user_id, source, month_key=month_key))
+                asyncio.create_task(_refund_generation_credit(
+                    user_id,
+                    source,
+                    month_key=month_key,
+                    credits=int(job.get("credit_amount", 1) or 1),
+                ))
                 job["credit_refunded"] = True
             except Exception:
                 pass
@@ -5068,12 +9958,8 @@ async def run_generation_pipeline(
         skeleton_anchor = ""
         skeleton_reference_image_url = ""
         if template == "skeleton":
+            skeleton_anchor = _canonical_skeleton_anchor()
             skeleton_reference_image_url = reference_image_url or SKELETON_GLOBAL_REFERENCE_IMAGE_URL
-        if template == "skeleton" and scenes:
-            s1_desc = scenes[0].get("visual_description", "")
-            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
-            if outfit_match:
-                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -5298,6 +10184,1358 @@ async def _update_project_by_session(user_id: str, session_id: str, fields: dict
         _save_projects_store()
 
 
+class LongFormPauseError(RuntimeError):
+    def __init__(self, message: str, details: dict):
+        super().__init__(message)
+        self.details = dict(details or {})
+
+
+def _longform_review_state(session: dict) -> dict:
+    chapters = list((session or {}).get("chapters") or [])
+    total = len(chapters)
+    approved = sum(1 for c in chapters if str((c or {}).get("status", "")).strip().lower() == "approved")
+    pending = total - approved
+    avg_score = 0.0
+    if total > 0:
+        avg_score = sum(float((c or {}).get("viral_score", 0) or 0) for c in chapters) / total
+    return {
+        "total_chapters": total,
+        "approved_chapters": approved,
+        "pending_chapters": max(0, pending),
+        "all_approved": (total > 0 and approved == total),
+        "viral_score_total": round(avg_score, 2),
+    }
+
+
+def _longform_public_session(session: dict) -> dict:
+    s = dict(session or {})
+    chapters = []
+    for ch in list(s.get("chapters") or []):
+        chapter = dict(ch or {})
+        chapter_scenes = []
+        for scene_idx, raw_scene in enumerate(list(chapter.get("scenes") or [])):
+            scene = dict(raw_scene or {})
+            chapter_scenes.append({
+                "scene_num": int(scene.get("scene_num", scene_idx + 1) or (scene_idx + 1)),
+                "duration_sec": float(scene.get("duration_sec", 5.0) or 5.0),
+                "narration": str(scene.get("narration", "") or ""),
+                "visual_description": str(scene.get("visual_description", "") or ""),
+                "text_overlay": str(scene.get("text_overlay", "") or ""),
+                "image_url": str(scene.get("image_url", "") or ""),
+                "image_status": str(scene.get("image_status", "missing") or "missing"),
+                "image_error": str(scene.get("image_error", "") or ""),
+            })
+        chapters.append({
+            "index": int(chapter.get("index", 0) or 0),
+            "title": str(chapter.get("title", "") or ""),
+            "summary": str(chapter.get("summary", "") or ""),
+            "target_sec": float(chapter.get("target_sec", 0) or 0),
+            "status": str(chapter.get("status", "pending_review") or "pending_review"),
+            "retry_count": int(chapter.get("retry_count", 0) or 0),
+            "viral_score": int(chapter.get("viral_score", 0) or 0),
+            "brand_slot": str(chapter.get("brand_slot", "") or ""),
+            "scene_count": len(chapter_scenes),
+            "scenes": chapter_scenes,
+            "last_error": str(chapter.get("last_error", "") or ""),
+        })
+    return {
+        "session_id": str(s.get("session_id", "") or ""),
+        "template": str(s.get("template", "") or ""),
+        "topic": str(s.get("topic", "") or ""),
+        "input_title": str(s.get("input_title", "") or ""),
+        "input_description": str(s.get("input_description", "") or ""),
+        "target_minutes": float(s.get("target_minutes", 0) or 0),
+        "language": str(s.get("language", "en") or "en"),
+        "resolution": str(s.get("resolution", "720p_landscape") or "720p_landscape"),
+        "animation_enabled": bool(s.get("animation_enabled", True)),
+        "sfx_enabled": bool(s.get("sfx_enabled", True)),
+        "whisper_mode": str(s.get("whisper_mode", "subtle") or "subtle"),
+        "status": str(s.get("status", "draft_review") or "draft_review"),
+        "job_id": str(s.get("job_id", "") or ""),
+        "paused_error": s.get("paused_error", None),
+        "metadata_pack": dict(s.get("metadata_pack") or {}),
+        "chapters": chapters,
+        "review_state": _longform_review_state(s),
+        "draft_progress": dict(s.get("draft_progress") or {}),
+        "created_at": float(s.get("created_at", 0) or 0),
+        "updated_at": float(s.get("updated_at", 0) or 0),
+        "package": dict(s.get("package") or {}),
+    }
+
+
+def _longform_session_summary(session: dict) -> dict:
+    s = dict(session or {})
+    chapters = list(s.get("chapters") or [])
+    preview_image_url = ""
+    for chapter in reversed(chapters):
+        chapter_scenes = list((chapter or {}).get("scenes") or [])
+        for scene in chapter_scenes:
+            candidate = str((scene or {}).get("image_url", "") or "").strip()
+            if candidate:
+                preview_image_url = candidate
+                break
+        if preview_image_url:
+            break
+    package = dict(s.get("package") or {})
+    output_file = str(package.get("output_file", "") or "")
+    return {
+        "session_id": str(s.get("session_id", "") or ""),
+        "template": str(s.get("template", "") or ""),
+        "topic": str(s.get("topic", "") or ""),
+        "input_title": str(s.get("input_title", "") or ""),
+        "target_minutes": float(s.get("target_minutes", 0) or 0),
+        "language": str(s.get("language", "en") or "en"),
+        "resolution": str(s.get("resolution", "720p_landscape") or "720p_landscape"),
+        "status": str(s.get("status", "draft_review") or "draft_review"),
+        "job_id": str(s.get("job_id", "") or ""),
+        "review_state": _longform_review_state(s),
+        "draft_progress": dict(s.get("draft_progress") or {}),
+        "paused_error": s.get("paused_error", None),
+        "preview_image_url": preview_image_url,
+        "output_file": output_file,
+        "created_at": float(s.get("created_at", 0) or 0),
+        "updated_at": float(s.get("updated_at", 0) or 0),
+    }
+
+
+def _longform_chapter_scene_targets(target_minutes: float) -> tuple[int, float]:
+    chapter_count = _longform_chapter_count_for_minutes(target_minutes)
+    chapter_target_sec = max(35.0, float(target_minutes) * 60.0 / max(chapter_count, 1))
+    return chapter_count, chapter_target_sec
+
+
+def _longform_placeholder_chapter(
+    chapter_index: int,
+    chapter_target_sec: float,
+    brand_slot: str = "",
+    status: str = "awaiting_previous_approval",
+) -> dict:
+    return {
+        "index": int(chapter_index),
+        "title": f"Chapter {int(chapter_index) + 1}",
+        "summary": "Generating chapter draft...",
+        "target_sec": round(float(chapter_target_sec), 2),
+        "scenes": [],
+        "status": str(status or "awaiting_previous_approval"),
+        "retry_count": 0,
+        "brand_slot": str(brand_slot or ""),
+        "viral_score": 0,
+        "last_error": "",
+    }
+
+
+def _longform_fallback_chapter(
+    topic: str,
+    input_title: str,
+    chapter_index: int,
+    chapter_target_sec: float,
+    chapter_count: int,
+    brand_slot: str = "",
+    tone: str = "neutral",
+    template: str = "story",
+) -> dict:
+    scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    scenes: list[dict] = []
+    for i in range(scene_goal):
+        beat = i + 1
+        scenes.append({
+            "scene_num": beat,
+            "duration_sec": 5.0,
+            "narration": (
+                f"{input_title}: chapter {chapter_index + 1}, beat {beat}. "
+                f"This section deepens the core idea of {topic} with clear progression and stakes."
+            ),
+            "visual_description": (
+                f"Cinematic documentary frame for {topic}, chapter {chapter_index + 1}, beat {beat}; "
+                "clear subject, dynamic camera motion, realistic lighting, high detail."
+            ),
+            "text_overlay": f"Chapter {chapter_index + 1} - Beat {beat}",
+        })
+    normalized = _normalize_longform_scenes_for_render(scenes)
+    normalized = _scale_scene_durations_to_target(normalized, chapter_target_sec)
+    normalized = _longform_enforce_tone_on_scenes(normalized, tone=tone, template=template)
+    out = {
+        "index": int(chapter_index),
+        "title": f"Chapter {chapter_index + 1} - {topic[:64].strip() or 'Main Segment'}",
+        "summary": (
+            f"Fallback draft for chapter {chapter_index + 1} of {chapter_count}. "
+            "Review and regenerate if needed."
+        ),
+        "tone": str(tone or "neutral"),
+        "target_sec": round(float(len(normalized) * 5.0), 2),
+        "scenes": normalized,
+        "status": "pending_review",
+        "retry_count": 0,
+        "brand_slot": str(brand_slot or ""),
+        "viral_score": 0,
+        "last_error": "",
+    }
+    out = _longform_apply_brand_slot(out, brand_slot, input_title=input_title)
+    out["viral_score"] = _longform_chapter_retention_score(out)
+    return out
+
+
+def _longform_preview_filename(session_id: str, chapter_index: int, scene_index: int) -> str:
+    safe_sid = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(session_id or "").strip())[:64] or "lf"
+    return f"{safe_sid}_c{int(chapter_index) + 1:02d}_s{int(scene_index) + 1:03d}.png"
+
+
+def _longform_preview_url(filename: str) -> str:
+    return f"/api/longform/preview/{filename}"
+
+
+async def _longform_attach_scene_previews(session_id: str, template: str, chapter: dict, resolution: str = "720p_landscape") -> dict:
+    out = dict(chapter or {})
+    chapter_index = int(out.get("index", 0) or 0)
+    scenes = _normalize_longform_scenes_for_render(list(out.get("scenes") or []))
+    scenes = _scale_scene_durations_to_target(scenes, out.get("target_sec", 0))
+    if not scenes:
+        out["scenes"] = []
+        out["target_sec"] = 0.0
+        return out
+
+    neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+    skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
+    # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
+    reference_image_url = ""
+    preview_resolution = "720p_landscape" if str(resolution or "").endswith("_landscape") else "720p"
+    LONGFORM_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    now_cache_bust = int(time.time())
+    chapter_tone = str(out.get("tone", "") or "").strip().lower()
+    if chapter_tone not in {"horror", "neutral"}:
+        derived_narration = " ".join(str((s or {}).get("narration", "") or "") for s in scenes)
+        chapter_tone = _longform_detect_tone(
+            template,
+            str(out.get("title", "") or ""),
+            str(out.get("summary", "") or ""),
+            derived_narration,
+        )
+    out["tone"] = chapter_tone
+    if _longform_is_horror_tone(chapter_tone):
+        neg_prompt = (
+            neg_prompt
+            + ", bright cheerful lighting, warm happy tone, colorful festival mood, comedy framing, daylight beach party aesthetics"
+        )
+
+    scripted_scenes: list[dict] = []
+    for scene_idx, raw_scene in enumerate(scenes):
+        scene = dict(raw_scene or {})
+        scene["scene_num"] = int(scene.get("scene_num", scene_idx + 1) or (scene_idx + 1))
+        scene["duration_sec"] = 5.0
+        scene["visual_description"] = _longform_tone_locked_visual_description(
+            str(scene.get("visual_description", "") or ""),
+            tone=chapter_tone,
+            template=template,
+        )
+        scene["image_url"] = ""
+        scene["image_status"] = "pending_script_lock"
+        scene["image_error"] = ""
+        scripted_scenes.append(scene)
+
+    out["scenes"] = scripted_scenes
+    out["target_sec"] = round(float(len(scripted_scenes) * 5.0), 2)
+
+    # Persist all scripted scenes first so owner can review story flow before images finish.
+    try:
+        async with _longform_sessions_lock:
+            live = _longform_sessions.get(session_id)
+            if isinstance(live, dict):
+                chapters_live = list(live.get("chapters") or [])
+                if 0 <= chapter_index < len(chapters_live):
+                    chapter_live = dict(chapters_live[chapter_index] or {})
+                    chapter_live["scenes"] = [dict(s) for s in scripted_scenes]
+                    chapter_live["target_sec"] = out["target_sec"]
+                    chapter_live["status"] = "draft_generating_images"
+                    chapters_live[chapter_index] = chapter_live
+                    live["chapters"] = chapters_live
+                    progress = dict(live.get("draft_progress") or {})
+                    progress["preview_scene_total"] = int(len(scripted_scenes))
+                    progress["preview_scene_generated"] = 0
+                    live["draft_progress"] = progress
+                    live["updated_at"] = time.time()
+                    _save_longform_sessions()
+    except Exception:
+        pass
+
+    for scene_idx, raw_scene in enumerate(scripted_scenes):
+        scene = dict(raw_scene or {})
+        scene["image_status"] = "generating"
+        visual_desc = _longform_tone_locked_visual_description(
+            str(scene.get("visual_description", "") or ""),
+            tone=chapter_tone,
+            template=template,
+        )
+        scene["visual_description"] = visual_desc
+
+        prompt = _build_scene_prompt_with_reference(
+            template=template,
+            visual_description=visual_desc,
+            quality_mode="cinematic",
+            skeleton_anchor=skeleton_anchor,
+            reference_dna={},
+            reference_lock_mode="strict",
+            art_style="auto",
+        )
+        filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
+        output_path = str(LONGFORM_PREVIEW_DIR / filename)
+        try:
+            img_result = await generate_scene_image(
+                prompt,
+                output_path,
+                resolution=preview_resolution,
+                negative_prompt=neg_prompt,
+                template=template,
+                reference_image_url=reference_image_url,
+                reference_lock_mode="inspired",
+                best_of_enabled=False,
+                salvage_enabled=False,
+            )
+            if Path(output_path).exists():
+                scene["image_url"] = f"{_longform_preview_url(filename)}?v={now_cache_bust}"
+                scene["image_status"] = "ready"
+                scene["image_error"] = ""
+            else:
+                cdn_url = str((img_result or {}).get("cdn_url", "") or "")
+                if cdn_url:
+                    scene["image_url"] = cdn_url
+                    scene["image_status"] = "ready"
+                    scene["image_error"] = ""
+                else:
+                    scene["image_status"] = "error"
+                    scene["image_error"] = "Preview image was not generated"
+        except Exception as e:
+            scene["image_status"] = "error"
+            scene["image_error"] = str(e)[:220]
+
+        scripted_scenes[scene_idx] = scene
+        # Stream image progress while preserving full scripted scene list.
+        try:
+            async with _longform_sessions_lock:
+                live = _longform_sessions.get(session_id)
+                if isinstance(live, dict):
+                    chapters_live = list(live.get("chapters") or [])
+                    if 0 <= chapter_index < len(chapters_live):
+                        chapter_live = dict(chapters_live[chapter_index] or {})
+                        chapter_live["scenes"] = [dict(s) for s in scripted_scenes]
+                        chapter_live["target_sec"] = out["target_sec"]
+                        chapter_live["status"] = "draft_generating_images"
+                        chapters_live[chapter_index] = chapter_live
+                        live["chapters"] = chapters_live
+                        progress = dict(live.get("draft_progress") or {})
+                        progress["preview_scene_total"] = int(len(scripted_scenes))
+                        progress["preview_scene_generated"] = int(scene_idx + 1)
+                        live["draft_progress"] = progress
+                        live["updated_at"] = time.time()
+                        _save_longform_sessions()
+        except Exception:
+            pass
+
+    out["scenes"] = scripted_scenes
+    out["target_sec"] = round(float(len(scripted_scenes) * 5.0), 2)
+    return out
+
+
+def _longform_generated_chapter_count(chapters: list[dict]) -> int:
+    total = 0
+    for chapter in list(chapters or []):
+        if list((chapter or {}).get("scenes") or []):
+            total += 1
+    return total
+
+
+def _longform_approved_chapter_count(chapters: list[dict]) -> int:
+    return sum(1 for chapter in list(chapters or []) if str((chapter or {}).get("status", "") or "") == "approved")
+
+
+async def _generate_longform_chapter_for_session(session_id: str, chapter_index: int) -> None:
+    chapter_count = 0
+    fallback_used = 0
+    try:
+        async with _longform_sessions_lock:
+            session = dict(_longform_sessions.get(session_id) or {})
+        if not session:
+            return
+
+        template = _normalize_longform_template(session.get("template", "story"))
+        topic = str(session.get("topic", "") or "").strip()
+        input_title = str(session.get("input_title", "") or "").strip()
+        input_description = str(session.get("input_description", "") or "").strip()
+        language = _normalize_longform_language(session.get("language", "en"))
+        resolution = str(session.get("resolution", "720p_landscape") or "720p_landscape")
+        chapter_tone = _longform_detect_tone(template, topic, input_title, input_description)
+        target_minutes = _normalize_longform_target_minutes(session.get("target_minutes", LONGFORM_DEFAULT_TARGET_MINUTES))
+        chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
+
+        chapter_list = list(session.get("chapters") or [])
+        if chapter_index < 0 or chapter_index >= len(chapter_list):
+            return
+        chapter_seed = dict(chapter_list[chapter_index] or {})
+        slot = str(chapter_seed.get("brand_slot", "") or _longform_brand_slot(chapter_index, chapter_count))
+        prior_retry = int(chapter_seed.get("retry_count", 0) or 0)
+
+        try:
+            chapter = await _generate_longform_chapter(
+                template=template,
+                topic=topic,
+                input_title=input_title,
+                input_description=input_description,
+                chapter_index=chapter_index,
+                chapter_count=chapter_count,
+                chapter_target_sec=chapter_target_sec,
+                language=language,
+                brand_slot=slot,
+            )
+            chapter["last_error"] = ""
+        except Exception as e:
+            fallback_used = 1
+            chapter = _longform_fallback_chapter(
+                topic=topic,
+                input_title=input_title or topic or "Untitled",
+                chapter_index=chapter_index,
+                chapter_target_sec=chapter_target_sec,
+                chapter_count=chapter_count,
+                brand_slot=slot,
+                tone=chapter_tone,
+                template=template,
+            )
+            chapter["last_error"] = f"AI draft failed once ({type(e).__name__}); fallback draft generated."
+            log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used: {e}")
+
+        chapter = await _longform_attach_scene_previews(
+            session_id=session_id,
+            template=template,
+            chapter=chapter,
+            resolution=resolution,
+        )
+        chapter["status"] = "pending_review"
+        chapter["retry_count"] = max(prior_retry, int(chapter.get("retry_count", 0) or 0))
+
+        async with _longform_sessions_lock:
+            live = _longform_sessions.get(session_id)
+            if not isinstance(live, dict):
+                return
+            chapters_live = list(live.get("chapters") or [])
+            if chapter_index >= len(chapters_live):
+                return
+            chapters_live[chapter_index] = chapter
+            live["chapters"] = chapters_live
+            progress = dict(live.get("draft_progress") or {})
+            live["status"] = "draft_review"
+            live["draft_progress"] = {
+                "total_chapters": int(len(chapters_live)),
+                "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
+                "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
+                "failed_chapters": int(progress.get("failed_chapters", 0) or 0) + int(fallback_used),
+                "stage": "awaiting_owner_approval",
+            }
+            live["updated_at"] = time.time()
+            _save_longform_sessions()
+    except Exception as e:
+        log.error(f"[longform:{session_id}] chapter generation failed: {e}", exc_info=True)
+        async with _longform_sessions_lock:
+            live = _longform_sessions.get(session_id)
+            if isinstance(live, dict):
+                live["status"] = "error"
+                live["paused_error"] = {
+                    "stage": "draft_generation",
+                    "chapter_index": int(chapter_index),
+                    "error": str(e),
+                }
+                chapters_live = list(live.get("chapters") or [])
+                progress = dict(live.get("draft_progress") or {})
+                live["draft_progress"] = {
+                    "total_chapters": int(chapter_count or len(chapters_live)),
+                    "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
+                    "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
+                    "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                    "stage": "error",
+                }
+                live["updated_at"] = time.time()
+                _save_longform_sessions()
+
+
+async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
+    next_idx: int | None = None
+    async with _longform_sessions_lock:
+        live = _longform_sessions.get(session_id)
+        if not isinstance(live, dict):
+            return
+        chapters = list(live.get("chapters") or [])
+        if not chapters:
+            return
+        if any(str((c or {}).get("status", "") or "") == "draft_generating" for c in chapters):
+            return
+
+        for i, chapter in enumerate(chapters):
+            status = str((chapter or {}).get("status", "") or "")
+            if status == "awaiting_previous_approval":
+                next_idx = i
+                break
+
+        generated = _longform_generated_chapter_count(chapters)
+        approved = _longform_approved_chapter_count(chapters)
+        progress = dict(live.get("draft_progress") or {})
+
+        if next_idx is None:
+            live["status"] = "draft_review"
+            live["draft_progress"] = {
+                "total_chapters": int(len(chapters)),
+                "generated_chapters": int(generated),
+                "approved_chapters": int(approved),
+                "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                "stage": "ready_for_finalize" if approved == len(chapters) else "awaiting_owner_approval",
+            }
+            live["updated_at"] = time.time()
+            _save_longform_sessions()
+            return
+
+        if any(str((chapters[j] or {}).get("status", "") or "") != "approved" for j in range(next_idx)):
+            live["status"] = "draft_review"
+            live["draft_progress"] = {
+                "total_chapters": int(len(chapters)),
+                "generated_chapters": int(generated),
+                "approved_chapters": int(approved),
+                "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                "stage": "awaiting_owner_approval",
+            }
+            live["updated_at"] = time.time()
+            _save_longform_sessions()
+            return
+
+        chapter = dict(chapters[next_idx] or {})
+        chapter["status"] = "draft_generating"
+        chapter["summary"] = chapter.get("summary") or "Generating chapter draft..."
+        chapter["last_error"] = ""
+        chapter["scenes"] = []
+        chapters[next_idx] = chapter
+        live["chapters"] = chapters
+        live["status"] = "draft_generating"
+        live["draft_progress"] = {
+            "total_chapters": int(len(chapters)),
+            "generated_chapters": int(generated),
+            "approved_chapters": int(approved),
+            "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+            "stage": f"generating_chapter_{next_idx + 1}",
+        }
+        live["updated_at"] = time.time()
+        _save_longform_sessions()
+
+    asyncio.create_task(_generate_longform_chapter_for_session(session_id, next_idx))
+
+
+async def _run_longform_pipeline(job_id: str, session_id: str):
+    pause_details: dict = {}
+    session_snapshot: dict = {}
+    try:
+        async with _longform_sessions_lock:
+            # Worker runs in a separate process from the API; reload disk state
+            # so newly-created sessions are visible before render starts.
+            if session_id not in _longform_sessions:
+                _load_longform_sessions()
+            if session_id not in _longform_sessions:
+                raise RuntimeError("Long-form session not found")
+            session_snapshot = dict(_longform_sessions[session_id])
+        template = str(session_snapshot.get("template", "story") or "story")
+        resolution = str(session_snapshot.get("resolution", "720p_landscape") or "720p_landscape")
+        language = _normalize_longform_language(session_snapshot.get("language", "en"))
+        animation_enabled = _bool_from_any(session_snapshot.get("animation_enabled"), True)
+        sfx_enabled = _bool_from_any(session_snapshot.get("sfx_enabled"), True)
+        whisper_mode = _normalize_longform_whisper_mode(session_snapshot.get("whisper_mode", "subtle"))
+        chapters = list(session_snapshot.get("chapters") or [])
+        topic = str(session_snapshot.get("topic", "") or "")
+        input_title = str(session_snapshot.get("input_title", "") or topic or "Untitled")
+        input_description = str(session_snapshot.get("input_description", "") or "")
+        session_tone = _longform_detect_tone(template, topic, input_title, input_description)
+        chapter_tones = {
+            int((chapter or {}).get("index", idx) or idx): str((chapter or {}).get("tone", session_tone) or session_tone)
+            for idx, chapter in enumerate(chapters)
+        }
+        render_horror_audio = _longform_is_horror_tone(session_tone) or any(
+            _longform_is_horror_tone(tone) for tone in chapter_tones.values()
+        )
+
+        scenes: list[dict] = []
+        chapter_markers: list[dict] = []
+        cursor_sec = 0.0
+        for chapter in chapters:
+            chapter_idx = int((chapter or {}).get("index", len(chapter_markers)) or len(chapter_markers))
+            chapter_title = str((chapter or {}).get("title", f"Chapter {chapter_idx + 1}") or f"Chapter {chapter_idx + 1}")
+            chapter_scenes = _normalize_longform_scenes_for_render((chapter or {}).get("scenes", []))
+            chapter_scenes = _scale_scene_durations_to_target(chapter_scenes, float((chapter or {}).get("target_sec", 70) or 70))
+            chapter_scenes = list(
+                (
+                    _longform_apply_brand_slot(
+                        {"scenes": chapter_scenes},
+                        str((chapter or {}).get("brand_slot", "") or ""),
+                        input_title=input_title,
+                    ).get("scenes")
+                    or chapter_scenes
+                )
+            )
+            chapter_scenes = _normalize_longform_scenes_for_render(chapter_scenes)
+            chapter_tone = str((chapter or {}).get("tone", chapter_tones.get(chapter_idx, session_tone)) or chapter_tones.get(chapter_idx, session_tone))
+            chapter_scenes = _longform_enforce_tone_on_scenes(chapter_scenes, tone=chapter_tone, template=template)
+            if not chapter_scenes:
+                raise LongFormPauseError(
+                    f"Chapter {chapter_idx + 1} has no scenes",
+                    {"chapter_index": chapter_idx, "stage": "planning", "error": "empty_chapter_scenes"},
+                )
+            start_sec = cursor_sec
+            for scene in chapter_scenes:
+                scene_copy = dict(scene or {})
+                scene_copy["_chapter_index"] = chapter_idx
+                scenes.append(scene_copy)
+                cursor_sec += float(scene_copy.get("duration_sec", 6) or 6)
+            chapter_markers.append({
+                "index": chapter_idx,
+                "title": chapter_title,
+                "start_sec": round(start_sec, 2),
+                "end_sec": round(cursor_sec, 2),
+            })
+
+        if not scenes:
+            raise RuntimeError("Long-form render has no scenes")
+
+        _job_set_stage(job_id, "generating_images", 8)
+        jobs[job_id]["total_scenes"] = len(scenes)
+        jobs[job_id]["generation_mode"] = "video" if animation_enabled else "image"
+        neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+        if render_horror_audio:
+            neg_prompt = (
+                neg_prompt
+                + ", bright cheerful lighting, warm happy tone, colorful festival mood, comedy framing, daylight beach party aesthetics"
+            )
+        scene_assets: list[dict] = []
+        scene_prompts: list[str] = []
+        skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
+        reference_image_url = _normalize_reference_with_default(template, "")
+        total_steps = len(scenes) * (2 if animation_enabled else 1)
+        gen_ts = str(int(time.time() * 1000))
+
+        for i, scene in enumerate(scenes):
+            jobs[job_id]["current_scene"] = i + 1
+            step_base = i * (2 if animation_enabled else 1)
+            _job_set_stage(job_id, "generating_images", 8 + int((step_base / max(total_steps, 1)) * 58))
+            chapter_index = int(scene.get("_chapter_index", 0) or 0)
+            chapter_tone = str(chapter_tones.get(chapter_index, session_tone) or session_tone)
+            locked_visual = _longform_tone_locked_visual_description(
+                str(scene.get("visual_description", "") or ""),
+                tone=chapter_tone,
+                template=template,
+            )
+            scene["visual_description"] = locked_visual
+            full_prompt = _build_scene_prompt_with_reference(
+                template=template,
+                visual_description=locked_visual,
+                quality_mode="cinematic",
+                skeleton_anchor=skeleton_anchor,
+                reference_dna={},
+                reference_lock_mode="strict",
+                art_style="auto",
+            )
+            scene_prompts.append(locked_visual)
+
+            img_path = str(TEMP_DIR / f"{job_id}_lf_scene_{i}.png")
+            img_result = None
+            image_ok = False
+            image_error = ""
+            for attempt in range(1, LONGFORM_MAX_SCENE_RETRIES + 1):
+                try:
+                    img_result = await generate_scene_image(
+                        full_prompt,
+                        img_path,
+                        resolution=resolution,
+                        negative_prompt=neg_prompt,
+                        template=template,
+                        reference_image_url=reference_image_url,
+                        reference_lock_mode="strict",
+                        best_of_enabled=False,
+                        salvage_enabled=False,
+                    )
+                    quality = _score_generated_image_quality(img_path, full_prompt, template=template)
+                    score = float(quality.get("score", 0.0) or 0.0)
+                    min_score = _image_quality_min_score(
+                        template=template,
+                        lock_mode="strict",
+                        has_reference=bool(reference_image_url),
+                    )
+                    if score < min_score:
+                        log.warning(
+                            f"[{job_id}] Long-form image quality below gate for scene {i + 1}: "
+                            f"{score:.1f} < {min_score:.1f}. Accepting for throughput."
+                        )
+                    image_ok = True
+                    break
+                except Exception as e:
+                    image_error = str(e)
+            if not image_ok:
+                pause_details = {
+                    "chapter_index": chapter_index,
+                    "scene_index": i,
+                    "stage": "image_generation",
+                    "error": image_error or "image_generation_failed_after_retries",
+                }
+                raise LongFormPauseError("Image generation failed repeatedly", pause_details)
+
+            asset = {"image": img_path, "frames": None, "kling_clip": None}
+            cdn_url = (img_result or {}).get("cdn_url")
+            if animation_enabled:
+                _job_set_stage(job_id, "animating_scenes", 8 + int(((step_base + 1) / max(total_steps, 1)) * 58))
+                anim_error = ""
+                clip_ok = False
+                for _attempt in range(1, LONGFORM_MAX_SCENE_RETRIES + 1):
+                    try:
+                        clip_path = str(TEMP_DIR / f"{job_id}_lf_clip_{i}.mp4")
+                        motion_prompt = locked_visual + " " + TEMPLATE_KLING_MOTION.get(template, "Cinematic motion.")
+                        out_clip = await animate_image_kling(
+                            image_path=img_path,
+                            prompt=motion_prompt,
+                            output_clip_path=clip_path,
+                            duration=str(max(4, min(12, int(round(float(scene.get("duration_sec", 6) or 6)))))),
+                            aspect_ratio="16:9",
+                            image_cdn_url=cdn_url,
+                        )
+                        if out_clip and Path(out_clip).exists():
+                            asset["kling_clip"] = out_clip
+                            clip_ok = True
+                            break
+                    except Exception as e:
+                        anim_error = str(e)
+                if not clip_ok:
+                    pause_details = {
+                        "chapter_index": chapter_index,
+                        "scene_index": i,
+                        "stage": "animation",
+                        "error": anim_error or "animation_failed_after_retries",
+                    }
+                    raise LongFormPauseError("Animation failed repeatedly", pause_details)
+            scene_assets.append(asset)
+
+        _job_set_stage(job_id, "generating_voice", 70)
+        full_narration = " ".join(str((s or {}).get("narration", "") or "") for s in scenes)
+        audio_path = str(TEMP_DIR / f"{job_id}_lf_voice.mp3")
+        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
+        audio_path = vo_result["audio_path"]
+        word_timings = vo_result.get("word_timings", [])
+
+        subtitle_path = None
+        if word_timings:
+            subtitle_path = str(TEMP_DIR / f"{job_id}_lf_captions.ass")
+            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
+
+        sfx_paths: list[str] = []
+        if sfx_enabled:
+            _job_set_stage(job_id, "generating_sfx", 78)
+            whisper_hint = ""
+            if whisper_mode == "subtle":
+                whisper_hint = " with subtle whispered ambience under bed"
+            elif whisper_mode == "cinematic":
+                whisper_hint = " with cinematic whisper textures and breathy tension"
+            for i, scene in enumerate(scenes):
+                sfx_out = str(TEMP_DIR / f"{job_id}_lf_sfx_{i}.mp3")
+                chapter_tone = str(chapter_tones.get(int(scene.get("_chapter_index", 0) or 0), session_tone) or session_tone)
+                desc = _longform_tone_locked_visual_description(
+                    str(scene.get("visual_description", "") or ""),
+                    tone=chapter_tone,
+                    template=template,
+                ) + whisper_hint
+                dur = float(scene.get("duration_sec", 6) or 6)
+                sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
+                sfx_paths.append(sfx_file)
+            sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
+
+        bgm_track = ""
+        if render_horror_audio:
+            bgm_path = str(TEMP_DIR / f"{job_id}_lf_horror_bgm.mp3")
+            total_duration = sum(float((s or {}).get("duration_sec", 5.0) or 5.0) for s in scenes) + 1.0
+            bgm_track = await _generate_spooky_bgm_track(total_duration, bgm_path, whisper_mode=whisper_mode)
+
+        _job_set_stage(job_id, "compositing", 84)
+        output_filename = f"longform_{template}_{job_id}.mp4"
+        output_path = str(OUTPUT_DIR / output_filename)
+        await composite_video(
+            scenes,
+            scene_assets,
+            audio_path,
+            output_path,
+            resolution=resolution,
+            use_svd=animation_enabled,
+            subtitle_path=subtitle_path,
+            sfx_paths=sfx_paths,
+            bgm_track=bgm_track,
+            transition_style="smooth",
+            micro_escalation_mode=False,
+        )
+
+        for sfx in sfx_paths:
+            if sfx:
+                Path(sfx).unlink(missing_ok=True)
+        if bgm_track:
+            Path(bgm_track).unlink(missing_ok=True)
+        for asset in scene_assets:
+            Path(str(asset.get("image", ""))).unlink(missing_ok=True)
+            if asset.get("kling_clip"):
+                Path(str(asset["kling_clip"])).unlink(missing_ok=True)
+            if asset.get("frames"):
+                for fp in asset["frames"]:
+                    Path(fp).unlink(missing_ok=True)
+        Path(audio_path).unlink(missing_ok=True)
+        if subtitle_path:
+            Path(subtitle_path).unlink(missing_ok=True)
+
+        _job_set_stage(job_id, "complete", 100)
+        jobs[job_id]["output_file"] = output_filename
+        jobs[job_id]["resolution"] = resolution
+        jobs[job_id]["metadata"] = {
+            "title": input_title,
+            "description": str(session_snapshot.get("input_description", "") or ""),
+            "tags": list(((session_snapshot.get("metadata_pack") or {}).get("tags") or [])),
+            "chapters": chapter_markers,
+        }
+        _job_diag_finalize(job_id)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict):
+                session_live["status"] = "complete"
+                session_live["paused_error"] = None
+                session_live["package"] = {
+                    "output_file": output_filename,
+                    "chapters": chapter_markers,
+                    "title_variants": list(((session_live.get("metadata_pack") or {}).get("title_variants") or [])),
+                    "description_variants": list(((session_live.get("metadata_pack") or {}).get("description_variants") or [])),
+                    "thumbnail_prompts": list(((session_live.get("metadata_pack") or {}).get("thumbnail_prompts") or [])),
+                }
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+    except LongFormPauseError as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        _job_diag_finalize(job_id)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict):
+                session_live["status"] = "paused_needs_fix"
+                session_live["paused_error"] = dict(e.details or pause_details or {})
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        _job_diag_finalize(job_id)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict):
+                session_live["status"] = "error"
+                if pause_details:
+                    session_live["paused_error"] = dict(pause_details)
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+
+
+@app.post("/api/longform/session")
+async def create_longform_session(req: LongFormSessionCreateRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    if not XAI_API_KEY:
+        raise HTTPException(500, "XAI_API_KEY not configured")
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
+
+    template = _normalize_longform_template(req.template)
+    topic = str(req.topic or "").strip()
+    input_title = str(req.input_title or "").strip()
+    input_description = str(req.input_description or "").strip()
+    if not topic:
+        raise HTTPException(400, "Topic is required")
+    if not input_title:
+        raise HTTPException(400, "Video title is required")
+    if not input_description:
+        raise HTTPException(400, "Video description is required")
+    target_minutes = _normalize_longform_target_minutes(req.target_minutes)
+    language = _normalize_longform_language(req.language)
+    whisper_mode = _normalize_longform_whisper_mode(req.whisper_mode)
+
+    chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
+    chapters = [
+        _longform_placeholder_chapter(
+            i,
+            chapter_target_sec,
+            _longform_brand_slot(i, chapter_count),
+            status="awaiting_previous_approval",
+        )
+        for i in range(chapter_count)
+    ]
+
+    title_variants = []
+    for t in [
+        _longform_title_variant(input_title, topic),
+        f"{input_title} | Full Breakdown",
+        f"{topic} - Complete Breakdown",
+    ]:
+        tt = str(t or "").strip()
+        if tt and tt not in title_variants:
+            title_variants.append(tt)
+
+    description_variants = []
+    for d in [
+        input_description,
+        (input_description + " Built with NYPTID Studio."),
+        ("Built in NYPTID Studio: " + input_description),
+    ]:
+        dd = str(d or "").strip()
+        if dd and dd not in description_variants:
+            description_variants.append(dd)
+
+    metadata_pack = {
+        "title_variants": title_variants,
+        "description_variants": description_variants,
+        "thumbnail_prompts": [
+            f"{input_title} cinematic hero frame, high contrast, readable face/subject, YouTube thumbnail style",
+            f"{topic} dramatic split-moment scene, premium documentary look, 16:9 thumbnail",
+        ],
+        "tags": [template, "nyptid", "longform", topic[:32].replace(" ", "_").lower()],
+    }
+    session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
+    now = time.time()
+    session_data = {
+        "session_id": session_id,
+        "user_id": str(user.get("id", "") or ""),
+        "template": template,
+        "topic": topic,
+        "input_title": input_title,
+        "input_description": input_description,
+        "target_minutes": float(target_minutes),
+        "language": language,
+        "resolution": "720p_landscape",
+        "animation_enabled": _bool_from_any(req.animation_enabled, True),
+        "sfx_enabled": _bool_from_any(req.sfx_enabled, True),
+        "whisper_mode": whisper_mode,
+        "chapters": chapters,
+        "status": "draft_review",
+        "paused_error": None,
+        "job_id": "",
+        "metadata_pack": metadata_pack,
+        "draft_progress": {
+            "total_chapters": int(chapter_count),
+            "generated_chapters": 0,
+            "approved_chapters": 0,
+            "failed_chapters": 0,
+            "stage": "queued_first_chapter",
+        },
+        "package": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    async with _longform_sessions_lock:
+        _longform_sessions[session_id] = session_data
+        _save_longform_sessions()
+    await _queue_next_longform_chapter_if_ready(session_id)
+    async with _longform_sessions_lock:
+        session_live = _longform_sessions.get(session_id, session_data)
+    return {"session": _longform_public_session(session_live)}
+
+
+@app.get("/api/longform/session/{session_id}/status")
+async def longform_session_status(session_id: str, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    should_resume = False
+    now = time.time()
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = _longform_sessions.get(session_id)
+        if isinstance(session, dict):
+            chapters = list(session.get("chapters") or [])
+            in_progress_idx = -1
+            in_progress_status = ""
+            for idx, chapter in enumerate(chapters):
+                status = str((chapter or {}).get("status", "") or "")
+                if status in {"draft_generating", "draft_generating_images"}:
+                    in_progress_idx = idx
+                    in_progress_status = status
+                    break
+
+            stalled_sec = max(0.0, now - float(session.get("updated_at", 0) or 0))
+            if in_progress_idx >= 0:
+                chapter_live = dict(chapters[in_progress_idx] or {})
+                chapter_scenes = list(chapter_live.get("scenes") or [])
+                scene_count = len(chapter_scenes)
+                # Recover from crash/restart if a generation task died before scripts/scenes were persisted.
+                if in_progress_status == "draft_generating" and scene_count <= 0 and stalled_sec > 180.0:
+                    chapter_live["status"] = "awaiting_previous_approval"
+                    chapter_live["last_error"] = "Recovered from stalled generation task; chapter resumed."
+                    chapters[in_progress_idx] = chapter_live
+                    session["chapters"] = chapters
+                    session["status"] = "draft_review"
+                    progress = dict(session.get("draft_progress") or {})
+                    progress["stage"] = "auto_resume_after_stall"
+                    progress["preview_scene_generated"] = 0
+                    session["draft_progress"] = progress
+                    session["updated_at"] = now
+                    _save_longform_sessions()
+                    should_resume = True
+                # Recover from stalled preview-image generation so owner can approve/regenerate and continue.
+                elif in_progress_status == "draft_generating_images" and scene_count > 0 and stalled_sec > 180.0:
+                    ready_count = 0
+                    for idx, raw_scene in enumerate(chapter_scenes):
+                        scene = dict(raw_scene or {})
+                        has_img = bool(str(scene.get("image_url", "") or "").strip())
+                        if has_img:
+                            ready_count += 1
+                        else:
+                            status = str(scene.get("image_status", "") or "")
+                            if status != "error":
+                                scene["image_status"] = "error"
+                                scene["image_error"] = "Preview generation stalled; regenerate chapter to refresh this scene."
+                            chapter_scenes[idx] = scene
+
+                    missing_count = max(0, scene_count - ready_count)
+                    chapter_live["scenes"] = chapter_scenes
+                    chapter_live["status"] = "pending_review"
+                    chapter_live["last_error"] = (
+                        f"Recovered from stalled preview generation ({ready_count}/{scene_count} ready). "
+                        f"{missing_count} previews missing; regenerate chapter if needed."
+                        if missing_count > 0
+                        else "Recovered from stalled preview generation; chapter moved to review."
+                    )
+                    chapters[in_progress_idx] = chapter_live
+                    session["chapters"] = chapters
+                    session["status"] = "draft_review"
+                    progress = dict(session.get("draft_progress") or {})
+                    progress["stage"] = "auto_resume_after_preview_stall"
+                    progress["preview_scene_total"] = int(scene_count)
+                    progress["preview_scene_generated"] = int(ready_count)
+                    progress["generated_chapters"] = int(_longform_generated_chapter_count(chapters))
+                    progress["approved_chapters"] = int(_longform_approved_chapter_count(chapters))
+                    session["draft_progress"] = progress
+                    session["updated_at"] = now
+                    _save_longform_sessions()
+            elif any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
+                should_resume = True
+    if not session:
+        raise HTTPException(404, "Long-form session not found")
+    if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
+        raise HTTPException(403, "Forbidden")
+    if should_resume:
+        await _queue_next_longform_chapter_if_ready(session_id)
+        async with _longform_sessions_lock:
+            _load_longform_sessions()
+            session = _longform_sessions.get(session_id) or session
+    job_id = str(session.get("job_id", "") or "")
+    job = jobs.get(job_id, {}) if job_id else {}
+    if job_id:
+        persisted = await get_persisted_job_state(job_id)
+        if isinstance(persisted, dict) and persisted:
+            jobs[job_id] = persisted
+            job = persisted
+        # If worker failed before it could write session state, prevent a
+        # permanently stuck "rendering" session in the UI.
+        if str((job or {}).get("status", "") or "") == "error":
+            async with _longform_sessions_lock:
+                _load_longform_sessions()
+                session_live = _longform_sessions.get(session_id)
+                if isinstance(session_live, dict) and str(session_live.get("status", "") or "") == "rendering":
+                    session_live["status"] = "error"
+                    session_live["updated_at"] = time.time()
+                    _save_longform_sessions()
+                    session = session_live
+    return {"session": _longform_public_session(session), "job": job}
+
+
+@app.get("/api/longform/sessions")
+async def list_longform_sessions(request: Request = None, limit: int = 25):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+
+    limit = max(1, min(100, int(limit or 25)))
+    user_id = str(user.get("id", "") or "")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        sessions = [
+            _longform_session_summary(s)
+            for s in list(_longform_sessions.values())
+            if str((s or {}).get("user_id", "") or "") == user_id
+        ]
+    sessions.sort(key=lambda s: float(s.get("updated_at", 0) or 0), reverse=True)
+    return {"sessions": sessions[:limit]}
+
+
+@app.get("/api/longform/preview/{filename}")
+async def longform_preview_file(filename: str):
+    safe = os.path.basename(filename)
+    if not safe or safe != filename:
+        raise HTTPException(400, "Invalid filename")
+    path = LONGFORM_PREVIEW_DIR / safe
+    if not path.exists():
+        raise HTTPException(404, "Preview not found")
+    suffix = path.suffix.lower()
+    media_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+    return FileResponse(str(path), media_type=media_map.get(suffix, "application/octet-stream"), filename=safe)
+
+
+@app.post("/api/longform/session/{session_id}/chapter-action")
+async def longform_chapter_action(session_id: str, req: LongFormChapterActionRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    action = str(req.action or "").strip().lower()
+    if action not in {"approve", "regenerate"}:
+        raise HTTPException(400, "action must be approve or regenerate")
+
+    should_queue_next = False
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = _longform_sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
+            raise HTTPException(403, "Forbidden")
+        chapters = list(session.get("chapters") or [])
+        chapter_index = int(req.chapter_index)
+        if chapter_index < 0 or chapter_index >= len(chapters):
+            raise HTTPException(400, "Invalid chapter index")
+        chapter = dict(chapters[chapter_index] or {})
+        chapter_status = str(chapter.get("status", "") or "")
+        if action == "approve":
+            if chapter_status in {"awaiting_previous_approval", "draft_generating"}:
+                raise HTTPException(400, "This chapter is not ready for approval yet")
+            chapter["status"] = "approved"
+            chapter["last_error"] = ""
+            chapters[chapter_index] = chapter
+            session["chapters"] = chapters
+            session["status"] = "draft_review"
+            progress = dict(session.get("draft_progress") or {})
+            session["draft_progress"] = {
+                "total_chapters": int(len(chapters)),
+                "generated_chapters": int(_longform_generated_chapter_count(chapters)),
+                "approved_chapters": int(_longform_approved_chapter_count(chapters)),
+                "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                "stage": "awaiting_owner_approval",
+            }
+            session["updated_at"] = time.time()
+            _save_longform_sessions()
+            should_queue_next = True
+        else:
+            if chapter_status in {"awaiting_previous_approval", "draft_generating"}:
+                raise HTTPException(400, "This chapter is not ready for regeneration yet")
+
+            # Mark in-progress before releasing lock for generation.
+            chapter["status"] = "regenerating"
+            chapter["retry_count"] = int(chapter.get("retry_count", 0) or 0) + 1
+            chapters[chapter_index] = chapter
+            session["chapters"] = chapters
+            session["updated_at"] = time.time()
+            _save_longform_sessions()
+            session_copy = dict(session)
+
+    if should_queue_next:
+        await _queue_next_longform_chapter_if_ready(session_id)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+        if not session_live:
+            raise HTTPException(404, "Long-form session not found")
+        chapter_live = dict((list(session_live.get("chapters") or [])[chapter_index]) or {})
+        return {"session": _longform_public_session(session_live), "chapter": chapter_live}
+
+    regenerated = await _generate_longform_chapter(
+        template=str(session_copy.get("template", "story") or "story"),
+        topic=str(session_copy.get("topic", "") or ""),
+        input_title=str(session_copy.get("input_title", "") or ""),
+        input_description=str(session_copy.get("input_description", "") or ""),
+        chapter_index=chapter_index,
+        chapter_count=len(list(session_copy.get("chapters") or [])),
+        chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
+        language=_normalize_longform_language(session_copy.get("language", "en")),
+        brand_slot=str(chapter.get("brand_slot", "") or ""),
+        fix_note=str(req.reason or "").strip(),
+    )
+    regenerated = await _longform_attach_scene_previews(
+        session_id=session_id,
+        template=str(session_copy.get("template", "story") or "story"),
+        chapter=regenerated,
+        resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
+    )
+    regenerated["retry_count"] = int(chapter.get("retry_count", 1) or 1)
+    async with _longform_sessions_lock:
+        session_live = _longform_sessions.get(session_id)
+        if not session_live:
+            raise HTTPException(404, "Long-form session not found")
+        chapters_live = list(session_live.get("chapters") or [])
+        chapters_live[chapter_index] = regenerated
+        session_live["chapters"] = chapters_live
+        session_live["status"] = "draft_review"
+        progress = dict(session_live.get("draft_progress") or {})
+        session_live["draft_progress"] = {
+            "total_chapters": int(len(chapters_live)),
+            "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
+            "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
+            "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+            "stage": "awaiting_owner_approval",
+        }
+        session_live["updated_at"] = time.time()
+        _save_longform_sessions()
+        return {"session": _longform_public_session(session_live), "chapter": regenerated}
+
+
+@app.post("/api/longform/session/{session_id}/resolve-error")
+async def longform_resolve_error(session_id: str, req: LongFormResolveErrorRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = _longform_sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
+            raise HTTPException(403, "Forbidden")
+        paused = dict(session.get("paused_error") or {})
+        if not paused:
+            raise HTTPException(400, "Session is not paused for manual fix")
+        chapter_index = int(req.chapter_index)
+        chapters = list(session.get("chapters") or [])
+        if chapter_index < 0 or chapter_index >= len(chapters):
+            raise HTTPException(400, "Invalid chapter index")
+        chapter = dict(chapters[chapter_index] or {})
+        session_copy = dict(session)
+
+    regenerated = await _generate_longform_chapter(
+        template=str(session_copy.get("template", "story") or "story"),
+        topic=str(session_copy.get("topic", "") or ""),
+        input_title=str(session_copy.get("input_title", "") or ""),
+        input_description=str(session_copy.get("input_description", "") or ""),
+        chapter_index=chapter_index,
+        chapter_count=len(list(session_copy.get("chapters") or [])),
+        chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
+        language=_normalize_longform_language(session_copy.get("language", "en")),
+        brand_slot=str(chapter.get("brand_slot", "") or ""),
+        fix_note=str(req.fix_note or "").strip(),
+    )
+    regenerated = await _longform_attach_scene_previews(
+        session_id=session_id,
+        template=str(session_copy.get("template", "story") or "story"),
+        chapter=regenerated,
+        resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
+    )
+    regenerated["status"] = "approved" if _bool_from_any(req.force_accept, False) else "pending_review"
+    regenerated["retry_count"] = int(chapter.get("retry_count", 0) or 0) + 1
+    force_accept = _bool_from_any(req.force_accept, False)
+    async with _longform_sessions_lock:
+        session_live = _longform_sessions.get(session_id)
+        if not session_live:
+            raise HTTPException(404, "Long-form session not found")
+        chapters_live = list(session_live.get("chapters") or [])
+        chapters_live[chapter_index] = regenerated
+        session_live["chapters"] = chapters_live
+        session_live["status"] = "draft_review"
+        session_live["paused_error"] = None
+        progress = dict(session_live.get("draft_progress") or {})
+        session_live["draft_progress"] = {
+            "total_chapters": int(len(chapters_live)),
+            "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
+            "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
+            "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+            "stage": "awaiting_owner_approval",
+        }
+        session_live["updated_at"] = time.time()
+        _save_longform_sessions()
+    if force_accept:
+        await _queue_next_longform_chapter_if_ready(session_id)
+    async with _longform_sessions_lock:
+        session_latest = _longform_sessions.get(session_id)
+    if not session_latest:
+        raise HTTPException(404, "Long-form session not found")
+    return {"session": _longform_public_session(session_latest), "chapter": regenerated}
+
+
+@app.post("/api/longform/session/{session_id}/finalize")
+async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = _longform_sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
+            raise HTTPException(403, "Forbidden")
+        if session.get("paused_error"):
+            raise HTTPException(400, "Session is paused due to an unresolved chapter error")
+        review = _longform_review_state(session)
+        if not review.get("all_approved", False):
+            raise HTTPException(
+                400,
+                f"All chapters must be approved before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved).",
+            )
+        job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+        jobs[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "template": str(session.get("template", "story") or "story"),
+            "topic": str(session.get("topic", "") or ""),
+            "resolution": str(session.get("resolution", "720p_landscape") or "720p_landscape"),
+            "plan": "pro",
+            "user_id": str(user.get("id", "") or ""),
+            "created_at": time.time(),
+            "type": "longform",
+            "target_minutes": float(session.get("target_minutes", 0) or 0),
+            "animation_enabled": bool(session.get("animation_enabled", True)),
+            "story_animation_enabled": bool(session.get("animation_enabled", True)),
+            "voice_id": "",
+            "voice_speed": 1.0,
+            "pacing_mode": "standard",
+            "subtitles_enabled": True,
+            "reference_lock_mode": "strict",
+            "transition_style": "smooth",
+            "micro_escalation_mode": False,
+            "credit_charged": False,
+            "credit_source": "admin",
+            "credit_month_key": _month_key(),
+            "credit_refunded": False,
+        }
+        session["job_id"] = job_id
+        session["status"] = "rendering"
+        session["updated_at"] = time.time()
+        _save_longform_sessions()
+
+    _job_diag_init(job_id, "longform")
+    try:
+        await enqueue_generation_job(job_id, "pro", _run_longform_pipeline, (job_id, session_id))
+    except QueueFullError as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        await persist_job_state(job_id, jobs[job_id])
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict):
+                session_live["status"] = "draft_review"
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+        raise HTTPException(429, str(e))
+    return {"job_id": job_id}
+
+
 @app.post("/api/creative/script")
 async def creative_generate_script(req: GenerateRequest, request: Request = None):
     """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
@@ -5322,10 +11560,10 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
     mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
     art_style = _normalize_art_style(req.art_style, template=req.template)
-    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
-    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", True))
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     default_reference_url = _default_reference_for_template(req.template)
+    reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, req.template, reference_lock_mode)
     transition_style = _normalize_transition_style(req.transition_style)
     micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
     if cinematic_boost:
@@ -5357,14 +11595,31 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     if script_to_short_mode:
         scene_range = "12-15" if req.template == "story" else "10-14"
         script_to_short_instruction = (
-            "\n\nSCRIPT-TO-SHORT MODE (PRE-ALPHA): The user input is already a full script. "
+            "\n\nSCRIPT-TO-SHORT MODE: The user input is already a full script. "
             "Do not invent a different story. Keep the original intent and wording as much as possible while adapting for timing. "
             f"Split into {scene_range} scenes with clear visual progression and strong retention pacing. "
             "Do not force a single unchanged main character in every scene; match subjects to each script beat. "
-            "Each scene must have concise narration and a cinematic visual_description that can be directly rendered."
+            "Each scene must have concise narration and a cinematic visual_description that can be directly rendered. "
+            "Make the visual_description fields self-contained, specific, and editable so users can regenerate each scene from the prompt alone."
         )
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
-    script_data = await generate_script(req.template, req.prompt, extra_instructions=(lang_instruction + script_to_short_instruction))
+    try:
+        script_data = await generate_script(
+            req.template,
+            req.prompt,
+            extra_instructions=(lang_instruction + script_to_short_instruction),
+        )
+    except httpx.HTTPStatusError as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code == 429:
+            raise HTTPException(
+                503,
+                "Script generation is temporarily rate-limited upstream. Retry in a minute.",
+            ) from e
+        raise HTTPException(
+            502,
+            "Script generation failed upstream. Retry shortly.",
+        ) from e
     scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
     scenes = _apply_template_scene_constraints(scenes, req.template, quality_mode=quality_mode)
     scenes = _apply_mint_scene_compiler(scenes, req.template, mint_mode=mint_mode)
@@ -5395,9 +11650,11 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "story_animation_enabled": animation_enabled if req.template == "story" else True,
             "reference_image_url": default_reference_url,
             "reference_lock_mode": reference_lock_mode,
-            "reference_dna": {},
-            "reference_quality": {},
+            "reference_dna": reference_dna,
+            "reference_quality": reference_quality,
+            "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
+            "prompt_passthrough": True,
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -5424,6 +11681,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
+        "prompt_passthrough": True,
         "mode": "script_to_short" if script_to_short_mode else "creative",
     }
 
@@ -5442,7 +11700,7 @@ async def creative_create_session(body: dict, request: Request = None):
     art_style = _normalize_art_style(body.get("art_style"), template=template)
     transition_style = _normalize_transition_style(body.get("transition_style", "smooth"))
     micro_escalation_mode = _normalize_micro_escalation_mode(body.get("micro_escalation_mode"), template=template)
-    cinematic_boost = _normalize_cinematic_boost(body.get("cinematic_boost", False))
+    cinematic_boost = _normalize_cinematic_boost(body.get("cinematic_boost", True))
     if cinematic_boost:
         quality_mode = "cinematic"
         transition_style = "cinematic"
@@ -5457,6 +11715,7 @@ async def creative_create_session(body: dict, request: Request = None):
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     default_reference_url = _default_reference_for_template(template)
+    reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, template, reference_lock_mode)
     _ensure_template_allowed(template, user)
     _user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     requested_resolution = body.get("resolution", "720p")
@@ -5488,9 +11747,11 @@ async def creative_create_session(body: dict, request: Request = None):
             "story_animation_enabled": story_animation_enabled,
             "reference_image_url": default_reference_url,
             "reference_lock_mode": reference_lock_mode,
-            "reference_dna": {},
-            "reference_quality": {},
+            "reference_dna": reference_dna,
+            "reference_quality": reference_quality,
+            "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
+            "prompt_passthrough": True,
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk()
@@ -5529,6 +11790,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
+        "prompt_passthrough": True,
     }
 
 
@@ -5581,6 +11843,7 @@ async def creative_reference_image(
     session["reference_lock_mode"] = lock_mode
     session["reference_quality"] = quality
     session["reference_dna"] = _extract_reference_dna(raw, template=str(session.get("template", "skeleton") or "skeleton"))
+    session["reference_image_uploaded"] = True
     session["rolling_reference_image_url"] = public_url
     if session.get("template") == "skeleton":
         # Keep legacy skeleton key in sync for downstream compatibility.
@@ -5626,7 +11889,11 @@ async def creative_session_status(session_id: str, request: Request = None):
         raise HTTPException(403, "Not your session")
     return {
         "session_id": session_id,
-        "has_reference_image": bool(session.get("reference_image_url") or session.get("skeleton_reference_image")),
+        "has_reference_image": bool(
+            _skeleton_session_has_explicit_reference(session)
+            if str(session.get("template", "") or "").strip().lower() == "skeleton"
+            else (session.get("reference_image_url") or session.get("skeleton_reference_image"))
+        ),
         "reference_lock_mode": _normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict"),
         "reference_quality": session.get("reference_quality", {}),
         "template": session.get("template", ""),
@@ -5640,6 +11907,7 @@ async def creative_session_status(session_id: str, request: Request = None):
         "scene_count": len(session.get("scenes", [])),
         "animation_enabled": _bool_from_any(session.get("animation_enabled"), _bool_from_any(session.get("story_animation_enabled"), True)),
         "story_animation_enabled": _bool_from_any(session.get("story_animation_enabled"), True),
+        "prompt_passthrough": _creative_prompt_passthrough_enabled(session),
     }
 
 
@@ -5733,28 +12001,67 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     _ensure_reference_public_url(req.session_id, session)
     user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
-    neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
-    constrained_prompt = req.prompt
-    if template == "skeleton":
-        constrained_prompt = _apply_template_scene_constraints(
-            [{"visual_description": req.prompt}],
-            template,
-            quality_mode=quality_mode,
-        )[0]["visual_description"]
-    constrained_prompt = _apply_mint_scene_compiler(
-        [{"visual_description": constrained_prompt}],
-        template,
-        mint_mode=mint_mode,
-    )[0]["visual_description"]
-    full_prompt = _build_scene_prompt_with_reference(
-        template=template,
-        visual_description=constrained_prompt,
-        quality_mode=quality_mode,
-        reference_dna=session.get("reference_dna", {}),
-        reference_lock_mode=reference_lock_mode,
-        art_style=art_style,
-    )
+    neg_prompt = str(getattr(req, "negative_prompt", "") or "").strip()
+    raw_prompt = str(req.prompt or "").strip()
+    if not raw_prompt:
+        raise HTTPException(400, "Scene prompt is required")
+    prompt_passthrough = _creative_prompt_passthrough_enabled(session)
     scene_reference = _resolve_reference_for_scene(session, template, req.scene_index)
+    prompt_requests_damage_or_fatigue = bool(
+        re.search(
+            r"\b(crack|cracks|fracture|fractured|chip|chipped|bruise|bruises|damaged|damage|tired|fatigued|weary|slouch|slouched|hunch|hunched|droop|drooping|exhausted)\b",
+            raw_prompt,
+            flags=re.IGNORECASE,
+        )
+    )
+    effective_reference_lock_mode = reference_lock_mode
+    if (
+        template == "skeleton"
+        and prompt_passthrough
+        and reference_lock_mode == "strict"
+        and prompt_requests_damage_or_fatigue
+        and not bool(scene_reference)
+    ):
+        # Strict reference lock can suppress requested damage/posture deltas.
+        # In passthrough mode, soften to inspired so prompt details can render.
+        effective_reference_lock_mode = "inspired"
+    if template == "skeleton":
+        log.info(
+            f"Creative scene prompt mode: passthrough={prompt_passthrough} "
+            f"lock={reference_lock_mode}->{effective_reference_lock_mode} "
+            f"prompt='{raw_prompt[:220]}'"
+        )
+    if prompt_passthrough:
+        constrained_prompt = raw_prompt
+        full_prompt = _build_creative_passthrough_scene_prompt(
+            template=template,
+            visual_description=raw_prompt,
+            quality_mode=quality_mode,
+            reference_dna=session.get("reference_dna", {}),
+            reference_lock_mode=reference_lock_mode,
+            art_style=art_style,
+        )
+    else:
+        constrained_prompt = raw_prompt
+        if template == "skeleton":
+            constrained_prompt = _apply_template_scene_constraints(
+                [{"visual_description": raw_prompt}],
+                template,
+                quality_mode=quality_mode,
+            )[0]["visual_description"]
+        constrained_prompt = _apply_mint_scene_compiler(
+            [{"visual_description": constrained_prompt}],
+            template,
+            mint_mode=mint_mode,
+        )[0]["visual_description"]
+        full_prompt = _build_scene_prompt_with_reference(
+            template=template,
+            visual_description=constrained_prompt,
+            quality_mode=quality_mode,
+            reference_dna=session.get("reference_dna", {}),
+            reference_lock_mode=reference_lock_mode,
+            art_style=art_style,
+        )
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
     try:
@@ -5765,9 +12072,51 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
             negative_prompt=neg_prompt,
             template=template,
             reference_image_url=scene_reference,
-            reference_lock_mode=reference_lock_mode,
+            reference_lock_mode=effective_reference_lock_mode,
+            best_of_enabled=False,
+            salvage_enabled=(template == "story"),
+            interactive_fast=True,
+            prompt_passthrough=prompt_passthrough,
         )
     except Exception as e:
+        err_text = str(e or "").strip()
+        err_l = err_text.lower()
+        if "hidream is the only configured image provider" in err_l:
+            raise HTTPException(503, err_text) from e
+        if template == "skeleton" and "hidream" in err_l and ("timed out" in err_l or "timeout" in err_l):
+            raise HTTPException(
+                504,
+                "Skeleton image generation timed out on the NYPTID Studio image engine. Click Regenerate to retry.",
+            ) from e
+        if template == "skeleton" and (
+            "Skeleton generation blocked" in err_text
+            or "WAN2.2 text-to-image is unavailable" in err_text
+        ):
+            raise HTTPException(503, err_text) from e
+        if template == "skeleton" and (
+            "timed out" in err_l
+            or "timeout" in err_l
+        ):
+            raise HTTPException(
+                504,
+                "Skeleton image generation timed out on the NYPTID Studio image engine. Click Regenerate to retry.",
+            ) from e
+        if template == "skeleton" and "exhausted wan2.2 attempt budget" in err_l:
+            raise HTTPException(
+                504,
+                "WAN2.2 exhausted interactive budget before finishing. Install the real WAN2.2 TI2V/T2I model (wan2.2_ti2v_5B_fp16.safetensors) to avoid slow fallback lanes.",
+            ) from e
+        if template == "skeleton" and (
+            "qa gate failed" in err_l
+            or "failed qa gate" in err_l
+            or ("qa gate" in err_l and "skeleton" in err_l)
+            or "prompt mismatch" in err_l
+            or "prop_missing_or_wrong" in err_l
+        ):
+            raise HTTPException(
+                422,
+                "Scene prompt not satisfied strongly enough (skeleton/props mismatch). Click Regenerate to retry with stricter composition.",
+            ) from e
         should_try_moderation_rewrite = (
             template == "story"
             and (
@@ -5805,7 +12154,11 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
                         negative_prompt=neg_prompt,
                         template=template,
                         reference_image_url=scene_reference,
-                        reference_lock_mode=reference_lock_mode,
+                        reference_lock_mode=effective_reference_lock_mode,
+                        best_of_enabled=False,
+                        salvage_enabled=False,
+                        interactive_fast=True,
+                        prompt_passthrough=prompt_passthrough,
                     )
                     last_retry_error = None
                     break
@@ -5817,13 +12170,34 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
                     "Image provider rejected this scene prompt due to safety policy. Try regenerate, or simplify violent wording while keeping the same emotion.",
                 ) from (last_retry_error or e)
         else:
+            if template == "skeleton":
+                detail = err_text if err_text else "unknown skeleton image generation failure"
+                if len(detail) > 260:
+                    detail = detail[:260].rstrip() + "..."
+                raise HTTPException(500, f"Skeleton image generation failed: {detail}") from e
             raise HTTPException(
                 500,
                 "Scene image generation failed. Please regenerate this scene.",
             ) from e
-    if template == "skeleton" and req.scene_index == 0 and not (session.get("skeleton_reference_image") or session.get("reference_image_url")):
+    if template == "skeleton":
+        qa_notes = list(img_result.get("qa_notes", []) or [])
+        qa_ok = bool(img_result.get("qa_ok", False))
+        severe_qa = (not qa_ok) and _skeleton_notes_are_severe(qa_notes)
+        if severe_qa:
+            raise HTTPException(
+                422,
+                "Scene prompt not satisfied strongly enough (skeleton/props mismatch). Click Regenerate to retry with stricter composition.",
+            )
+        # Creative prompt-passthrough mode should not nudge extra regenerations for
+        # non-severe soft-accept outcomes; treat those as acceptable matches.
+        if prompt_passthrough and not qa_ok:
+            img_result["qa_ok"] = True
+            img_result["qa_notes"] = [n for n in qa_notes if str(n or "").strip().lower() != "interactive_soft_accept"]
+    if template == "skeleton" and not _skeleton_default_identity_locked(session) and req.scene_index == 0 and not (session.get("skeleton_reference_image") or session.get("reference_image_url")):
         session["skeleton_reference_image"] = _file_to_data_image_url(img_path)
-    if reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
+    if template == "skeleton" and _skeleton_default_identity_locked(session):
+        session["rolling_reference_image_url"] = _default_reference_for_template("skeleton")
+    elif reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
         rolled = str(img_result.get("cdn_url", "") or "").strip() or _file_to_data_image_url(img_path)
         if rolled:
             session["rolling_reference_image_url"] = rolled
@@ -5845,8 +12219,9 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     }
 
     while len(session["scenes"]) <= req.scene_index:
-        session["scenes"].append({"narration": "", "visual_description": "", "duration_sec": 5})
+        session["scenes"].append({"narration": "", "visual_description": "", "negative_prompt": "", "duration_sec": 5})
     session["scenes"][req.scene_index]["visual_description"] = constrained_prompt
+    session["scenes"][req.scene_index]["negative_prompt"] = neg_prompt
     session["quality_mode"] = quality_mode
     session["mint_mode"] = mint_mode
     session["art_style"] = art_style
@@ -5902,6 +12277,8 @@ async def creative_update_scene(session_id: str, scene_index: int, body: dict, r
         scene["narration"] = body["narration"]
     if "visual_description" in body:
         scene["visual_description"] = body["visual_description"]
+    if "negative_prompt" in body:
+        scene["negative_prompt"] = str(body.get("negative_prompt", "") or "")
     if "duration_sec" in body:
         scene["duration_sec"] = body["duration_sec"]
     async with _creative_sessions_lock:
@@ -5982,16 +12359,24 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = user.get("email", "") in ADMIN_EMAILS
     billing_active = _billing_active_for_user(user)
+    usage_kind = "animated" if animation_enabled else "non_animated"
+    credits_required = max(1, len(session.get("scenes", []))) if animation_enabled else 1
     can_render, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
         billing_active,
         is_admin=is_admin,
+        usage_kind=usage_kind,
+        credits_needed=credits_required,
     )
     if not can_render:
+        if usage_kind == "non_animated":
+            raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
+        available_credits = int(credit_state.get("credits_total_remaining", 0) or 0)
+        required_credits = int(credit_state.get("credits_needed", credits_required) or credits_required)
         raise HTTPException(
             402,
-            "No animated render credits left this month. Buy an animated top-up pack to continue.",
+            f"This render needs {required_credits} animation credits, but only {available_credits} are available. Buy more credits or switch to slideshow.",
         )
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
@@ -6026,6 +12411,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "reference_lock_mode": reference_lock_mode,
         "credit_charged": True,
         "credit_source": credit_source,
+        "credit_amount": credits_required,
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
     }
@@ -6058,6 +12444,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
                 str(jobs[job_id].get("user_id", "") or ""),
                 str(jobs[job_id].get("credit_source", "") or ""),
                 month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
+                credits=int(jobs[job_id].get("credit_amount", 1) or 1),
             )
             jobs[job_id]["credit_refunded"] = True
         jobs[job_id]["status"] = "error"
@@ -6094,8 +12481,10 @@ async def _run_creative_pipeline(
         pacing_mode = _normalize_pacing_mode(session.get("pacing_mode", "standard"))
         subtitles_enabled = _bool_from_any(session.get("subtitles_enabled"), True)
         scenes = _normalize_scenes_for_render(session["scenes"])
-        scenes = _apply_template_scene_constraints(scenes, template, quality_mode=quality_mode)
-        scenes = _apply_mint_scene_compiler(scenes, template, mint_mode=mint_mode)
+        prompt_passthrough = _creative_prompt_passthrough_enabled(session)
+        if not prompt_passthrough:
+            scenes = _apply_template_scene_constraints(scenes, template, quality_mode=quality_mode)
+            scenes = _apply_mint_scene_compiler(scenes, template, mint_mode=mint_mode)
         if not (template == "story" and pacing_mode != "standard"):
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
@@ -6121,15 +12510,11 @@ async def _run_creative_pipeline(
         _job_set_stage(job_id, "generating_images", 10)
         jobs[job_id]["total_scenes"] = len(scenes)
 
-        neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
         scene_assets = []
         total_steps = len(scenes) * (2 if use_video else 1)
         skeleton_anchor = ""
         if template == "skeleton" and scenes:
-            s1_desc = str(scenes[0].get("visual_description", "") or "")
-            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
-            if outfit_match:
-                skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+            skeleton_anchor = _canonical_skeleton_anchor()
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -6144,30 +12529,45 @@ async def _run_creative_pipeline(
                 log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} using pre-approved image")
                 _job_record_scene_event(job_id, i, len(scenes), "image_ready", "pre_approved")
             else:
-                full_prompt = _build_scene_prompt_with_reference(
-                    template=template,
-                    visual_description=scene.get("visual_description", ""),
-                    quality_mode=quality_mode,
-                    skeleton_anchor=skeleton_anchor,
-                    reference_dna=reference_dna,
-                    reference_lock_mode=reference_lock_mode,
-                    art_style=art_style,
-                )
+                if prompt_passthrough:
+                    full_prompt = _build_creative_passthrough_scene_prompt(
+                        template=template,
+                        visual_description=scene.get("visual_description", ""),
+                        quality_mode=quality_mode,
+                        skeleton_anchor=skeleton_anchor,
+                        reference_dna=reference_dna,
+                        reference_lock_mode=reference_lock_mode,
+                        art_style=art_style,
+                    )
+                else:
+                    full_prompt = _build_scene_prompt_with_reference(
+                        template=template,
+                        visual_description=scene.get("visual_description", ""),
+                        quality_mode=quality_mode,
+                        skeleton_anchor=skeleton_anchor,
+                        reference_dna=reference_dna,
+                        reference_lock_mode=reference_lock_mode,
+                        art_style=art_style,
+                    )
                 img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
+                scene_negative_prompt = str(scene.get("negative_prompt", "") or "").strip()
                 img_result = await generate_scene_image(
                     full_prompt,
                     img_path,
                     resolution=resolution,
-                    negative_prompt=neg_prompt,
+                    negative_prompt=scene_negative_prompt,
                     template=template,
                     reference_image_url=_resolve_reference_for_scene(session, template, i),
                     reference_lock_mode=reference_lock_mode,
+                    prompt_passthrough=prompt_passthrough,
                 )
-                if template == "skeleton" and not (session.get("reference_image_url") or session.get("skeleton_reference_image")) and i == 0:
+                if template == "skeleton" and not _skeleton_default_identity_locked(session) and not (session.get("reference_image_url") or session.get("skeleton_reference_image")) and i == 0:
                     skeleton_seed = _file_to_data_image_url(img_path)
                     if skeleton_seed:
                         session["skeleton_reference_image"] = skeleton_seed
-                if reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
+                if template == "skeleton" and _skeleton_default_identity_locked(session):
+                    session["rolling_reference_image_url"] = _default_reference_for_template("skeleton")
+                elif reference_lock_mode == "strict" or not session.get("rolling_reference_image_url"):
                     rolled = str(img_result.get("cdn_url", "") or "").strip() or _file_to_data_image_url(img_path)
                     if rolled:
                         session["rolling_reference_image_url"] = rolled
@@ -6309,7 +12709,29 @@ async def list_languages():
 @app.get("/api/health")
 async def health():
     skeleton_lora = await check_skeleton_lora_available()
-    wan_ready = await check_wan22_available()
+    provider_order = _configured_image_provider_order()
+    hidream_configured = any(_normalize_image_provider_key(p) == "hidream" for p in provider_order)
+    wan_configured = any(_normalize_image_provider_key(p) == "wan22" for p in provider_order)
+    hidream_ready = await check_hidream_available() if hidream_configured else False
+    hidream_edit_ready = await check_hidream_edit_available() if hidream_configured else False
+    wan_ready = await check_wan22_available() if wan_configured else False
+    wan_t2i_ready = await check_wan22_t2i_available() if wan_configured else False
+    now_ts = time.time()
+    hidream_checked_ts = float(_hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
+    hidream_last_ok_ts = float(_hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+    hidream_last_error = str(_hidream_availability_cache.get("last_error", "") or "")
+    hidream_model = str(_hidream_availability_cache.get("model_name", "") or "")
+    hidream_edit_checked_ts = float(_hidream_edit_availability_cache.get("checked_ts", 0.0) or 0.0)
+    hidream_edit_last_ok_ts = float(_hidream_edit_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+    hidream_edit_last_error = str(_hidream_edit_availability_cache.get("last_error", "") or "")
+    hidream_edit_model = str(_hidream_edit_availability_cache.get("model_name", "") or "")
+    wan_t2i_checked_ts = float(_wan22_t2i_availability_cache.get("checked_ts", 0.0) or 0.0)
+    wan_t2i_last_ok_ts = float(_wan22_t2i_availability_cache.get("last_ok_ts", 0.0) or 0.0)
+    wan_t2i_last_error = str(_wan22_t2i_availability_cache.get("last_error", "") or "")
+    wan_t2i_mode = str(_wan22_t2i_availability_cache.get("mode", "") or "")
+    wan_t2i_checkpoint = str(_wan22_t2i_availability_cache.get("ckpt_name", "") or "")
+    wan_t2i_unet = str(_wan22_t2i_availability_cache.get("unet_name", "") or "")
+    provider_label = " > ".join(provider_order)
     backend_commit, frontend_bundle = _read_deploy_meta()
     fal_video_enabled = bool(FAL_AI_KEY)
     runway_video_enabled = bool(RUNWAY_API_KEY)
@@ -6333,8 +12755,26 @@ async def health():
     return {
         "status": "online",
         "engine": "NYPTID Studio Engine v3.0",
+        "ffmpeg_available": _ffmpeg_available(),
         "kling_enabled": bool(FAL_AI_KEY),
+        "hidream_ready": hidream_ready,
+        "hidream_model": hidream_model,
+        "hidream_checked_ago_sec": int(max(0.0, now_ts - hidream_checked_ts)) if hidream_checked_ts else -1,
+        "hidream_last_ok_ago_sec": int(max(0.0, now_ts - hidream_last_ok_ts)) if hidream_last_ok_ts else -1,
+        "hidream_last_error": hidream_last_error,
+        "hidream_edit_ready": hidream_edit_ready,
+        "hidream_edit_model": hidream_edit_model,
+        "hidream_edit_checked_ago_sec": int(max(0.0, now_ts - hidream_edit_checked_ts)) if hidream_edit_checked_ts else -1,
+        "hidream_edit_last_ok_ago_sec": int(max(0.0, now_ts - hidream_edit_last_ok_ts)) if hidream_edit_last_ok_ts else -1,
+        "hidream_edit_last_error": hidream_edit_last_error,
         "wan22_ready": wan_ready,
+        "wan22_t2i_ready": wan_t2i_ready,
+        "wan22_t2i_mode": wan_t2i_mode,
+        "wan22_t2i_checkpoint": wan_t2i_checkpoint,
+        "wan22_t2i_unet": wan_t2i_unet,
+        "wan22_t2i_checked_ago_sec": int(max(0.0, now_ts - wan_t2i_checked_ts)) if wan_t2i_checked_ts else -1,
+        "wan22_t2i_last_ok_ago_sec": int(max(0.0, now_ts - wan_t2i_last_ok_ts)) if wan_t2i_last_ok_ts else -1,
+        "wan22_t2i_last_error": wan_t2i_last_error,
         "video_engine": video_engine,
         "runway_key_configured": runway_video_enabled,
         "runway_key_source": RUNWAY_API_KEY_SOURCE if runway_video_enabled else "",
@@ -6342,10 +12782,24 @@ async def health():
         "comfyui_url": COMFYUI_URL[:50],
         "skeleton_lora": skeleton_lora,
         "image_engine_skeleton": (
-            "Skeleton LoRA (local)"
+            ("Skeleton LoRA (local) > " + provider_label)
             if skeleton_lora
-            else (f"xAI {XAI_IMAGE_MODEL}" if XAI_API_KEY else "SDXL")
+            else provider_label
         ),
+        "image_provider_order": provider_order,
+        "xai_image_fallback_enabled": bool(XAI_IMAGE_FALLBACK_ENABLED),
+        "fal_image_backup_model": _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL) if FAL_AI_KEY else "",
+        "image_local_provider_retries": int(IMAGE_LOCAL_PROVIDER_RETRIES),
+        "image_provider_failure_cooldown_sec": int(IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC),
+        "image_provider_wan_skip_if_unavailable": bool(IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE),
+        "skeleton_require_wan22": bool(SKELETON_REQUIRE_WAN22),
+        "image_provider_fail_counts": dict(_image_provider_fail_counts),
+        "image_provider_success_counts": dict(_image_provider_success_counts),
+        "image_provider_cooldowns_sec": _provider_cooldown_snapshot(),
+        "image_fallback_events_total": int(_image_provider_fallback_total),
+        "image_fallback_events_pairs": dict(_image_provider_fallback_pairs),
+        "template_adapter_routing_enabled": bool(TEMPLATE_ADAPTER_ROUTING_ENABLED),
+        "template_adapter_routes": sorted(k for k in (TEMPLATE_ADAPTER_ROUTING or {}).keys()),
         "backend_commit": backend_commit,
         "frontend_bundle": frontend_bundle,
         "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
@@ -6521,6 +12975,30 @@ async def admin_analytics(user: dict = Depends(require_auth)):
     }
 
 
+@app.get("/api/admin/waiting-list")
+async def admin_waiting_list(user: dict = Depends(require_auth)):
+    if user.get("email", "") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+    rows = await _supabase_get_waitlist_rows(limit=3000)
+    total = len(rows)
+    by_plan = {"starter": 0, "creator": 0, "pro": 0, "elite": 0}
+    paid_revenue_monthly = 0.0
+    for row in rows:
+        plan = str((row or {}).get("plan", "") or "").strip().lower()
+        if plan in by_plan:
+            by_plan[plan] += 1
+        if bool((row or {}).get("paid")):
+            paid_revenue_monthly += float((row or {}).get("price_usd", 0.0) or 0.0)
+    return {
+        "rows": rows,
+        "summary": {
+            "total": total,
+            "by_plan": by_plan,
+            "paid_revenue_monthly_usd": round(paid_revenue_monthly, 2),
+        },
+    }
+
+
 @app.get("/api/admin/billing-audit")
 async def admin_billing_audit(user: dict = Depends(require_auth)):
     email = str(user.get("email", "") or "")
@@ -6570,7 +13048,17 @@ async def admin_billing_audit(user: dict = Depends(require_auth)):
                 stripe_diag = _stripe_subscription_snapshot(acct_email)
                 stripe_status = str(stripe_diag.get("status", "") or "")
                 stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing", "past_due"}
+                cancel_at_period_end = bool(stripe_diag.get("cancel_at_period_end", False))
                 status_source = "stripe" if stripe_ok else "profile_fallback"
+                next_renewal_unix = int(stripe_diag.get("next_renewal_unix", 0) or 0)
+                next_renewal_source = str(stripe_diag.get("next_renewal_source", "") or "")
+                paid_at_unix = int(stripe_diag.get("paid_at_unix", 0) or 0)
+                interval_months = max(1, int(stripe_diag.get("interval_months", 1) or 1))
+                if next_renewal_unix <= 0 and paid_at_unix > 0 and not cancel_at_period_end:
+                    rolled = _next_renewal_from_anchor(paid_at_unix, interval_months)
+                    if rolled > 0:
+                        next_renewal_unix = int(rolled)
+                        next_renewal_source = next_renewal_source or "paid_at_rollforward_fallback"
                 rows.append(
                     {
                         "email": acct_email,
@@ -6578,8 +13066,11 @@ async def admin_billing_audit(user: dict = Depends(require_auth)):
                         "plan": plan,
                         "status_source": status_source,
                         "stripe_status": stripe_status or "unknown",
+                        "cancel_at_period_end": cancel_at_period_end,
                         "billing_active": bool(stripe_ok or _profile_plan_is_paid(plan)),
-                        "next_renewal_unix": int(stripe_diag.get("next_renewal_unix", 0) or 0),
+                        "next_renewal_unix": next_renewal_unix,
+                        "next_renewal_source": next_renewal_source,
+                        "paid_at_unix": paid_at_unix,
                     }
                 )
     except HTTPException:
@@ -6631,6 +13122,8 @@ async def public_config():
         "supabase_url": SUPABASE_URL,
         "supabase_anon_key": SUPABASE_ANON_KEY,
         "stripe_enabled": bool(STRIPE_SECRET_KEY),
+        "waitlist_only_mode": False,
+        "waitlist_requires_stripe_payment": False,
         "maintenance_banner_enabled": _maintenance_banner_enabled,
         "maintenance_banner_message": _maintenance_banner_message,
         "plans": {
@@ -6655,35 +13148,65 @@ async def public_config():
             "micro_escalation_max_output_clips": MICRO_ESCALATION_MAX_OUTPUT_CLIPS,
         },
         "billing_model": {
-            "hybrid_enabled": True,
+            "hybrid_enabled": False,
+            "model": "usage_based_animation_only",
+            "slideshows_free": True,
             "animated_credit_label": "finished animated shorts",
-            "non_animated_credit_label": "script/image operations",
+            "non_animated_credit_label": "free script/image/slideshow operations",
             "overage_label": "animated top-up packs",
             "hard_stop_on_animated_exhaustion": True,
+            "waitlist_only_mode": False,
+            "waitlist_requires_stripe_payment": False,
+            "kling21_standard_i2v_5s_usd": KLING21_STANDARD_I2V_5S_USD,
+            "animation_markup_multiplier": ANIMATION_MARKUP_MULTIPLIER,
+            "animation_credit_unit_usd": ANIMATION_CREDIT_UNIT_USD,
         },
         "feature_flags": {
             "script_to_short_enabled": SCRIPT_TO_SHORT_ENABLED,
             "story_advanced_controls_enabled": STORY_ADVANCED_CONTROLS_ENABLED,
             "story_retention_tuning_enabled": STORY_RETENTION_TUNING_ENABLED,
             "disable_all_sfx": DISABLE_ALL_SFX,
+            "longform_beta_enabled": bool(LONGFORM_BETA_ENABLED),
         },
     }
 
 
+@app.get("/api/landing/notifications")
+async def landing_notifications_feed():
+    cutoff = time.time() - (7 * 24 * 3600)
+    async with _landing_notifications_lock:
+        events = [
+            e for e in _landing_notifications
+            if isinstance(e, dict) and float(e.get("ts") or 0.0) >= cutoff
+        ]
+        events = events[-LANDING_NOTIFICATIONS_PUBLIC_LIMIT:]
+    return {"events": events}
+
+
 @app.get("/api/me")
 async def get_me(user: dict = Depends(require_auth)):
-    plan = str(user.get("plan", "none") or "none")
-    if plan == "free":
-        plan = "none"
     email = user.get("email", "")
     is_admin = email in ADMIN_EMAILS
-    billing_active = _billing_active_for_user(user)
-    if (not is_admin) and (not billing_active):
-        # Unpaid accounts should present as no active plan.
+    access_snapshot = _paid_access_snapshot_for_user(user)
+    billing_active = bool(access_snapshot.get("billing_active"))
+    plan = str(access_snapshot.get("plan", user.get("plan", "none")) or "none").strip().lower()
+    if plan == "free":
         plan = "none"
-    elif (not is_admin) and plan not in PLAN_LIMITS:
-        # Paid account with missing/unknown stored plan defaults to paid starter tier.
-        plan = "starter"
+    next_renewal_unix = int(access_snapshot.get("next_renewal_unix", 0) or 0)
+    next_renewal_source = str(access_snapshot.get("next_renewal_source", "") or "")
+    billing_anchor_unix = int(access_snapshot.get("billing_anchor_unix", 0) or 0)
+    if (
+        billing_active
+        and str(access_snapshot.get("source", "") or "") == "stripe"
+        and next_renewal_unix <= 0
+        and billing_anchor_unix > 0
+    ):
+        stripe_diag = _stripe_subscription_snapshot(email)
+        interval_months = max(1, int((stripe_diag or {}).get("interval_months", 1) or 1))
+        rolled = _next_renewal_from_anchor(billing_anchor_unix, interval_months)
+        if rolled > 0:
+            next_renewal_unix = int(rolled)
+            next_renewal_source = next_renewal_source or "paid_at_rollforward_fallback"
     if is_admin:
         limits = PLAN_LIMITS["pro"]
         limits = {**limits, "videos_per_month": 9999}
@@ -6699,6 +13222,9 @@ async def get_me(user: dict = Depends(require_auth)):
         "plan": effective_plan,
         "role": "admin" if is_admin else "user",
         "billing_active": billing_active,
+        "next_renewal_unix": next_renewal_unix,
+        "next_renewal_source": next_renewal_source,
+        "billing_anchor_unix": billing_anchor_unix,
         "limits": limits,
         "features": features,
         "animated_credits_remaining": credit_state["animated_monthly_remaining"],
@@ -6719,16 +13245,14 @@ async def get_me(user: dict = Depends(require_auth)):
         "demo_access": has_demo,
         "demo_price_id": DEMO_PRO_PRICE_ID,
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
+        "longform_owner_beta": bool(is_admin and LONGFORM_BETA_ENABLED),
     }
 
 
 def _user_has_paid_access(user: dict | None) -> bool:
-    if not user:
-        return False
-    email = str(user.get("email", "") or "")
-    if email in ADMIN_EMAILS:
-        return True
-    return _billing_active_for_user(user)
+    # Access policy: any authenticated account can use non-animated workflows.
+    # Animated renders are controlled by top-up credits in _reserve_generation_credit.
+    return bool(user)
 
 
 @app.post("/api/generate")
@@ -6755,14 +13279,14 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
-    reference_dna = {}
-    if reference_image_url.startswith("data:image/"):
-        raw_ref, _mime = _decode_data_image_url(reference_image_url)
-        if raw_ref:
-            quality = _analyze_reference_quality(raw_ref, lock_mode=reference_lock_mode)
-            if not quality.get("accepted", True) and reference_lock_mode == "strict":
-                raise HTTPException(400, "Reference image quality too low for Strict lock. Upload a higher-resolution image or use Inspired lock.")
-            reference_dna = _extract_reference_dna(raw_ref, template=req.template)
+    reference_dna, reference_quality = await _extract_reference_profile(reference_image_url, req.template, reference_lock_mode)
+    if (
+        reference_quality
+        and not reference_quality.get("accepted", True)
+        and reference_lock_mode == "strict"
+        and not _is_template_default_reference(req.template, reference_image_url)
+    ):
+        raise HTTPException(400, "Reference image quality too low for Strict lock. Upload a higher-resolution image or use Inspired lock.")
     user_plan = "starter"
     plan_limits = PLAN_LIMITS["starter"]
     is_admin = False
@@ -6770,13 +13294,17 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         user_plan, plan_limits = _resolve_user_plan_for_limits(user)
         is_admin = user.get("email", "") in ADMIN_EMAILS
         billing_active = _billing_active_for_user(user)
+        usage_kind = "animated" if animation_enabled else "non_animated"
         can_render, credit_source, credit_state = await _reserve_generation_credit(
             user,
             user_plan if not is_admin else "pro",
             billing_active,
             is_admin=is_admin,
+            usage_kind=usage_kind,
         )
         if not can_render:
+            if usage_kind == "non_animated":
+                raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
             raise HTTPException(
                 402,
                 "No animated render credits left this month. Buy an animated top-up pack to continue.",
@@ -6786,6 +13314,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         credit_state = {"month_key": _month_key()}
     transition_style = _normalize_transition_style(req.transition_style)
     micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
+    cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
 
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=bool(plan_limits.get("priority", False)))
 
@@ -6813,8 +13342,10 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "reference_image_url": reference_image_url,
         "reference_lock_mode": reference_lock_mode,
         "reference_dna": reference_dna,
+        "reference_quality": reference_quality,
         "credit_charged": bool(user),
         "credit_source": credit_source,
+        "credit_amount": 1,
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
     }
@@ -6853,6 +13384,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
                 str(jobs[job_id].get("user_id", "") or ""),
                 str(jobs[job_id].get("credit_source", "") or ""),
                 month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
+                credits=int(jobs[job_id].get("credit_amount", 1) or 1),
             )
             jobs[job_id]["credit_refunded"] = True
         jobs[job_id]["status"] = "error"
@@ -6935,11 +13467,7 @@ async def auto_regenerate_scene_image(body: dict, request: Request = None):
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     skeleton_anchor = ""
     if template == "skeleton" and isinstance(scene_images, list) and scene_images:
-        first_scene = scene_images[0] if isinstance(scene_images[0], dict) else {}
-        s1_desc = str(first_scene.get("visual_description", "") or "")
-        outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
-        if outfit_match:
-            skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+        skeleton_anchor = _canonical_skeleton_anchor()
     if template == "skeleton":
         scene_prompt = _apply_template_scene_constraints(
             [{"visual_description": scene_prompt}],
@@ -7024,6 +13552,99 @@ async def download_video(filename: str):
     return FileResponse(str(path), media_type="video/mp4", filename=filename)
 
 
+@app.post("/api/chatstory/render")
+async def render_chat_story(
+    request: Request,
+    payload: str = Form(...),
+    avatar: Optional[UploadFile] = File(None),
+    background_video: Optional[UploadFile] = File(None),
+):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    if not _chat_story_access_for_user(user):
+        raise HTTPException(403, "Chat Story requires an active Starter, Creator, or Pro monthly plan.")
+
+    try:
+        parsed_payload = json.loads(payload or "{}")
+    except Exception:
+        raise HTTPException(400, "Invalid chat story payload")
+
+    messages = parsed_payload.get("messages") or []
+    if not isinstance(messages, list) or not any(str(item.get("text", "") or "").strip() for item in messages if isinstance(item, dict)):
+        raise HTTPException(400, "Add at least one chat message before rendering.")
+
+    render_id = f"chatstory_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+    work_dir = TEMP_DIR / render_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    avatar_path = ""
+    bg_video_path = ""
+
+    try:
+        if avatar and avatar.filename:
+            avatar_ext = Path(avatar.filename).suffix or ".png"
+            avatar_path = str(work_dir / f"avatar{avatar_ext}")
+            with open(avatar_path, "wb") as handle:
+                while chunk := await avatar.read(1024 * 1024):
+                    handle.write(chunk)
+
+        if background_video and background_video.filename:
+            bg_ext = Path(background_video.filename).suffix or ".mp4"
+            bg_video_path = str(work_dir / f"background{bg_ext}")
+            with open(bg_video_path, "wb") as handle:
+                while chunk := await background_video.read(1024 * 1024):
+                    handle.write(chunk)
+
+        payload_path = work_dir / "payload.json"
+        payload_path.write_text(json.dumps(parsed_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        output_name = f"{render_id}.mp4"
+        output_path = OUTPUT_DIR / output_name
+        script_path = Path(__file__).resolve().parent / "ops" / "render_chat_story.py"
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script_path),
+            "--payload",
+            str(payload_path),
+            "--output",
+            str(output_path),
+            "--avatar",
+            avatar_path,
+            "--background-video",
+            bg_video_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            log.error("Chat Story render failed: %s", (stderr or b"").decode("utf-8", errors="replace"))
+            raise HTTPException(500, "Chat Story render failed.")
+
+        meta = {}
+        try:
+            meta = json.loads((stdout or b"{}").decode("utf-8", errors="replace").strip() or "{}")
+        except Exception:
+            meta = {}
+
+        if not output_path.exists():
+            raise HTTPException(500, "Chat Story render did not produce an output video.")
+
+        return {
+            "ok": True,
+            "output_file": output_name,
+            "download_url": f"/api/download/{quote(output_name)}",
+            "duration_sec": meta.get("duration_sec"),
+            "message_count": meta.get("message_count"),
+            "voice": meta.get("voice"),
+            "theme": meta.get("theme"),
+            "background": meta.get("background"),
+            "used_background_video": bool(meta.get("used_background_video")),
+        }
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 CLONE_ANALYSIS_PROMPT = """You are a viral video reverse-engineering expert. Analyze the source video and extract its EXACT winning formula so it can be replicated on a new topic.
 
 You will receive:
@@ -7042,7 +13663,7 @@ Analyze these elements:
 - RETENTION TRICKS: Money flying, size comparisons, face-offs, shocking numbers?
 
 TEMPLATE DEFINITIONS (pick the one that matches BEST):
-- "skeleton" = 3D skeleton characters wearing topic-relevant outfits on teal/green studio background. VS comparisons, career/earnings breakdowns. One-word bold captions. Example: "NASCAR vs F1 Driver Who Makes More Money"
+- "skeleton" = Canonical 3D anatomical skeleton identity (same skull/eyes/bone proportions every scene, no clothing/costumes), topic-relevant environments allowed, VS comparisons/career breakdowns, one-word bold captions. Example: "NASCAR vs F1 Driver Who Makes More Money"
 - "history" = Epic cinematic historical scenes. Battles, empires, ancient events. Dramatic narrator, god rays, film grain. 2-4 word caption phrases. Example: "What Happened to the Roman Legion That Vanished"
 - "story" = Cinematic AI visual stories with emotional arc. Pixar/UE5 quality. Continuity of recurring subjects/locations across scenes (do not force one unchanged protagonist). Poetic narration. Minimal captions. Example: "The Last Lighthouse Keeper"
 - "reddit" = Reddit story narration. First-person dramatic stories (AITA, TIFU). Photorealistic modern-day scenes illustrating the story. Dialogue/reaction captions. Example: "AITA for Kicking Out My Sister"
@@ -7289,10 +13910,7 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         clone_skeleton_anchor = ""
         clone_skeleton_reference_image_url = SKELETON_GLOBAL_REFERENCE_IMAGE_URL if detected_template == "skeleton" else ""
         if detected_template == "skeleton" and scenes:
-            s1_desc = scenes[0].get("visual_description", "")
-            outfit_match = re.search(r'[Ww]earing\s+(.{20,200}?)(?:\.|,\s*(?:standing|holding|facing|looking|posed))', s1_desc)
-            if outfit_match:
-                clone_skeleton_anchor = f"CONSISTENCY ANCHOR -- every skeleton in this video wears: {outfit_match.group(1).strip()}. "
+            clone_skeleton_anchor = _canonical_skeleton_anchor()
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -7513,6 +14131,92 @@ def _stripe_find_customer_id_by_email(email: str) -> str:
         return ""
 
 
+def _stripe_value(obj, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_unix(value) -> int:
+    try:
+        if value is None:
+            return 0
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def _add_months_utc(anchor_unix: int, months: int) -> int:
+    anchor = int(anchor_unix or 0)
+    m = max(1, int(months or 1))
+    if anchor <= 0:
+        return 0
+    dt = datetime.fromtimestamp(anchor, tz=timezone.utc)
+    month_index = (dt.month - 1) + m
+    year = dt.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    shifted = dt.replace(year=year, month=month, day=day)
+    return int(shifted.timestamp())
+
+
+def _next_renewal_from_anchor(anchor_unix: int, months: int, now_unix: int | None = None) -> int:
+    """Roll an anchor forward by billing intervals until it is in the future."""
+    anchor = int(anchor_unix or 0)
+    step_months = max(1, int(months or 1))
+    if anchor <= 0:
+        return 0
+    now_ts = int(now_unix or time.time())
+    candidate = _add_months_utc(anchor, step_months)
+    if candidate <= 0:
+        return 0
+    # 20 years of monthly roll-forward is a safe upper bound and prevents bad loops.
+    for _ in range(240):
+        if candidate > now_ts:
+            return int(candidate)
+        nxt = _add_months_utc(candidate, step_months)
+        if nxt <= candidate:
+            break
+        candidate = nxt
+    return int(candidate if candidate > now_ts else 0)
+
+
+def _subscription_interval_months(sub) -> int:
+    try:
+        items = _stripe_value(sub, "items", {}) or {}
+        item_data = _stripe_value(items, "data", []) or []
+        first_item = item_data[0] if item_data else {}
+        price = _stripe_value(first_item, "price", {}) or {}
+        recurring = _stripe_value(price, "recurring", {}) or {}
+        interval = str(_stripe_value(recurring, "interval", "month") or "month").strip().lower()
+        interval_count = max(1, _to_unix(_stripe_value(recurring, "interval_count", 1) or 1))
+        if interval == "year":
+            return interval_count * 12
+        if interval == "month":
+            return interval_count
+        # Fallback for non-monthly intervals (all Studio plans are monthly today).
+        return 1
+    except Exception:
+        return 1
+
+
+def _invoice_period_end_unix(invoice_obj) -> int:
+    lines = _stripe_value(invoice_obj, "lines", {}) or {}
+    line_data = _stripe_value(lines, "data", []) or []
+    if not line_data:
+        return 0
+    period = _stripe_value(line_data[0], "period", {}) or {}
+    return _to_unix(_stripe_value(period, "end", 0) or 0)
+
+
+def _invoice_paid_at_unix(invoice_obj) -> int:
+    transitions = _stripe_value(invoice_obj, "status_transitions", {}) or {}
+    paid_at = _to_unix(_stripe_value(transitions, "paid_at", 0) or 0)
+    if paid_at > 0:
+        return paid_at
+    return _to_unix(_stripe_value(invoice_obj, "created", 0) or 0)
+
+
 def _stripe_has_active_subscription(email: str) -> bool:
     """Return True when user has active access through Stripe."""
     if not STRIPE_SECRET_KEY:
@@ -7537,22 +14241,100 @@ def _stripe_has_active_subscription(email: str) -> bool:
 
 def _stripe_subscription_snapshot(email: str) -> dict:
     """Best-effort Stripe snapshot used by admin billing audit."""
-    out = {"ok": False, "status": "", "next_renewal_unix": 0}
+    out = {
+        "ok": False,
+        "plan": "",
+        "status": "",
+        "next_renewal_unix": 0,
+        "next_renewal_source": "",
+        "cancel_at_period_end": False,
+        "paid_at_unix": 0,
+        "interval_months": 1,
+    }
     if not STRIPE_SECRET_KEY or not email:
         return out
     customer_id = _stripe_find_customer_id_by_email(email)
     if not customer_id:
         return out
     try:
-        subs = stripe_lib.Subscription.list(customer=customer_id, status="all", limit=20)
-        ranked = list(getattr(subs, "data", []) or [])
+        subs = stripe_lib.Subscription.list(
+            customer=customer_id,
+            status="all",
+            limit=20,
+            expand=["data.latest_invoice", "data.items.data.price"],
+        )
+        ranked = list(_stripe_value(subs, "data", []) or [])
         if not ranked:
             return out
-        ranked.sort(key=lambda s: int(getattr(s, "created", 0) or 0), reverse=True)
+        status_rank = {"active": 0, "trialing": 1, "past_due": 2, "incomplete": 3, "canceled": 4}
+        ranked.sort(
+            key=lambda s: (
+                status_rank.get(str(_stripe_value(s, "status", "") or "").strip().lower(), 99),
+                -_to_unix(_stripe_value(s, "created", 0) or 0),
+            )
+        )
         chosen = ranked[0]
+        items = _stripe_value(chosen, "items", {}) or {}
+        item_data = _stripe_value(items, "data", []) or []
+        first_item = item_data[0] if item_data else {}
+        first_price = _stripe_value(first_item, "price", {}) or {}
+        active_price_id = str(_stripe_value(first_price, "id", "") or "")
+        interval_months = _subscription_interval_months(chosen)
+        status = str(_stripe_value(chosen, "status", "") or "")
+        cancel_at_period_end = bool(_stripe_value(chosen, "cancel_at_period_end", False))
+        current_period_end = _to_unix(_stripe_value(chosen, "current_period_end", 0) or 0)
+        current_period_start = _to_unix(_stripe_value(chosen, "current_period_start", 0) or 0)
+        billing_cycle_anchor = _to_unix(_stripe_value(chosen, "billing_cycle_anchor", 0) or 0)
+        start_date = _to_unix(_stripe_value(chosen, "start_date", 0) or 0)
+        trial_end = _to_unix(_stripe_value(chosen, "trial_end", 0) or 0)
+        created_unix = _to_unix(_stripe_value(chosen, "created", 0) or 0)
+        paid_at_unix = current_period_start or billing_cycle_anchor or start_date or created_unix
+        next_renewal_unix = current_period_end
+        next_renewal_source = "current_period_end" if next_renewal_unix > 0 else ""
+
+        latest_invoice = _stripe_value(chosen, "latest_invoice", None)
+        invoice_obj = None
+        if latest_invoice:
+            if isinstance(latest_invoice, str):
+                try:
+                    invoice_obj = stripe_lib.Invoice.retrieve(latest_invoice)
+                except Exception:
+                    invoice_obj = None
+            else:
+                invoice_obj = latest_invoice
+        if invoice_obj:
+            invoice_paid_at = _invoice_paid_at_unix(invoice_obj)
+            if invoice_paid_at > 0:
+                paid_at_unix = invoice_paid_at
+            if next_renewal_unix <= 0:
+                invoice_period_end = _invoice_period_end_unix(invoice_obj)
+                if invoice_period_end > 0:
+                    next_renewal_unix = invoice_period_end
+                    next_renewal_source = "invoice_period_end"
+                elif invoice_paid_at > 0:
+                    rolled = _next_renewal_from_anchor(invoice_paid_at, interval_months)
+                    if rolled > 0:
+                        next_renewal_unix = rolled
+                        next_renewal_source = "invoice_paid_at_rollforward"
+        if next_renewal_unix <= 0 and trial_end > 0 and status == "trialing":
+            next_renewal_unix = trial_end
+            next_renewal_source = "trial_end"
+        if next_renewal_unix <= 0 and not cancel_at_period_end:
+            anchor = billing_cycle_anchor or current_period_start or paid_at_unix or start_date or created_unix
+            if anchor > 0:
+                rolled = _next_renewal_from_anchor(anchor, interval_months)
+                if rolled > 0:
+                    next_renewal_unix = rolled
+                    next_renewal_source = "anchor_rollforward"
+
         out["ok"] = True
-        out["status"] = str(getattr(chosen, "status", "") or "")
-        out["next_renewal_unix"] = int(getattr(chosen, "current_period_end", 0) or 0)
+        out["plan"] = str(STRIPE_PRICE_TO_PLAN.get(active_price_id, "") or "").strip().lower()
+        out["status"] = status
+        out["cancel_at_period_end"] = cancel_at_period_end
+        out["paid_at_unix"] = int(paid_at_unix or 0)
+        out["next_renewal_unix"] = int(next_renewal_unix or 0)
+        out["next_renewal_source"] = next_renewal_source
+        out["interval_months"] = max(1, int(interval_months or 1))
         return out
     except Exception as e:
         log.warning(f"Stripe subscription snapshot failed for {email}: {e}")
@@ -7601,57 +14383,505 @@ async def _supabase_set_user_plan(user_id: str, plan: str):
         )
 
 
-@app.post("/api/checkout")
-async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(500, "Stripe not configured")
-    if req.price_id not in STRIPE_PRICE_TO_PLAN:
-        raise HTTPException(400, "Invalid price ID")
-    target_plan = STRIPE_PRICE_TO_PLAN.get(req.price_id, "")
-    user_email = user.get("email", "")
-    user_plan = user.get("plan", "starter")
-    is_admin = user_email in ADMIN_EMAILS
-    if target_plan == "demo_pro" and (not PRODUCT_DEMO_PUBLIC_ENABLED) and (not is_admin):
-        raise HTTPException(403, "Demo Pro is coming soon.")
+def _stripe_price_id_for_plan(plan: str) -> str:
+    normalized = str(plan or "").strip().lower()
+    for price_id, mapped_plan in STRIPE_PRICE_TO_PLAN.items():
+        if str(mapped_plan or "").strip().lower() == normalized:
+            return str(price_id)
+    return ""
+
+
+async def _supabase_get_waitlist_rows(limit: int = 2000) -> list[dict]:
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL:
+        return []
+    fallback_table = "app_settings"
+    fallback_prefix = "studio_waitlist_reservation:"
+
+    def _waitlist_missing(resp: httpx.Response) -> bool:
+        if resp.status_code == 404:
+            return True
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        text = json.dumps(body).lower() if isinstance(body, (dict, list)) else str(body).lower()
+        return "could not find the table" in text and "waiting_list" in text
+
+    def _parse_fallback_value(raw: object) -> dict:
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                return {}
+        return {}
 
     try:
-        checkout_payload = {
-            "mode": "subscription",
-            "payment_method_types": ["card"],
-            "line_items": [{"price": req.price_id, "quantity": 1}],
-            "success_url": f"{SITE_URL}?payment=success",
-            "cancel_url": f"{SITE_URL}?payment=cancelled",
-            "client_reference_id": user["id"],
-            "metadata": {"user_id": user["id"], "plan": STRIPE_PRICE_TO_PLAN[req.price_id]},
-        }
-        customer_id = _stripe_find_customer_id_by_email(user["email"])
-        if customer_id:
-            checkout_payload["customer"] = customer_id
-        else:
-            checkout_payload["customer_email"] = user["email"]
-        session = stripe_lib.checkout.Session.create(**checkout_payload)
-        return {"checkout_url": session.url}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/waiting_list?select=*&order=created_at.desc&limit={int(max(1, limit))}",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows if isinstance(rows, list) else []
+
+            if not _waitlist_missing(resp):
+                return []
+
+            fallback_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/{fallback_table}?select=id,key,value,updated_at&key=like.{quote(fallback_prefix + '%')}&order=updated_at.desc&limit={int(max(1, limit))}",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if fallback_resp.status_code != 200:
+                return []
+            raw_rows = fallback_resp.json()
+            raw_rows = raw_rows if isinstance(raw_rows, list) else []
+            rows: list[dict] = []
+            for item in raw_rows:
+                if not isinstance(item, dict):
+                    continue
+                parsed = _parse_fallback_value(item.get("value"))
+                key = str(item.get("key", "") or "")
+                email = str(parsed.get("email", "") or "").strip().lower()
+                if not email and key.startswith(fallback_prefix):
+                    email = key[len(fallback_prefix):].strip().lower()
+                if not email:
+                    continue
+                rows.append(
+                    {
+                        "id": str(item.get("id", "") or ""),
+                        "email": email,
+                        "plan": str(parsed.get("plan", "starter") or "starter").strip().lower(),
+                        "price_usd": float(parsed.get("price_usd", 0.0) or 0.0),
+                        "paid": bool(parsed.get("paid", False)),
+                        "stripe_session_id": parsed.get("stripe_session_id"),
+                        "created_at": str(parsed.get("created_at", item.get("updated_at", "")) or ""),
+                    }
+                )
+            rows.sort(
+                key=lambda r: str(r.get("created_at", "") or ""),
+                reverse=True,
+            )
+            return rows
     except Exception as e:
-        log.error(f"Stripe checkout error: {e}")
-        raise HTTPException(500, f"Payment error: {str(e)}")
+        log.warning(f"Supabase waiting_list read failed: {e}")
+        return []
+
+
+async def _supabase_upsert_waitlist_entry(
+    *,
+    email: str,
+    plan: str,
+    price_usd: float,
+    paid: bool,
+) -> bool:
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL or not email:
+        return False
+    payload = {
+        "email": str(email or "").strip().lower(),
+        "plan": str(plan or "").strip().lower(),
+        "price_usd": float(price_usd or 0.0),
+        "paid": bool(paid),
+    }
+    fallback_table = "app_settings"
+    fallback_prefix = "studio_waitlist_reservation:"
+
+    def _waitlist_missing(resp: httpx.Response) -> bool:
+        if resp.status_code == 404:
+            return True
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        text = json.dumps(body).lower() if isinstance(body, (dict, list)) else str(body).lower()
+        return "could not find the table" in text and "waiting_list" in text
+
+    def _parse_fallback_value(raw: object) -> dict:
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                return {}
+        return {}
+
+    async def _fallback_upsert(client: httpx.AsyncClient) -> bool:
+        key = f"{fallback_prefix}{payload['email']}"
+        existing = await client.get(
+            f"{SUPABASE_URL}/rest/v1/{fallback_table}?key=eq.{quote(key)}&select=id,value&limit=1",
+            headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+        )
+        existing_rows = existing.json() if existing.status_code == 200 else []
+        existing_rows = existing_rows if isinstance(existing_rows, list) else []
+        value = {
+            "email": payload["email"],
+            "plan": payload["plan"],
+            "price_usd": payload["price_usd"],
+            "paid": payload["paid"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if existing_rows:
+            prev = _parse_fallback_value(existing_rows[0].get("value"))
+            value["created_at"] = str(prev.get("created_at", value["created_at"]) or value["created_at"])
+            value["paid"] = bool(prev.get("paid")) or value["paid"]
+            update = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/{fallback_table}?id=eq.{quote(str(existing_rows[0].get('id', '') or ''))}",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json={"value": value},
+            )
+            return update.status_code in {200, 204}
+        insert = await client.post(
+            f"{SUPABASE_URL}/rest/v1/{fallback_table}",
+            headers={
+                "apikey": svc_key,
+                "Authorization": f"Bearer {svc_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={"key": key, "value": value},
+        )
+        return insert.status_code in {200, 201, 204}
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            existing_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/waiting_list?email=eq.{quote(payload['email'])}&select=id,paid&limit=1",
+                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+            )
+            if _waitlist_missing(existing_resp):
+                return await _fallback_upsert(client)
+            existing_rows = existing_resp.json() if existing_resp.status_code == 200 else []
+            existing_rows = existing_rows if isinstance(existing_rows, list) else []
+            if existing_rows:
+                existing_paid = bool(existing_rows[0].get("paid"))
+                update_payload = dict(payload)
+                if existing_paid:
+                    update_payload["paid"] = True
+                update_resp = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/waiting_list?email=eq.{quote(payload['email'])}",
+                    headers={
+                        "apikey": svc_key,
+                        "Authorization": f"Bearer {svc_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    json=update_payload,
+                )
+                if _waitlist_missing(update_resp):
+                    return await _fallback_upsert(client)
+                return update_resp.status_code in {200, 204}
+            insert_resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/waiting_list",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json=payload,
+            )
+            if _waitlist_missing(insert_resp):
+                return await _fallback_upsert(client)
+            return insert_resp.status_code in {200, 201, 204}
+    except Exception as e:
+        log.warning(f"Supabase waiting_list upsert failed for {email}: {e}")
+        return False
+
+
+@app.post("/api/checkout")
+async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
+    price_id = str(req.price_id or "").strip()
+    if not price_id:
+        raise HTTPException(400, "Missing price id")
+    plan = str(STRIPE_PRICE_TO_PLAN.get(price_id, "") or "").strip().lower()
+    if plan not in CHAT_STORY_ALLOWED_PLANS:
+        raise HTTPException(400, "This monthly plan is not available for PayPal checkout.")
+    price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
+    if price_usd <= 0:
+        raise HTTPException(400, f"Monthly pricing is not configured for {plan}.")
+    checkout_url = await _create_paypal_subscription_order(user, price_id, plan, price_usd)
+    return {"checkout_url": checkout_url}
+
+
+async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
+    capture = await _paypal_request("POST", f"/v2/checkout/orders/{order_id}/capture", json_body={})
+    status = str(capture.get("status", "") or "").upper()
+    capture_id = ""
+    for purchase_unit in list(capture.get("purchase_units", []) or []):
+        payments = purchase_unit.get("payments", {}) or {}
+        captures = list(payments.get("captures", []) or [])
+        if captures:
+            capture_id = str(captures[0].get("id", "") or "")
+            break
+    if status not in {"COMPLETED", "APPROVED"} and not capture_id:
+        raise HTTPException(400, "PayPal payment was not completed")
+    return capture, capture_id
+
+
+async def _create_paypal_subscription_order(user: dict, price_id: str, plan: str, price_usd: float) -> str:
+    if not _paypal_enabled():
+        raise HTTPException(400, "PayPal is not configured on this billing account yet.")
+    normalized_plan = str(plan or "").strip().lower()
+    if normalized_plan not in CHAT_STORY_ALLOWED_PLANS:
+        raise HTTPException(400, "Only Starter, Creator, and Pro can be sold through monthly PayPal checkout.")
+    order_payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [
+            {
+                "reference_id": str(price_id or ""),
+                "custom_id": str(user.get("id", "") or ""),
+                "description": f"NYPTID Studio {normalized_plan.title()} Monthly Access",
+                "amount": {
+                    "currency_code": "USD",
+                    "value": f"{float(price_usd or 0.0):.2f}",
+                },
+            }
+        ],
+        "application_context": {
+            "brand_name": "NYPTID Studio",
+            "landing_page": "LOGIN",
+            "user_action": "PAY_NOW",
+            "shipping_preference": "NO_SHIPPING",
+            "return_url": f"{_api_public_url()}/api/paypal/return",
+            "cancel_url": f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=paypal",
+        },
+    }
+    data = await _paypal_request("POST", "/v2/checkout/orders", json_body=order_payload)
+    order_id = str(data.get("id", "") or "")
+    approve_url = ""
+    for link in list(data.get("links", []) or []):
+        if str(link.get("rel", "") or "").lower() == "approve":
+            approve_url = str(link.get("href", "") or "")
+            break
+    if not order_id or not approve_url:
+        raise HTTPException(500, "PayPal approval URL missing")
+    async with _paypal_orders_lock:
+        _paypal_orders[order_id] = {
+            "kind": "subscription",
+            "user_id": str(user.get("id", "") or ""),
+            "email": str(user.get("email", "") or "").strip().lower(),
+            "price_id": str(price_id or ""),
+            "plan": normalized_plan,
+            "price_usd": float(price_usd or 0.0),
+            "activated": False,
+            "capture_id": "",
+            "created_at": time.time(),
+        }
+        _save_paypal_orders()
+    return approve_url
+
+
+async def _create_paypal_topup_order(user: dict, price_id: str, pack: dict) -> str:
+    if not _paypal_enabled():
+        raise HTTPException(400, "PayPal is not configured on this billing account yet.")
+    order_payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [
+            {
+                "reference_id": str(price_id or ""),
+                "custom_id": str(user.get("id", "") or ""),
+                "description": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} AC Credits",
+                "amount": {
+                    "currency_code": "USD",
+                    "value": f"{float(pack.get('price_usd', 0.0) or 0.0):.2f}",
+                },
+            }
+        ],
+        "application_context": {
+            "brand_name": "NYPTID Studio",
+            "landing_page": "LOGIN",
+            "user_action": "PAY_NOW",
+            "shipping_preference": "NO_SHIPPING",
+            "return_url": f"{_api_public_url()}/api/paypal/return",
+            "cancel_url": f"{_billing_site_url()}?topup=cancelled&provider=paypal",
+        },
+    }
+    data = await _paypal_request("POST", "/v2/checkout/orders", json_body=order_payload)
+    order_id = str(data.get("id", "") or "")
+    approve_url = ""
+    for link in list(data.get("links", []) or []):
+        if str(link.get("rel", "") or "").lower() == "approve":
+            approve_url = str(link.get("href", "") or "")
+            break
+    if not order_id or not approve_url:
+        raise HTTPException(500, "PayPal approval URL missing")
+    async with _paypal_orders_lock:
+        _paypal_orders[order_id] = {
+            "kind": "topup",
+            "user_id": str(user.get("id", "") or ""),
+            "email": str(user.get("email", "") or ""),
+            "price_id": str(price_id or ""),
+            "pack": str(pack.get("pack", "") or ""),
+            "credits": int(pack.get("credits", 0) or 0),
+            "price_usd": float(pack.get("price_usd", 0.0) or 0.0),
+            "credited": False,
+            "capture_id": "",
+            "created_at": time.time(),
+        }
+        _save_paypal_orders()
+    return approve_url
+
+
+async def _capture_paypal_topup_order(order_id: str) -> dict:
+    order_id = str(order_id or "").strip()
+    if not order_id:
+        raise HTTPException(400, "Missing PayPal order id")
+    async with _paypal_orders_lock:
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+    if not order_meta:
+        raise HTTPException(404, "PayPal order was not found")
+    if order_meta.get("credited"):
+        return order_meta
+    _, capture_id = await _capture_paypal_order_api(order_id)
+    async with _paypal_orders_lock:
+        latest = dict(_paypal_orders.get(order_id, {}) or {})
+        if latest.get("credited"):
+            return latest
+        await _credit_topup_wallet(
+            user_id=str(latest.get("user_id", "") or ""),
+            credits=int(latest.get("credits", 0) or 0),
+            source=str(latest.get("pack", "paypal") or "paypal"),
+            stripe_session_id=order_id,
+        )
+        latest["credited"] = True
+        latest["capture_id"] = capture_id
+        latest["captured_at"] = time.time()
+        _paypal_orders[order_id] = latest
+        _save_paypal_orders()
+    await _append_landing_notification(
+        event_type="topup",
+            credits=int(latest.get("credits", 0) or 0),
+            customer_email=str(latest.get("email", "") or ""),
+    )
+    return latest
+
+
+async def _capture_paypal_subscription_order(order_id: str) -> dict:
+    order_id = str(order_id or "").strip()
+    if not order_id:
+        raise HTTPException(400, "Missing PayPal order id")
+    async with _paypal_orders_lock:
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+    if not order_meta:
+        raise HTTPException(404, "PayPal order was not found")
+    if str(order_meta.get("kind", "") or "").strip().lower() not in {"subscription", "monthly"}:
+        raise HTTPException(400, "PayPal order is not a monthly subscription checkout")
+    if order_meta.get("activated"):
+        return order_meta
+    _, capture_id = await _capture_paypal_order_api(order_id)
+    user_id = str(order_meta.get("user_id", "") or "").strip()
+    email = str(order_meta.get("email", "") or "").strip().lower()
+    plan = str(order_meta.get("plan", "none") or "none").strip().lower()
+    if plan not in CHAT_STORY_ALLOWED_PLANS:
+        raise HTTPException(400, "PayPal subscription order is missing a valid plan")
+    now_unix = int(time.time())
+    current_user = {"id": user_id, "email": email, "plan": plan}
+    current_record = _paypal_subscription_record_for_user(current_user)
+    current_snapshot = _paypal_subscription_snapshot_for_user(current_user)
+    period_start_unix = now_unix
+    if current_snapshot.get("billing_active") and str(current_snapshot.get("record_plan", "none") or "none") == plan:
+        active_end = int((current_record or {}).get("period_end_unix", 0) or 0)
+        if active_end > now_unix:
+            period_start_unix = active_end
+    period_end_unix = _add_months_utc(period_start_unix, 1)
+    if period_end_unix <= period_start_unix:
+        period_end_unix = period_start_unix + (31 * 24 * 3600)
+    subscription_key_candidates = _paypal_subscription_lookup_keys(user_id, email)
+    subscription_key = subscription_key_candidates[0] if subscription_key_candidates else order_id
+    subscription_record = {
+        "provider": "paypal_manual",
+        "user_id": user_id,
+        "email": email,
+        "plan": plan,
+        "price_id": str(order_meta.get("price_id", "") or ""),
+        "price_usd": float(order_meta.get("price_usd", 0.0) or 0.0),
+        "order_id": order_id,
+        "capture_id": capture_id,
+        "status": "active",
+        "period_start_unix": int(period_start_unix),
+        "period_end_unix": int(period_end_unix),
+        "created_at": float((current_record or {}).get("created_at", 0) or order_meta.get("created_at", time.time()) or time.time()),
+        "updated_at": time.time(),
+        "renewal_mode": "manual_paypal",
+    }
+    async with _paypal_subscriptions_lock:
+        _paypal_subscriptions[subscription_key] = subscription_record
+        _save_paypal_subscriptions()
+    async with _paypal_orders_lock:
+        latest = dict(_paypal_orders.get(order_id, {}) or {})
+        if latest.get("activated"):
+            return latest
+        latest["activated"] = True
+        latest["capture_id"] = capture_id
+        latest["captured_at"] = time.time()
+        latest["period_start_unix"] = int(period_start_unix)
+        latest["period_end_unix"] = int(period_end_unix)
+        latest["paypal_subscription_key"] = subscription_key
+        _paypal_orders[order_id] = latest
+        _save_paypal_orders()
+    if user_id:
+        await _supabase_set_user_plan(user_id, plan)
+    await _append_landing_notification(
+        event_type="subscription",
+        plan=plan,
+        customer_email=email,
+    )
+    return latest
 
 
 @app.post("/api/checkout/topup")
 async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(require_auth)):
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(500, "Stripe not configured")
     pack = TOPUP_PACKS.get(req.price_id)
     if not pack:
         raise HTTPException(400, "Invalid top-up pack")
     if user.get("email", "") in ADMIN_EMAILS:
         raise HTTPException(400, "Admin account does not require top-up packs")
+    preferred_method = str(getattr(req, "preferred_method", "card") or "card").strip().lower()
+    if preferred_method not in {"card", "paypal"}:
+        preferred_method = "card"
+    if preferred_method == "card" and not STRIPE_TOPUP_PUBLIC_ENABLED:
+        raise HTTPException(400, "Stripe checkout is coming soon. Use PayPal for now.")
+    if preferred_method == "paypal":
+        checkout_url = await _create_paypal_topup_order(user, req.price_id, pack)
+        return {"checkout_url": checkout_url}
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
     try:
+        checkout_price_id = str(pack.get("stripe_price_id", "") or "").strip()
+        line_item = (
+            {"price": checkout_price_id, "quantity": 1}
+            if checkout_price_id
+            else {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} AC Credits",
+                        "description": f"{int(pack.get('credits', 0) or 0)} animation credits",
+                    },
+                    "unit_amount": int(round(float(pack.get("price_usd", 0.0) or 0.0) * 100)),
+                },
+                "quantity": 1,
+            }
+        )
         checkout_payload = {
             "mode": "payment",
-            "payment_method_types": ["card"],
-            "line_items": [{"price": req.price_id, "quantity": 1}],
-            "success_url": f"{SITE_URL}?topup=success",
-            "cancel_url": f"{SITE_URL}?topup=cancelled",
+            "line_items": [line_item],
+            "success_url": f"{_billing_site_url()}?topup=success",
+            "cancel_url": f"{_billing_site_url()}?topup=cancelled",
             "client_reference_id": user["id"],
             "metadata": {
                 "user_id": user["id"],
@@ -7665,30 +14895,71 @@ async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(
             checkout_payload["customer"] = customer_id
         else:
             checkout_payload["customer_email"] = user["email"]
-        session = stripe_lib.checkout.Session.create(**checkout_payload)
+        session = stripe_lib.checkout.Session.create(
+            **checkout_payload,
+            payment_method_types=["card"],
+        )
         return {"checkout_url": session.url}
     except Exception as e:
         log.error(f"Stripe top-up checkout error: {e}")
         raise HTTPException(500, f"Payment error: {str(e)}")
 
 
+@app.get("/api/paypal/return")
+async def paypal_return(token: str = "", PayerID: str = ""):
+    order_id = str(token or "").strip()
+    async with _paypal_orders_lock:
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+    order_kind = str(order_meta.get("kind", "topup") or "topup").strip().lower()
+    success_url = f"{_billing_site_url()}?topup=success&provider=paypal"
+    error_url = f"{_billing_site_url()}?topup=cancelled&provider=paypal"
+    if order_kind in {"subscription", "monthly"}:
+        plan = str(order_meta.get("plan", "") or "").strip().lower()
+        plan_suffix = f"&plan={quote(plan)}" if plan else ""
+        success_url = f"{_billing_site_url()}?page=subscription&subscription=success&provider=paypal{plan_suffix}"
+        error_url = f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=paypal{plan_suffix}"
+    try:
+        if order_kind in {"subscription", "monthly"}:
+            await _capture_paypal_subscription_order(order_id)
+        else:
+            await _capture_paypal_topup_order(order_id)
+        return RedirectResponse(url=success_url, status_code=302)
+    except Exception as e:
+        log.error(f"PayPal return/capture failed for {order_id} payer={PayerID}: {e}")
+        message = quote(str(getattr(e, "detail", str(e)) or "PayPal capture failed")[:180])
+        separator = "&" if "?" in error_url else "?"
+        return RedirectResponse(url=f"{error_url}{separator}error={message}", status_code=302)
+
+
 @app.post("/api/billing-portal")
 async def create_billing_portal_session(user: dict = Depends(require_auth)):
     """Create a Stripe customer portal session so users can cancel/manage plans."""
+    manual_snapshot = _paypal_subscription_snapshot_for_user(user)
+    if manual_snapshot.get("billing_active"):
+        plan = str(manual_snapshot.get("plan", "") or "").strip().lower()
+        plan_suffix = f"&plan={quote(plan)}" if plan else ""
+        return {
+            "portal_url": f"{_billing_site_url()}?page=subscription&subscription=manual&provider=paypal{plan_suffix}"
+        }
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")
     customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
     if not customer_id:
-        raise HTTPException(404, "No billing profile found yet. Start a subscription first.")
+        raise HTTPException(404, "No billing profile found yet. Complete a credit-pack purchase first.")
     try:
         portal = stripe_lib.billing_portal.Session.create(
             customer=customer_id,
-            return_url=f"{SITE_URL}?billing=updated",
+            return_url=f"{_billing_site_url()}?billing=updated",
         )
         return {"portal_url": portal.url}
     except Exception as e:
         log.error(f"Stripe billing portal error: {e}")
         raise HTTPException(500, "Could not open billing portal")
+
+
+@app.post("/api/waitlist/join")
+async def join_waitlist(req: WaitlistJoinRequest, user: dict = Depends(require_auth)):
+    raise HTTPException(410, "Waiting list has been removed from Studio.")
 
 
 @app.post("/api/stripe-webhook")
@@ -7710,6 +14981,11 @@ async def stripe_webhook(request: Request):
         metadata = session_data.get("metadata", {}) or {}
         mode = str(session_data.get("mode", "") or "")
         user_id = str(session_data.get("client_reference_id") or metadata.get("user_id") or "")
+        customer_email = str(
+            (session_data.get("customer_details", {}) or {}).get("email")
+            or session_data.get("customer_email")
+            or ""
+        )
         if mode == "subscription":
             plan = metadata.get("plan", "starter")
             if user_id and SUPABASE_URL:
@@ -7729,7 +15005,30 @@ async def stripe_webhook(request: Request):
                     log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
                 except Exception as e:
                     log.error(f"Failed to update plan for {user_id}: {e}")
+            await _append_landing_notification(
+                event_type="subscription",
+                plan=str(plan or "starter"),
+                customer_email=customer_email,
+            )
         elif mode == "payment":
+            checkout_kind = str(metadata.get("checkout_kind", "") or "")
+            if checkout_kind == "waitlist_reservation":
+                plan = str(metadata.get("plan", "") or "").strip().lower()
+                plan_price_usd = float(metadata.get("plan_price_usd", PLAN_PRICE_USD.get(plan, 0.0)) or 0.0)
+                if customer_email and plan in {"starter", "creator", "pro", "elite"}:
+                    await _supabase_upsert_waitlist_entry(
+                        email=customer_email,
+                        plan=plan,
+                        price_usd=plan_price_usd,
+                        paid=True,
+                    )
+                    await _append_landing_notification(
+                        event_type="subscription",
+                        plan=plan,
+                        customer_email=customer_email,
+                    )
+                    log.info(f"Stripe webhook: confirmed waitlist reservation {customer_email} -> {plan}")
+                return {"status": "ok"}
             topup_credits = int(str(metadata.get("topup_credits", "0") or "0"))
             if user_id and topup_credits > 0:
                 await _credit_topup_wallet(
@@ -7739,6 +15038,11 @@ async def stripe_webhook(request: Request):
                     stripe_session_id=str(session_data.get("id", "") or ""),
                 )
                 log.info(f"Stripe webhook: credited {topup_credits} top-up credits to {user_id}")
+                await _append_landing_notification(
+                    event_type="topup",
+                    credits=topup_credits,
+                    customer_email=customer_email,
+                )
 
     elif event.get("type") in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         sub = event["data"]["object"]
@@ -7861,6 +15165,55 @@ async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)
     except Exception as e:
         log.error(f"Admin set-plan error: {e}")
         raise HTTPException(500, str(e))
+
+
+@app.post("/api/admin/cancel-subscription")
+async def admin_cancel_subscription(body: dict, user: dict = Depends(require_auth)):
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
+
+    target_email = str((body or {}).get("email", "") or "").strip().lower()
+    if not target_email:
+        raise HTTPException(400, "Missing email")
+    cancel_now = _bool_from_any((body or {}).get("cancel_now"), False)
+
+    try:
+        customer_id = _stripe_find_customer_id_by_email(target_email)
+        if not customer_id:
+            raise HTTPException(404, f"No Stripe customer found for {target_email}")
+
+        subs = stripe_lib.Subscription.list(customer=customer_id, status="all", limit=50)
+        data = list(getattr(subs, "data", []) or [])
+        canceled: list[dict] = []
+        for sub in data:
+            sub_id = str(getattr(sub, "id", "") or "")
+            sub_status = str(getattr(sub, "status", "") or "")
+            if not sub_id:
+                continue
+            if sub_status not in {"active", "trialing", "past_due", "incomplete"}:
+                continue
+            if cancel_now:
+                stripe_lib.Subscription.delete(sub_id)
+                action = "canceled_now"
+            else:
+                stripe_lib.Subscription.modify(sub_id, cancel_at_period_end=True)
+                action = "cancel_at_period_end"
+            canceled.append({"id": sub_id, "status": sub_status, "action": action})
+
+        return {
+            "ok": True,
+            "email": target_email,
+            "cancel_now": cancel_now,
+            "canceled_count": len(canceled),
+            "subscriptions": canceled,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Admin cancel-subscription error for {target_email}: {e}")
+        raise HTTPException(500, f"Failed to cancel subscription(s): {e}")
 
 
 # ─── User Feedback Collection ─────────────────────────────────────────────────
@@ -8028,12 +15381,11 @@ async def seed_profiles():
 
 # ─── Thumbnail System ─────────────────────────────────────────────────────────
 
-THUMBNAIL_DIR = Path("thumbnails")
-THUMBNAIL_DIR.mkdir(exist_ok=True)
+THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
-THUMBNAIL_UPLOAD_DIR.mkdir(exist_ok=True)
+THUMBNAIL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_OUTPUT_DIR = THUMBNAIL_DIR / "generated"
-THUMBNAIL_OUTPUT_DIR.mkdir(exist_ok=True)
+THUMBNAIL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 THUMBNAIL_RUNPOD_HOST = os.getenv("THUMBNAIL_RUNPOD_HOST", "root@69.30.85.41")
 THUMBNAIL_RUNPOD_SSH_PORT = os.getenv("THUMBNAIL_RUNPOD_SSH_PORT", "22118")
@@ -9191,7 +16543,46 @@ _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist
 dist_dir = Path(os.getenv("FRONTEND_DIST_DIR", str(_default_dist_dir))).resolve()
 if dist_dir.exists():
     log.info(f"Serving frontend dist from: {dist_dir}")
-    app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir), html=False), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def _serve_landing_page():
+        index_path = dist_dir / "index.html"
+        if not index_path.exists():
+            raise HTTPException(404, "Landing page not found")
+        return FileResponse(str(index_path), media_type="text/html")
+
+    @app.get("/{page_name}.html", include_in_schema=False)
+    async def _serve_dist_html(page_name: str):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", page_name or ""):
+            raise HTTPException(404, "Not Found")
+        html_path = dist_dir / f"{page_name}.html"
+        if not html_path.exists():
+            raise HTTPException(404, "Not Found")
+        return FileResponse(str(html_path), media_type="text/html")
+
+    @app.get("/{asset_name}", include_in_schema=False)
+    async def _serve_root_asset(asset_name: str):
+        if "/" in asset_name or "\\" in asset_name:
+            raise HTTPException(404, "Not Found")
+        asset_path = dist_dir / asset_name
+        if not asset_path.exists() or not asset_path.is_file():
+            raise HTTPException(404, "Not Found")
+        suffix = asset_path.suffix.lower()
+        media_map = {
+            ".txt": "text/plain; charset=utf-8",
+            ".xml": "application/xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+            ".ico": "image/x-icon",
+            ".json": "application/json",
+        }
+        return FileResponse(str(asset_path), media_type=media_map.get(suffix))
 else:
     log.warning(f"Frontend dist directory not found: {dist_dir}")
 

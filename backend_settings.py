@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import stripe as stripe_lib
 
@@ -20,8 +21,13 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_TOPUP_PUBLIC_ENABLED = os.getenv("STRIPE_TOPUP_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
+FAL_IMAGE_BACKUP_MODEL = str(os.getenv("FAL_IMAGE_BACKUP_MODEL", "grok_imagine") or "grok_imagine").strip().lower()
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
 
@@ -47,10 +53,96 @@ XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
 PRODUCT_DEMO_PUBLIC_ENABLED = os.getenv("PRODUCT_DEMO_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
-SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")
+WAITLIST_ONLY_MODE = os.getenv("WAITLIST_ONLY_MODE", "0").lower() in ("1", "true", "yes", "on")
+WAITLIST_REQUIRE_STRIPE_PAYMENT = os.getenv("WAITLIST_REQUIRE_STRIPE_PAYMENT", "0").lower() in ("1", "true", "yes", "on")
+SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv(
+    "SKELETON_GLOBAL_REFERENCE_IMAGE_URL",
+    f"{SITE_URL.rstrip('/')}/default-skeleton-style-lock.png",
+)
 STORY_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("STORY_GLOBAL_REFERENCE_IMAGE_URL", "")
 MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL", "")
 USE_FAL_GROK_IMAGE = os.getenv("USE_FAL_GROK_IMAGE", "0").lower() in ("1", "true", "yes", "on")
+IMAGE_PROVIDER_ORDER = os.getenv("IMAGE_PROVIDER_ORDER", "fal")
+XAI_IMAGE_FALLBACK_ENABLED = os.getenv("XAI_IMAGE_FALLBACK_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+HIDREAM_ENABLED = os.getenv("HIDREAM_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+HIDREAM_MODEL = os.getenv("HIDREAM_MODEL", "hidream_i1_full_fp8.safetensors")
+HIDREAM_EDIT_ENABLED = os.getenv("HIDREAM_EDIT_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+HIDREAM_EDIT_MODEL = os.getenv("HIDREAM_EDIT_MODEL", "hidream_e1_1_bf16.safetensors")
+HIDREAM_EDIT_WEIGHT_DTYPE = os.getenv("HIDREAM_EDIT_WEIGHT_DTYPE", "fp8_e4m3fn_fast")
+HIDREAM_CLIP_L = os.getenv("HIDREAM_CLIP_L", "clip_l_hidream.safetensors")
+HIDREAM_CLIP_G = os.getenv("HIDREAM_CLIP_G", "clip_g_hidream.safetensors")
+HIDREAM_T5 = os.getenv("HIDREAM_T5", "t5xxl_fp8_e4m3fn_scaled.safetensors")
+HIDREAM_LLAMA = os.getenv("HIDREAM_LLAMA", "llama_3.1_8b_instruct_fp8_scaled.safetensors")
+HIDREAM_VAE = os.getenv("HIDREAM_VAE", "ae.safetensors")
+HIDREAM_SHIFT = float(os.getenv("HIDREAM_SHIFT", "3.0") or 3.0)
+HIDREAM_STEPS = max(8, int(os.getenv("HIDREAM_STEPS", "40") or 40))
+HIDREAM_CFG = float(os.getenv("HIDREAM_CFG", "5.0") or 5.0)
+HIDREAM_SAMPLER = os.getenv("HIDREAM_SAMPLER", "euler")
+HIDREAM_SCHEDULER = os.getenv("HIDREAM_SCHEDULER", "simple")
+WAN22_T2I_CHECKPOINT = os.getenv("WAN22_T2I_CHECKPOINT", "wan2.2_t2i_14b_fp8_scaled.safetensors")
+WAN22_T2I_CLIP = os.getenv("WAN22_T2I_CLIP", "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
+WAN22_T2I_VAE = os.getenv("WAN22_T2I_VAE", "wan2.2_vae.safetensors")
+WAN22_T2I_UNET = os.getenv("WAN22_T2I_UNET", "wan2.2_ti2v_5B_fp16.safetensors")
+WAN22_T2I_UNET_FP8 = os.getenv("WAN22_T2I_UNET_FP8", "wan2.2_ti2v_5B_fp8.safetensors")
+TEMPLATE_ADAPTER_ROUTING_ENABLED = os.getenv("TEMPLATE_ADAPTER_ROUTING_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+_TEMPLATE_ADAPTER_ROUTING_DEFAULT = {
+    "default": {
+        "checkpoint": "sd_xl_base_1.0.safetensors",
+        "prepend_trigger": "",
+        "prompt_suffix": "",
+        "negative_suffix": "",
+        "loras": [],
+    },
+    "skeleton": {
+        "checkpoint": "sd_xl_base_1.0.safetensors",
+        "prepend_trigger": "",
+        "prompt_suffix": "",
+        "negative_suffix": "",
+        "loras": [],
+    },
+    "story": {
+        "checkpoint": "sd_xl_base_1.0.safetensors",
+        "prepend_trigger": "",
+        "prompt_suffix": "cinematic photoreal composition, high-detail environmental storytelling",
+        "negative_suffix": "",
+        "loras": [],
+    },
+    "motivation": {
+        "checkpoint": "sd_xl_base_1.0.safetensors",
+        "prepend_trigger": "",
+        "prompt_suffix": "cinematic golden-hour lighting, premium inspirational framing",
+        "negative_suffix": "",
+        "loras": [],
+    },
+}
+
+
+def _parse_template_adapter_routing() -> dict:
+    raw = os.getenv("TEMPLATE_ADAPTER_ROUTING", "").strip()
+    if not raw:
+        return dict(_TEMPLATE_ADAPTER_ROUTING_DEFAULT)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            merged = dict(_TEMPLATE_ADAPTER_ROUTING_DEFAULT)
+            for k, v in parsed.items():
+                if isinstance(v, dict):
+                    base = dict(_TEMPLATE_ADAPTER_ROUTING_DEFAULT.get(str(k).lower(), {}))
+                    base.update(v)
+                    merged[str(k).lower()] = base
+            return merged
+    except Exception:
+        pass
+    return dict(_TEMPLATE_ADAPTER_ROUTING_DEFAULT)
+
+
+TEMPLATE_ADAPTER_ROUTING = _parse_template_adapter_routing()
+IMAGE_LOCAL_PROVIDER_RETRIES = max(1, min(5, int(os.getenv("IMAGE_LOCAL_PROVIDER_RETRIES", "3"))))
+IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC = max(0, int(os.getenv("IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC", "90")))
+IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE = os.getenv("IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE", "1").lower() in ("1", "true", "yes", "on")
+SKELETON_REQUIRE_WAN22 = os.getenv("SKELETON_REQUIRE_WAN22", "1").lower() in ("1", "true", "yes", "on")
+SKELETON_SDXL_LORA_ENABLED = os.getenv("SKELETON_SDXL_LORA_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+IMAGE_LOCAL_MIN_FILE_BYTES = max(1024, int(os.getenv("IMAGE_LOCAL_MIN_FILE_BYTES", "8192")))
 IMAGE_QUALITY_BESTOF_ENABLED = os.getenv("IMAGE_QUALITY_BESTOF_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 IMAGE_QUALITY_BESTOF_COUNT = max(1, min(8, int(os.getenv("IMAGE_QUALITY_BESTOF_COUNT", "4"))))
 IMAGE_QUALITY_MIN_SCORE = float(os.getenv("IMAGE_QUALITY_MIN_SCORE", "62"))
@@ -75,6 +167,11 @@ SCRIPT_TO_SHORT_ENABLED = os.getenv("SCRIPT_TO_SHORT_ENABLED", "1").lower() in (
 STORY_ADVANCED_CONTROLS_ENABLED = os.getenv("STORY_ADVANCED_CONTROLS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 STORY_RETENTION_TUNING_ENABLED = os.getenv("STORY_RETENTION_TUNING_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 DISABLE_ALL_SFX = os.getenv("DISABLE_ALL_SFX", "1").lower() in ("1", "true", "yes", "on")
+LONGFORM_BETA_ENABLED = os.getenv("LONGFORM_BETA_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+LONGFORM_DEFAULT_TARGET_MINUTES = float(os.getenv("LONGFORM_DEFAULT_TARGET_MINUTES", "8"))
+LONGFORM_MIN_TARGET_MINUTES = float(os.getenv("LONGFORM_MIN_TARGET_MINUTES", "2"))
+LONGFORM_MAX_TARGET_MINUTES = float(os.getenv("LONGFORM_MAX_TARGET_MINUTES", "10"))
+LONGFORM_MAX_SCENE_RETRIES = max(1, int(os.getenv("LONGFORM_MAX_SCENE_RETRIES", "4")))
 MAINTENANCE_BANNER_ENABLED = os.getenv("MAINTENANCE_BANNER_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 MAINTENANCE_BANNER_MESSAGE = os.getenv(
     "MAINTENANCE_BANNER_MESSAGE",
@@ -95,33 +192,78 @@ STRIPE_PRICE_TO_PLAN = {
 
 PLAN_PRICE_USD = {
     "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
-    "creator": float(os.getenv("PLAN_PRICE_CREATOR_USD", "30")),
+    "creator": float(os.getenv("PLAN_PRICE_CREATOR_USD", "24")),
     "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
     "elite": float(os.getenv("PLAN_PRICE_ELITE_USD", "300")),
     "demo_pro": float(os.getenv("PLAN_PRICE_DEMO_PRO_USD", "150")),
 }
 
+# Animation usage pricing baseline:
+# Kling 2.1 Standard I2V observed market API cost (5s) ~= $0.28.
+# Studio applies a configurable multiplier for margin + platform overhead.
+KLING21_STANDARD_I2V_5S_USD = float(os.getenv("KLING21_STANDARD_I2V_5S_USD", "0.28"))
+ANIMATION_MARKUP_MULTIPLIER = float(os.getenv("ANIMATION_MARKUP_MULTIPLIER", "3.0"))
+ANIMATION_CREDIT_UNIT_USD = round(
+    max(0.01, KLING21_STANDARD_I2V_5S_USD) * max(1.0, ANIMATION_MARKUP_MULTIPLIER),
+    2,
+)
+
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
-TOPUP_PACK_PRICE_IDS = {
-    "small": os.getenv("TOPUP_PRICE_SMALL", "price_1T6mJLBL8lRmwao2jPo0DGdq").strip(),
-    "medium": os.getenv("TOPUP_PRICE_MEDIUM", "price_1T6mJXBL8lRmwao2E9djNfMA").strip(),
-    "large": os.getenv("TOPUP_PRICE_LARGE", "price_1T6mJmBL8lRmwao24qTiaau5").strip(),
+TOPUP_PACK_SPECS = [
+    {"id": "ac_trial", "pack": "trial", "credits": 1, "price_usd": 0.60},
+    {"id": "ac_starter", "pack": "starter", "credits": 3, "price_usd": 1.80},
+    {"id": "ac_mini", "pack": "mini", "credits": 5, "price_usd": 3.00},
+    {"id": "ac_lite", "pack": "lite", "credits": 10, "price_usd": 6.00},
+    {"id": "ac_basic", "pack": "basic", "credits": 25, "price_usd": 15.00},
+    {"id": "ac_creator", "pack": "creator", "credits": 50, "price_usd": 30.00},
+    {"id": "ac_growth", "pack": "growth", "credits": 100, "price_usd": 60.00},
+    {"id": "ac_scale", "pack": "scale", "credits": 250, "price_usd": 150.00},
+    {"id": "ac_studio", "pack": "studio", "credits": 500, "price_usd": 300.00},
+    {"id": "ac_agency", "pack": "agency", "credits": 1000, "price_usd": 600.00},
+]
+TOPUP_PACKS = {
+    str(spec["id"]): {
+        "pack": str(spec["pack"]),
+        "credits": int(spec["credits"]),
+        "price_usd": float(spec["price_usd"]),
+        "stripe_price_id": str(spec.get("stripe_price_id", "") or "").strip(),
+    }
+    for spec in TOPUP_PACK_SPECS
 }
-TOPUP_PACKS = {}
-if TOPUP_PACK_PRICE_IDS["small"]:
-    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["small"]] = {"pack": "small", "credits": 25, "price_usd": 7.99}
-if TOPUP_PACK_PRICE_IDS["medium"]:
-    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["medium"]] = {"pack": "medium", "credits": 150, "price_usd": 27.99}
-if TOPUP_PACK_PRICE_IDS["large"]:
-    TOPUP_PACKS[TOPUP_PACK_PRICE_IDS["large"]] = {"pack": "large", "credits": 400, "price_usd": 64.99}
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-OUTPUT_DIR = Path("generated_videos")
-OUTPUT_DIR.mkdir(exist_ok=True)
-TEMP_DIR = Path("temp_assets")
-TEMP_DIR.mkdir(exist_ok=True)
-TRAINING_DATA_DIR = Path("training_data")
-TRAINING_DATA_DIR.mkdir(exist_ok=True)
-CREATIVE_SESSIONS_FILE = TEMP_DIR / "creative_sessions_store.json"
+APP_ROOT = Path(__file__).resolve().parent
+
+
+def _resolve_data_path(raw_value: str, default_path: Path) -> Path:
+    cleaned = str(raw_value or "").strip()
+    if cleaned:
+        candidate = Path(cleaned).expanduser()
+        if not candidate.is_absolute():
+            candidate = (APP_ROOT / candidate).resolve()
+        return candidate
+    return default_path.resolve()
+
+
+APP_DATA_DIR = _resolve_data_path(os.getenv("APP_DATA_DIR", ""), APP_ROOT)
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+OUTPUT_DIR = _resolve_data_path(os.getenv("OUTPUT_DIR", ""), APP_DATA_DIR / "generated_videos")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR = _resolve_data_path(os.getenv("TEMP_DIR", ""), APP_DATA_DIR / "temp_assets")
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+TRAINING_DATA_DIR = _resolve_data_path(os.getenv("TRAINING_DATA_DIR", ""), APP_DATA_DIR / "training_data")
+TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAIL_DIR = _resolve_data_path(os.getenv("THUMBNAIL_DIR", ""), APP_DATA_DIR / "thumbnails")
+THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+DEMO_UPLOAD_DIR = _resolve_data_path(os.getenv("DEMO_UPLOAD_DIR", ""), APP_DATA_DIR / "demo_uploads")
+DEMO_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+CREATIVE_SESSIONS_FILE = _resolve_data_path(
+    os.getenv("CREATIVE_SESSIONS_FILE", ""),
+    TEMP_DIR / "creative_sessions_store.json",
+)
 CREATIVE_SESSION_PERSISTENCE_ENABLED = os.getenv("CREATIVE_SESSION_PERSISTENCE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
-PROJECTS_STORE_FILE = TEMP_DIR / "projects_store.json"
+PROJECTS_STORE_FILE = _resolve_data_path(
+    os.getenv("PROJECTS_STORE_FILE", ""),
+    TEMP_DIR / "projects_store.json",
+)

@@ -25,6 +25,7 @@ class GenerateRequest(BaseModel):
 
 class SceneImageRequest(BaseModel):
     prompt: str
+    negative_prompt: str = ""
     scene_index: int = 0
     session_id: str = ""
     template: str = "skeleton"
@@ -66,6 +67,11 @@ class CheckoutRequest(BaseModel):
 
 class TopupCheckoutRequest(BaseModel):
     price_id: str
+    preferred_method: str = "card"
+
+
+class WaitlistJoinRequest(BaseModel):
+    plan: str
 
 
 class SetPlanRequest(BaseModel):
@@ -93,3 +99,27 @@ class ThumbnailGenerateRequest(BaseModel):
     style_reference_id: str = ""
     sketch_image_id: str = ""
     screenshot_description: str = ""
+
+
+class LongFormSessionCreateRequest(BaseModel):
+    template: str
+    topic: str
+    input_title: str
+    input_description: str
+    target_minutes: float = 8.0
+    language: str = "en"
+    animation_enabled: bool = True
+    sfx_enabled: bool = True
+    whisper_mode: str = "subtle"
+
+
+class LongFormChapterActionRequest(BaseModel):
+    chapter_index: int
+    action: str = "approve"
+    reason: str = ""
+
+
+class LongFormResolveErrorRequest(BaseModel):
+    chapter_index: int
+    fix_note: str = ""
+    force_accept: bool = False

@@ -32,7 +32,11 @@ COPY backend_demo.py .
 COPY backend_state.py .
 COPY backend_queue.py .
 COPY backend_worker.py .
+COPY ops ./ops
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
+COPY ViralShorts-App/public/ ./ViralShorts-App/public/
+
+RUN chmod +x ./ops/run_render_service.sh
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 

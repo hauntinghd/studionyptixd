@@ -1,7 +1,7 @@
 PLAN_LIMITS = {
     "starter": {
         "videos_per_month": 50,
-        "animated_renders_per_month": 50,
+        "animated_renders_per_month": 0,
         "non_animated_ops_per_month": 80,
         "max_duration_sec": 60,
         "max_resolution": "720p",
@@ -11,7 +11,7 @@ PLAN_LIMITS = {
     },
     "creator": {
         "videos_per_month": 90,
-        "animated_renders_per_month": 90,
+        "animated_renders_per_month": 0,
         "non_animated_ops_per_month": 150,
         "max_duration_sec": 180,
         "max_resolution": "720p",
@@ -21,7 +21,7 @@ PLAN_LIMITS = {
     },
     "pro": {
         "videos_per_month": 150,
-        "animated_renders_per_month": 150,
+        "animated_renders_per_month": 0,
         "non_animated_ops_per_month": 300,
         "max_duration_sec": 300,
         "max_resolution": "720p",
@@ -31,7 +31,7 @@ PLAN_LIMITS = {
     },
     "elite": {
         "videos_per_month": 350,
-        "animated_renders_per_month": 350,
+        "animated_renders_per_month": 0,
         "non_animated_ops_per_month": 800,
         "max_duration_sec": 420,
         "max_resolution": "720p",
@@ -41,7 +41,7 @@ PLAN_LIMITS = {
     },
     "demo_pro": {
         "videos_per_month": 240,
-        "animated_renders_per_month": 240,
+        "animated_renders_per_month": 0,
         "non_animated_ops_per_month": 350,
         "max_duration_sec": 300,
         "max_resolution": "720p",
@@ -91,6 +91,8 @@ PLAN_FEATURES = {
 RESOLUTION_CONFIGS = {
     "720p": {"gen_width": 720, "gen_height": 1280, "output_width": 720, "output_height": 1280, "upscale": False},
     "1080p": {"gen_width": 768, "gen_height": 1344, "output_width": 1080, "output_height": 1920, "upscale": True, "upscale_factor": 1.43},
+    "720p_landscape": {"gen_width": 1280, "gen_height": 720, "output_width": 1280, "output_height": 720, "upscale": False},
+    "1080p_landscape": {"gen_width": 1344, "gen_height": 768, "output_width": 1920, "output_height": 1080, "upscale": True, "upscale_factor": 1.43},
 }
 
 ADMIN_EMAILS = {"omatic657@gmail.com"}
@@ -98,7 +100,20 @@ HARDCODED_PLANS = {
     "omatic657@gmail.com": "admin",
 }
 
-PUBLIC_TEMPLATE_ALLOWLIST = {"skeleton", "story", "motivation", "objects", "wouldyourather", "scary", "history"}
+PUBLIC_TEMPLATE_ALLOWLIST = {
+    "skeleton",
+    "story",
+    "motivation",
+    "business",
+    "finance",
+    "tech",
+    "crypto",
+    "objects",
+    "wouldyourather",
+    "scary",
+    "history",
+    "whatif",
+}
 
 SUPPORTED_LANGUAGES = {
     "en": {"name": "English", "model": "eleven_turbo_v2_5"},

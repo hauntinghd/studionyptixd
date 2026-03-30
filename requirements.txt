@@ -7,3 +7,5 @@ pydantic
 python-multipart
 paramiko
 redis
+pillow
+pydub

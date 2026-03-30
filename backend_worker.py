@@ -19,6 +19,7 @@ async def _run_worker_loop():
     task_map = {
         "run_generation_pipeline": backend.run_generation_pipeline,
         "_run_creative_pipeline": backend._run_creative_pipeline,
+        "_run_longform_pipeline": backend._run_longform_pipeline,
         "run_clone_pipeline": backend.run_clone_pipeline,
     }
     log.info("Redis worker started")

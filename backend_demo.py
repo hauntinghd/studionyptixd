@@ -7,11 +7,11 @@ from pathlib import Path
 
 import httpx
 
-from backend_settings import TEMP_DIR, XAI_IMAGE_MODEL
+from backend_settings import DEMO_UPLOAD_DIR, TEMP_DIR, XAI_IMAGE_MODEL
 
 log = logging.getLogger("nyptid-studio")
 
-DEMO_DIR = Path("demo_uploads")
+DEMO_DIR = DEMO_UPLOAD_DIR
 DEMO_DIR.mkdir(exist_ok=True)
 
 DEMO_SYSTEM_PROMPT = """You are an expert product demo scriptwriter. You create engaging, professional voiceover scripts for software product demo videos.
