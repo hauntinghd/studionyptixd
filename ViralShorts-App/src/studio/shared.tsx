@@ -7,7 +7,7 @@ const billingHostAliases = new Set(["billing.nyptidindustries.com", "billing.nip
 export const isBillingHost = billingHostAliases.has(window.location.hostname.toLowerCase()) || window.location.hostname.toLowerCase().startsWith("billing.");
 export const BILLING_SITE_URL = "https://billing.nyptidindustries.com";
 export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
-export const PROD_API_BASE_URL = "https://api.nyptidindustries.com";
+export const PROD_API_BASE_URL = "https://nyptid-studio-api.onrender.com";
 const resolveSafeApiBase = (rawBase: string): string => {
     const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
     if (!cleaned) return "";
