@@ -1,8 +1,10 @@
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/StudioWidgets';
 import ChatStoryPanel from './ChatStoryPanel';
+import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
+import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
 
 interface CreativeScene {
     index: number;
@@ -108,35 +110,6 @@ function SceneImageLoadingCard({ template }: { template: string }) {
     );
 }
 
-const activeCustomVoiceLibrary = [
-    { id: 'studio_voice_core', name: 'Core Neutral', profile: 'Balanced all-purpose narrator', source: 'Local owned variant', available: true, defaultSpeed: 1.0, defaultPitch: 1.0 },
-    { id: 'studio_voice_hook', name: 'Hook Sprint', profile: 'Fast short-form opener energy', source: 'Local owned variant', available: true, defaultSpeed: 1.12, defaultPitch: 1.03 },
-    { id: 'studio_voice_drama', name: 'Dark Drama', profile: 'Lower, heavier dramatic delivery', source: 'Local owned variant', available: true, defaultSpeed: 0.96, defaultPitch: 0.94 },
-    { id: 'studio_voice_confession', name: 'Relatable Confession', profile: 'Confessional story tone', source: 'Local owned variant', available: true, defaultSpeed: 1.04, defaultPitch: 0.98 },
-    { id: 'studio_voice_founder', name: 'Founder Calm', profile: 'Controlled operator/founder narration', source: 'Local owned variant', available: true, defaultSpeed: 0.98, defaultPitch: 0.97 },
-    { id: 'studio_voice_punch', name: 'Viral Punch', profile: 'Sharper payoff emphasis', source: 'Local owned variant', available: true, defaultSpeed: 1.1, defaultPitch: 1.02 },
-    { id: 'studio_voice_doc', name: 'Documentary Steel', profile: 'Clean explainer authority', source: 'Local owned variant', available: true, defaultSpeed: 0.97, defaultPitch: 0.95 },
-    { id: 'studio_voice_luxe', name: 'Luxury Ad', profile: 'Premium polished ad cadence', source: 'Local owned variant', available: true, defaultSpeed: 1.01, defaultPitch: 1.01 },
-    { id: 'studio_voice_story', name: 'Storyteller Warm', profile: 'Warm cinematic storytelling', source: 'Local owned variant', available: true, defaultSpeed: 0.99, defaultPitch: 1.04 },
-    { id: 'studio_voice_intense', name: 'Intense Clarity', profile: 'Sharper urgency for conflict beats', source: 'Local owned variant', available: true, defaultSpeed: 1.08, defaultPitch: 0.97 },
-    { id: 'studio_voice_genz', name: 'Gen Z Hook', profile: 'Modern social pacing', source: 'Local owned variant', available: true, defaultSpeed: 1.14, defaultPitch: 1.05 },
-    { id: 'studio_voice_motive', name: 'Motivation Rise', profile: 'Slightly elevated inspirational tone', source: 'Local owned variant', available: true, defaultSpeed: 1.03, defaultPitch: 1.06 },
-    { id: 'studio_voice_noir', name: 'Noir Tension', profile: 'Low-key suspense delivery', source: 'Local owned variant', available: true, defaultSpeed: 0.95, defaultPitch: 0.92 },
-];
-
-const customVoiceLibrary = [
-    ...activeCustomVoiceLibrary,
-    ...Array.from({ length: 37 }, (_, index) => ({
-        id: `studio_voice_reserved_${String(index + 1).padStart(2, '0')}`,
-        name: `Reserved Slot ${String(index + 14).padStart(2, '0')}`,
-        profile: 'Reserved for future licensed or user-owned voice packs',
-        source: 'Reserved voice slot',
-        available: false,
-        defaultSpeed: 1,
-        defaultPitch: 1,
-    })),
-];
-
 const finaleCaptionFonts = ['Komika Axis', 'Montserrat Bold', 'Anton', 'Bebas Neue', 'Satoshi', 'Oswald', 'Archivo Black', 'League Spartan', 'Teko', 'Playfair Display'];
 const finaleMusicOptions = ['No Background Music'];
 const backgroundMusicComingSoon = true;
@@ -173,7 +146,7 @@ export default function CreatePanel() {
     const [creativeReferenceLockMode, setCreativeReferenceLockMode] = useState<'strict' | 'inspired'>('strict');
     const [animateOutputEnabled, setAnimateOutputEnabled] = useState(true);
     const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
-    const [storyVoiceId, setStoryVoiceId] = useState("");
+    const [storyVoiceId, setStoryVoiceId] = useState(customVoiceLibrary[0]?.backingVoiceId || "");
     const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
     const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
     const [artStyle, setArtStyle] = useState('auto');
@@ -218,7 +191,6 @@ export default function CreatePanel() {
     const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
     const pendingChatStoryTemplateStorageKey = session ? `nyptid_pending_chatstory_${session.user.id}` : "nyptid_pending_chatstory_guest";
     const activePromptEditorScene = scenePromptEditorIndex !== null ? creativeScenes[scenePromptEditorIndex] : null;
-    const customVoicePresetMap = new Map(customVoiceLibrary.map((voice) => [voice.id, voice]));
 
     useEffect(() => {
         (async () => {
@@ -263,13 +235,6 @@ export default function CreatePanel() {
         { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
         { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
         { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
-    ];
-    const artStyleOptions = [
-        { id: 'auto', label: 'Auto (Model Best)', desc: 'Uses template-optimized style defaults.' },
-        { id: 'cinematic_realism', label: 'Cinematic Realism', desc: 'Photoreal cinematic look.' },
-        { id: 'commercial_polish', label: 'Commercial Polish', desc: 'Premium ad-style clarity.' },
-        { id: 'moody_noir', label: 'Moody Noir', desc: 'Dramatic low-key cinematic tone.' },
-        { id: 'bright_lifestyle', label: 'Bright Lifestyle', desc: 'Clean bright modern aesthetic.' },
     ];
     const supportsArtStyle = selectedTemplate !== 'skeleton';
     const publicDefaultTemplateId = 'story';
@@ -345,10 +310,17 @@ export default function CreatePanel() {
         reader.onerror = () => reject(new Error("Failed to read reference image"));
         reader.readAsDataURL(file);
     });
+    const availableCustomVoices = useMemo(
+        () => customVoiceLibrary.filter((voice) => voice.available),
+        [],
+    );
     const applyCustomVoicePreset = useCallback((voiceId: string, shouldApplyTuning = true) => {
         const preset = customVoicePresetMap.get(voiceId);
         if (!preset || !preset.available) return;
         setCustomVoiceId(voiceId);
+        if (preset.backingVoiceId) {
+            setStoryVoiceId(preset.backingVoiceId);
+        }
         if (shouldApplyTuning) {
             setStoryVoiceSpeed(preset.defaultSpeed);
             setVoicePitch(preset.defaultPitch);
@@ -446,7 +418,7 @@ export default function CreatePanel() {
                     />
                 </div>
                 <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Pitch ({voicePitch.toFixed(2)}x)</label>
+                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Pitch (profile-locked)</label>
                     <input
                         type="range"
                         min={0.8}
@@ -454,6 +426,7 @@ export default function CreatePanel() {
                         step={0.05}
                         value={voicePitch}
                         onChange={(e) => setVoicePitch(Number(e.target.value))}
+                        disabled
                         className="w-full accent-cyan-500"
                     />
                 </div>
@@ -491,30 +464,31 @@ export default function CreatePanel() {
                     <div className="flex items-center justify-between gap-3">
                         <div>
                             <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Custom Voice Library</p>
-                            <p className="mt-1 text-sm text-white">50-slot owned/licensed voice rack</p>
+                            <p className="mt-1 text-sm text-white">{availableCustomVoices.length}-profile Catalyst voice rack</p>
                         </div>
-                        <p className="text-xs text-gray-500">Only owned or licensed clones belong here.</p>
+                        <p className="text-xs text-gray-500">Each preset resolves to a real render voice and tuned delivery profile.</p>
                     </div>
-                    <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                        {customVoiceLibrary.slice(0, 13).map((voice) => (
+                    <div className="mt-4 grid max-h-[26rem] gap-2 overflow-y-auto pr-1 md:grid-cols-2 xl:grid-cols-3">
+                        {availableCustomVoices.map((voice) => (
                             <button
                                 key={voice.id}
                                 type="button"
-                                onClick={() => voice.available && applyCustomVoicePreset(voice.id)}
+                                onClick={() => applyCustomVoicePreset(voice.id)}
                                 className={`rounded-xl border p-3 text-left transition ${
                                     customVoiceId === voice.id
                                         ? 'border-violet-500 bg-violet-500/10'
                                         : 'border-white/[0.08] bg-white/[0.02] hover:border-violet-500/30'
-                                } ${voice.available ? '' : 'opacity-55'}`}
+                                }`}
                             >
                                 <p className="text-sm font-semibold text-white">{voice.name}</p>
                                 <p className="mt-1 text-[11px] text-gray-400">{voice.profile}</p>
-                                <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-cyan-300">{voice.source}</p>
+                                <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-cyan-300">{voice.category || 'Catalyst'} · {voice.accent || 'global'}</p>
+                                <p className="mt-1 text-[10px] uppercase tracking-[0.14em] text-gray-500">{voice.source}</p>
                             </button>
                         ))}
                     </div>
                     <p className="mt-3 text-[11px] text-gray-500">
-                        The first 13 entries are active local-owned voice variants built from your current narrator source. The remaining slots are reserved for future licensed or user-supplied voices.
+                        Custom library mode now drives the actual render voice instead of only changing local tuning. Use ElevenLabs mode if you want to browse the raw account catalog directly.
                     </p>
                 </div>
             ) : (
@@ -906,6 +880,14 @@ export default function CreatePanel() {
     }, [createSubTab, loadProjects]);
 
     useEffect(() => {
+        if (voiceProvider !== 'custom') return;
+        const preset = customVoicePresetMap.get(customVoiceId);
+        if (preset?.backingVoiceId && storyVoiceId !== preset.backingVoiceId) {
+            setStoryVoiceId(preset.backingVoiceId);
+        }
+    }, [voiceProvider, customVoiceId, storyVoiceId]);
+
+    useEffect(() => {
         if (selectedTemplate !== 'story') return;
         if (!session) return;
         let cancelled = false;
@@ -921,7 +903,7 @@ export default function CreatePanel() {
                     setStoryVoices(voices);
                     setStoryVoicesSource(data?.source === 'elevenlabs' ? 'elevenlabs' : (data?.source === 'fallback' ? 'fallback' : 'unknown'));
                     setStoryVoicesWarning(String(data?.warning || ""));
-                    if (!storyVoiceId && voices.length > 0) {
+                    if (voiceProvider !== 'custom' && !storyVoiceId && voices.length > 0) {
                         setStoryVoiceId(String(voices[0].voice_id || ""));
                     }
                 }
@@ -937,7 +919,7 @@ export default function CreatePanel() {
         };
         void run();
         return () => { cancelled = true; };
-    }, [selectedTemplate, session, storyVoiceId]);
+    }, [selectedTemplate, session, storyVoiceId, voiceProvider]);
 
     const previewStoryVoice = async () => {
         if (!session || !storyVoiceId || storyPreviewLoading) return;
@@ -1531,22 +1513,12 @@ export default function CreatePanel() {
         setSubscriptionPromptError(null);
     };
 
-    const openSubscriptionPrompt = () => {
-        setTemplateChooserOpen(false);
-        setSubscriptionPromptOpen(true);
-        setSubscriptionPromptError(null);
-    };
-
     const handleWorkspaceCreateClick = () => {
         if (loading || scriptLoading) return;
         openTemplateChooser();
     };
 
     const handleTemplateSelection = (templateId: string) => {
-        if (templateId === 'chatstory' && !chatStoryTemplateUnlocked) {
-            openSubscriptionPrompt();
-            return;
-        }
         if (templateId !== selectedTemplate) {
             handleResetCreative();
         }
@@ -1645,7 +1617,7 @@ export default function CreatePanel() {
                     </button>
                     {selectedTemplate === 'chatstory' ? (
                         <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-200">
-                            Monthly Template
+                            Catalyst Lane
                         </span>
                     ) : (
                         <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
@@ -1698,7 +1670,6 @@ export default function CreatePanel() {
                 </div>
                 <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     {liveWorkspaceTemplates.map((template) => {
-                        const locked = template.id === 'chatstory' && !chatStoryTemplateUnlocked;
                         const active = selectedTemplate === template.id;
                         return (
                             <button
@@ -1709,15 +1680,11 @@ export default function CreatePanel() {
                                     active
                                         ? 'border-violet-500 bg-violet-500/10'
                                         : 'border-white/[0.08] bg-white/[0.03] hover:border-violet-500/30 hover:bg-violet-500/[0.03]'
-                                } ${locked ? 'border-violet-500/25' : ''}`}
+                                }`}
                             >
                                 <div className="flex items-start justify-between gap-3">
                                     <span className="text-2xl">{template.icon}</span>
-                                    {locked ? (
-                                        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
-                                            Monthly
-                                        </span>
-                                    ) : active ? (
+                                    {active ? (
                                         <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
                                             Active
                                         </span>
@@ -1740,22 +1707,22 @@ export default function CreatePanel() {
                     <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">Chat Story Locked</p>
                         <h3 className="mt-2 text-2xl font-bold text-white">You do not have a monthly subscription yet</h3>
-                        <p className="mt-2 text-sm text-gray-400">Choose Starter, Creator, or Pro to unlock Chat Story. After PayPal confirms the month, Studio will open the template automatically.</p>
+                        <p className="mt-2 text-sm text-gray-400">Choose Catalyst Membership to unlock Chat Story. After PayPal confirms the month, Studio will open the template automatically.</p>
                     </div>
                     <button
                         type="button"
                         onClick={() => setSubscriptionPromptOpen(false)}
                         className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
-                        title="Close monthly plan prompt"
+                        title="Close membership prompt"
                     >
                         <X className="h-4 w-4" />
                     </button>
                 </div>
                 <div className="mt-6 grid gap-4 md:grid-cols-3">
                     {[
-                        { id: 'starter', title: 'Starter', copy: 'Lowest monthly unlock. Best if you only need Chat Story access right now.' },
-                        { id: 'creator', title: 'Creator', copy: 'Mid-tier monthly access for regular channel operators.' },
-                        { id: 'pro', title: 'Pro', copy: 'Highest monthly tier for the full paid workspace lane.' },
+                        { id: 'starter', title: 'Starter', copy: 'Catalyst membership starts here and unlocks Chat Story on the same account.' },
+                        { id: 'creator', title: 'Creator', copy: 'Higher membership headroom for operators who expect heavier usage.' },
+                        { id: 'pro', title: 'Pro', copy: 'Highest public membership tier for daily operator volume.' },
                     ].map((entry) => (
                         <button
                             key={entry.id}
@@ -2081,9 +2048,9 @@ export default function CreatePanel() {
 
                 {workspaceStage === 'script' && supportsArtStyle && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
-                        <p className="text-sm font-semibold text-white">Art Style</p>
+                        <p className="text-sm font-semibold text-white">Art Style ({storyArtStyleOptions.length} verified looks)</p>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                            {artStyleOptions.map((style) => (
+                            {storyArtStyleOptions.map((style) => (
                                 <button
                                     key={style.id}
                                     type="button"
@@ -2547,7 +2514,7 @@ export default function CreatePanel() {
                                 <h2 className="mt-2 text-2xl font-bold text-white">{currentTemplateMeta.title}</h2>
                                 <p className="mt-2 text-sm text-gray-400">
                                     {selectedTemplate === 'chatstory'
-                                        ? 'Chat Story runs in a dedicated fullscreen-style editor. Monthly access is enforced before the workspace opens.'
+                                        ? 'Chat Story runs in a dedicated fullscreen-style editor on the same Catalyst render path as the rest of Studio.'
                                         : 'Creative Control and Script to Short are the live build paths. Auto stays marked coming soon until the scene-first flow is tighter.'}
                                 </p>
                             </div>
@@ -2561,7 +2528,7 @@ export default function CreatePanel() {
                                 </button>
                                 {selectedTemplate === 'chatstory' ? (
                                     <span className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-violet-200">
-                                        Starter / Creator / Pro
+                                        Catalyst Lane
                                     </span>
                                 ) : (
                                     <span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">
@@ -2725,9 +2692,9 @@ export default function CreatePanel() {
                 <>
                 {supportsArtStyle && (
                     <div>
-                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Art Style</h2>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Art Style ({storyArtStyleOptions.length} verified looks)</h2>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                            {artStyleOptions.map((style) => (
+                            {storyArtStyleOptions.map((style) => (
                                 <button
                                     key={style.id}
                                     type="button"

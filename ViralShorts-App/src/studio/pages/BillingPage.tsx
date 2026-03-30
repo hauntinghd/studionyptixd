@@ -1,58 +1,11 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, CheckCircle2, CreditCard, WalletCards, X } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Sparkles, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
-
-const subscriptionPlanMeta = [
-    {
-        id: 'starter',
-        title: 'Starter',
-        fallbackPrice: '$14/mo',
-        clipperCredits: 'Starter recurring access',
-        desc: 'Best for solo creators who want Chat Story plus starter AutoClipper access.',
-        features: [
-            'Chat Story access',
-            'AutoClipper beta access',
-            'Recurring monthly access',
-            'Keep buying one-time AC packs separately',
-            'Standard queue priority',
-        ],
-    },
-    {
-        id: 'creator',
-        title: 'Creator',
-        fallbackPrice: '$24/mo',
-        clipperCredits: 'Balanced recurring access',
-        desc: 'For active creators who need more monthly headroom for Chat Story and clipping.',
-        features: [
-            'Chat Story access',
-            'AutoClipper beta access',
-            'More monthly headroom',
-            'Priority queue handling',
-            'Built to pair with AC animation packs',
-        ],
-        badge: 'Popular',
-    },
-    {
-        id: 'pro',
-        title: 'Pro',
-        fallbackPrice: '$39/mo',
-        clipperCredits: 'Highest public monthly tier',
-        desc: 'For operators and teams running Chat Story plus repeat clipping on a regular schedule.',
-        features: [
-            'Chat Story access',
-            'AutoClipper beta access',
-            'Highest public monthly headroom',
-            'Top queue priority',
-            'Best fit for repeat operator volume',
-        ],
-    },
-];
 
 export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
-        plan,
         billingActive,
         nextRenewalSource,
         checkout,
@@ -63,6 +16,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         monthlyCreditsRemaining,
         creditsTotalRemaining,
         publicPlanPrices,
+        defaultMembershipPlanId,
         requiresTopup,
     } = useContext(AuthContext);
     const params = useMemo(() => {
@@ -73,32 +27,22 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const subscriptionError = String(params.get('error') || '').trim();
-    const requestedSubscriptionPlan = String(params.get('plan') || '').trim().toLowerCase();
     const [selectedPackId, setSelectedPackId] = useState('');
-    const [paymentModalOpen, setPaymentModalOpen] = useState(false);
-    const [checkoutLoadingMethod, setCheckoutLoadingMethod] = useState<'paypal' | null>(null);
     const [checkoutError, setCheckoutError] = useState('');
-    const [planCheckoutLoadingId, setPlanCheckoutLoadingId] = useState('');
-    const [subscriptionActionError, setSubscriptionActionError] = useState('');
+    const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
+    const [membershipLoading, setMembershipLoading] = useState(false);
 
     const sortedPacks = useMemo(() => [...topupPacks].sort((a, b) => a.credits - b.credits), [topupPacks]);
-    const formatPlanPrice = useCallback((planId: string, fallbackPrice: string) => {
-        const raw = Number((publicPlanPrices as Record<string, number>)[planId]);
-        if (!Number.isFinite(raw) || raw <= 0) return fallbackPrice;
+    const selectedPack = useMemo(
+        () => sortedPacks.find((pack) => pack.price_id === selectedPackId) || null,
+        [selectedPackId, sortedPacks],
+    );
+    const membershipPrice = useMemo(() => {
+        const raw = Number((publicPlanPrices as Record<string, number>)[defaultMembershipPlanId || 'starter']);
+        if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
         return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
-    }, [publicPlanPrices]);
-    const subscriptionPlans = useMemo(() => {
-        return subscriptionPlanMeta.map((plan) => ({
-            ...plan,
-            price: formatPlanPrice(plan.id, plan.fallbackPrice),
-        }));
-    }, [formatPlanPrice]);
-    const normalizedPlan = String(plan || '').trim().toLowerCase();
-    const usesManualPayPalSubscription = billingActive && nextRenewalSource === 'paypal_manual';
-    const activePlanLabel = useMemo(() => {
-        const match = subscriptionPlanMeta.find((item) => item.id === (normalizedPlan || requestedSubscriptionPlan));
-        return match?.title || 'Your';
-    }, [normalizedPlan, requestedSubscriptionPlan]);
+    }, [defaultMembershipPlanId, publicPlanPrices]);
+    const usesManualPayPalMembership = billingActive && nextRenewalSource === 'paypal_manual';
 
     useEffect(() => {
         if (!sortedPacks.length) return;
@@ -110,38 +54,9 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!selectedPackId || !sortedPacks.some((pack) => pack.price_id === selectedPackId)) {
             setSelectedPackId(sortedPacks[0].price_id);
         }
-    }, [sortedPacks, requestedPackId, selectedPackId]);
+    }, [requestedPackId, selectedPackId, sortedPacks]);
 
-    const selectedPack = useMemo(
-        () => sortedPacks.find((pack) => pack.price_id === selectedPackId) || null,
-        [sortedPacks, selectedPackId],
-    );
-
-    const openCheckout = useCallback((priceId: string) => {
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        setSelectedPackId(priceId);
-        setCheckoutError('');
-        setPaymentModalOpen(true);
-    }, [session, onNavigate]);
-
-    const handleConfirmPayPal = useCallback(async () => {
-        if (!selectedPack) {
-            setCheckoutError('Select a package first.');
-            return;
-        }
-        setCheckoutLoadingMethod('paypal');
-        setCheckoutError('');
-        const err = await checkoutTopup(selectedPack.price_id, 'paypal');
-        if (err) {
-            setCheckoutLoadingMethod(null);
-            setCheckoutError(err);
-        }
-    }, [checkoutTopup, selectedPack]);
-
-    const handleBackToDashboard = () => {
+    const handleBack = () => {
         if (isBillingHost) {
             window.location.href = STUDIO_SITE_URL;
             return;
@@ -149,7 +64,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         onNavigate('dashboard');
     };
 
-    const handleOpenSubscriptions = () => {
+    const handleOpenMembership = () => {
         if (isBillingHost) {
             window.location.href = `${BILLING_SITE_URL}?page=subscription`;
             return;
@@ -157,30 +72,44 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         onNavigate('subscription');
     };
 
-    const startPlanCheckout = useCallback(async (planId: string) => {
+    const handleMembershipCheckout = useCallback(async () => {
         if (!session) {
             onNavigate('auth');
             return;
         }
-        setSubscriptionActionError('');
-        setPlanCheckoutLoadingId(planId);
+        setCheckoutError('');
+        setMembershipLoading(true);
         try {
-            if (usesManualPayPalSubscription) {
-                const err = await checkout(planId);
-                if (err) setSubscriptionActionError(err);
-                return;
-            }
-            if (billingActive) {
+            if (billingActive && !usesManualPayPalMembership) {
                 const err = await manageBilling();
-                if (err) setSubscriptionActionError(err);
+                if (err) setCheckoutError(err);
                 return;
             }
-            const err = await checkout(planId);
-            if (err) setSubscriptionActionError(err);
+            const err = await checkout('membership');
+            if (err) setCheckoutError(err);
         } finally {
-            setPlanCheckoutLoadingId('');
+            setMembershipLoading(false);
         }
-    }, [session, onNavigate, billingActive, usesManualPayPalSubscription, manageBilling, checkout]);
+    }, [billingActive, checkout, manageBilling, onNavigate, session, usesManualPayPalMembership]);
+
+    const handlePackCheckout = useCallback(async () => {
+        if (!selectedPack) {
+            setCheckoutError('Select a credit pack first.');
+            return;
+        }
+        if (!session) {
+            onNavigate('auth');
+            return;
+        }
+        setCheckoutError('');
+        setPackCheckoutLoadingId(selectedPack.price_id);
+        try {
+            const err = await checkoutTopup(selectedPack.price_id, 'paypal');
+            if (err) setCheckoutError(err);
+        } finally {
+            setPackCheckoutLoadingId('');
+        }
+    }, [checkoutTopup, onNavigate, selectedPack, session]);
 
     return (
         <>
@@ -192,82 +121,96 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <WalletCards className="h-4 w-4" />
                             Billing
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white">Pricing & Billing</h1>
-                        <p className="mt-2 text-sm text-gray-400">
-                            Images stay free. Buy one-time AC packs for animation, or use a monthly plan to unlock Chat Story plus AutoClipper beta. PayPal monthly access renews manually for now.
+                        <h1 className="mt-3 text-3xl font-bold text-white">Catalyst Membership + Credit Wallet</h1>
+                        <p className="mt-2 max-w-3xl text-sm text-gray-400">
+                            NYPTID Studio now sells one faceless YouTube operating system. Membership unlocks the public Studio lanes and includes starter credits. Wallet top-ups cover heavier animation usage on the same account.
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
                         <button
                             type="button"
-                            onClick={handleBackToDashboard}
+                            onClick={handleBack}
                             className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
                         >
                             <ArrowLeft className="h-4 w-4" />
-                            Back to Dashboard
+                            Back
                         </button>
                         <button
                             type="button"
-                            onClick={handleOpenSubscriptions}
+                            onClick={handleOpenMembership}
                             className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
                         >
-                            Manage Subscription
+                            Membership Details
                         </button>
                     </div>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-[1.15fr,0.85fr]">
+                <div className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
                     <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                        <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex flex-wrap items-center justify-between gap-4">
                             <div>
-                                <h2 className="text-lg font-semibold text-white">Select your AC package</h2>
-                                <p className="mt-1 text-sm text-gray-400">Ten one-time top-up packs, from trial buys to larger operator packs.</p>
+                                <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Unified Offer</p>
+                                <h2 className="mt-2 text-2xl font-bold text-white">Catalyst Membership</h2>
+                                <p className="mt-2 text-sm text-gray-400">
+                                    Unlock Create, Thumbnails, Clone, Long Form, and Chat Story on one account. Included credits burn before the wallet, so hybrid customers do not lose their monthly headroom.
+                                </p>
                             </div>
-                            {!session && (
-                                <button
-                                    type="button"
-                                    onClick={() => onNavigate('auth')}
-                                    className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/15"
-                                >
-                                    Sign in to checkout
-                                </button>
-                            )}
+                            <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-5 py-4 text-right">
+                                <p className="text-[10px] uppercase tracking-[0.18em] text-violet-200/70">Membership</p>
+                                <p className="mt-2 text-3xl font-bold text-white">{membershipPrice}</p>
+                            </div>
                         </div>
-                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {sortedPacks.map((pack) => {
-                                const active = pack.price_id === selectedPackId;
-                                return (
-                                    <button
-                                        key={pack.price_id}
-                                        type="button"
-                                        onClick={() => setSelectedPackId(pack.price_id)}
-                                        className={`rounded-2xl border p-4 text-left transition ${
-                                            active
-                                                ? 'border-violet-500 bg-violet-500/10'
-                                                : 'border-white/[0.08] bg-black/20 hover:border-violet-500/30'
-                                        }`}
-                                    >
-                                        <p className="text-sm font-semibold text-white">{String(pack.pack || '').toUpperCase()} Pack</p>
-                                        <p className="mt-1 text-xs text-gray-500">{pack.credits} AC credits</p>
-                                        <p className="mt-5 text-2xl font-bold text-white">${Number(pack.price_usd || 0).toFixed(2)}</p>
-                                        <p className="mt-1 text-[11px] text-gray-500">one-time</p>
-                                    </button>
-                                );
-                            })}
+
+                        <div className="mt-6 grid gap-4 md:grid-cols-2">
+                            {[
+                                'Create, Thumbnails, Clone, Long Form, and Chat Story on one login',
+                                'Starter included credits reset monthly when membership is active',
+                                'Wallet top-ups stack on top for heavier renders and operator usage',
+                                'PayPal is the live membership checkout path for now',
+                            ].map((feature) => (
+                                <div key={feature} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
+                                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+                                    <span>{feature}</span>
+                                </div>
+                            ))}
                         </div>
+
+                        <button
+                            type="button"
+                            onClick={() => void handleMembershipCheckout()}
+                            className="mt-6 inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-500"
+                        >
+                            <Sparkles className="h-4 w-4" />
+                            {membershipLoading
+                                ? 'Opening...'
+                                : usesManualPayPalMembership
+                                    ? 'Extend Membership'
+                                    : billingActive
+                                        ? 'Manage Membership'
+                                        : 'Start Membership'}
+                        </button>
                     </section>
 
                     <aside className="space-y-6">
                         <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">Checkout Summary</h2>
+                            <h2 className="text-lg font-semibold text-white">Balance Overview</h2>
+                            <div className="mt-4 grid gap-3">
+                                <BalanceCard label="Credit Wallet" value={Number(topupCreditsRemaining || 0)} accent="cyan" helper="Pay-as-you-go balance" />
+                                <BalanceCard label="Included Credits" value={Number(monthlyCreditsRemaining || 0)} accent="violet" helper="Burns first when membership is active" />
+                                <BalanceCard label="Total Available" value={Number(creditsTotalRemaining || 0)} accent="emerald" helper={requiresTopup ? 'Top up before the next animation-heavy run' : 'Ready for Catalyst jobs'} />
+                            </div>
+                        </section>
+
+                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+                            <h2 className="text-lg font-semibold text-white">Selected Credit Pack</h2>
                             {selectedPack ? (
                                 <>
-                                    <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 p-4">
-                                        <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Package</p>
+                                    <div className="mt-4 rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+                                        <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Pack</p>
                                         <p className="mt-2 text-lg font-semibold text-white">{String(selectedPack.pack || '').toUpperCase()} Pack</p>
                                         <div className="mt-4 flex items-center justify-between text-sm">
                                             <span className="text-gray-400">Credits</span>
-                                            <span className="font-semibold text-cyan-300">{selectedPack.credits} AC</span>
+                                            <span className="font-semibold text-cyan-300">{selectedPack.credits}</span>
                                         </div>
                                         <div className="mt-2 flex items-center justify-between text-sm">
                                             <span className="text-gray-400">Price</span>
@@ -276,37 +219,15 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => openCheckout(selectedPack.price_id)}
-                                        className="mt-5 w-full rounded-xl bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-500"
+                                        onClick={() => void handlePackCheckout()}
+                                        className="mt-5 w-full rounded-xl bg-cyan-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-cyan-500"
                                     >
-                                        Buy Now
+                                        {packCheckoutLoadingId === selectedPack.price_id ? 'Opening PayPal...' : 'Buy Credits with PayPal'}
                                     </button>
-                                    <p className="mt-3 text-xs text-gray-500">PayPal is the active checkout path. Stripe remains coming soon here.</p>
                                 </>
                             ) : (
-                                <p className="mt-4 text-sm text-gray-400">Select a package to continue.</p>
+                                <p className="mt-4 text-sm text-gray-400">Select a credit pack below.</p>
                             )}
-                        </section>
-
-                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">Current Balance</h2>
-                            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3 xl:grid-cols-1">
-                                <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
-                                    <p className="text-xs uppercase tracking-[0.18em] text-cyan-200/70">Purchased AC</p>
-                                    <p className="mt-2 text-2xl font-bold text-cyan-100">{Number(topupCreditsRemaining || 0)}</p>
-                                </div>
-                                <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4">
-                                    <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Subscription Credits</p>
-                                    <p className="mt-2 text-2xl font-bold text-violet-100">{Number(monthlyCreditsRemaining || 0)}</p>
-                                </div>
-                                <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-                                    <p className="text-xs uppercase tracking-[0.18em] text-emerald-200/70">Total AC</p>
-                                    <p className="mt-2 text-2xl font-bold text-emerald-100">{Number(creditsTotalRemaining || 0)}</p>
-                                    <p className={`mt-2 text-xs font-medium ${requiresTopup ? 'text-amber-300' : 'text-emerald-200/80'}`}>
-                                        {requiresTopup ? 'Top up before the next animation render.' : 'Ready for animation renders.'}
-                                    </p>
-                                </div>
-                            </div>
                         </section>
                     </aside>
                 </div>
@@ -314,147 +235,83 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <section className="mt-8 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                     <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
                         <div>
-                            <h2 className="text-lg font-semibold text-white">Monthly Plans</h2>
+                            <h2 className="text-lg font-semibold text-white">Credit Wallet Packs</h2>
                             <p className="mt-1 text-sm text-gray-400">
-                                Every monthly plan unlocks Chat Story, includes clipper credits, and keeps animation on separate one-time AC packs.
+                                Use wallet packs if you want pay-as-you-go only, or combine them with membership for a hybrid setup.
                             </p>
                         </div>
-                        <button
-                            type="button"
-                            onClick={handleOpenSubscriptions}
-                            className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.06]"
-                        >
-                            Compare Plans
-                        </button>
                     </div>
-                    <div className="grid gap-4 lg:grid-cols-3">
-                        {subscriptionPlans.map((plan) => (
-                            <div key={plan.id} className={`rounded-2xl border p-5 ${plan.badge ? 'border-violet-500/40 bg-violet-500/[0.06]' : 'border-white/[0.08] bg-black/20'}`}>
-                                <div className="flex items-start justify-between gap-3">
-                                    <div>
-                                        <p className="text-sm font-semibold text-white">{plan.title}</p>
-                                        <p className="mt-2 text-3xl font-bold text-white">{plan.price}</p>
-                                        <p className="mt-2 text-sm text-gray-400">{plan.desc}</p>
-                                    </div>
-                                    {plan.badge && (
-                                        <span className="rounded-full border border-violet-400/40 bg-violet-500/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
-                                            {plan.badge}
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm font-semibold text-cyan-200">
-                                    {plan.clipperCredits}
-                                </div>
-                                <ul className="mt-4 space-y-2 text-sm text-gray-300">
-                                    {plan.features.map((feature) => (
-                                        <li key={feature} className="flex items-start gap-2">
-                                            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
-                                            <span>{feature}</span>
-                                        </li>
-                                    ))}
-                                </ul>
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                        {sortedPacks.map((pack) => {
+                            const active = pack.price_id === selectedPackId;
+                            return (
                                 <button
+                                    key={pack.price_id}
                                     type="button"
-                                    onClick={() => void startPlanCheckout(plan.id)}
-                                    className="mt-5 w-full rounded-xl bg-white/[0.06] px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.1]"
+                                    onClick={() => setSelectedPackId(pack.price_id)}
+                                    className={`rounded-2xl border p-4 text-left transition ${
+                                        active
+                                            ? 'border-cyan-500 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-black/20 hover:border-cyan-500/30'
+                                    }`}
                                 >
-                                    {planCheckoutLoadingId === plan.id
-                                        ? 'Opening...'
-                                        : usesManualPayPalSubscription
-                                            ? (plan.id === normalizedPlan ? 'Extend 1 Month' : 'Switch with PayPal')
-                                            : billingActive
-                                                ? 'Manage Subscription'
-                                                : 'Start Subscription'}
+                                    <p className="text-sm font-semibold text-white">{String(pack.pack || '').toUpperCase()} Pack</p>
+                                    <p className="mt-1 text-xs text-gray-500">{pack.credits} credits</p>
+                                    <p className="mt-4 text-2xl font-bold text-white">${Number(pack.price_usd || 0).toFixed(2)}</p>
+                                    <p className="mt-1 text-[11px] text-gray-500">one-time top-up</p>
                                 </button>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
-                    {subscriptionActionError && (
-                        <p className="mt-4 text-sm text-amber-300">{subscriptionActionError}</p>
-                    )}
-                    {subscriptionResult === 'success' && (
-                        <p className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                            {activePlanLabel} monthly access is live. PayPal renews manually for now, so use the same plan button again whenever you want to extend another month.
-                        </p>
-                    )}
-                    {subscriptionResult === 'manual' && (
-                        <p className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
-                            This subscription is on manual PayPal renewal. Click your current plan to extend another month, or choose a different tier to switch immediately.
-                        </p>
-                    )}
-                    {subscriptionResult === 'cancelled' && (
-                        <p className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                            Monthly checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
-                        </p>
-                    )}
                 </section>
 
-                {topupResult === 'success' && (
-                    <div className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        Payment received. Your AC credits are updating on this billing surface now.
-                    </div>
+                {checkoutError && (
+                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
+                        {checkoutError}
+                    </p>
                 )}
-
-                {paymentModalOpen && selectedPack && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
-                        <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#0d0d11] shadow-2xl">
-                            <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
-                                <div>
-                                    <h3 className="text-lg font-semibold text-white">Choose Payment Method</h3>
-                                    <p className="mt-1 text-sm text-gray-400">{selectedPack.credits} AC credits for ${Number(selectedPack.price_usd || 0).toFixed(2)}</p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        if (checkoutLoadingMethod) return;
-                                        setPaymentModalOpen(false);
-                                        setCheckoutError('');
-                                    }}
-                                    className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
-                                >
-                                    <X className="h-4 w-4" />
-                                </button>
-                            </div>
-                            <div className="p-5 space-y-4">
-                                <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
-                                    <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Package</p>
-                                    <p className="mt-2 text-base font-semibold text-white">{String(selectedPack.pack || '').toUpperCase()} Pack</p>
-                                    <div className="mt-3 flex items-center justify-between text-sm">
-                                        <span className="text-gray-400">Credits</span>
-                                        <span className="font-semibold text-cyan-300">{selectedPack.credits} AC</span>
-                                    </div>
-                                    <div className="mt-2 flex items-center justify-between text-sm">
-                                        <span className="text-gray-400">Price</span>
-                                        <span className="font-semibold text-white">${Number(selectedPack.price_usd || 0).toFixed(2)}</span>
-                                    </div>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    disabled
-                                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-200/80 opacity-70"
-                                >
-                                    <CreditCard className="w-4 h-4" />
-                                    Stripe Coming Soon
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => void handleConfirmPayPal()}
-                                    disabled={Boolean(checkoutLoadingMethod)}
-                                    className="w-full rounded-xl bg-[#0070ba] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#04619f] disabled:opacity-60"
-                                >
-                                    {checkoutLoadingMethod === 'paypal' ? 'Opening PayPal...' : 'Pay with PayPal'}
-                                </button>
-                                {checkoutError && <p className="text-sm text-amber-300">{checkoutError}</p>}
-                                <div className="flex items-center gap-2 text-xs text-gray-500">
-                                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                                    NYPTID Studio keeps image generation free. Only animation uses AC credits.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                {topupResult === 'success' && (
+                    <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+                        Credit wallet payment received. Your balance is refreshing now.
+                    </p>
+                )}
+                {subscriptionResult === 'success' && (
+                    <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+                        Catalyst Membership is active. Included credits will burn before the wallet on eligible jobs.
+                    </p>
+                )}
+                {subscriptionResult === 'cancelled' && (
+                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
+                        Membership checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
+                    </p>
                 )}
             </div>
         </>
+    );
+}
+
+function BalanceCard({
+    label,
+    value,
+    helper,
+    accent,
+}: {
+    label: string;
+    value: number;
+    helper: string;
+    accent: 'cyan' | 'violet' | 'emerald';
+}) {
+    const accentClasses = accent === 'cyan'
+        ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
+        : accent === 'violet'
+            ? 'border-violet-500/20 bg-violet-500/10 text-violet-100'
+            : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100';
+
+    return (
+        <div className={`rounded-2xl border px-4 py-3 ${accentClasses}`}>
+            <p className="text-[10px] uppercase tracking-[0.18em] opacity-70">{label}</p>
+            <p className="mt-2 text-2xl font-bold">{value}</p>
+            <p className="mt-1 text-xs opacity-75">{helper}</p>
+        </div>
     );
 }

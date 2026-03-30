@@ -757,8 +757,7 @@ def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool
     mk = _month_key()
     animated_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
     non_animated_used = int((wallet.get("monthly_usage_non_animated", {}) or {}).get(mk, 0) or 0)
-    # Studio policy: slideshow/script/image generation is free; only animated renders consume top-up credits.
-    animated_limit = 0
+    animated_limit = _plan_monthly_animated_limit(effective_plan) if billing_active else 0
     non_animated_limit = 999999
     animated_remaining = max(0, animated_limit - animated_used)
     non_animated_remaining = max(0, non_animated_limit - non_animated_used)
@@ -808,6 +807,16 @@ async def _reserve_generation_credit(
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
             return True, "non_animated_free", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+        monthly_remaining = int(state.get("animated_monthly_remaining", 0) or 0)
+        if monthly_remaining >= required_credits:
+            usage = dict(wallet.get("monthly_usage", {}) or {})
+            usage[mk] = int(usage.get(mk, 0) or 0) + required_credits
+            wallet["monthly_usage"] = usage
+            wallet["updated_at"] = time.time()
+            _save_topup_wallets()
+            refreshed = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+            refreshed["credits_needed"] = required_credits
+            return True, "monthly", refreshed
         topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
         if topup >= required_credits:
             wallet["animated_topup_credits"] = topup - required_credits
@@ -977,10 +986,7 @@ LONGFORM_WHISPER_MODES = {"off", "subtle", "cinematic"}
 
 
 def _longform_owner_beta_enabled(user: dict | None) -> bool:
-    if not user:
-        return False
-    email = str(user.get("email", "") or "").strip().lower()
-    return bool(LONGFORM_BETA_ENABLED and email in ADMIN_EMAILS)
+    return bool((_public_lane_access_for_user(user) or {}).get("longform"))
 
 
 def _normalize_longform_template(value: str) -> str:
@@ -1104,13 +1110,41 @@ TEMPLATE_DEFAULT_REFERENCE_URLS = {
     "story": str(STORY_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
     "motivation": str(MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
 }
-ART_STYLE_PRESETS = {
+DEFAULT_ART_STYLE_PRESETS = {
     "auto": "",
     "cinematic_realism": "Photoreal cinematic realism with natural skin detail, physically-plausible lighting, clean lens behavior, and premium film color grade.",
     "commercial_polish": "High-end commercial look: crisp product-grade detail, controlled highlights, clean background separation, and premium ad-level finish.",
     "moody_noir": "Moody low-key cinematic style with rich shadow contrast, tasteful grain-free clarity, and dramatic yet realistic lighting.",
     "bright_lifestyle": "Bright modern lifestyle aesthetic with soft natural light, inviting color balance, realistic textures, and clean premium framing.",
 }
+
+
+def _story_art_style_catalog_path() -> Path:
+    return Path(__file__).parent / "ViralShorts-App" / "src" / "studio" / "lib" / "storyArtStyles.json"
+
+
+def _load_story_art_style_presets() -> dict[str, str]:
+    catalog_path = _story_art_style_catalog_path()
+    try:
+        rows = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_ART_STYLE_PRESETS)
+    if not isinstance(rows, list):
+        return dict(DEFAULT_ART_STYLE_PRESETS)
+    out: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        style_id = str(row.get("id", "") or "").strip().lower()
+        if not style_id:
+            continue
+        out[style_id] = str(row.get("prompt", "") or "").strip()
+    if "auto" not in out:
+        out["auto"] = ""
+    return out or dict(DEFAULT_ART_STYLE_PRESETS)
+
+
+ART_STYLE_PRESETS = _load_story_art_style_presets()
 
 
 def _normalize_reference_lock_mode(value, default: str = "strict") -> str:
@@ -2762,6 +2796,45 @@ def _profile_plan_is_paid(plan: str) -> bool:
 
 
 CHAT_STORY_ALLOWED_PLANS = {"starter", "creator", "pro"}
+DEFAULT_MEMBERSHIP_PLAN_ID = "starter"
+
+
+def _default_membership_plan_id() -> str:
+    return DEFAULT_MEMBERSHIP_PLAN_ID if DEFAULT_MEMBERSHIP_PLAN_ID in PLAN_LIMITS else "starter"
+
+
+def _membership_plan_for_user(user: Optional[dict], access_snapshot: Optional[dict] = None) -> str:
+    snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
+    plan = str((snapshot or {}).get("plan", "none") or "none").strip().lower()
+    if plan in PLAN_LIMITS:
+        return plan
+    return _default_membership_plan_id() if bool((snapshot or {}).get("billing_active")) else "none"
+
+
+def _credit_wallet_balance_for_user(user: Optional[dict]) -> int:
+    if not user:
+        return 0
+    wallet = _wallet_for_user(str((user or {}).get("id", "") or ""))
+    return int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
+
+
+def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional[dict] = None) -> dict[str, bool]:
+    is_admin = _is_admin_user(user)
+    authenticated = bool(user)
+    snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
+    public_live = authenticated
+    return {
+        "create": public_live,
+        "thumbnails": public_live,
+        "clone": public_live,
+        "longform": public_live,
+        "chatstory": public_live,
+        "autoclipper": is_admin,
+        "demo": is_admin,
+        "analytics": is_admin,
+        "membership": bool((snapshot or {}).get("billing_active")) or is_admin,
+        "wallet": (_credit_wallet_balance_for_user(user) > 0) or is_admin,
+    }
 
 
 def _paypal_subscription_lookup_keys(user_id: str = "", email: str = "") -> list[str]:
@@ -2930,12 +3003,7 @@ def _billing_active_for_user(user: Optional[dict]) -> bool:
 
 
 def _chat_story_access_for_user(user: Optional[dict]) -> bool:
-    if _is_admin_user(user):
-        return True
-    if not _billing_active_for_user(user):
-        return False
-    normalized_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
-    return normalized_plan in CHAT_STORY_ALLOWED_PLANS
+    return bool((_public_lane_access_for_user(user) or {}).get("chatstory"))
 
 
 def _ensure_template_allowed(template: str, user: Optional[dict]):
@@ -11637,6 +11705,8 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
             "progress": 0,
             "template": str(session.get("template", "story") or "story"),
             "topic": str(session.get("topic", "") or ""),
+            "lane": "longform",
+            "mode": "longform_finalize",
             "resolution": str(session.get("resolution", "720p_landscape") or "720p_landscape"),
             "plan": "pro",
             "user_id": str(user.get("id", "") or ""),
@@ -11654,6 +11724,8 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
             "micro_escalation_mode": False,
             "credit_charged": False,
             "credit_source": "admin",
+            "credit_cost": 0,
+            "billing_source": "workspace_access" if not _is_admin_user(user) else "owner_override",
             "credit_month_key": _month_key(),
             "credit_refunded": False,
         }
@@ -12541,6 +12613,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "progress": 0,
         "template": session["template"],
         "topic": session["topic"],
+        "lane": "create",
+        "mode": "creative_finalize" if animation_enabled else "creative_slideshow",
         "resolution": resolution,
         "plan": user_plan,
         "user_id": user.get("id"),
@@ -12560,6 +12634,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "credit_charged": True,
         "credit_source": credit_source,
         "credit_amount": credits_required,
+        "credit_cost": credits_required if animation_enabled else 0,
+        "billing_source": "owner_override" if is_admin else credit_source,
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
     }
@@ -13289,6 +13365,7 @@ async def public_config():
             for price_id, meta in TOPUP_PACKS.items()
         ],
         "transition_styles": list(TRANSITION_STYLE_MAP.keys()),
+        "story_art_style_count": len(ART_STYLE_PRESETS),
         "render_capabilities": {
             "animated_max_resolution": ("720p" if FORCE_720P_ONLY else "1080p"),
             "micro_escalation_supported": True,
@@ -13296,12 +13373,14 @@ async def public_config():
             "micro_escalation_max_output_clips": MICRO_ESCALATION_MAX_OUTPUT_CLIPS,
         },
         "billing_model": {
-            "hybrid_enabled": False,
-            "model": "usage_based_animation_only",
+            "hybrid_enabled": True,
+            "model": "membership_plus_credits",
+            "default_membership_plan_id": _default_membership_plan_id(),
+            "membership_label": "Catalyst Membership",
             "slideshows_free": True,
-            "animated_credit_label": "finished animated shorts",
-            "non_animated_credit_label": "free script/image/slideshow operations",
-            "overage_label": "animated top-up packs",
+            "animated_credit_label": "Catalyst credits",
+            "non_animated_credit_label": "script/image/slideshow operations",
+            "overage_label": "credit wallet top-ups",
             "hard_stop_on_animated_exhaustion": True,
             "waitlist_only_mode": False,
             "waitlist_requires_stripe_payment": False,
@@ -13363,18 +13442,25 @@ async def get_me(user: dict = Depends(require_auth)):
     credit_state = _credit_state_for_user(user, plan if not is_admin else "pro", billing_active, is_admin=is_admin)
     has_demo = is_admin or (PRODUCT_DEMO_PUBLIC_ENABLED and plan == "demo_pro")
     effective_plan = "pro" if is_admin else plan
+    membership_plan_id = _membership_plan_for_user(user, access_snapshot)
     features = _plan_features_for(effective_plan, is_admin=is_admin)
+    lane_access = _public_lane_access_for_user(user, access_snapshot)
     return {
         "id": user["id"],
         "email": email,
         "plan": effective_plan,
         "role": "admin" if is_admin else "user",
+        "owner_override": is_admin,
         "billing_active": billing_active,
+        "membership_active": billing_active,
+        "membership_plan_id": membership_plan_id,
+        "membership_label": "Catalyst Membership" if billing_active or is_admin else "",
         "next_renewal_unix": next_renewal_unix,
         "next_renewal_source": next_renewal_source,
         "billing_anchor_unix": billing_anchor_unix,
         "limits": limits,
         "features": features,
+        "lane_access": lane_access,
         "animated_credits_remaining": credit_state["animated_monthly_remaining"],
         "animated_credits_used": credit_state["animated_monthly_used"],
         "animated_credits_limit": credit_state["animated_monthly_limit"],
@@ -13388,18 +13474,21 @@ async def get_me(user: dict = Depends(require_auth)):
         "monthly_credits_limit": credit_state["monthly_limit"],
         "topup_credits_remaining": credit_state["topup_credits"],
         "credits_total_remaining": credit_state["credits_total_remaining"],
+        "included_credits_remaining": credit_state["monthly_remaining"],
+        "included_credits_used": credit_state["monthly_used"],
+        "included_credits_limit": credit_state["monthly_limit"],
+        "credit_wallet_balance": credit_state["topup_credits"],
+        "billing_source_precedence": ["monthly", "topup"],
         "requires_topup": credit_state["requires_topup"],
         "credit_month": credit_state["month_key"],
         "demo_access": has_demo,
         "demo_price_id": DEMO_PRO_PRICE_ID,
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
-        "longform_owner_beta": bool(is_admin and LONGFORM_BETA_ENABLED),
+        "longform_owner_beta": bool(lane_access.get("longform")),
     }
 
 
 def _user_has_paid_access(user: dict | None) -> bool:
-    # Access policy: any authenticated account can use non-animated workflows.
-    # Animated renders are controlled by top-up credits in _reserve_generation_credit.
     return bool(user)
 
 
@@ -13472,6 +13561,8 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "progress": 0,
         "template": req.template,
         "topic": req.prompt,
+        "lane": "create",
+        "mode": "auto_generate",
         "resolution": resolution,
         "plan": user_plan,
         "user_id": user.get("id") if user else None,
@@ -13494,6 +13585,8 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "credit_charged": bool(user),
         "credit_source": credit_source,
         "credit_amount": 1,
+        "credit_cost": 1 if animation_enabled else 0,
+        "billing_source": "owner_override" if is_admin else (credit_source or "workspace_access"),
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
     }
@@ -13782,6 +13875,10 @@ async def render_chat_story(
             "ok": True,
             "output_file": output_name,
             "download_url": f"/api/download/{quote(output_name)}",
+            "lane": "chatstory",
+            "mode": "chatstory_render",
+            "credit_cost": 0,
+            "billing_source": "workspace_access" if not _is_admin_user(user) else "owner_override",
             "duration_sec": meta.get("duration_sec"),
             "message_count": meta.get("message_count"),
             "voice": meta.get("voice"),
@@ -14218,7 +14315,12 @@ async def clone_video(
         "progress": 0,
         "template": "analyzing...",
         "topic": topic,
+        "lane": "clone",
+        "mode": "clone_rebuild",
         "resolution": res,
+        "credit_cost": 0,
+        "billing_source": "workspace_access",
+        "user_id": str(user.get("id", "") or ""),
         "created_at": time.time(),
     }
 
@@ -14750,17 +14852,31 @@ async def _supabase_upsert_waitlist_entry(
         return False
 
 
+def _price_id_for_plan_id(plan_id: str) -> str:
+    normalized = str(plan_id or "").strip().lower()
+    for price_id, mapped_plan in STRIPE_PRICE_TO_PLAN.items():
+        if str(mapped_plan or "").strip().lower() == normalized:
+            return str(price_id or "").strip()
+    return ""
+
+
 @app.post("/api/checkout")
 async def create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
+    requested_product = str(getattr(req, "product", "") or "").strip().lower()
+    requested_plan = str(getattr(req, "plan", "") or "").strip().lower()
     price_id = str(req.price_id or "").strip()
+    if requested_product == "membership" and not requested_plan and not price_id:
+        requested_plan = _default_membership_plan_id()
+    if requested_plan and not price_id:
+        price_id = _price_id_for_plan_id(requested_plan)
     if not price_id:
         raise HTTPException(400, "Missing price id")
-    plan = str(STRIPE_PRICE_TO_PLAN.get(price_id, "") or "").strip().lower()
+    plan = str(STRIPE_PRICE_TO_PLAN.get(price_id, requested_plan) or "").strip().lower()
     if plan not in CHAT_STORY_ALLOWED_PLANS:
-        raise HTTPException(400, "This monthly plan is not available for PayPal checkout.")
+        raise HTTPException(400, "This membership plan is not available for PayPal checkout.")
     price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
     if price_usd <= 0:
-        raise HTTPException(400, f"Monthly pricing is not configured for {plan}.")
+        raise HTTPException(400, f"Membership pricing is not configured for {plan}.")
     checkout_url = await _create_paypal_subscription_order(user, price_id, plan, price_usd)
     return {"checkout_url": checkout_url}
 
@@ -14785,14 +14901,14 @@ async def _create_paypal_subscription_order(user: dict, price_id: str, plan: str
         raise HTTPException(400, "PayPal is not configured on this billing account yet.")
     normalized_plan = str(plan or "").strip().lower()
     if normalized_plan not in CHAT_STORY_ALLOWED_PLANS:
-        raise HTTPException(400, "Only Starter, Creator, and Pro can be sold through monthly PayPal checkout.")
+        raise HTTPException(400, "Only Starter, Creator, and Pro legacy plan IDs can be sold through membership checkout.")
     order_payload = {
         "intent": "CAPTURE",
         "purchase_units": [
             {
                 "reference_id": str(price_id or ""),
                 "custom_id": str(user.get("id", "") or ""),
-                "description": f"NYPTID Studio {normalized_plan.title()} Monthly Access",
+                "description": f"NYPTID Studio Catalyst Membership ({normalized_plan.title()})",
                 "amount": {
                     "currency_code": "USD",
                     "value": f"{float(price_usd or 0.0):.2f}",
@@ -15542,6 +15658,26 @@ RUNPOD_TRAINING_DIR = "/workspace/thumbnail_training/images"
 LORA_NAME = "nyptid_thumbnails.safetensors"
 
 
+def _storage_safe_user_segment(user: Optional[dict]) -> str:
+    raw = str((user or {}).get("id", "") or "").strip()
+    if not raw:
+        raw = str((user or {}).get("email", "") or "").strip().lower()
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw).strip("_")
+    return safe or "anonymous"
+
+
+def _thumbnail_library_dir_for_user(user: Optional[dict]) -> Path:
+    path = THUMBNAIL_UPLOAD_DIR / _storage_safe_user_segment(user)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _thumbnail_output_dir_for_user(user: Optional[dict]) -> Path:
+    path = THUMBNAIL_OUTPUT_DIR / _storage_safe_user_segment(user)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _thumbnail_scp_cmd(local_path: str, remote_path: str) -> str:
     return (
         f"scp -o StrictHostKeyChecking=no -P {THUMBNAIL_RUNPOD_SSH_PORT} "
@@ -15770,9 +15906,21 @@ async def sync_thumbnail_to_runpod(local_path: str) -> tuple[bool, str]:
         return False, err
 
 
-async def check_lora_status() -> dict:
+async def check_lora_status(user: Optional[dict] = None) -> dict:
     """Check if the LoRA trainer is running and if a trained LoRA exists on RunPod."""
-    local_count = len([p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]) if THUMBNAIL_UPLOAD_DIR.exists() else 0
+    library_dir = _thumbnail_library_dir_for_user(user) if user else THUMBNAIL_UPLOAD_DIR
+    local_count = len([p for p in library_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]) if library_dir.exists() else 0
+    if not _is_admin_user(user):
+        return {
+            "lora_available": False,
+            "is_training": False,
+            "total_images": local_count,
+            "local_library_images": local_count,
+            "trained_images": 0,
+            "version": 0,
+            "last_train": 0,
+            "training_available": False,
+        }
     try:
         cmd = (
             f"{RUNPOD_SSH} '"
@@ -15813,6 +15961,7 @@ async def check_lora_status() -> dict:
             "trained_images": state.get("image_count", 0),
             "version": state.get("version", 0),
             "last_train": state.get("last_train", 0),
+            "training_available": True,
         }
     except Exception as e:
         log.warning(f"LoRA status check failed: {e}")
@@ -15824,21 +15973,21 @@ async def check_lora_status() -> dict:
             "trained_images": 0,
             "version": 0,
             "last_train": 0,
+            "training_available": True,
         }
 
 
 @app.get("/api/thumbnails/training-status")
 async def training_status(user: dict = Depends(require_auth)):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
-    return await check_lora_status()
+    return await check_lora_status(user)
 
 
 @app.post("/api/thumbnails/sync-library")
 async def sync_thumbnail_library(user: dict = Depends(require_auth)):
     if not _is_admin_user(user):
         raise HTTPException(403, "Admin only")
-    files = [p for p in THUMBNAIL_UPLOAD_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+    library_dir = _thumbnail_library_dir_for_user(user)
+    files = [p for p in library_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
     if not files:
         return {"status": "no_files", "queued": 0, "synced": 0, "failed": 0}
 
@@ -15870,8 +16019,7 @@ async def upload_thumbnails(
     background_tasks: BackgroundTasks = None,
     user: dict = Depends(require_auth),
 ):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
+    library_dir = _thumbnail_library_dir_for_user(user)
     saved = []
     for file in files:
         if not file.filename:
@@ -15881,7 +16029,7 @@ async def upload_thumbnails(
             continue
         ts = int(time.time() * 1000)
         safe_name = str(ts) + "_" + str(random.randint(1000, 9999)) + ext
-        dest = THUMBNAIL_UPLOAD_DIR / safe_name
+        dest = library_dir / safe_name
         with open(dest, "wb") as f:
             while chunk := await file.read(1024 * 1024):
                 f.write(chunk)
@@ -15891,17 +16039,16 @@ async def upload_thumbnails(
             "size": dest.stat().st_size,
             "url": "/api/thumbnails/library/" + safe_name,
         })
-        if background_tasks:
+        if background_tasks and _is_admin_user(user):
             background_tasks.add_task(sync_thumbnail_to_runpod, str(dest))
     return {"uploaded": len(saved), "files": saved}
 
 
 @app.get("/api/thumbnails/library")
 async def list_thumbnails(user: dict = Depends(require_auth)):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
+    library_dir = _thumbnail_library_dir_for_user(user)
     files = []
-    for f in sorted(THUMBNAIL_UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in sorted(library_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
             files.append({
                 "id": f.name,
@@ -15931,9 +16078,7 @@ async def serve_thumbnail(filename: str, request: Request):
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(401, "Authentication required")
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
-    path = THUMBNAIL_UPLOAD_DIR / filename
+    path = _thumbnail_library_dir_for_user(user) / filename
     if not path.exists():
         raise HTTPException(404, "Thumbnail not found")
     mime = "image/png" if path.suffix == ".png" else "image/jpeg" if path.suffix in (".jpg", ".jpeg") else "image/webp"
@@ -15942,9 +16087,7 @@ async def serve_thumbnail(filename: str, request: Request):
 
 @app.delete("/api/thumbnails/library/{filename}")
 async def delete_thumbnail(filename: str, user: dict = Depends(require_auth)):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
-    path = THUMBNAIL_UPLOAD_DIR / filename
+    path = _thumbnail_library_dir_for_user(user) / filename
     if path.exists():
         path.unlink()
     return {"status": "deleted"}
@@ -15955,9 +16098,7 @@ async def serve_generated_thumbnail(filename: str, request: Request):
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(401, "Authentication required")
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
-    path = THUMBNAIL_OUTPUT_DIR / filename
+    path = _thumbnail_output_dir_for_user(user) / filename
     if not path.exists():
         raise HTTPException(404, "Generated thumbnail not found")
     mime = "image/png"
@@ -16218,17 +16359,21 @@ async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_pa
 
 @app.post("/api/thumbnails/generate")
 async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
+    library_dir = _thumbnail_library_dir_for_user(user)
+    output_dir = _thumbnail_output_dir_for_user(user)
 
     job_id = f"thumb_{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
         "status": "queued",
         "progress": 0,
         "type": "thumbnail",
+        "lane": "thumbnails",
         "mode": req.mode,
+        "credit_cost": 0,
+        "billing_source": "workspace_access",
+        "user_id": str(user.get("id", "") or ""),
         "created_at": time.time(),
     }
 
@@ -16254,18 +16399,18 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
 
             style_ref_path = ""
             if req.style_reference_id:
-                ref_path = THUMBNAIL_UPLOAD_DIR / req.style_reference_id
+                ref_path = library_dir / req.style_reference_id
                 if ref_path.exists():
                     style_ref_path = str(ref_path)
 
             output_name = f"{job_id}.png"
-            output_path = str(THUMBNAIL_OUTPUT_DIR / output_name)
+            output_path = str(output_dir / output_name)
             await _generate_thumbnail_image(thumb_prompt, thumb_negative, output_path, style_ref_path)
 
             if title_text:
                 try:
                     safe_title = title_text.replace("'", "'\\''").replace(":", "\\:")
-                    titled_out = str(THUMBNAIL_OUTPUT_DIR / (job_id + "_titled.png"))
+                    titled_out = str(output_dir / (job_id + "_titled.png"))
                     vf_filter = (
                         "drawtext=text='" + safe_title + "':"
                         "fontsize=72:fontcolor=white:borderw=5:bordercolor=black:"

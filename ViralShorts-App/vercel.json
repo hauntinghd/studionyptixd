@@ -1,0 +1,30 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "thumblab.nyptidindustries.com"
+        }
+      ],
+      "destination": "https://studio.nyptidindustries.com/?focus=thumbnails",
+      "statusCode": 301
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": "https://api.nyptidindustries.com/api"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "https://api.nyptidindustries.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

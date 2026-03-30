@@ -159,9 +159,9 @@ export default function ChatStoryPanel({ onBack }: Props) {
 
     const topCopy = useMemo(() => {
         if (hasChatStoryAccess) {
-            return 'Build text-message shorts with owned voices, shipped music/SFX, uploaded backgrounds, and a live phone preview that matches the server render path.';
+            return 'Build text-message shorts with owned voices, shipped music and SFX, uploaded backgrounds, and a live phone preview that matches the Catalyst render path.';
         }
-        return 'Chat Story is locked behind the Starter, Creator, and Pro monthly plans. Rendering is free once one of those plans is active.';
+        return 'Chat Story follows the Catalyst membership lane. Once membership is active, renders do not burn wallet credits.';
     }, [hasChatStoryAccess]);
     const monthlyPlanCards = useMemo(() => {
         return monthlyPlanCardMeta.map((planCard) => {
@@ -295,7 +295,7 @@ export default function ChatStoryPanel({ onBack }: Props) {
             return;
         }
         if (!hasChatStoryAccess) {
-            setRenderError('Chat Story requires an active Starter, Creator, or Pro monthly plan.');
+            setRenderError('Chat Story requires an active Catalyst membership.');
             return;
         }
         if (!messages.some((message) => String(message.text || '').trim())) {
@@ -396,11 +396,11 @@ export default function ChatStoryPanel({ onBack }: Props) {
                         <div>
                             <div className="flex items-center gap-2 text-sm font-semibold text-amber-200">
                                 <Lock className="h-4 w-4" />
-                                Monthly plan required
+                                Membership required
                             </div>
-                            <h3 className="mt-2 text-2xl font-bold text-white">Starter, Creator, or Pro required</h3>
+                            <h3 className="mt-2 text-2xl font-bold text-white">Catalyst membership required</h3>
                             <p className="mt-2 max-w-3xl text-sm text-amber-100/80">
-                                Chat Story does not burn AC credits. A Starter, Creator, or Pro monthly plan unlocks the template and its free render path, while AC packs stay for animation elsewhere in Studio.
+                                Chat Story does not burn wallet credits. Catalyst membership unlocks the template and its render path, while wallet packs stay available for heavier animation elsewhere in Studio.
                             </p>
                         </div>
                         <button
@@ -408,7 +408,7 @@ export default function ChatStoryPanel({ onBack }: Props) {
                             onClick={openSubscriptionPage}
                             className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
                         >
-                            Open Plans
+                            Open Membership
                         </button>
                     </div>
                     <div className="mt-6 grid gap-4 lg:grid-cols-3">
@@ -496,7 +496,7 @@ export default function ChatStoryPanel({ onBack }: Props) {
                                 </div>
                                 <div className="rounded-3xl border border-emerald-500/20 bg-emerald-500/10 p-5">
                                     <p className="text-sm font-semibold text-emerald-100">Render path</p>
-                                    <p className="mt-2 text-sm text-emerald-100/80">Monthly-plan gated, no AC cost. Background video uploads, owned voices, and shipped music/SFX all go through the real backend render route.</p>
+                                    <p className="mt-2 text-sm text-emerald-100/80">Membership unlocks this lane, and renders here do not burn wallet credits. Background video uploads, owned voices, and shipped music/SFX all go through the real backend render route.</p>
                                 </div>
                             </div>
                             <div className="space-y-4">
@@ -849,7 +849,7 @@ export default function ChatStoryPanel({ onBack }: Props) {
                                     className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-60"
                                 >
                                     {rendering ? <Loader2 className="h-4 w-4 animate-spin" /> : hasChatStoryAccess ? <Wand2 className="h-4 w-4" /> : <Lock className="h-4 w-4" />}
-                                    {rendering ? 'Rendering...' : hasChatStoryAccess ? 'Render Chat Story' : 'Unlock with Monthly Plan'}
+                                    {rendering ? 'Rendering...' : hasChatStoryAccess ? 'Render Chat Story' : 'Open Membership'}
                                 </button>
                             )}
                         </div>

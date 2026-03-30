@@ -1,71 +1,69 @@
-import { useContext } from 'react';
-import { ArrowRight, CheckCircle2, Clapperboard, Clock, Flame, Globe, MessageSquareText, Monitor, Shield, Wand2, Zap } from 'lucide-react';
+import { useContext, useMemo } from 'react';
+import { ArrowRight, CheckCircle2, Copy, Film, Image, Rocket, ScissorsLineDashed, Sparkles, Workflow, Wrench } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, BILLING_SITE_URL, Logo, isBillingHost } from '../shared';
+import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
 export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, topupPacks } = useContext(AuthContext);
-    const sortedPacks = [...topupPacks].sort((a, b) => a.credits - b.credits);
+    const { session, topupPacks, publicPlanPrices, defaultMembershipPlanId } = useContext(AuthContext);
     const billingHost = isBillingHost;
+    const sortedPacks = [...topupPacks].sort((a, b) => a.credits - b.credits);
+    const membershipPrice = useMemo(() => {
+        const raw = Number((publicPlanPrices as Record<string, number>)[defaultMembershipPlanId || 'starter']);
+        if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
+        return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
+    }, [defaultMembershipPlanId, publicPlanPrices]);
 
-    const handleBuyPack = (priceId: string) => {
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        const params = new URLSearchParams({ view: 'checkout', pack: priceId });
-        window.location.href = billingHost ? `?${params.toString()}` : `${BILLING_SITE_URL}?${params.toString()}`;
+    const openBilling = () => {
+        window.location.href = billingHost ? `${window.location.origin}?page=billing` : `${BILLING_SITE_URL}?page=billing`;
     };
 
-    const liveTemplates = [
+    const openDashboard = () => {
+        if (session) {
+            onNavigate('dashboard');
+            return;
+        }
+        onNavigate('auth');
+    };
+
+    const liveLanes = [
         {
-            title: 'AI Stories',
-            desc: 'Scene-first faceless story shorts with strong hooks, editable visuals, and slideshow fallback.',
-            icon: <Clapperboard className="w-5 h-5" />,
-            color: 'from-violet-600 to-violet-800',
+            title: 'Create',
+            desc: 'Scene-first short-form workflows for AI stories, motivation, skeleton videos, and Chat Story.',
+            icon: <Sparkles className="h-5 w-5" />,
         },
         {
-            title: 'Motivation',
-            desc: 'Faceless motivation clips built for repeatable posting, strong pacing, and clean voice-led delivery.',
-            icon: <Flame className="w-5 h-5" />,
-            color: 'from-amber-600 to-amber-800',
+            title: 'Thumbnails',
+            desc: 'Generate click-driven thumbnails, upload winners into your private library, and refine style references inside Studio.',
+            icon: <Image className="h-5 w-5" />,
         },
         {
-            title: 'Skeleton AI',
-            desc: 'Locked skeleton identity for comparison channels, with editable scenes, clothed variants, and consistent character continuity.',
-            icon: <Shield className="w-5 h-5" />,
-            color: 'from-cyan-600 to-sky-800',
+            title: 'Clone',
+            desc: 'Break down an existing short, extract its structure, and rebuild the format for a new topic with the same retention logic.',
+            icon: <Copy className="h-5 w-5" />,
         },
         {
-            title: 'Chat Story',
-            desc: 'Premium text-message shorts for faceless drama and niche story channels, with a dedicated phone-preview editor.',
-            icon: <MessageSquareText className="w-5 h-5" />,
-            color: 'from-fuchsia-600 to-violet-800',
+            title: 'Long Form',
+            desc: 'Run chapter-based faceless production for recaps, explainers, documentary-style videos, and story channels.',
+            icon: <Film className="h-5 w-5" />,
         },
     ];
 
-    const comingSoonTemplates = [
-        'Business',
-        'Finance',
-        'Tech',
-        'Crypto',
-        'Objects Explain',
-        'Would You Rather',
-        'Scary Stories',
-        'Historical Epic',
-        'What If',
-        'Clone',
-        'Long Form',
-        'Thumbnails',
-        'Product Demo',
-        'Auto Clipper',
-    ];
-
-    const proofLinks = [
-        'https://youtube.com/shorts/36-AAocHhg0?feature=share',
-        'https://youtube.com/shorts/K8-W6xmXF7w?feature=share',
-        'https://youtube.com/shorts/1y10LtdyQ_I?feature=share',
-        'https://youtube.com/shorts/UcTCAOUNa1I?feature=share',
+    const roadmapLanes = [
+        {
+            title: 'AutoClipper',
+            desc: 'Visible in Studio now, but still held back until clipping quality, scoring, and packaging beat the lazy “coming soon” bar.',
+            icon: <ScissorsLineDashed className="h-5 w-5" />,
+        },
+        {
+            title: 'Catalyst',
+            desc: 'The shared engine behind thumbnails, cloning, long-form generation, and future automation layers.',
+            icon: <Workflow className="h-5 w-5" />,
+        },
+        {
+            title: 'Operator Tools',
+            desc: 'Internal demo and analytics lanes stay private so the public offer remains tight and credible.',
+            icon: <Wrench className="h-5 w-5" />,
+        },
     ];
 
     return (
@@ -73,133 +71,63 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
             <NavBar onNavigate={onNavigate} />
 
             <section className="relative overflow-hidden pt-32 pb-24">
-                <div className="absolute inset-0 bg-gradient-to-b from-violet-600/10 via-transparent to-transparent" />
-                <div className="absolute top-16 left-1/2 h-[760px] w-[760px] -translate-x-1/2 rounded-full bg-violet-600/5 blur-[140px]" />
-                <div className="relative max-w-5xl mx-auto px-6 text-center">
-                    <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-1.5 text-sm font-medium text-emerald-300 mb-8">
-                        <Zap className="w-4 h-4" />
-                        Built for Faceless YouTube Automation
-                    </div>
-
-                    <h1 className="text-6xl md:text-7xl font-extrabold tracking-tight leading-[1.05] mb-6">
-                        Build Faceless
-                        <br />
-                        <span className="bg-gradient-to-r from-violet-400 via-purple-400 to-indigo-400 bg-clip-text text-transparent">
-                            YouTube Shorts Faster
-                        </span>
-                    </h1>
-
-                    <p className="mx-auto mb-10 max-w-3xl text-xl leading-relaxed text-gray-400">
-                        NYPTID Studio is a scene-first workspace for faceless channels. Build AI Stories, Motivation, Skeleton AI, and Chat Story formats without living in timelines, then pay only when you animate or when you want the monthly Chat Story lane.
-                    </p>
-
-                    <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14">
-                        <button
-                            onClick={() => {
-                                window.location.href = `${BILLING_SITE_URL}?page=billing`;
-                            }}
-                            className="group flex items-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-bold text-white transition-all hover:bg-violet-500 shadow-lg shadow-violet-600/20"
-                        >
-                            View Pricing
-                            <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" />
-                        </button>
-                        <button
-                            onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
-                            className="rounded-xl border border-white/10 bg-white/5 px-8 py-4 text-lg font-medium text-white transition hover:bg-white/10"
-                        >
-                            {session ? 'Open Create Workspace' : 'Sign In'}
-                        </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-6 md:grid-cols-4 max-w-3xl mx-auto">
-                        {[
-                            { value: '4', label: 'Live Templates' },
-                            { value: 'Scene-First', label: 'Create Flow' },
-                            { value: 'PayPal', label: 'Main Checkout' },
-                            { value: 'Faceless', label: 'Channel Focus' },
-                        ].map((item) => (
-                            <div key={item.label}>
-                                <div className="text-3xl font-bold text-white">{item.value}</div>
-                                <div className="text-sm text-gray-500 mt-1">{item.label}</div>
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(6,182,212,0.14),_transparent_40%),radial-gradient(circle_at_70%_20%,_rgba(139,92,246,0.18),_transparent_32%)]" />
+                <div className="relative mx-auto max-w-6xl px-6">
+                    <div className="grid items-center gap-10 lg:grid-cols-[1.1fr,0.9fr]">
+                        <div>
+                            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-4 py-1.5 text-sm font-medium text-cyan-300">
+                                <Rocket className="h-4 w-4" />
+                                Faceless YouTube Operating System
                             </div>
-                        ))}
-                    </div>
-                </div>
-            </section>
+                            <h1 className="mt-6 text-5xl font-extrabold leading-[1.02] tracking-tight text-white md:text-7xl">
+                                Build faceless YouTube content with one Studio.
+                            </h1>
+                            <p className="mt-6 max-w-3xl text-lg leading-relaxed text-gray-400">
+                                NYPTID Studio now sells one product. Catalyst powers the short-form builder, thumbnail engine, clone workflow, and long-form lane so operators can stop stitching together separate tools for every part of the channel.
+                            </p>
+                            <div className="mt-8 flex flex-col gap-4 sm:flex-row">
+                                <button
+                                    type="button"
+                                    onClick={openDashboard}
+                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
+                                >
+                                    {session ? 'Open Studio' : 'Sign In'}
+                                    <ArrowRight className="h-5 w-5" />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={openBilling}
+                                    className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
+                                >
+                                    View Pricing
+                                </button>
+                            </div>
+                            <div className="mt-10 grid gap-6 sm:grid-cols-3">
+                                <StatCard label="Live Public Lanes" value="4" />
+                                <StatCard label="Membership" value={membershipPrice} />
+                                <StatCard label="Checkout" value="PayPal" />
+                            </div>
+                        </div>
 
-            <section className="py-16 border-t border-white/5">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="text-center mb-10">
-                        <h2 className="text-3xl md:text-4xl font-bold mb-3">Live Channel Formats</h2>
-                        <p className="text-gray-400 max-w-2xl mx-auto">
-                            The launch is intentionally narrow around faceless formats that are closest to stable and sellable right now.
-                        </p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                        {liveTemplates.map((template) => (
-                            <div
-                                key={template.title}
-                                className="group relative rounded-2xl border border-white/[0.06] bg-white/[0.03] p-6 transition-all hover:border-violet-500/30 hover:bg-violet-500/[0.03]"
-                            >
-                                <span className="absolute top-4 right-4 rounded-full border border-emerald-500/30 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold tracking-wider text-emerald-300">
-                                    LIVE
-                                </span>
-                                <div className={`mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br ${template.color}`}>
-                                    {template.icon}
+                        <div className="rounded-[32px] border border-white/[0.08] bg-white/[0.03] p-6 shadow-2xl shadow-black/30">
+                            <div className="flex items-center gap-3">
+                                <Logo size={30} />
+                                <div>
+                                    <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Catalyst</p>
+                                    <h2 className="text-xl font-bold text-white">One engine, multiple lanes</h2>
                                 </div>
-                                <h3 className="text-lg font-bold transition-colors group-hover:text-violet-300">{template.title}</h3>
-                                <p className="mt-2 text-sm leading-relaxed text-gray-500">{template.desc}</p>
                             </div>
-                        ))}
-                    </div>
-                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
-                        <p className="mb-3 text-xs uppercase tracking-wider text-gray-500">Coming Soon</p>
-                        <div className="flex flex-wrap gap-2">
-                            {comingSoonTemplates.map((name) => (
-                                <span key={name} className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1.5 text-xs text-gray-400">
-                                    {name}
-                                </span>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <section className="py-16 border-t border-white/5">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="text-center mb-10">
-                        <h2 className="text-3xl md:text-4xl font-bold mb-3">Proof</h2>
-                        <p className="text-gray-400 max-w-2xl mx-auto">
-                            Public YouTube shorts are linked directly here. This is the content style the workspace is being shaped around.
-                        </p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
-                            <p className="mb-3 text-xs uppercase tracking-wider text-gray-500">Featured Short</p>
-                            <div className="mx-auto aspect-[9/16] max-h-[540px] overflow-hidden rounded-xl border border-white/[0.08] bg-black">
-                                <iframe
-                                    title="NYPTID Featured Short"
-                                    src="https://www.youtube.com/embed/36-AAocHhg0"
-                                    className="h-full w-full"
-                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                                    allowFullScreen
-                                />
-                            </div>
-                        </div>
-                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
-                            <p className="mb-3 text-xs uppercase tracking-wider text-gray-500">Public Proof Links</p>
-                            <div className="space-y-2">
-                                {proofLinks.map((url, index) => (
-                                    <a
-                                        key={url}
-                                        href={url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300 transition hover:border-violet-500/40 hover:text-white"
-                                    >
-                                        <span>Watch Short #{index + 1}</span>
-                                        <ArrowRight className="w-4 h-4" />
-                                    </a>
+                            <div className="mt-6 space-y-3">
+                                {[
+                                    'Create scripts, scenes, and renders without leaving Studio',
+                                    'Store thumbnail references in the same account that owns the channel workflow',
+                                    'Use membership and wallet credits together instead of juggling separate subscriptions',
+                                    'Keep future automation lanes inside one account model as Catalyst expands',
+                                ].map((item) => (
+                                    <div key={item} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
+                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+                                        <span>{item}</span>
+                                    </div>
                                 ))}
                             </div>
                         </div>
@@ -207,174 +135,131 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             </section>
 
-            <section className="py-24 border-t border-white/5">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="text-center mb-16">
-                        <h2 className="text-4xl font-bold mb-4">Why This Fits Faceless Operators</h2>
-                        <p className="text-gray-400 text-lg max-w-3xl mx-auto">
-                            The product is being narrowed around repeatable faceless workflows instead of trying to look like a general-purpose editor.
+            <section className="border-t border-white/[0.06] py-20">
+                <div className="mx-auto max-w-6xl px-6">
+                    <div className="mb-10 text-center">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">Live Now</p>
+                        <h2 className="mt-3 text-4xl font-bold text-white">Public launch surface</h2>
+                        <p className="mx-auto mt-3 max-w-3xl text-gray-400">
+                            The public offer is intentionally tight: Create, Thumbnails, Clone, and Long Form. Product Demo stays internal. Analytics stays owner-only. AutoClipper remains visible but not sellable yet.
                         </p>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8">
-                            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-violet-500/10">
-                                <Zap className="w-6 h-6 text-violet-400" />
-                            </div>
-                            <h3 className="text-xl font-bold mb-3">Scene-First Editing</h3>
-                            <p className="text-gray-500 leading-relaxed">
-                                You write the script, generate scenes, tune prompts, and keep the short editable before you spend on animation.
-                            </p>
-                        </div>
-                        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8">
-                            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/10">
-                                <Shield className="w-6 h-6 text-emerald-400" />
-                            </div>
-                            <h3 className="text-xl font-bold mb-3">Pay for Motion, Not Guesswork</h3>
-                            <p className="text-gray-500 leading-relaxed">
-                                Slideshows stay available, animation is pay-as-you-go, and monthly plans are reserved for the premium Chat Story lane.
-                            </p>
-                        </div>
-                        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8">
-                            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-amber-500/10">
-                                <Monitor className="w-6 h-6 text-amber-400" />
-                            </div>
-                            <h3 className="text-xl font-bold mb-3">Retention-Friendly Formats</h3>
-                            <p className="text-gray-500 leading-relaxed">
-                                AI Stories, Motivation, Skeleton AI, and Chat Story are the formats most aligned with faceless YouTube retention loops, so they lead the launch.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <section className="py-24 border-t border-white/5" id="pricing">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="text-center mb-16">
-                        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-1.5 text-sm font-medium text-emerald-300 mb-6">
-                            <Zap className="w-4 h-4" />
-                            Free Slideshows + PayPal Credit Top-Ups
-                        </div>
-                        <h2 className="text-4xl font-bold mb-4">AC Credit Packs</h2>
-                        <p className="text-gray-400 text-lg">
-                            Buy animation credits with PayPal when you want motion. Monthly plans on the same billing surface unlock Chat Story.
-                        </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6">
-                        {sortedPacks.map((pack, index) => {
-                            const isPopular = index === 4;
-                            return (
-                                <div
-                                    key={pack.price_id}
-                                    className={`relative rounded-2xl p-6 transition-all ${
-                                        isPopular
-                                            ? 'border-2 border-violet-500/30 bg-violet-500/[0.05] shadow-xl shadow-violet-500/5'
-                                            : 'border border-white/[0.06] bg-white/[0.02]'
-                                    }`}
-                                >
-                                    {isPopular && (
-                                        <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-violet-600 px-3 py-1 text-[10px] font-bold tracking-wide text-white">
-                                            MOST POPULAR
-                                        </span>
-                                    )}
-                                    <h3 className="text-lg font-bold">{String(pack.pack || '').toUpperCase()} Pack</h3>
-                                    <p className="mt-1 text-xs text-gray-500">{pack.credits} AC credits</p>
-                                    <div className="mt-5 flex items-baseline gap-1">
-                                        <span className="text-3xl font-extrabold">${Number(pack.price_usd || 0).toFixed(2)}</span>
-                                        <span className="text-sm text-gray-500">one-time</span>
-                                    </div>
-                                    <ul className="mt-5 space-y-2.5">
-                                        <li className="flex items-center gap-2 text-xs text-gray-300">
-                                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-violet-400" />
-                                            {pack.credits} animation attempts
-                                        </li>
-                                        <li className="flex items-center gap-2 text-xs text-gray-300">
-                                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-violet-400" />
-                                            No monthly commitment
-                                        </li>
-                                        <li className="flex items-center gap-2 text-xs text-gray-300">
-                                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-violet-400" />
-                                            Free images and slideshows remain enabled
-                                        </li>
-                                    </ul>
-                                    <button
-                                        onClick={() => handleBuyPack(pack.price_id)}
-                                        className={`mt-6 w-full rounded-lg py-2.5 text-sm font-bold transition-all ${
-                                            isPopular
-                                                ? 'bg-violet-600 text-white hover:bg-violet-500 shadow-lg shadow-violet-600/20'
-                                                : 'border border-white/10 bg-white/5 text-white hover:bg-white/10'
-                                        }`}
-                                    >
-                                        Buy Now
-                                    </button>
+                    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+                        {liveLanes.map((lane) => (
+                            <div key={lane.title} className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10 text-violet-300">
+                                    {lane.icon}
                                 </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            </section>
-
-            <section className="py-24 border-t border-white/5">
-                <div className="max-w-6xl mx-auto px-6">
-                    <div className="text-center mb-16">
-                            <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-sm font-medium text-amber-300 mb-6">
-                                <Clock className="w-4 h-4" />
-                                Roadmap
-                            </div>
-                        <h2 className="text-4xl font-bold mb-4">What Comes Next For Faceless Channels</h2>
-                        <p className="text-gray-400 text-lg max-w-3xl mx-auto">
-                            New templates, long-form tooling, thumbnails, and deeper automation stay gated until they are stable enough to sell without support drag.
-                        </p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-                        {[
-                            {
-                                title: 'Q1: More Faceless Niches',
-                                desc: 'Business, Finance, Tech, Crypto, Objects Explain, Would You Rather, Scary Stories, and Historical Epic move public after they hit the same quality bar as the live set.',
-                                icon: <Globe className="w-6 h-6 text-violet-400" />,
-                            },
-                            {
-                                title: 'Q2: Long-Form Builder',
-                                desc: 'Long-form chapter planning and scene editing return after the short-form create workspace is fully stable.',
-                                icon: <Wand2 className="w-6 h-6 text-cyan-400" />,
-                            },
-                            {
-                                title: 'Q3: Automation Layers',
-                                desc: 'Prompt-level scene revision, stronger continuity controls, and repeatable channel automation for recurring content formats.',
-                                icon: <Monitor className="w-6 h-6 text-amber-400" />,
-                            },
-                            {
-                                title: 'Q4: Higher-End Rendering',
-                                desc: 'Premium animation lanes, better exports, and stronger long-form rendering once the short-form engine is fully hardened.',
-                                icon: <Clock className="w-6 h-6 text-emerald-400" />,
-                            },
-                        ].map((item) => (
-                            <div key={item.title} className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8">
-                                <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-white/5">
-                                    {item.icon}
-                                </div>
-                                <h3 className="text-xl font-bold mb-3">{item.title}</h3>
-                                <p className="text-gray-500 leading-relaxed">{item.desc}</p>
+                                <h3 className="mt-5 text-xl font-bold text-white">{lane.title}</h3>
+                                <p className="mt-2 text-sm leading-relaxed text-gray-400">{lane.desc}</p>
                             </div>
                         ))}
                     </div>
                 </div>
             </section>
 
-            <footer className="py-12 border-t border-white/5">
-                <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4">
-                    <div className="flex items-center gap-2">
-                        <Logo size={22} />
-                        <span className="font-bold">NYPTID Studio</span>
-                        <span className="ml-2 text-sm text-gray-600">by NYPTID Industries</span>
+            <section className="border-t border-white/[0.06] py-20">
+                <div className="mx-auto max-w-6xl px-6">
+                    <div className="mb-10 text-center">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Offer Design</p>
+                        <h2 className="mt-3 text-4xl font-bold text-white">One product, two ways to pay</h2>
+                        <p className="mx-auto mt-3 max-w-3xl text-gray-400">
+                            Membership unlocks the product. Credit packs cover usage spikes. Customers can run membership-only, wallet-only, or both together without switching platforms.
+                        </p>
                     </div>
-                    <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
-                        <a href="/ai-story-video-generator.html" className="text-gray-500 transition-colors hover:text-white">AI Stories</a>
-                        <a href="/motivation-video-maker.html" className="text-gray-500 transition-colors hover:text-white">Motivation</a>
+                    <div className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
+                        <div className="rounded-[32px] border border-violet-500/20 bg-violet-500/[0.06] p-6">
+                            <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Catalyst Membership</p>
+                            <p className="mt-3 text-4xl font-bold text-white">{membershipPrice}</p>
+                            <p className="mt-3 text-sm text-gray-300">
+                                Unlock the live public lanes and get starter included credits. Included credits burn before the wallet on eligible jobs.
+                            </p>
+                            <ul className="mt-6 space-y-3 text-sm text-gray-300">
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Create, Thumbnails, Clone, Long Form, and Chat Story on one login</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Starter included credits reset monthly</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Manual PayPal renewal for now</li>
+                            </ul>
+                        </div>
+                        <div className="rounded-[32px] border border-white/[0.06] bg-white/[0.02] p-6">
+                            <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Credit Wallet</p>
+                            <h3 className="mt-3 text-2xl font-bold text-white">Top up only when usage spikes</h3>
+                            <p className="mt-3 text-sm text-gray-400">
+                                The wallet is for heavier animation runs, hybrid accounts, or usage-only buyers who do not want membership yet.
+                            </p>
+                            <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                                {sortedPacks.slice(0, 4).map((pack) => (
+                                    <div key={pack.price_id} className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+                                        <p className="text-sm font-semibold text-white">{String(pack.pack || '').toUpperCase()}</p>
+                                        <p className="mt-1 text-xs text-gray-500">{pack.credits} credits</p>
+                                        <p className="mt-4 text-2xl font-bold text-white">${Number(pack.price_usd || 0).toFixed(2)}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
                     </div>
-                    <p className="text-sm text-gray-600">&copy; 2026 NYPTID Industries. All rights reserved.</p>
                 </div>
-            </footer>
+            </section>
+
+            <section className="border-t border-white/[0.06] py-20">
+                <div className="mx-auto max-w-6xl px-6">
+                    <div className="mb-10 text-center">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-300">Roadmap</p>
+                        <h2 className="mt-3 text-4xl font-bold text-white">What stays private or coming soon</h2>
+                    </div>
+                    <div className="grid gap-5 md:grid-cols-3">
+                        {roadmapLanes.map((lane) => (
+                            <div key={lane.title} className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-300">
+                                    {lane.icon}
+                                </div>
+                                <h3 className="mt-5 text-xl font-bold text-white">{lane.title}</h3>
+                                <p className="mt-2 text-sm leading-relaxed text-gray-400">{lane.desc}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+
+            <section className="border-t border-white/[0.06] py-24">
+                <div className="mx-auto max-w-4xl px-6 text-center">
+                    <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Start Here</p>
+                    <h2 className="mt-3 text-4xl font-bold text-white">Open Studio and build from one workspace.</h2>
+                    <p className="mx-auto mt-4 max-w-2xl text-gray-400">
+                        If you already know your niche, open Studio now. If you need billing first, go straight to the membership and wallet page. Either way, the offer is finally one product instead of a pile of disconnected tools.
+                    </p>
+                    <div className="mt-8 flex flex-col justify-center gap-4 sm:flex-row">
+                        <button
+                            type="button"
+                            onClick={openDashboard}
+                            className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
+                        >
+                            {session ? 'Open Studio' : 'Sign In'}
+                            <ArrowRight className="h-5 w-5" />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={openBilling}
+                            className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
+                        >
+                            Pricing
+                        </button>
+                    </div>
+                    {!billingHost && (
+                        <p className="mt-6 text-xs text-gray-500">
+                            ThumbLab now redirects into Studio. The thumbnail engine lives inside the same product at <span className="text-gray-300">{STUDIO_SITE_URL}</span>.
+                        </p>
+                    )}
+                </div>
+            </section>
         </>
+    );
+}
+
+function StatCard({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] px-4 py-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-gray-500">{label}</p>
+            <p className="mt-3 text-2xl font-bold text-white">{value}</p>
+        </div>
     );
 }

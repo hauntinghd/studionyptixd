@@ -7,7 +7,7 @@ const billingHostAliases = new Set(["billing.nyptidindustries.com", "billing.nip
 export const isBillingHost = billingHostAliases.has(window.location.hostname.toLowerCase()) || window.location.hostname.toLowerCase().startsWith("billing.");
 export const BILLING_SITE_URL = "https://billing.nyptidindustries.com";
 export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
-export const PROD_API_BASE_URL = "https://nyptid-studio-api.onrender.com";
+export const PROD_API_BASE_URL = "https://api.nyptidindustries.com";
 const resolveSafeApiBase = (rawBase: string): string => {
     const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
     if (!cleaned) return "";
@@ -72,9 +72,10 @@ export const hasChatStoryTemplateAccess = (
     billingActive: boolean,
     role?: string | null
 ): boolean => {
-    if (String(role || '').trim().toLowerCase() === 'admin') return true;
-    const normalizedPlan = String(planName || '').trim().toLowerCase();
-    return Boolean(billingActive) && CHAT_STORY_MONTHLY_PLAN_IDS.has(normalizedPlan);
+    void planName;
+    void billingActive;
+    void role;
+    return true;
 };
 export const CLONE_COMING_SOON = true;
 export const Logo = ({ size = 24 }: { size?: number }) => (
@@ -315,6 +316,7 @@ export type PlanLimit = {
 export type PlanLimitMap = Record<string, PlanLimit>;
 export type PlanFeatureMap = Record<string, string[]>;
 export type PlanPriceMap = Record<string, number>;
+export type LaneAccessMap = Record<string, boolean>;
 const PRICE_IDS: Record<string, string> = {
     starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
     creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
@@ -327,8 +329,11 @@ export interface AuthContextType {
     supabase: SupabaseClient | null;
     plan: Plan;
     role: string;
+    ownerOverride: boolean;
     loading: boolean;
     billingActive: boolean;
+    membershipActive: boolean;
+    membershipPlanId: string;
     backendOffline: boolean;
     nextRenewalUnix: number;
     nextRenewalSource: string;
@@ -349,6 +354,8 @@ export interface AuthContextType {
     publicPlanLimits: PlanLimitMap;
     publicPlanFeatures: PlanFeatureMap;
     publicPlanPrices: PlanPriceMap;
+    studioLaneAccess: LaneAccessMap;
+    defaultMembershipPlanId: string;
     signIn: (email: string, password: string) => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
@@ -360,12 +367,12 @@ export interface AuthContextType {
 }
 
 export const AuthContext = createContext<AuthContextType>({
-    session: null, supabase: null, plan: 'none', role: 'user', loading: true, billingActive: false,
+    session: null, supabase: null, plan: 'none', role: 'user', ownerOverride: false, loading: true, billingActive: false, membershipActive: false, membershipPlanId: 'none',
     backendOffline: false,
     nextRenewalUnix: 0, nextRenewalSource: '',
     billingAnchorUnix: 0,
     monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: [],
-    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: {}, publicPlanFeatures: {}, publicPlanPrices: {},
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: {}, publicPlanFeatures: {}, publicPlanPrices: {}, studioLaneAccess: {}, defaultMembershipPlanId: 'starter',
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     longformOwnerBeta: false,
     waitlistOnlyMode: false,
@@ -380,8 +387,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [session, setSession] = useState<Session | null>(null);
     const [plan, setPlan] = useState<Plan>('none');
     const [role, setRole] = useState<string>('user');
+    const [ownerOverride, setOwnerOverride] = useState(false);
     const [loading, setLoading] = useState(true);
     const [billingActive, setBillingActive] = useState(false);
+    const [membershipActive, setMembershipActive] = useState(false);
+    const [membershipPlanId, setMembershipPlanId] = useState('none');
     const [backendOffline, setBackendOffline] = useState(false);
     const [nextRenewalUnix, setNextRenewalUnix] = useState(0);
     const [nextRenewalSource, setNextRenewalSource] = useState('');
@@ -397,6 +407,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [publicPlanLimits, setPublicPlanLimits] = useState<PlanLimitMap>({});
     const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>({});
     const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>({});
+    const [studioLaneAccess, setStudioLaneAccess] = useState<LaneAccessMap>({});
+    const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('starter');
     const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
     const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
     const [longformOwnerBeta, setLongformOwnerBeta] = useState(false);
@@ -404,17 +416,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [waitlistRequiresStripePayment, setWaitlistRequiresStripePayment] = useState(false);
     const healthFailureCountRef = useRef(0);
     const lastHealthSuccessAtRef = useRef(0);
+    const ownerLaneAccess: LaneAccessMap = {
+        create: true,
+        thumbnails: true,
+        clone: true,
+        longform: true,
+        chatstory: true,
+        autoclipper: true,
+        demo: true,
+        analytics: true,
+        membership: true,
+        wallet: true,
+    };
     const applyOwnerAccess = useCallback(() => {
         setRole('admin');
         setPlan('elite');
         setBillingActive(true);
+        setMembershipActive(true);
+        setMembershipPlanId(defaultMembershipPlanId || 'starter');
+        setOwnerOverride(true);
+        setStudioLaneAccess(ownerLaneAccess);
         setLongformOwnerBeta(true);
-    }, []);
+    }, [defaultMembershipPlanId]);
     const refreshViewerState = useCallback(async () => {
         if (!session) {
             setPlan('none');
             setRole('user');
+            setOwnerOverride(false);
             setBillingActive(false);
+            setMembershipActive(false);
+            setMembershipPlanId('none');
             setNextRenewalUnix(0);
             setNextRenewalSource('');
             setBillingAnchorUnix(0);
@@ -425,6 +456,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setTopupCreditsRemaining(0);
             setCreditsTotalRemaining(0);
             setRequiresTopup(false);
+            setStudioLaneAccess({});
             setDemoAccess(false);
             setDemoComingSoon(true);
             return;
@@ -437,7 +469,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             } else {
                 setPlan('none');
                 setRole('user');
+                setOwnerOverride(false);
                 setBillingActive(false);
+                setMembershipActive(false);
+                setMembershipPlanId('none');
+                setStudioLaneAccess({});
             }
             return;
         }
@@ -451,13 +487,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const incomingPlan = (data.plan === 'free' ? 'none' : data.plan) || 'none';
             setPlan((['none', 'starter', 'creator', 'pro', 'elite'].includes(incomingPlan) ? incomingPlan : 'none') as Plan);
             setRole(isOwner ? 'admin' : 'user');
-            setBillingActive(Boolean(data.billing_active));
+            const incomingMembershipActive = Boolean(data.membership_active ?? data.billing_active);
+            setBillingActive(incomingMembershipActive);
+            setMembershipActive(incomingMembershipActive);
+            setMembershipPlanId(String(data.membership_plan_id || incomingPlan || 'none'));
+            setOwnerOverride(Boolean(data.owner_override || isOwner));
             setNextRenewalUnix(Number(data.next_renewal_unix || 0));
             setNextRenewalSource(String(data.next_renewal_source || ''));
             setBillingAnchorUnix(Number(data.billing_anchor_unix || 0));
-            setLongformOwnerBeta(isOwner && Boolean(data.longform_owner_beta));
-            setMonthlyCreditsRemaining(Number(data.animated_credits_remaining ?? data.monthly_credits_remaining ?? 0));
-            setTopupCreditsRemaining(Number(data.animated_topup_credits_remaining ?? data.topup_credits_remaining ?? 0));
+            const laneAccess = (data.lane_access && typeof data.lane_access === 'object') ? (data.lane_access as LaneAccessMap) : {};
+            setStudioLaneAccess(laneAccess);
+            setLongformOwnerBeta(Boolean(data.longform_owner_beta));
+            setMonthlyCreditsRemaining(Number(data.included_credits_remaining ?? data.animated_credits_remaining ?? data.monthly_credits_remaining ?? 0));
+            setTopupCreditsRemaining(Number(data.credit_wallet_balance ?? data.animated_topup_credits_remaining ?? data.topup_credits_remaining ?? 0));
             setCreditsTotalRemaining(Number(data.animated_credits_total_remaining ?? data.credits_total_remaining ?? 0));
             setRequiresTopup(Boolean(data.requires_topup));
             setDemoAccess(data.demo_access || false);
@@ -472,7 +514,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             } else {
                 setPlan('none');
                 setRole('user');
+                setOwnerOverride(false);
                 setBillingActive(false);
+                setMembershipActive(false);
+                setMembershipPlanId('none');
             }
             setNextRenewalUnix(0);
             setNextRenewalSource('');
@@ -482,6 +527,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setTopupCreditsRemaining(0);
             setCreditsTotalRemaining(0);
             setRequiresTopup(false);
+            if (!isOwner) setStudioLaneAccess({});
             setDemoAccess(false);
             setDemoComingSoon(true);
         }
@@ -505,6 +551,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     if (cfg.plans && typeof cfg.plans === 'object') setPublicPlanLimits(cfg.plans as PlanLimitMap);
                     if (cfg.plan_features && typeof cfg.plan_features === 'object') setPublicPlanFeatures(cfg.plan_features as PlanFeatureMap);
                     if (cfg.plan_prices_usd && typeof cfg.plan_prices_usd === 'object') setPublicPlanPrices(cfg.plan_prices_usd as PlanPriceMap);
+                    if (cfg.billing_model && typeof cfg.billing_model === 'object') {
+                        const incomingDefaultMembershipPlanId = String((cfg.billing_model as any).default_membership_plan_id || '').trim().toLowerCase();
+                        if (incomingDefaultMembershipPlanId) {
+                            setDefaultMembershipPlanId(incomingDefaultMembershipPlanId);
+                        }
+                    }
                     setWaitlistOnlyMode(false);
                     setWaitlistRequiresStripePayment(false);
                 }
@@ -672,6 +724,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (supabase) await supabase.auth.signOut();
         setSession(null);
         setPlan('none');
+        setRole('user');
+        setOwnerOverride(false);
+        setBillingActive(false);
+        setMembershipActive(false);
+        setMembershipPlanId('none');
+        setStudioLaneAccess({});
+        setLongformOwnerBeta(false);
         setMonthlyCreditsRemaining(0);
         setTopupCreditsRemaining(0);
         setCreditsTotalRemaining(0);
@@ -679,8 +738,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [supabase]);
 
     const checkout = useCallback(async (planName: string): Promise<string | null> => {
-        const priceId = PRICE_IDS[planName];
-        if (!priceId || !session) return "Missing plan checkout details";
+        if (!session) return "Missing membership checkout details";
+        const normalizedPlanName = String(planName || '').trim().toLowerCase();
+        const isMembershipCheckout = normalizedPlanName === 'membership';
+        const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'starter') : normalizedPlanName;
+        const priceId = PRICE_IDS[targetPlanId];
+        if (!isMembershipCheckout && !priceId) return "Missing membership checkout details";
         try {
             const res = await fetch(`${API}/api/checkout`, {
                 method: "POST",
@@ -688,11 +751,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${session.access_token}`,
                 },
-                body: JSON.stringify({ price_id: priceId }),
+                body: JSON.stringify(
+                    isMembershipCheckout
+                        ? { product: 'membership', plan: targetPlanId }
+                        : { price_id: priceId, plan: targetPlanId }
+                ),
             });
             const { data } = await readJsonResponse<any>(res);
             const payload = data || {};
-            if (!res.ok) return (payload as any).detail || "Could not start monthly checkout";
+            if (!res.ok) return (payload as any).detail || "Could not start membership checkout";
             if ((payload as any).checkout_url) {
                 window.location.href = (payload as any).checkout_url;
                 return null;
@@ -700,9 +767,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return "Checkout URL missing";
         } catch (e) {
             console.error("Checkout failed", e);
-            return "Monthly checkout failed";
+            return "Membership checkout failed";
         }
-    }, [session]);
+    }, [defaultMembershipPlanId, session]);
 
     const checkoutDemo = useCallback(async () => {
         if (!demoPriceId || !session) return;
@@ -778,14 +845,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return (
         <AuthContext.Provider value={{
-            session, supabase, plan, role, loading, billingActive,
+            session, supabase, plan, role, ownerOverride, loading, billingActive, membershipActive, membershipPlanId,
             backendOffline,
             nextRenewalUnix, nextRenewalSource,
             billingAnchorUnix,
             longformOwnerBeta,
             monthlyCreditsRemaining, topupCreditsRemaining, creditsTotalRemaining, requiresTopup, topupPacks,
             demoAccess, demoPriceId, demoComingSoon,
-            publicPlanLimits, publicPlanFeatures, publicPlanPrices,
+            publicPlanLimits, publicPlanFeatures, publicPlanPrices, studioLaneAccess, defaultMembershipPlanId,
             maintenanceBannerEnabled, maintenanceBannerMessage,
             waitlistOnlyMode, waitlistRequiresStripePayment,
             signIn, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,

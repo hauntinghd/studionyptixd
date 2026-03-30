@@ -1,10 +1,10 @@
 import { useContext, useEffect, useState } from 'react';
-import { CheckCircle2, Clock, Download, FileVideo, Loader2, Lock, Plus, UploadCloud, Wand2 } from 'lucide-react';
+import { CheckCircle2, Clock, Download, FileVideo, Loader2, Plus, UploadCloud, Wand2 } from 'lucide-react';
 import { AuthContext, GENERATION_API } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/StudioWidgets';
 
 export default function ClonePanel() {
-    const { session, plan } = useContext(AuthContext);
+    const { session } = useContext(AuthContext);
     const [viralFile, setViralFile] = useState<File | null>(null);
     const [topic, setTopic] = useState("");
     const [viralUrl, setViralUrl] = useState("");
@@ -23,7 +23,7 @@ export default function ClonePanel() {
         }
     };
 
-    const canClone = plan === 'creator' || plan === 'pro' || plan === 'elite';
+    const canClone = Boolean(session);
     const canUse1080p = true;
 
     useEffect(() => {
@@ -70,16 +70,16 @@ export default function ClonePanel() {
     return (
             <div className="max-w-3xl mx-auto px-6 pb-10 space-y-8">
                 <div className="text-center mb-4">
-                    <h1 className="text-2xl font-bold mb-2">Clone a Viral Short</h1>
-                    <p className="text-gray-500 text-sm max-w-lg mx-auto">Just tell us the new topic. AI auto-detects the best template, reverse-engineers what makes content go viral, and generates a new short for you.</p>
+                    <h1 className="text-2xl font-bold mb-2">Catalyst Clone</h1>
+                    <p className="text-gray-500 text-sm max-w-lg mx-auto">Drop in a source short, paste a link, or just define the new topic. Catalyst breaks down the hook, pacing, template, and visual rhythm, then rebuilds the idea for your new angle.</p>
                 </div>
 
                 {!canClone && (
                     <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center gap-3">
-                        <Lock className="w-5 h-5 text-amber-400 shrink-0" />
+                        <Wand2 className="w-5 h-5 text-amber-400 shrink-0" />
                         <div>
-                            <p className="text-amber-300 text-sm font-medium">Clone requires Creator plan or higher</p>
-                            <p className="text-gray-500 text-xs mt-0.5">Upgrade to access the viral cloning engine.</p>
+                            <p className="text-amber-300 text-sm font-medium">Sign in to use the clone lane</p>
+                            <p className="text-gray-500 text-xs mt-0.5">Clone is now part of the unified Catalyst workspace.</p>
                         </div>
                     </div>
                 )}

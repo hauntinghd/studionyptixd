@@ -62,7 +62,9 @@ class FinalizeRequest(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    price_id: str
+    price_id: str = ""
+    product: str = ""
+    plan: str = ""
 
 
 class TopupCheckoutRequest(BaseModel):

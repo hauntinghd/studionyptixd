@@ -8,6 +8,7 @@ interface ThumbFile { id: string; name: string; size: number; url: string; creat
 interface TrainingStatus {
     lora_available: boolean;
     is_training: boolean;
+    training_available?: boolean;
     total_images: number;
     local_library_images?: number;
     trained_images: number;
@@ -16,7 +17,7 @@ interface TrainingStatus {
 }
 
 export default function ThumbnailPanel() {
-    const { session } = useContext(AuthContext);
+    const { session, ownerOverride, role } = useContext(AuthContext);
     const [subTab, setSubTab] = useState<'generate' | 'library'>('generate');
     const [mode, setMode] = useState<'describe' | 'style_transfer' | 'screenshot_analysis'>('describe');
     const [description, setDescription] = useState('');
@@ -60,6 +61,8 @@ export default function ThumbnailPanel() {
             }
         } catch { /* ignore */ }
     }, [session, parseJsonResponse]);
+
+    const trainingControlsAvailable = Boolean(trainingStatus?.training_available) && (ownerOverride || role === 'admin');
 
     const fetchTrainingStatus = useCallback(async () => {
         try {
@@ -147,7 +150,7 @@ export default function ThumbnailPanel() {
             } else if (failed > 0) {
                 setSyncMessage(`Synced ${synced}/${total}. ${failed} failed; check server logs.`);
             } else {
-                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed to RunPod.`);
+                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed into the training set.`);
             }
             await fetchTrainingStatus();
         } catch {
@@ -213,16 +216,16 @@ export default function ThumbnailPanel() {
     };
 
     const modes = [
-        { id: 'describe' as const, icon: <Sparkles className="w-4 h-4" />, title: 'Describe', desc: 'Describe your video and get a pro thumbnail' },
-        { id: 'style_transfer' as const, icon: <Palette className="w-4 h-4" />, title: 'Style Transfer', desc: 'Copy a thumbnail style you like' },
-        { id: 'screenshot_analysis' as const, icon: <Camera className="w-4 h-4" />, title: 'Channel Analysis', desc: 'AI learns from what works for you' },
+        { id: 'describe' as const, icon: <Sparkles className="w-4 h-4" />, title: 'Describe', desc: 'Describe the video and generate a click-driven thumbnail' },
+        { id: 'style_transfer' as const, icon: <Palette className="w-4 h-4" />, title: 'Style Transfer', desc: 'Use your private library as a style reference' },
+        { id: 'screenshot_analysis' as const, icon: <Camera className="w-4 h-4" />, title: 'Channel Analysis', desc: 'Teach Catalyst what already works on your channel' },
     ];
 
     return (
         <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
             <div className="text-center mb-2">
-                <h1 className="text-2xl font-bold mb-2">AI Thumbnail Engine</h1>
-                <p className="text-gray-500 text-sm max-w-xl mx-auto">Generate click-worthy thumbnails that outperform human designers. Upload your proven winners to train the AI on your style.</p>
+                <h1 className="text-2xl font-bold mb-2">Catalyst Thumbnail Engine</h1>
+                <p className="text-gray-500 text-sm max-w-xl mx-auto">Generate click-driven thumbnails, keep private reference winners in your library, and use the same Studio account that owns the rest of your faceless workflow.</p>
             </div>
 
             <div className="flex gap-1 p-1 bg-white/[0.03] border border-white/[0.06] rounded-xl">
@@ -264,24 +267,26 @@ export default function ThumbnailPanel() {
                                 {(() => {
                                     const remoteCount = Number(trainingStatus.total_images || 0);
                                     const localCount = Number(trainingStatus.local_library_images || 0);
-                                    const pendingSync = remoteCount === 0 && localCount > 0;
-                                    const canSyncNow = localCount > remoteCount;
+                                    const pendingSync = remoteCount === 0 && localCount > 0 && trainingControlsAvailable;
+                                    const canSyncNow = localCount > remoteCount && trainingControlsAvailable;
                                     return (
                                         <>
                                 <p className={`text-sm font-medium ${
                                     trainingStatus.is_training ? 'text-amber-300' : trainingStatus.lora_available ? 'text-emerald-300' : 'text-gray-400'
                                 }`}>
                                     {trainingStatus.is_training
-                                        ? 'AI is training on your thumbnails...'
+                                        ? 'Catalyst is training on the owner thumbnail set...'
                                         : trainingStatus.lora_available
-                                            ? `Thumbnail AI trained (v${trainingStatus.version}, ${trainingStatus.trained_images} images)`
+                                            ? `Catalyst thumbnail training ready (v${trainingStatus.version}, ${trainingStatus.trained_images} images)`
                                             : pendingSync
-                                                ? `Syncing ${localCount} uploaded thumbnails to RunPod training set...`
-                                                : `Upload ${Math.max(0, 5 - remoteCount)} more thumbnails to start training`
+                                                ? `Syncing ${localCount} uploaded thumbnails into the training set...`
+                                                : trainingControlsAvailable
+                                                    ? `Upload ${Math.max(0, 5 - remoteCount)} more thumbnails to start training`
+                                                    : 'Your private library is ready for describe and style-reference generation'
                                     }
                                 </p>
                                 <p className="text-gray-600 text-xs mt-0.5">
-                                    {remoteCount} images in RunPod training set
+                                    {remoteCount} synced training images
                                     {localCount > remoteCount ? ` (${localCount} in local library)` : ''}
                                     {trainingStatus.lora_available && trainingStatus.total_images > trainingStatus.trained_images &&
                                         ` (${trainingStatus.total_images - trainingStatus.trained_images} new, will retrain soon)`
@@ -294,12 +299,17 @@ export default function ThumbnailPanel() {
                                             disabled={syncingLibrary}
                                             className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
                                         >
-                                            {syncingLibrary ? 'Syncing to RunPod...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
+                                            {syncingLibrary ? 'Syncing...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
                                         </button>
                                         {syncMessage && (
                                             <p className="text-[11px] text-gray-500 mt-1">{syncMessage}</p>
                                         )}
                                     </>
+                                )}
+                                {!trainingControlsAvailable && (
+                                    <p className="text-[11px] text-gray-500 mt-2">
+                                        Owner-only training sync stays internal. Public accounts can still upload references and generate thumbnails from their private library.
+                                    </p>
                                 )}
                                         </>
                                     );
@@ -310,8 +320,8 @@ export default function ThumbnailPanel() {
 
                     <label className="block border-2 border-dashed border-white/[0.08] hover:border-violet-500/30 hover:bg-violet-500/[0.02] rounded-2xl p-8 text-center cursor-pointer transition-all">
                         <UploadCloud className={`w-10 h-10 mx-auto mb-3 ${uploading ? 'text-violet-400 animate-pulse' : 'text-gray-600'}`} />
-                        <p className="text-gray-300 font-medium">{uploading ? 'Uploading...' : 'Upload Thumbnails'}</p>
-                        <p className="text-gray-600 text-xs mt-1">PNG, JPG, WebP -- drag and drop or click. Upload as many as you want.</p>
+                        <p className="text-gray-300 font-medium">{uploading ? 'Uploading...' : 'Upload Reference Thumbnails'}</p>
+                        <p className="text-gray-600 text-xs mt-1">PNG, JPG, WebP. Use this library for style references and future training data.</p>
                         <input type="file" className="hidden" accept="image/png,image/jpeg,image/webp" multiple
                             onChange={e => { if (e.target.files?.length) handleUpload(e.target.files); }} />
                     </label>
@@ -320,7 +330,7 @@ export default function ThumbnailPanel() {
                         <div className="text-center py-12">
                             <Image className="w-12 h-12 mx-auto text-gray-700 mb-3" />
                             <p className="text-gray-500">No thumbnails yet</p>
-                            <p className="text-gray-600 text-xs mt-1">Upload your best-performing thumbnails to train the AI on your style</p>
+                            <p className="text-gray-600 text-xs mt-1">Upload reference winners here so Catalyst can reuse your style across future generations.</p>
                         </div>
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -352,7 +362,7 @@ export default function ThumbnailPanel() {
                     {trainingStatus?.lora_available && (
                         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-xs">
                             <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-300 font-medium">AI trained on {trainingStatus.trained_images} of your thumbnails</span>
+                            <span className="text-emerald-300 font-medium">Catalyst trained on {trainingStatus.trained_images} of your thumbnails</span>
                             <span className="text-gray-600">v{trainingStatus.version}</span>
                         </div>
                     )}
@@ -406,7 +416,7 @@ export default function ThumbnailPanel() {
                                     </div>
                                 ) : (
                                     <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center">
-                                        <p className="text-gray-500 text-sm">Go to Library tab and upload thumbnail styles you like</p>
+                                        <p className="text-gray-500 text-sm">Go to the Library tab and upload the thumbnail styles you want Catalyst to reference.</p>
                                     </div>
                                 )}
                             </div>

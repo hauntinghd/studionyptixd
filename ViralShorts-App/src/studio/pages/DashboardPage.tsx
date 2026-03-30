@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
 import { BarChart3, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, isOwnerEmail } from '../shared';
+import { AuthContext } from '../shared';
 import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
 import AutoClipperPanel from '../panels/AutoClipperPanel';
 import ClonePanel from '../panels/ClonePanel';
@@ -20,16 +20,34 @@ type SidebarItem = {
     hidden?: boolean;
 };
 
+const OWNER_ALL_ACCESS = {
+    create: true,
+    clone: true,
+    longform: true,
+    thumbnails: true,
+    demo: true,
+    autoclipper: true,
+    analytics: true,
+};
+
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, role, backendOffline, creditsTotalRemaining, requiresTopup, monthlyCreditsRemaining } = useContext(AuthContext);
-    const isAdmin = role === 'admin';
-    const isOwner = isOwnerEmail(session?.user?.email);
-    const ownerToolAccess = isOwner;
+    const {
+        session,
+        role,
+        ownerOverride,
+        backendOffline,
+        topupCreditsRemaining,
+        requiresTopup,
+        monthlyCreditsRemaining,
+        studioLaneAccess,
+    } = useContext(AuthContext);
+    const isAdmin = role === 'admin' || ownerOverride;
+    const laneAccess = ownerOverride ? OWNER_ALL_ACCESS : studioLaneAccess;
     const [tab, setTab] = useState<DashboardTab>('create');
     const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
     const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
-    const acCredits = Number(creditsTotalRemaining || 0);
-    const clipperCredits = Number(monthlyCreditsRemaining || 0);
+    const walletCredits = Number(topupCreditsRemaining || 0);
+    const includedCredits = Number(monthlyCreditsRemaining || 0);
     const greeting = useMemo(() => {
         const hour = new Date().getHours();
         if (hour < 12) return 'Good morning';
@@ -41,6 +59,28 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
 
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        const requestedTab = String(params.get('tab') || params.get('focus') || '').trim().toLowerCase();
+        if (!requestedTab) return;
+        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics']);
+        if (!allowedTabs.has(requestedTab as DashboardTab)) return;
+        const nextTab = requestedTab as DashboardTab;
+        const unlocked = nextTab === 'create' || Boolean((laneAccess as Record<string, boolean>)[nextTab]);
+        if (!unlocked) return;
+        setTab(nextTab);
+        setCreateWorkspaceOpen(nextTab === 'create');
+    }, [laneAccess]);
+
+    useEffect(() => {
+        if (tab === 'create') return;
+        if (!Boolean((laneAccess as Record<string, boolean>)[tab])) {
+            setTab('create');
+            setCreateWorkspaceOpen(false);
+        }
+    }, [laneAccess, tab]);
+
     if (!session) return null;
 
     const sidebarItems = ([{
@@ -51,32 +91,29 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         id: 'clone',
         label: 'Clone',
         icon: Copy,
-        comingSoon: !ownerToolAccess,
     }, {
         id: 'longform',
         label: 'Long Form',
         icon: Film,
-        comingSoon: !ownerToolAccess,
     }, {
         id: 'thumbnails',
         label: 'Thumbnails',
         icon: Image,
-        comingSoon: !ownerToolAccess,
     }, {
         id: 'demo',
         label: 'Product Demo',
         icon: Monitor,
-        comingSoon: !ownerToolAccess,
+        hidden: !ownerOverride,
     }, {
         id: 'autoclipper',
         label: 'Auto Clipper',
         icon: Clapperboard,
-        comingSoon: !ownerToolAccess,
+        comingSoon: !ownerOverride,
     }, {
         id: 'analytics',
         label: 'Product Analytics',
         icon: BarChart3,
-        hidden: !isAdmin && !ownerToolAccess,
+        hidden: !isAdmin,
     }] as SidebarItem[]).filter((item) => !item.hidden);
 
     const openCreateWorkspace = () => {
@@ -90,13 +127,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             openCreateWorkspace();
             return;
         }
-        const analyticsUnlocked = item.id === 'analytics' && (isAdmin || ownerToolAccess);
-        const ownerUnlocked = item.id !== 'analytics' && ownerToolAccess;
-        if (analyticsUnlocked || ownerUnlocked) {
+        const unlocked = Boolean((laneAccess as Record<string, boolean>)[item.id]);
+        if (unlocked && !item.comingSoon) {
             setTab(item.id);
             setCreateWorkspaceOpen(false);
             setSidebarPeekOpen(false);
-            return;
         }
     };
 
@@ -104,12 +139,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const sidebarVisible = !createImmersive || sidebarPeekOpen;
 
     const panel = (() => {
-        if (tab === 'analytics' && (isAdmin || ownerToolAccess)) return <AdminAnalyticsPanel />;
-        if (tab === 'clone' && ownerToolAccess) return <ClonePanel />;
-        if (tab === 'longform' && ownerToolAccess) return <LongFormPanel />;
-        if (tab === 'thumbnails' && ownerToolAccess) return <ThumbnailPanel />;
-        if (tab === 'demo' && ownerToolAccess) return <DemoPanel />;
-        if (tab === 'autoclipper' && ownerToolAccess) return <AutoClipperPanel />;
+        if (tab === 'analytics' && isAdmin) return <AdminAnalyticsPanel />;
+        if (tab === 'clone' && laneAccess.clone) return <ClonePanel />;
+        if (tab === 'longform' && laneAccess.longform) return <LongFormPanel />;
+        if (tab === 'thumbnails' && laneAccess.thumbnails) return <ThumbnailPanel />;
+        if (tab === 'demo' && ownerOverride) return <DemoPanel />;
+        if (tab === 'autoclipper' && ownerOverride) return <AutoClipperPanel />;
         return <CreatePanel />;
     })();
 
@@ -129,14 +164,14 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </button>
             )}
 
-            <div className="pl-0 pr-4 sm:pr-6 lg:pr-8 pt-20 pb-8">
+            <div className="pl-0 pr-4 pt-20 pb-8 sm:pr-6 lg:pr-8">
                 <div className="flex items-start gap-5">
                     <aside
                         onMouseLeave={() => {
                             if (createImmersive) setSidebarPeekOpen(false);
                         }}
                         className={`shrink-0 overflow-hidden transition-all duration-300 ${
-                            sidebarVisible ? 'w-[300px] opacity-100 lg:w-[312px]' : 'w-0 -translate-x-6 opacity-0 pointer-events-none'
+                            sidebarVisible ? 'w-[300px] opacity-100 lg:w-[312px]' : 'pointer-events-none w-0 -translate-x-6 opacity-0'
                         }`}
                     >
                         <div className="rounded-none rounded-r-[30px] border border-l-0 border-white/[0.06] bg-white/[0.02] p-4">
@@ -155,9 +190,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         const active = tab === item.id;
                                         const disabled = item.id === 'create'
                                             ? false
-                                            : item.id === 'analytics'
-                                                ? !(isAdmin || ownerToolAccess)
-                                                : !ownerToolAccess;
+                                            : item.comingSoon || !Boolean((laneAccess as Record<string, boolean>)[item.id]);
                                         const Icon = item.icon;
                                         return (
                                             <button
@@ -197,14 +230,24 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         </div>
                                         <h1 className="mt-3 text-4xl font-bold text-white">{greeting}, {session.user.email?.split('@')[0] || 'creator'}</h1>
                                         <p className="mt-3 max-w-3xl text-sm text-gray-400">
-                                            {ownerToolAccess
-                                                ? 'Owner preview is active on this account. Every Studio lane is open here while non-owner accounts still see the public launch surface.'
-                                                : 'NYPTID Studio is now focused on one live path: Create. The rail shows the future surface, but only the sellable workflow is active.'}
+                                            {ownerOverride
+                                                ? 'Owner preview is active on this account. Every Studio lane is open here while public accounts only see the launch surface.'
+                                                : 'Catalyst is the shared engine behind Create, Thumbnails, Clone, and Long Form. AutoClipper stays visible as coming soon until the clipping lane is truly ready.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">
-                                        <MetricCard label="AI Credits" value={acCredits} accent="cyan" helper={requiresTopup ? 'Top up before your next animation run' : 'Ready to animate'} />
-                                        <MetricCard label="Clipper Credits" value={clipperCredits} accent="violet" helper={ownerToolAccess ? 'Owner preview lane unlocked' : 'AutoClipper stays marked coming soon'} />
+                                        <MetricCard
+                                            label="Credit Wallet"
+                                            value={walletCredits}
+                                            accent="cyan"
+                                            helper={requiresTopup ? 'Top up before your next animation run' : 'Wallet ready for heavier usage'}
+                                        />
+                                        <MetricCard
+                                            label="Included Credits"
+                                            value={includedCredits}
+                                            accent="violet"
+                                            helper={ownerOverride ? 'Owner preview lane unlocked' : 'Membership burns before wallet credits'}
+                                        />
                                     </div>
                                 </div>
                             </section>

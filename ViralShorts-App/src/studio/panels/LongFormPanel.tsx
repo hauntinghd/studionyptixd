@@ -98,6 +98,8 @@ type LongFormSessionSummary = {
     updated_at: number;
 };
 
+type LongFormPreset = 'recap' | 'explainer' | 'documentary' | 'story_channel';
+
 const STATUS_LABELS: Record<string, string> = {
     awaiting_previous_approval: 'Waiting For Prior Chapter Approval',
     draft_generating: 'Generating Draft Chapters',
@@ -121,6 +123,7 @@ export default function LongFormPanel() {
     const { session } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
     const [template, setTemplate] = useState<'story' | 'skeleton'>('story');
+    const [formatPreset, setFormatPreset] = useState<LongFormPreset>('explainer');
     const [topic, setTopic] = useState('');
     const [inputTitle, setInputTitle] = useState('');
     const [inputDescription, setInputDescription] = useState('');
@@ -282,13 +285,19 @@ export default function LongFormPanel() {
         setCreating(true);
         setError('');
         try {
+            const presetLabelMap: Record<LongFormPreset, string> = {
+                recap: 'Recap',
+                explainer: 'Explainer',
+                documentary: 'Documentary',
+                story_channel: 'Story Channel',
+            };
             const payload = await apiCall('/api/longform/session', {
                 method: 'POST',
                 body: JSON.stringify({
                     template,
                     topic: topic.trim(),
                     input_title: inputTitle.trim(),
-                    input_description: inputDescription.trim(),
+                    input_description: `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim(),
                     target_minutes: targetMinutes,
                     language,
                     animation_enabled: animationEnabled,
@@ -319,6 +328,7 @@ export default function LongFormPanel() {
         targetMinutes,
         template,
         topic,
+        formatPreset,
         whisperMode,
     ]);
 
@@ -402,10 +412,10 @@ export default function LongFormPanel() {
             <div className="rounded-xl border border-violet-400/25 bg-violet-500/10 p-4">
                 <div className="flex items-center gap-2 text-violet-200">
                     <Sparkles className="w-4 h-4" />
-                    <p className="text-sm font-semibold">Owner Long-Form Beta (2 to 10 minutes)</p>
+                    <p className="text-sm font-semibold">Catalyst Long Form (2 to 10 minutes)</p>
                 </div>
                 <p className="text-xs text-violet-100/80 mt-1">
-                    End-to-end flow: topic to chapters, chapter review/approve, finalize render, then package export.
+                    End-to-end faceless pipeline: topic to chapters, chapter review/approve, finalize render, then package export.
                 </p>
             </div>
 
@@ -444,8 +454,18 @@ export default function LongFormPanel() {
                         Template
                         <select value={template} onChange={(e) => setTemplate(e.target.value as 'story' | 'skeleton')}
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
-                            <option value="story">AI Stories</option>
+                            <option value="story">Cinematic</option>
                             <option value="skeleton">Skeleton AI</option>
+                        </select>
+                    </label>
+                    <label className="text-sm text-gray-300">
+                        Content Format
+                        <select value={formatPreset} onChange={(e) => setFormatPreset(e.target.value as LongFormPreset)}
+                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
+                            <option value="recap">Recap</option>
+                            <option value="explainer">Explainer</option>
+                            <option value="documentary">Documentary</option>
+                            <option value="story_channel">Story Channel</option>
                         </select>
                     </label>
                     <label className="text-sm text-gray-300">
@@ -465,7 +485,7 @@ export default function LongFormPanel() {
                         <input
                             value={topic}
                             onChange={(e) => setTopic(e.target.value)}
-                            placeholder="Ancient Rome battle tactics that still work in modern strategy"
+                            placeholder="Why some manga recaps hold attention for 20 minutes while others die in the first 90 seconds"
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                     </label>
@@ -474,7 +494,7 @@ export default function LongFormPanel() {
                         <input
                             value={inputTitle}
                             onChange={(e) => setInputTitle(e.target.value)}
-                            placeholder="How Ancient Rome Built Unbreakable Systems"
+                            placeholder="How top recap channels keep viewers watching"
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                     </label>
@@ -484,7 +504,7 @@ export default function LongFormPanel() {
                             value={inputDescription}
                             onChange={(e) => setInputDescription(e.target.value)}
                             rows={3}
-                            placeholder="End-to-end breakdown with practical examples, modern parallels, and high-retention pacing."
+                            placeholder="Describe the structure, tone, pacing, references, research angle, and retention goals for this long-form video."
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
                         />
                     </label>

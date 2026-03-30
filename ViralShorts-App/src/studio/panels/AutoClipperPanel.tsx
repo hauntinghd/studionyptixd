@@ -18,7 +18,7 @@ export default function AutoClipperPanel() {
                     </div>
                     <h2 className="mt-3 text-2xl font-bold text-white">Auto Clipper</h2>
                         <p className="mt-2 max-w-2xl text-sm text-gray-400">
-                        Extract viral-ready clips from long-form uploads and scored URLs. Monthly plans unlock beta access, and clipper credits meter actual extraction length once the backend scoring slice is live.
+                        Extract viral-ready clips from long-form uploads and scored URLs. Catalyst membership will unlock beta access once the clipping and scoring slice is ready for public use.
                         </p>
                 </div>
                 <div className={`rounded-xl border px-4 py-2 text-sm font-semibold ${unlocked ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/20 bg-amber-500/10 text-amber-300'}`}>
@@ -45,7 +45,7 @@ export default function AutoClipperPanel() {
                     </button>
                     {!unlocked && (
                         <p className="mt-3 text-xs text-amber-300">
-                            Auto Clipper is attached to monthly plans first. Clipper-credit metering is the next backend slice.
+                            Auto Clipper stays in the roadmap until the quality bar is real. Membership and credit metering will come after the backend scoring slice is stable.
                         </p>
                     )}
                 </div>

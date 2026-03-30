@@ -13,6 +13,7 @@ type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'b
 function AppShell() {
     const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const billingHost = isBillingHost;
+    const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const [page, setPage] = useState<StudioPage>(() => {
         try {
             const urlPage = new URLSearchParams(window.location.search).get('page');
@@ -30,6 +31,11 @@ function AppShell() {
         if (billingHost) return 'billing';
         return 'landing';
     });
+
+    useEffect(() => {
+        if (!thumblabHost) return;
+        window.location.replace('https://studio.nyptidindustries.com/?focus=thumbnails');
+    }, [thumblabHost]);
 
     useEffect(() => {
         try {

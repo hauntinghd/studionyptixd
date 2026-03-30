@@ -5,7 +5,7 @@ import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } f
 export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription') => void;
 
 export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }) {
-    const { session, role, signOut, creditsTotalRemaining, monthlyCreditsRemaining } = useContext(AuthContext);
+    const { session, role, signOut, topupCreditsRemaining, monthlyCreditsRemaining, membershipActive } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const billingHost = isBillingHost;
     const discordUrl = 'https://discord.gg/zMZxRRu7BS';
@@ -121,8 +121,8 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
 
                         <div className="hidden xl:flex items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2">
                             <div>
-                                <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">AI Credits</p>
-                                <p className="text-sm font-semibold text-cyan-100">{Number(creditsTotalRemaining || 0)}</p>
+                                <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">Credit Wallet</p>
+                                <p className="text-sm font-semibold text-cyan-100">{Number(topupCreditsRemaining || 0)}</p>
                             </div>
                             <button type="button" onClick={handleTopupClick} className="rounded-lg bg-cyan-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-400">
                                 Top Up
@@ -131,7 +131,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
 
                         <div className="hidden xl:flex items-center gap-2 rounded-xl border border-violet-500/20 bg-violet-500/10 px-3 py-2">
                             <div>
-                                <p className="text-[10px] uppercase tracking-[0.18em] text-violet-200/70">Clipper Credits</p>
+                                <p className="text-[10px] uppercase tracking-[0.18em] text-violet-200/70">Included Credits</p>
                                 <p className="text-sm font-semibold text-violet-100">{Number(monthlyCreditsRemaining || 0)}</p>
                             </div>
                             <button type="button" onClick={handleTopupClick} className="rounded-lg bg-violet-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400">
@@ -144,7 +144,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                             onClick={handleSubscriptionClick}
                             className="hidden lg:inline-flex rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
                         >
-                            Manage Subscription
+                            {membershipActive ? 'Membership' : 'Start Membership'}
                         </button>
 
                         <button type="button" className="hidden md:inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-gray-300">
