@@ -1647,13 +1647,7 @@ def _build_skeleton_identity_passthrough_prompt(
             "large realistic human-like eyeballs clearly visible in both eye sockets with readable iris and pupil, "
             "and a continuous translucent glass-like skin shell clearly visible over the full body, hugging the skull, face, neck, torso, arms, hands, and legs like real transparent skin."
         )
-    delta_l = delta.lower()
-    internal_markers = (
-        "cell", "cells", "immune", "fever", "virus", "bacteria", "bloodstream", "pyrogen",
-        "hypothalamus", "neuron", "brain chemistry", "organ", "microscopic", "microshot",
-        "macro shot", "inside the body", "inside body", "cutaway", "close-up of tissue",
-    )
-    internal_focus = any(marker in delta_l for marker in internal_markers)
+    internal_focus = _skeleton_scene_prefers_internal_cutaway(delta)
     ref = reference_dna or {}
     ref_bits: list[str] = []
     lighting = str(ref.get("lighting_style", "") or "").strip()
@@ -1674,11 +1668,19 @@ def _build_skeleton_identity_passthrough_prompt(
     if internal_focus:
         bridge = (
             "Render the requested microscopic or internal subject as a zoom-in / cutaway happening inside the skeleton's "
-            "arm, torso, blood, or tissue while some part of the skeleton remains visible in frame."
+            "arm, torso, blood, or tissue while some canonical skeleton anatomy remains visible in frame."
         )
     else:
         bridge = "The skeleton remains the main on-screen subject while following the user's scene request."
-    return " ".join([anchor, bridge, outfit_lock, f"USER SCENE REQUEST: {delta}", *ref_bits]).strip()
+    return " ".join([
+        anchor,
+        bridge,
+        _skeleton_scene_context_lock(delta),
+        _skeleton_scene_framing_lock(delta),
+        outfit_lock,
+        f"USER SCENE REQUEST: {delta}",
+        *ref_bits,
+    ]).strip()
 
 
 def _build_creative_passthrough_scene_prompt(
@@ -1836,6 +1838,91 @@ def _sanitize_skeleton_scene_delta(text: str) -> str:
     return cleaned or raw
 
 
+def _skeleton_scene_prefers_internal_cutaway(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    internal_markers = (
+        "cell", "cells", "immune", "fever", "virus", "bacteria", "bloodstream", "blood vessel", "blood vessels", "pyrogen", "pyrogens",
+        "hypothalamus", "neuron", "brain chemistry", "organ", "microscopic", "microshot",
+        "macro shot", "close-up of tissue", "inside the body", "inside body", "inside the skeleton",
+        "cutaway", "cross-section", "cross section", "blood", "tissue", "artery", "vein",
+    )
+    return any(marker in raw for marker in internal_markers)
+
+
+def _skeleton_scene_requests_minimal_background(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    return bool(re.search(
+        r"\b(plain background|blank background|white background|black background|solid background|"
+        r"minimal background|minimalist background|empty background|void background|studio seamless|"
+        r"seamless backdrop|clean backdrop|isolated cutout|isolated on white|featureless backdrop)\b",
+        raw,
+    ))
+
+
+def _skeleton_scene_has_environment_cue(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    return bool(re.search(
+        r"\b(environment|background|setting|location|interior|exterior|room|office|lab|laboratory|street|city|"
+        r"arena|stadium|courtroom|hospital|factory|warehouse|classroom|garage|workshop|home|kitchen|bedroom|"
+        r"rooftop|subway|train|airplane|plane|ship|boat|spaceship|space|planet|forest|desert|jungle|beach|"
+        r"ocean|underwater|mountain|cave|temple|castle|battlefield|store|market|restaurant|bar|stage|studio|"
+        r"table|desk|countertop|inside|within|cutaway|macro|microscopic|bloodstream|organ|cell|tissue)\b",
+        raw,
+    ))
+
+
+def _skeleton_scene_has_camera_cue(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    return bool(re.search(
+        r"\b(close[- ]?up|closeup|macro|wide(?: shot)?|establishing|over[- ]?shoulder|over the shoulder|"
+        r"low[- ]?angle|high[- ]?angle|bird'?s[- ]?eye|top[- ]?down|profile|silhouette|medium shot|mid[- ]?shot|"
+        r"three[- ]?quarter|3/4|waist[- ]?up|full[- ]?body|full body|portrait|hero framing|framing|camera|lens|"
+        r"dolly|push[- ]?in|tracking|pov|point of view)\b",
+        raw,
+    ))
+
+
+def _skeleton_scene_context_lock(text: str) -> str:
+    raw = str(text or "").strip()
+    if _skeleton_scene_requests_minimal_background(raw):
+        return (
+            "BACKGROUND/STAGING LOCK: honor the explicitly requested minimal or studio backdrop, "
+            "but make it look intentional, premium, and fully lit rather than empty or unfinished."
+        )
+    if _skeleton_scene_prefers_internal_cutaway(raw):
+        return (
+            "BACKGROUND/STAGING LOCK: use a readable internal, anatomical, or microscopic environment with "
+            "clear contextual structures and layered depth; never reduce the beat to a plain void."
+        )
+    return (
+        "BACKGROUND/STAGING LOCK: place the skeleton inside a rich topic-specific environment with clear "
+        "location cues, layered foreground/midground/background depth, and contextual objects; never leave "
+        "the subject on a blank, plain, or empty backdrop."
+    )
+
+
+def _skeleton_scene_framing_lock(text: str) -> str:
+    raw = str(text or "").strip()
+    if _skeleton_scene_prefers_internal_cutaway(raw):
+        return (
+            "SHOT VARIETY LOCK: if the beat is internal or microscopic, use close cutaway or macro framing "
+            "while keeping some canonical skeleton anatomy readable in frame."
+        )
+    return (
+        "SHOT VARIETY LOCK: choose framing that best communicates the beat instead of repeating the same "
+        "centered medium hero shot. Use wide environmental, medium action, low-angle, over-shoulder, "
+        "prop-detail, or full-body movement framing as appropriate."
+    )
+
+
 def _extract_scene_content_lock(prompt: str) -> str:
     raw = str(prompt or "")
     m = re.search(
@@ -1866,6 +1953,7 @@ def _compact_skeleton_local_prompt(prompt: str) -> str:
     needs_brain = "brain" in scene_l
     needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", scene_l))
     needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
+    internal_focus = _skeleton_scene_prefers_internal_cutaway(scene)
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
     parts: list[str] = [
         "photoreal cinematic 3D render",
@@ -1899,18 +1987,22 @@ def _compact_skeleton_local_prompt(prompt: str) -> str:
     elif needs_money:
         glow = "glowing " if needs_glow else ""
         prompt_parts.append(
-            f"Show one {glow}pile/stack of paper cash banknotes clearly visible on the table."
+            f"Show one {glow}pile/stack of paper cash banknotes clearly visible {'on the table' if needs_table else 'near the skeleton in the environment'}."
         )
+    prompt_parts.append(_skeleton_scene_context_lock(scene))
     prompt_parts.append(
-        "Medium or three-quarter shot, subject fills frame, ultra sharp focus, high contrast, no text, no watermark."
+        _skeleton_scene_framing_lock(scene)
+        if not internal_focus
+        else "SHOT VARIETY LOCK: close cutaway or macro framing is allowed here, but some canonical skeleton anatomy must remain readable in frame."
     )
+    prompt_parts.append("Ultra sharp focus, high contrast, readable props, no text, no watermark.")
     prompt_parts.append(
         "Glass-shell lock: transparent glass-like skin hugs the skull, torso, arms, and legs tightly like a real outer body shell, "
         "not a halo, not a bubble, not a portal, and not a glowing arch behind the subject."
     )
     if delivery_hints:
         prompt_parts.append("Short-form lock: " + "; ".join(delivery_hints) + ".")
-    return _truncate_words(" ".join(prompt_parts), 120)
+    return _truncate_words(" ".join(prompt_parts), 150)
 
 
 def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
@@ -1921,6 +2013,7 @@ def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
     needs_brain = "brain" in scene_l
     needs_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", scene_l))
     needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
+    dark_room = bool(re.search(r"\b(dark|night|shadowy|moody|low[- ]?light)\b", scene_l))
     props = []
     if needs_brain:
         props.append(
@@ -1935,20 +2028,32 @@ def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
     props_text = " and ".join(props) if props else "scene props"
     placement = "on the table" if needs_table else "in front of the skeleton"
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
-    base = (
-        "photoreal 3D cinematic render, dark room, transparent-glass anatomical skeleton with both eyes visible, natural ivory bone color, no x-ray/radiograph look, "
-        "glass shell wraps tightly around skull torso arms and legs like transparent skin, never a halo or portal. "
-        "skeleton seated behind a real table, medium shot, sharp focus, tabletop spans the lower foreground with hands resting on or just above the tabletop. "
-        f"Mandatory props: {props_text} {placement}. "
-        "Both mandatory props are large and obvious in foreground on the tabletop. "
-        "Do not omit either prop. Do not replace props with spheres/balls. "
-        "On table: brain plus money. On table: brain plus money."
-    )
+    base_parts = [
+        "photoreal 3D cinematic render",
+        "transparent-glass anatomical skeleton with both eyes visible",
+        "natural ivory bone color, no x-ray or radiograph look",
+        "glass shell wraps tightly around skull torso arms and legs like transparent skin, never a halo or portal",
+        ("dark moody environment" if dark_room else "premium cinematic lighting"),
+    ]
+    prompt_parts = [", ".join(base_parts) + "."]
+    if needs_table:
+        prompt_parts.append(
+            "Skeleton is seated behind a real table with the tabletop clearly visible across the lower foreground and both hands near or on the tabletop."
+        )
+    else:
+        prompt_parts.append("Skeleton interacts with the requested props inside a readable topic-matched environment.")
+    prompt_parts.append(f"Mandatory props: {props_text} {placement}.")
+    if needs_table:
+        prompt_parts.append("Keep the required props large and obvious on the tabletop foreground. Do not omit either prop.")
+    else:
+        prompt_parts.append("Keep the required props large, obvious, and readable near the skeleton in the environment. Do not omit either prop.")
+    prompt_parts.append("Do not replace required props with spheres, balls, or generic abstract objects.")
     if explicit_outfit_request:
-        base += " " + _skeleton_outfit_coverage_lock(scene)
-    if not needs_table:
-        base = base.replace("skeleton seated at table, ", "")
-    return _truncate_words(base, 86)
+        prompt_parts.append(_skeleton_outfit_coverage_lock(scene))
+    prompt_parts.append(_skeleton_scene_context_lock(scene))
+    prompt_parts.append(_skeleton_scene_framing_lock(scene))
+    prompt_parts.append("Sharp focus, readable skull and prop detail, no text, no watermark.")
+    return _truncate_words(" ".join(prompt_parts), 120)
 
 
 def _extract_skeleton_scene_delta_for_fast_path(prompt: str) -> str:
@@ -1979,7 +2084,7 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
     prompt_parts = [
         "Single skeleton subject only.",
-        ("Dark room." if dark_room else "Cinematic room interior."),
+        ("Dark moody environment with readable background detail." if dark_room else "Detailed topic-matched environment with layered background depth."),
         "Photoreal 3D render.",
         "Anatomical skeleton with large realistic eyes and transparent glass skin tightly wrapped around the skull, torso, arms, and legs.",
         "No second skeleton and no extra person.",
@@ -1989,7 +2094,7 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
             "Skeleton sits behind a real table with the tabletop clearly visible across the lower foreground and both hands near or on the tabletop."
         )
     else:
-        prompt_parts.append("Medium shot of the skeleton in a readable cinematic scene.")
+        prompt_parts.append("Keep the skeleton inside a readable scene that clearly matches the topic, not a blank backdrop.")
     if explicit_outfit_request:
         prompt_parts.append(_skeleton_outfit_coverage_lock(scene))
     if needs_brain and needs_money:
@@ -2005,8 +2110,9 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
         prompt_parts.append(f"One {glow}pile of paper cash banknotes is clearly visible.")
     else:
         prompt_parts.append(scene.rstrip(". ") + ".")
-    prompt_parts.append("Medium or three-quarter portrait shot, sharp focus, realistic lighting.")
-    return _truncate_words(" ".join(part for part in prompt_parts if part).strip(), 90)
+    prompt_parts.append(_skeleton_scene_framing_lock(scene))
+    prompt_parts.append("Sharp focus, realistic lighting, readable environment depth.")
+    return _truncate_words(" ".join(part for part in prompt_parts if part).strip(), 110)
 
 
 def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
@@ -2939,7 +3045,7 @@ TEMPLATE_SYSTEM_PROMPTS = {
 
 CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Keep each visual_description SIMPLE but DETAILED, with a HARD MAX of 3 sentences:
 - Sentence 1: exact skeleton identity lock details first (same skull proportions, same eyes, same bone finish, same clearly visible translucent body silhouette).
-- Sentence 2: pose + prop + camera framing.
+- Sentence 2: pose + prop + environment + camera framing.
 - Sentence 3: motion/action cues only (what moves and how).
 Never exceed 3 sentences. Prefer 2-3 concise sentences over long paragraphs.
 
@@ -2949,16 +3055,17 @@ THE SKELETON CHARACTER RULES (STRICT):
 - A clearly visible translucent soft-tissue silhouette around torso/limbs is required in every scene.
 - Default to NO clothing, uniforms, armor, helmets, masks, or costumes on the skeleton body unless the user's topic/script explicitly requests a specific outfit for that scene.
 - ONE skeleton per scene unless it's a VS/comparison shot (max 2)
-- Always FULL BODY visible from head to toe, centered in frame
+- Keep the skeleton instantly readable in vertical 9:16, but choose the framing that best fits the beat: wide environmental, medium action, low-angle hero, over-shoulder, prop-detail, close cutaway, or full-body movement shot.
+- Do NOT default every scene to the same centered medium hero composition. Off-center placement and more visible background are good when they make the topic clearer.
 - EVERY scene the skeleton must be DOING something with ultra-smooth human-like natural motion -- fluid arm gestures, natural head turns, realistic weight and momentum. Zach D Films quality movement. NEVER stiff, robotic, or jerky motion.
 
-BACKGROUND: Scene-appropriate background for the topic (studio, city, arena, historical, etc.) is allowed, but skeleton identity must stay unchanged.
+BACKGROUND: EVERY scene needs a topic-specific environment or readable cutaway context with layered foreground/midground/background detail. Never isolate the skeleton on an empty, plain, or undefined backdrop unless the user's topic/script explicitly asks for a minimal studio or seamless background. Skeleton identity must stay unchanged.
 
 CAMERA AND LIGHTING:
 - Professional studio photography lighting: key light from upper-left, fill light from right, rim light on edges
 - Slight depth of field blur on background
-- Camera is at chest height, slight upward angle (heroic framing)
-- Vary camera angle per scene: medium shot, slight close-up, wide establishing, over-shoulder
+- Use motivated camera height and angle that fits the beat: low-angle for power, wide/establishing for scale, close/macro for detail, over-shoulder when the skeleton interacts with something.
+- Vary camera angle per scene: wide environmental, medium action, low-angle power, prop-detail insert, over-shoulder, close cutaway
 
 PROPS AND VISUAL STORYTELLING:
 - Money/dollar bills physically floating in the air when discussing earnings (not CGI overlays)
@@ -3002,7 +3109,7 @@ Output valid JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "1-2 sentence narration with real facts",
-      "visual_description": "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette, same identity as previous scenes, full body visible. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed] and holding [SPECIFIC PROP: e.g. trophy, steering wheel, clipboard]. [Camera angle: e.g. medium shot, slight low angle]. Background matches topic context (not fixed) while character identity remains unchanged. [Motion cue: e.g. skeleton gestures with right hand].",
+      "visual_description": "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette, same identity as previous scenes, instantly readable in vertical 9:16. The skeleton is [EXACT POSE: e.g. standing confidently with arms crossed] and holding [SPECIFIC PROP: e.g. trophy, steering wheel, clipboard] inside a [TOPIC-SPECIFIC ENVIRONMENT: e.g. pit lane garage, courtroom, hospital lab] with layered background detail. [Camera angle / motion cue: e.g. low-angle medium action shot while the skeleton gestures with the right hand].",
       "text_overlay": "ONE_WORD"
     }
   ],
@@ -3010,7 +3117,7 @@ Output valid JSON:
   "tags": ["tag1", "tag2"]
 }
 
-Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with canonical skeleton identity lock FIRST (same skull/eyes/bone proportions/clearly visible translucent silhouette). Keep identity consistency locked across all 10 scenes. Only introduce clothing/costume details when the user's topic/script explicitly asks for them. Each visual_description must be 1-3 sentences (hard max 3), covering identity lock, pose/props/camera, and motion.""",
+Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with canonical skeleton identity lock FIRST (same skull/eyes/bone proportions/clearly visible translucent silhouette). Keep identity consistency locked across all 10 scenes. Only introduce clothing/costume details when the user's topic/script explicitly asks for them. Every visual_description must include topic-specific environment/staging and a deliberate shot choice, never a generic blank-background pose. Each visual_description must be 1-3 sentences (hard max 3), covering identity lock, pose/props/camera, and motion.""",
 
     "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
 
@@ -6910,6 +7017,7 @@ async def generate_scene_image(
             + "Canonical ivory bone color only; never x-ray/radiograph/CT scan look, never neon-blue medical scan aesthetics. "
             + "Do not omit scene props: every explicitly requested object/action must be visible. "
             + "Never replace requested props with generic spheres/balls. "
+            + "Keep a rich topic-matched environment or readable cutaway context; do not collapse to a blank empty backdrop unless explicitly requested. "
             + (damage_lock + " " if damage_lock else "")
             + (tired_lock + " " if tired_lock else "")
             + (outfit_lock + " " if outfit_lock else "")
@@ -7175,7 +7283,7 @@ async def generate_scene_image(
                         if attempt > 1:
                             attempt_prompt = (
                                 attempt_prompt
-                                + " HARD FRAMING LOCK: subject fills most of frame, ultra-sharp focus, no haze, no motion blur."
+                                + " HARD READABILITY LOCK: skeleton stays dominant and ultra-sharp in frame with crisp eyes and props, while preserving readable environment depth. No haze, no motion blur."
                             ).strip()
                         if attempt >= 3:
                             attempt_prompt = (
@@ -9435,7 +9543,7 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
             if template == "skeleton":
                 chunks = [
                     "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a detailed cinematic environment.",
-                    "The skeleton takes a clear action pose with role-specific props while camera framing emphasizes conflict and readability.",
+                    "The skeleton takes a clear action pose with role-specific props inside a richly detailed environment that clearly matches the specific topic, with readable background depth.",
                     "Motion begins instantly with smooth human-like momentum and directional continuity into the next shot.",
                 ]
             else:
@@ -9450,7 +9558,7 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
             chunks.append("")
 
         if template == "skeleton":
-            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a detailed cinematic environment."
+            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a topic-matched cinematic environment."
             first_chunk = chunks[0].strip()
             explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
             if not re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE) or not re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE):
@@ -9462,25 +9570,43 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
             chunks[0] = first_chunk
             if not explicit_outfit_request:
                 chunks[1] = re.sub(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume)\b", "props", chunks[1], flags=re.IGNORECASE)
-            if not re.search(r"\b(environment|background|street|city|desert|forest|interior|exterior|battlefield|temple|rome|studio)\b", chunks[0], re.IGNORECASE):
-                chunks[0] = chunks[0].rstrip(".!?") + " In a detailed environment matching the scene request."
+            combined = " ".join(chunks[:3])
+            internal_focus = _skeleton_scene_prefers_internal_cutaway(combined)
+            minimal_background = _skeleton_scene_requests_minimal_background(combined)
+            if not _skeleton_scene_has_environment_cue(chunks[0]):
+                if minimal_background:
+                    chunks[0] = chunks[0].rstrip(".!?") + " With an intentional premium minimal backdrop."
+                elif internal_focus:
+                    chunks[0] = chunks[0].rstrip(".!?") + " In a readable internal or microscopic cutaway environment."
+                else:
+                    chunks[0] = chunks[0].rstrip(".!?") + " In a richly detailed environment matching the scene request."
             if not re.search(r"\b(holding|aiming|running|facing|fighting|action|pose|gestur|turning|pointing|sit|sits|seated|sitting)\b", chunks[1], re.IGNORECASE):
                 chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
                     "The skeleton takes a clear action pose with a role-specific prop and readable composition."
-            combined = " ".join(chunks[:3])
             has_table = bool(re.search(r"\b(table|desk|countertop)\b", combined, re.IGNORECASE))
             has_sit = bool(re.search(r"\b(sit|sits|seated|sitting)\b", combined, re.IGNORECASE))
             has_brain = bool(re.search(r"\bbrain\b", combined, re.IGNORECASE))
             has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", combined, re.IGNORECASE))
+            if internal_focus and not re.search(r"\b(cutaway|micro|microscopic|internal|bloodstream|blood vessels?|organ|cell|tissue|anatomical|artery|vein)\b", chunks[1], re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + ". Use a readable internal or microscopic cutaway environment with clear contextual structures and layered depth."
             if has_table and not has_sit:
                 chunks[1] = chunks[1].rstrip(".!?") + ". Skeleton is clearly seated at the table."
             if has_brain and has_money and not re.search(r"\b(two|both)\b", combined, re.IGNORECASE):
                 chunks[2] = chunks[2].rstrip(".!?") + ". Keep both required props visible: one brain and one pile of money."
+            if not _skeleton_scene_has_environment_cue(combined):
+                if minimal_background:
+                    chunks[1] = chunks[1].rstrip(".!?") + " Keep the requested minimal backdrop intentional and clearly lit."
+                elif internal_focus:
+                    chunks[1] = chunks[1].rstrip(".!?") + " Use a readable internal or microscopic cutaway environment with layered depth."
+                else:
+                    chunks[1] = chunks[1].rstrip(".!?") + " Place the skeleton in a richly detailed environment with readable background context."
             if not re.search(r"\b(prop|object|item|scene request|requested)\b", " ".join(chunks[:3]), re.IGNORECASE):
                 chunks[1] = chunks[1].rstrip(".!?") + ". Keep all explicitly requested props/objects visible and readable."
             if not re.search(r"\b(motion|camera|moves|moving|drift|continuity|momentum)\b", chunks[2], re.IGNORECASE):
                 chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
                     "Motion begins instantly with smooth momentum and directional continuity."
+            if not _skeleton_scene_has_camera_cue(combined):
+                chunks[2] = chunks[2].rstrip(".!?") + " Choose framing that fits the beat instead of repeating the same centered medium hero shot."
         else:
             explainer_visuals = template == "story" and _story_scene_prefers_explainer_visuals(" ".join(chunks[:3]))
             if explainer_visuals:
@@ -9562,6 +9688,8 @@ def _build_skeleton_image_prompt(
     explicit_outfit_request = bool(re.search(r"\b(suit|tuxedo|armor|uniform|costume|hoodie|jacket|dress|shirt|pants|coat|robe|scrubs|jersey)\b", delta, re.IGNORECASE))
     object_lock = _scene_object_lock(delta)
     glow_lock = ""
+    context_lock = _skeleton_scene_context_lock(delta)
+    framing_lock = _skeleton_scene_framing_lock(delta)
     if re.search(r"\b(glow|glowing|emissive|neon|luminescen|light[- ]?emitting)\b", delta, re.IGNORECASE):
         glow_lock = (
             "PROP LIGHTING LOCK: any requested glowing object must visibly emit light/bloom and be clearly identifiable on-screen. "
@@ -9581,6 +9709,8 @@ def _build_skeleton_image_prompt(
         )
         + (object_lock + " " if object_lock else "")
         + glow_lock
+        + context_lock + " "
+        + framing_lock + " "
         + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
         + "NON-NEGOTIABLE CHARACTER RULE: use the exact same canonical anatomical skeleton in every scene: ivory-white skull and bones, large realistic eyeballs with visible iris and wet reflective highlights, clearly visible translucent soft-tissue silhouette around torso/limbs, identical skull proportions and eye spacing. "
         + "COLOR/RENDER RULE: realistic photographic rendering with natural ivory bone tones; never x-ray, radiograph, CT, fluoroscopy, or neon-blue scan aesthetics. "
@@ -9594,7 +9724,7 @@ def _build_skeleton_image_prompt(
             if explicit_outfit_request
             else "NON-NEGOTIABLE STYLE RULE: no clothing, uniforms, armor, or costumes on the skeleton body. "
         )
-        + "COMPOSITION RULE: subject occupies most of vertical 9:16 frame; prefer medium or medium-full hero framing unless scene explicitly requests wide shot. "
+        + "COMPOSITION RULE: keep the skeleton prominent and instantly readable in vertical 9:16, but allow off-center placement and visible environment depth whenever that makes the beat clearer. The frame should feel designed, not generic. "
         + addon + immutable + skeleton_anchor + delta + " "
         + SKELETON_IMAGE_SUFFIX
     )
@@ -9633,8 +9763,8 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
         if not chunks:
             if template == "skeleton":
                 chunks = [
-                    "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette stands centered in frame.",
-                    "The skeleton holds role-specific props in a cinematic environment matching the scene request.",
+                    "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a topic-matched cinematic environment.",
+                    "The skeleton holds role-specific props inside a richly detailed environment that clearly matches the specific topic, with readable background elements and layered depth.",
                     "Motion cue: smooth natural arm and head movement with realistic momentum.",
                 ]
             else:
@@ -9647,7 +9777,7 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
             chunks = chunks[:3]
 
         if template == "skeleton":
-            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette is centered in frame."
+            skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a topic-matched cinematic environment."
             first_chunk = chunks[0].strip()
             explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
             if not re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE) or not re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE):
@@ -9659,7 +9789,7 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
             chunks[0] = first_chunk
 
             if len(chunks) < 2:
-                chunks.append("The skeleton holds role-specific props in a cinematic environment that matches the scene request.")
+                chunks.append("The skeleton holds role-specific props inside a richly detailed environment that clearly matches the specific topic, with readable background elements and layered depth.")
             if len(chunks) < 3:
                 chunks.append("Motion cue: smooth natural arm and head movement with realistic momentum.")
             # Some scene prompts come through as a single sentence. Ensure secondary chunk exists before mutating it.
@@ -9671,18 +9801,29 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
                     flags=re.IGNORECASE,
                 )
             combined = " ".join(chunks[:3])
+            internal_focus = _skeleton_scene_prefers_internal_cutaway(combined)
+            minimal_background = _skeleton_scene_requests_minimal_background(combined)
             has_table = bool(re.search(r"\b(table|desk|countertop)\b", combined, re.IGNORECASE))
             has_sit = bool(re.search(r"\b(sit|sits|seated|sitting)\b", combined, re.IGNORECASE))
             has_brain = bool(re.search(r"\bbrain\b", combined, re.IGNORECASE))
             has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", combined, re.IGNORECASE))
+            if internal_focus and not re.search(r"\b(cutaway|micro|microscopic|internal|bloodstream|blood vessels?|organ|cell|tissue|anatomical|artery|vein)\b", chunks[1], re.IGNORECASE):
+                chunks[1] = chunks[1].rstrip(".!?") + ". Use a readable internal or microscopic cutaway environment with clear contextual structures and layered depth."
             if has_table and not has_sit:
                 chunks[1] = chunks[1].rstrip(".!?") + ". Skeleton is clearly seated at the table."
             if has_brain and has_money and not re.search(r"\b(two|both)\b", combined, re.IGNORECASE):
                 chunks[2] = chunks[2].rstrip(".!?") + ". Keep both required props visible: one brain and one pile of money."
+            if not _skeleton_scene_has_environment_cue(combined):
+                if minimal_background:
+                    chunks[1] = chunks[1].rstrip(".!?") + ". Keep the requested minimal backdrop intentional, premium, and clearly lit."
+                elif internal_focus:
+                    chunks[1] = chunks[1].rstrip(".!?") + ". Use a readable internal or microscopic cutaway environment with clear contextual structures and layered depth."
+                else:
+                    chunks[1] = chunks[1].rstrip(".!?") + ". Place the skeleton in a richly detailed environment that clearly matches the topic, with readable background elements and layered depth."
             if not re.search(r"\b(prop|object|item|scene request|requested)\b", " ".join(chunks[:3]), re.IGNORECASE):
                 chunks[1] = chunks[1].rstrip(".!?") + ". Keep all explicitly requested props/objects visible and readable."
-            if not re.search(r"\b(close[- ]?up|medium|mid[- ]?shot|three[- ]?quarter|3/4|waist[- ]?up|hero framing|fills? (the )?frame)\b", " ".join(chunks[:3]), re.IGNORECASE):
-                chunks[1] = chunks[1].rstrip(".!?") + ". Hero framing: medium or three-quarter shot with the subject filling most of the vertical frame."
+            if not _skeleton_scene_has_camera_cue(combined):
+                chunks[2] = chunks[2].rstrip(".!?") + ". Choose framing that fits the beat: wide environmental for scale, medium action for gestures, low-angle or over-shoulder for drama, and close cutaway or prop detail when needed. Avoid repeating the same centered medium hero shot."
 
             # Hard default for Skeleton AI: eyeballs must always be present.
             eyes_ok = any(

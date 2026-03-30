@@ -10,15 +10,17 @@ SKELETON_MASTER_CONSISTENCY_PROMPT = (
     "MASTER CONSISTENCY RULES (apply to every scene): "
     "One continuous visual universe. Keep the same canonical skeleton identity: skull proportions, eye size/spacing, bone finish, clearly visible translucent body silhouette, and color grade. "
     "For VS videos, lock Character A and Character B identities and never swap them. "
-    "Do not change baseline anatomy scene-to-scene. No clothing, uniforms, armor, or costume swaps. "
-    "Maintain bright readability, premium cinematic detail, and stable camera language."
+    "Do not change baseline anatomy scene-to-scene. Default to no clothing, uniforms, armor, or costume swaps unless the scene explicitly requests a specific outfit. "
+    "Maintain bright readability, premium cinematic detail, visible environmental context, and stable but varied camera language scene-to-scene. "
+    "Do not collapse the character into the same blank backdrop or repeated centered hero shot every time."
 )
 
 SKELETON_IMAGE_SUFFIX = (
     "Character anatomy rules: ivory-white anatomical skeleton with realistic large eyeballs (visible iris and wet reflections), consistent skull proportions, and consistent bone structure every scene. "
     "A clearly visible translucent soft-tissue silhouette around torso/limbs is REQUIRED in every scene, but no full human skin face. "
-    "No clothing, uniforms, armor, masks, or costumes on the skeleton body. "
-    "Composition priority: hero subject fills the frame (medium or 3/4 shot by default), avoid tiny distant full-body unless explicitly requested. "
+    "Default to no clothing, uniforms, armor, masks, or costumes on the skeleton body unless the scene explicitly requests a specific outfit. "
+    "Composition priority: keep the skeleton prominent and mobile-readable while preserving a rich topic-matched background or readable cutaway context. "
+    "Vary framing by scene instead of repeating the same centered medium hero shot. "
     "Render as premium photoreal cinematic output with believable materials, natural perspective, clean edges, and readable facial skull detail."
 )
 
@@ -67,7 +69,7 @@ SKELETON_NEGATIVE_PROMPT = (
     "anatomy model with tiny eyes, medical chart style diagram, "
     "cartoon, anime, low poly, plastic looking, toy, cute, chibi, "
     "skin, flesh, muscles, human face, realistic person, "
-    "empty background with no context, generic blank set, low-detail environment, "
+    "empty background with no context, plain background, generic blank set, seamless studio void, featureless backdrop, low-detail environment, "
     "flat washed lighting, underexposed muddy shadows, "
     "blurry, low quality, watermark, text artifacts, deformed, "
     "bad anatomy, broken bones, dislocated joints, extra limbs, missing limbs, fused bones, "
