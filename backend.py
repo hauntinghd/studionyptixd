@@ -13454,6 +13454,7 @@ async def get_me(user: dict = Depends(require_auth)):
         "billing_active": billing_active,
         "membership_active": billing_active,
         "membership_plan_id": membership_plan_id,
+        "membership_source": str(access_snapshot.get("source", "") or ""),
         "membership_label": "Catalyst Membership" if billing_active or is_admin else "",
         "next_renewal_unix": next_renewal_unix,
         "next_renewal_source": next_renewal_source,
@@ -15198,12 +15199,19 @@ async def paypal_return(token: str = "", PayerID: str = ""):
 @app.post("/api/billing-portal")
 async def create_billing_portal_session(user: dict = Depends(require_auth)):
     """Create a Stripe customer portal session so users can cancel/manage plans."""
-    manual_snapshot = _paypal_subscription_snapshot_for_user(user)
-    if manual_snapshot.get("billing_active"):
-        plan = str(manual_snapshot.get("plan", "") or "").strip().lower()
+    access_snapshot = _paid_access_snapshot_for_user(user)
+    billing_active = bool(access_snapshot.get("billing_active"))
+    access_source = str(access_snapshot.get("source", "") or "").strip().lower()
+    if billing_active and access_source != "stripe":
+        plan = str(access_snapshot.get("plan", "") or "").strip().lower()
         plan_suffix = f"&plan={quote(plan)}" if plan else ""
+        provider_suffix = f"&provider={quote(access_source)}" if access_source else ""
+        subscription_state = "manual" if access_source == "paypal_manual" else "details"
         return {
-            "portal_url": f"{_billing_site_url()}?page=subscription&subscription=manual&provider=paypal{plan_suffix}"
+            "portal_url": (
+                f"{_billing_site_url()}?page=subscription&subscription={subscription_state}"
+                f"{provider_suffix}{plan_suffix}"
+            )
         }
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")

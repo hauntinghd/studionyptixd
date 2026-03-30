@@ -334,6 +334,7 @@ export interface AuthContextType {
     billingActive: boolean;
     membershipActive: boolean;
     membershipPlanId: string;
+    membershipSource: string;
     backendOffline: boolean;
     nextRenewalUnix: number;
     nextRenewalSource: string;
@@ -368,6 +369,7 @@ export interface AuthContextType {
 
 export const AuthContext = createContext<AuthContextType>({
     session: null, supabase: null, plan: 'none', role: 'user', ownerOverride: false, loading: true, billingActive: false, membershipActive: false, membershipPlanId: 'none',
+    membershipSource: '',
     backendOffline: false,
     nextRenewalUnix: 0, nextRenewalSource: '',
     billingAnchorUnix: 0,
@@ -392,6 +394,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [billingActive, setBillingActive] = useState(false);
     const [membershipActive, setMembershipActive] = useState(false);
     const [membershipPlanId, setMembershipPlanId] = useState('none');
+    const [membershipSource, setMembershipSource] = useState('');
     const [backendOffline, setBackendOffline] = useState(false);
     const [nextRenewalUnix, setNextRenewalUnix] = useState(0);
     const [nextRenewalSource, setNextRenewalSource] = useState('');
@@ -434,6 +437,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setBillingActive(true);
         setMembershipActive(true);
         setMembershipPlanId(defaultMembershipPlanId || 'starter');
+        setMembershipSource('admin');
         setOwnerOverride(true);
         setStudioLaneAccess(ownerLaneAccess);
         setLongformOwnerBeta(true);
@@ -446,6 +450,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setBillingActive(false);
             setMembershipActive(false);
             setMembershipPlanId('none');
+            setMembershipSource('');
             setNextRenewalUnix(0);
             setNextRenewalSource('');
             setBillingAnchorUnix(0);
@@ -491,6 +496,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setBillingActive(incomingMembershipActive);
             setMembershipActive(incomingMembershipActive);
             setMembershipPlanId(String(data.membership_plan_id || incomingPlan || 'none'));
+            setMembershipSource(String(data.membership_source || data.next_renewal_source || ''));
             setOwnerOverride(Boolean(data.owner_override || isOwner));
             setNextRenewalUnix(Number(data.next_renewal_unix || 0));
             setNextRenewalSource(String(data.next_renewal_source || ''));
@@ -518,6 +524,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 setBillingActive(false);
                 setMembershipActive(false);
                 setMembershipPlanId('none');
+                setMembershipSource('');
             }
             setNextRenewalUnix(0);
             setNextRenewalSource('');
@@ -729,6 +736,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setBillingActive(false);
         setMembershipActive(false);
         setMembershipPlanId('none');
+        setMembershipSource('');
         setStudioLaneAccess({});
         setLongformOwnerBeta(false);
         setMonthlyCreditsRemaining(0);
@@ -846,6 +854,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return (
         <AuthContext.Provider value={{
             session, supabase, plan, role, ownerOverride, loading, billingActive, membershipActive, membershipPlanId,
+            membershipSource,
             backendOffline,
             nextRenewalUnix, nextRenewalSource,
             billingAnchorUnix,

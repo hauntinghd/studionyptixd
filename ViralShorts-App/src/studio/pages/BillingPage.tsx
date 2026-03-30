@@ -7,6 +7,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
         billingActive,
+        membershipSource,
         nextRenewalSource,
         checkout,
         checkoutTopup,
@@ -15,6 +16,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         topupCreditsRemaining,
         monthlyCreditsRemaining,
         creditsTotalRemaining,
+        publicPlanLimits,
         publicPlanPrices,
         defaultMembershipPlanId,
         requiresTopup,
@@ -42,7 +44,13 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
         return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
     }, [defaultMembershipPlanId, publicPlanPrices]);
-    const usesManualPayPalMembership = billingActive && nextRenewalSource === 'paypal_manual';
+    const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
+    const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
+    const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
+    const starterLimits = (publicPlanLimits as Record<string, any>)[defaultMembershipPlanId || 'starter'] || {};
+    const includedAnimatedCredits = Number(starterLimits.animated_renders_per_month || 0);
+    const membershipMaxDurationMinutes = Math.max(1, Math.round(Number(starterLimits.max_duration_sec || 0) / 60));
+    const membershipResolution = String(starterLimits.max_resolution || '720p').toUpperCase();
 
     useEffect(() => {
         if (!sortedPacks.length) return;
@@ -80,17 +88,19 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         setCheckoutError('');
         setMembershipLoading(true);
         try {
-            if (billingActive && !usesManualPayPalMembership) {
+            if (usesStripeMembership) {
                 const err = await manageBilling();
                 if (err) setCheckoutError(err);
                 return;
             }
-            const err = await checkout('membership');
+            const err = billingActive && !usesManualPayPalMembership
+                ? await manageBilling()
+                : await checkout('membership');
             if (err) setCheckoutError(err);
         } finally {
             setMembershipLoading(false);
         }
-    }, [billingActive, checkout, manageBilling, onNavigate, session, usesManualPayPalMembership]);
+    }, [billingActive, checkout, manageBilling, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
 
     const handlePackCheckout = useCallback(async () => {
         if (!selectedPack) {
@@ -164,7 +174,10 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="mt-6 grid gap-4 md:grid-cols-2">
                             {[
                                 'Create, Thumbnails, Clone, Long Form, and Chat Story on one login',
-                                'Starter included credits reset monthly when membership is active',
+                                includedAnimatedCredits > 0
+                                    ? `${includedAnimatedCredits} included animation credits reset monthly when membership is active`
+                                    : 'Included animation credits reset monthly when membership is active',
+                                `${membershipResolution} output cap with up to ${membershipMaxDurationMinutes} minute jobs on the Starter unlock`,
                                 'Wallet top-ups stack on top for heavier renders and operator usage',
                                 'PayPal is the live membership checkout path for now',
                             ].map((feature) => (
@@ -185,8 +198,10 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 ? 'Opening...'
                                 : usesManualPayPalMembership
                                     ? 'Extend Membership'
-                                    : billingActive
+                                    : usesStripeMembership
                                         ? 'Manage Membership'
+                                        : billingActive
+                                            ? 'Membership Details'
                                         : 'Start Membership'}
                         </button>
                     </section>
