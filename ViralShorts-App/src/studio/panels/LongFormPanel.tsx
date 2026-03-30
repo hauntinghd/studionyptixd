@@ -329,7 +329,9 @@ export default function LongFormPanel() {
                     template,
                     topic: topic.trim(),
                     input_title: inputTitle.trim(),
-                    input_description: `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim(),
+                    input_description: inputDescription.trim()
+                        ? `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim()
+                        : '',
                     format_preset: formatPreset,
                     source_url: sourceUrl.trim(),
                     analytics_notes: analyticsNotes.trim(),
@@ -526,7 +528,7 @@ export default function LongFormPanel() {
                         <input
                             value={topic}
                             onChange={(e) => setTopic(e.target.value)}
-                            placeholder="Why some manga recaps hold attention for 20 minutes while others die in the first 90 seconds"
+                            placeholder="Optional if Source Video URL is filled. Example: Why some manga recaps hold attention for 20 minutes while others die in the first 90 seconds"
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                     </label>
@@ -535,7 +537,7 @@ export default function LongFormPanel() {
                         <input
                             value={inputTitle}
                             onChange={(e) => setInputTitle(e.target.value)}
-                            placeholder="How top recap channels keep viewers watching"
+                            placeholder="Optional if Source Video URL is filled. Example: How top recap channels keep viewers watching"
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                     </label>
@@ -545,7 +547,7 @@ export default function LongFormPanel() {
                             value={inputDescription}
                             onChange={(e) => setInputDescription(e.target.value)}
                             rows={3}
-                            placeholder="Describe the structure, tone, pacing, references, research angle, and retention goals for this long-form video."
+                            placeholder="Optional if Source Video URL is filled. Otherwise describe the structure, tone, pacing, references, research angle, and retention goals for this long-form video."
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
                         />
                     </label>
@@ -557,6 +559,9 @@ export default function LongFormPanel() {
                             placeholder="Optional: paste a YouTube video URL so Catalyst can study the source title, description, chapters, transcript, and public packaging."
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
+                        <p className="mt-2 text-xs text-cyan-300/80">
+                            If you only paste a source URL, Catalyst now auto-derives the follow-up topic, title, and description from the source video and rebuilds a stronger version from that angle.
+                        </p>
                     </label>
                     <label className="text-sm text-gray-300 md:col-span-2">
                         Private Performance Notes
@@ -617,10 +622,10 @@ export default function LongFormPanel() {
                 <div className="flex flex-wrap gap-3">
                     <button
                         onClick={createSession}
-                        disabled={creating || !topic.trim() || !inputTitle.trim() || !inputDescription.trim()}
+                        disabled={creating || (!sourceUrl.trim() && (!topic.trim() || !inputTitle.trim() || !inputDescription.trim()))}
                         className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium disabled:opacity-60 transition"
                     >
-                        {creating ? 'Creating...' : 'Create Session'}
+                        {creating ? 'Creating...' : sourceUrl.trim() && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
                     </button>
                     <div className="flex items-center gap-2">
                         <input

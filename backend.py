@@ -4321,6 +4321,60 @@ async def _build_source_performance_analysis(
         }
 
 
+async def _derive_longform_seed_from_source(
+    source_bundle: dict,
+    source_analysis: dict,
+    format_preset: str = "explainer",
+    strategy_notes: str = "",
+) -> dict:
+    if not source_bundle and not source_analysis:
+        return {}
+    source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 140)
+    source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 420)
+    improvement_moves = source_analysis.get("improvement_moves") or []
+    title_angles = [str(x).strip() for x in list(source_analysis.get("title_angles") or []) if str(x).strip()]
+    description_angles = [str(x).strip() for x in list(source_analysis.get("description_angles") or []) if str(x).strip()]
+    primary_move = _clip_text(str(improvement_moves[0] if improvement_moves else ""), 180)
+    system_prompt = (
+        "You are a faceless YouTube strategist for NYPTID Studio. "
+        "A user has a source video URL but does not want to hand-write the next topic, title, or description. "
+        "Create a sharper follow-up brief on the same general subject, but improve the angle, hook clarity, and packaging. "
+        "Do not copy the source title verbatim. Output strict JSON with keys: topic, title, description."
+    )
+    user_prompt = (
+        f"Format preset: {format_preset}\n"
+        f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
+        f"Source performance analysis: {json.dumps(source_analysis or {}, ensure_ascii=True)}\n"
+        "Use this marketing doctrine as operating context:\n"
+        f"{_marketing_doctrine_text(strategy_notes)}"
+    )
+    try:
+        raw = await _xai_json_completion(system_prompt, user_prompt, temperature=0.4, timeout_sec=60)
+        derived_topic = _clip_text(str((raw or {}).get("topic", "") or "").strip(), 140)
+        derived_title = _clip_text(str((raw or {}).get("title", "") or "").strip(), 140)
+        derived_description = _clip_text(str((raw or {}).get("description", "") or "").strip(), 420)
+    except Exception:
+        derived_topic = ""
+        derived_title = ""
+        derived_description = ""
+    fallback_topic = derived_topic or source_title or "Follow-up video breakdown"
+    fallback_title = derived_title or (title_angles[0] if title_angles else source_title or "New follow-up video")
+    fallback_description = derived_description or (
+        description_angles[0]
+        if description_angles
+        else "Follow-up on the source topic with a clearer hook, tighter pacing, and stronger packaging."
+    )
+    if primary_move:
+        fallback_description = _clip_text(f"{fallback_description} Improvement focus: {primary_move}", 420)
+    elif source_summary and not derived_description:
+        fallback_description = _clip_text(f"{fallback_description} Source context: {source_summary}", 420)
+    return {
+        "topic": fallback_topic,
+        "title": fallback_title,
+        "description": fallback_description,
+    }
+
+
 def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "") -> str:
     parts: list[str] = []
     if source_bundle:
@@ -11569,12 +11623,6 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         raise HTTPException(400, "Source URL is invalid")
     analytics_notes = str(getattr(req, "analytics_notes", "") or "").strip()
     strategy_notes = str(getattr(req, "strategy_notes", "") or "").strip()
-    if not topic:
-        raise HTTPException(400, "Topic is required")
-    if not input_title:
-        raise HTTPException(400, "Video title is required")
-    if not input_description:
-        raise HTTPException(400, "Video description is required")
     target_minutes = _normalize_longform_target_minutes(req.target_minutes)
     language = _normalize_longform_language(req.language)
     whisper_mode = _normalize_longform_whisper_mode(req.whisper_mode)
@@ -11587,6 +11635,33 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         input_description=input_description,
         strategy_notes=strategy_notes,
     )
+    if source_url and (not topic or not input_title or not input_description):
+        auto_seed = await _derive_longform_seed_from_source(
+            source_bundle=source_bundle,
+            source_analysis=source_analysis,
+            format_preset=format_preset,
+            strategy_notes=strategy_notes,
+        )
+        if not topic:
+            topic = str(auto_seed.get("topic", "") or "").strip()
+        if not input_title:
+            input_title = str(auto_seed.get("title", "") or "").strip()
+        if not input_description:
+            input_description = str(auto_seed.get("description", "") or "").strip()
+        source_analysis = await _build_source_performance_analysis(
+            source_bundle=source_bundle,
+            analytics_notes=analytics_notes,
+            topic=topic,
+            input_title=input_title,
+            input_description=input_description,
+            strategy_notes=strategy_notes,
+        )
+    if not topic:
+        raise HTTPException(400, "Topic is required unless a source URL can be analyzed into a follow-up brief")
+    if not input_title:
+        raise HTTPException(400, "Video title is required unless a source URL can be analyzed into a follow-up brief")
+    if not input_description:
+        raise HTTPException(400, "Video description is required unless a source URL can be analyzed into a follow-up brief")
     source_context = _render_source_context(source_bundle, source_analysis, analytics_notes)
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)

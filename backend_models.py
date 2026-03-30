@@ -105,9 +105,9 @@ class ThumbnailGenerateRequest(BaseModel):
 
 class LongFormSessionCreateRequest(BaseModel):
     template: str
-    topic: str
-    input_title: str
-    input_description: str
+    topic: str = ""
+    input_title: str = ""
+    input_description: str = ""
     format_preset: str = "explainer"
     source_url: str = ""
     analytics_notes: str = ""
