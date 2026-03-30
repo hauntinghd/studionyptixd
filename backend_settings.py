@@ -15,6 +15,7 @@ if env_path.exists():
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+PIKZELS_API_KEY = os.getenv("PIKZELS_API_KEY", "")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudflare.com")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
@@ -30,6 +31,9 @@ FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 FAL_IMAGE_BACKUP_MODEL = str(os.getenv("FAL_IMAGE_BACKUP_MODEL", "grok_imagine") or "grok_imagine").strip().lower()
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
+PIKZELS_THUMBNAIL_MODEL = os.getenv("PIKZELS_THUMBNAIL_MODEL", "pkz-3")
+PIKZELS_RECREATE_MODEL = os.getenv("PIKZELS_RECREATE_MODEL", "pkz-3")
+PIKZELS_TITLE_MODEL = os.getenv("PIKZELS_TITLE_MODEL", "pkz-3")
 
 
 def _resolve_runway_api_key() -> tuple[str, str]:

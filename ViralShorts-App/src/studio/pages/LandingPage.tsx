@@ -65,6 +65,23 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
             icon: <Wrench className="h-5 w-5" />,
         },
     ];
+    const marketingDoctrine = [
+        'Be active in the Daily Marketing Channel.',
+        'Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn’t. Think about how you could improve it.',
+        'Small, daily improvements in your marketing skills can lead to significant progress over time due to compounding.',
+        'Just like in boxing or other martial arts, consistent practice and real-world application are crucial for mastering marketing.',
+        'Engage with the daily challenges to continuously hone your skills. Missing a day occasionally is okay, but don’t make it a habit.',
+        'Regardless of your field or business, understanding and practicing marketing is fundamental to success.',
+        'Treat the daily marketing challenges seriously and make it a part of your routine to see substantial benefits in your marketing abilities.',
+        'Mastering marketing has enabled Arno to start and scale companies and avoid manual labor by understanding how to attract clients and improve businesses.',
+        'It is a long-lasting skill. Marketing has been around for millennia and will continue to be valuable in the future.',
+        'Anyone can learn it. It doesn’t require special skills, abilities, or connections. Pay attention, focus, and you can succeed.',
+        'High ROI (Return On Investment). Direct response marketing offers the highest and most reliable return on investment, outperforming traditional investments.',
+        'Learning marketing helps you see opportunities and gaps that others miss, making life easier.',
+        'You don’t need to be the world’s best marketer; being better than most is enough to succeed.',
+        'It is a fast skill to learn. With ten days of dedicated study, you can acquire valuable marketing skills.',
+        'Be ready for a significant change as you learn and apply these marketing skills.',
+    ];
 
     return (
         <>
@@ -196,6 +213,25 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 ))}
                             </div>
                         </div>
+                    </div>
+                </div>
+            </section>
+
+            <section className="border-t border-white/[0.06] py-20">
+                <div className="mx-auto max-w-6xl px-6">
+                    <div className="mb-10 text-center">
+                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-300">Growth Doctrine</p>
+                        <h2 className="mt-3 text-4xl font-bold text-white">The operating principles behind Catalyst</h2>
+                        <p className="mx-auto mt-3 max-w-3xl text-gray-400">
+                            These lesson points now sit inside the Studio positioning and Long Form workflow so the product stays aligned with direct-response, measurable YouTube growth instead of generic creator fluff.
+                        </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {marketingDoctrine.map((point) => (
+                            <div key={point} className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 text-sm leading-relaxed text-gray-300">
+                                {point}
+                            </div>
+                        ))}
                     </div>
                 </div>
             </section>

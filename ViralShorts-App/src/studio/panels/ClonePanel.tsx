@@ -8,6 +8,7 @@ export default function ClonePanel() {
     const [viralFile, setViralFile] = useState<File | null>(null);
     const [topic, setTopic] = useState("");
     const [viralUrl, setViralUrl] = useState("");
+    const [analyticsNotes, setAnalyticsNotes] = useState("");
     const [showSource, setShowSource] = useState(false);
     const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
     const [jobId, setJobId] = useState<string | null>(null);
@@ -50,10 +51,11 @@ export default function ClonePanel() {
         setJobStatus(null);
         setJobId(null);
 
-        const fullTopic = viralUrl ? `${topic} [Source: ${viralUrl}]` : topic;
         const formData = new FormData();
-        formData.append("topic", fullTopic);
+        formData.append("topic", topic);
         formData.append("resolution", canUse1080p ? resolution : '720p');
+        if (viralUrl.trim()) formData.append("source_url", viralUrl.trim());
+        if (analyticsNotes.trim()) formData.append("analytics_notes", analyticsNotes.trim());
         if (viralFile) formData.append("file", viralFile);
 
         const headers: Record<string, string> = {};
@@ -139,6 +141,14 @@ export default function ClonePanel() {
                                 placeholder="https://tiktok.com/... or youtube.com/shorts/..."
                                 className="w-full bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 text-white placeholder:text-gray-600 text-xs focus:outline-none focus:ring-2 focus:ring-violet-500/50 disabled:opacity-50"
                             />
+                            <textarea
+                                value={analyticsNotes}
+                                onChange={e => setAnalyticsNotes(e.target.value)}
+                                disabled={!canClone || loading}
+                                placeholder="Optional private notes: CTR, average view duration, where people dropped, and why you think the source worked or failed."
+                                rows={4}
+                                className="mt-3 w-full bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 text-white placeholder:text-gray-600 text-xs focus:outline-none focus:ring-2 focus:ring-violet-500/50 disabled:opacity-50 resize-none"
+                            />
                         </div>
                     </div>
                 )}
@@ -191,6 +201,18 @@ export default function ClonePanel() {
                                 </div>
                                 {jobStatus.viral_analysis.what_made_it_viral && (
                                     <p className="text-gray-400 text-xs mt-2 italic">{jobStatus.viral_analysis.what_made_it_viral}</p>
+                                )}
+                                {jobStatus.source_video?.title && (
+                                    <div className="mt-3 rounded-xl border border-white/5 bg-black/20 px-3 py-2 text-xs text-gray-300">
+                                        <p className="font-medium text-white">{jobStatus.source_video.title}</p>
+                                        <p className="mt-1 text-gray-500">
+                                            {jobStatus.source_video.channel ? `${jobStatus.source_video.channel} · ` : ''}
+                                            {jobStatus.source_video.duration_sec ? `${jobStatus.source_video.duration_sec}s analyzed` : 'Source link analyzed'}
+                                        </p>
+                                        {jobStatus.source_video.public_summary && (
+                                            <p className="mt-2 text-gray-400">{jobStatus.source_video.public_summary}</p>
+                                        )}
+                                    </div>
                                 )}
                             </div>
                         )}

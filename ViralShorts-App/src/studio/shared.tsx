@@ -795,7 +795,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch (e) { console.error("Demo checkout failed", e); }
     }, [session, demoPriceId]);
 
-    const checkoutTopup = useCallback(async (priceId: string, preferredMethod: 'card' | 'paypal' = 'card'): Promise<string | null> => {
+    const checkoutTopup = useCallback(async (priceId: string, preferredMethod: 'card' | 'paypal' = 'paypal'): Promise<string | null> => {
         if (!priceId || !session) return "Missing top-up price";
         try {
             const res = await fetch(`${API}/api/checkout/topup`, {

@@ -3,6 +3,7 @@ import re
 import base64
 import shutil
 import random
+import secrets
 import asyncio
 import json
 import time
@@ -11,6 +12,7 @@ import tempfile
 import logging
 import io
 import calendar
+import zipfile
 import httpx
 import jwt
 from datetime import datetime, timezone
@@ -27,6 +29,7 @@ import uvicorn
 from backend_settings import (
     XAI_API_KEY,
     ELEVENLABS_API_KEY,
+    PIKZELS_API_KEY,
     COMFYUI_URL,
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
@@ -42,6 +45,9 @@ from backend_settings import (
     FAL_IMAGE_BACKUP_MODEL,
     XAI_IMAGE_MODEL,
     XAI_VIDEO_MODEL,
+    PIKZELS_THUMBNAIL_MODEL,
+    PIKZELS_RECREATE_MODEL,
+    PIKZELS_TITLE_MODEL,
     RUNWAY_API_KEY,
     RUNWAY_API_KEY_SOURCE,
     RUNWAY_VIDEO_MODEL,
@@ -213,6 +219,11 @@ try:
     import cv2
 except Exception:
     cv2 = None
+
+try:
+    import yt_dlp
+except Exception:
+    yt_dlp = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
@@ -4061,6 +4072,275 @@ async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature
     return json.loads(content[start:end])
 
 
+CATALYST_MARKETING_DOCTRINE = [
+    "Be active in the Daily Marketing Channel.",
+    "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
+    "Small, daily improvements in your marketing skills can lead to significant progress over time due to compounding.",
+    "Just like in boxing or other martial arts, consistent practice and real-world application are crucial for mastering marketing.",
+    "Engage with the daily challenges to continuously hone your skills. Missing a day occasionally is okay, but don't make it a habit.",
+    "Regardless of your field or business, understanding and practicing marketing is fundamental to success.",
+    "Treat the daily marketing challenges seriously and make it a part of your routine to see substantial benefits in your marketing abilities.",
+    "Mastering marketing has enabled Arno to start and scale companies and avoid manual labor by understanding how to attract clients and improve businesses.",
+    "It is a long-lasting skill. Marketing has been around for millennia and will continue to be valuable in the future.",
+    "Anyone can learn it. It doesn't require special skills, abilities, or connections. Pay attention, focus, and you can succeed.",
+    "High ROI (Return On Investment). Direct response marketing offers the highest and most reliable return on investment, outperforming traditional investments.",
+    "Learning marketing helps you see opportunities and gaps that others miss, making life easier.",
+    "You don't need to be the world's best marketer; being better than most is enough to succeed.",
+    "It is a fast skill to learn. With ten days of dedicated study, you can acquire valuable marketing skills.",
+    "Be ready for a significant change as you learn and apply these marketing skills.",
+]
+
+
+def _clip_text(value: str, max_chars: int = 320) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def _normalize_external_source_url(raw_value: str) -> str:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
+        raw = "https://" + raw.lstrip("/")
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return parsed.geturl()
+    except Exception:
+        return ""
+
+
+def _parse_vtt_text(raw_vtt: str) -> str:
+    lines = []
+    for raw_line in str(raw_vtt or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("WEBVTT") or "-->" in line:
+            continue
+        if re.fullmatch(r"[0-9:\.\- ]+", line):
+            continue
+        line = re.sub(r"<[^>]+>", " ", line)
+        line = re.sub(r"\{[^}]+\}", " ", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+    deduped: list[str] = []
+    prev = ""
+    for line in lines:
+        if line != prev:
+            deduped.append(line)
+            prev = line
+    return _clip_text(" ".join(deduped), 2200)
+
+
+def _pick_subtitle_candidate(info: dict, language: str = "en") -> tuple[str, str]:
+    preferred = []
+    for lang in [str(language or "").strip().lower(), "en", "en-us", "en-gb"]:
+        if lang and lang not in preferred:
+            preferred.append(lang)
+    pools = [
+        info.get("subtitles") if isinstance(info, dict) else {},
+        info.get("automatic_captions") if isinstance(info, dict) else {},
+    ]
+    for pool in pools:
+        if not isinstance(pool, dict):
+            continue
+        for lang in preferred:
+            variants = [lang]
+            if "-" in lang:
+                variants.append(lang.split("-", 1)[0])
+            for variant in variants:
+                entries = pool.get(variant)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    ext = str(entry.get("ext", "") or "").strip().lower()
+                    url = str(entry.get("url", "") or "").strip()
+                    if url and ext == "vtt":
+                        return url, ext
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    url = str(entry.get("url", "") or "").strip()
+                    ext = str(entry.get("ext", "") or "").strip().lower()
+                    if url:
+                        return url, ext or "unknown"
+    return "", ""
+
+
+def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed")
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "extract_flat": False,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(source_url, download=False) or {}
+
+
+async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> dict:
+    normalized_url = _normalize_external_source_url(source_url)
+    if not normalized_url:
+        return {}
+    if yt_dlp is None:
+        return {
+            "source_url": normalized_url,
+            "error": "yt_dlp_unavailable",
+            "public_summary": "Source URL provided, but yt-dlp is not available on this deployment.",
+        }
+    try:
+        info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, normalized_url)
+    except Exception as e:
+        return {
+            "source_url": normalized_url,
+            "error": str(e),
+            "public_summary": f"Source URL provided but metadata extraction failed: {_clip_text(str(e), 180)}",
+        }
+
+    chapters = []
+    for raw in list(info.get("chapters") or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        chapters.append({
+            "title": str(raw.get("title", "") or "").strip(),
+            "start_sec": float(raw.get("start_time", 0.0) or 0.0),
+            "end_sec": float(raw.get("end_time", 0.0) or 0.0),
+        })
+
+    transcript_excerpt = ""
+    subtitle_url, subtitle_ext = _pick_subtitle_candidate(info, language=language)
+    if subtitle_url and subtitle_ext == "vtt":
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(subtitle_url)
+                if resp.status_code == 200:
+                    transcript_excerpt = _parse_vtt_text(resp.text)
+        except Exception:
+            transcript_excerpt = ""
+
+    title = str(info.get("title", "") or "").strip()
+    description = str(info.get("description", "") or "").strip()
+    channel = str(info.get("channel", "") or info.get("uploader", "") or "").strip()
+    duration_sec = int(float(info.get("duration", 0) or 0))
+    view_count = int(float(info.get("view_count", 0) or 0))
+    like_count = int(float(info.get("like_count", 0) or 0))
+    comment_count = int(float(info.get("comment_count", 0) or 0))
+    tags = [str(tag).strip() for tag in list(info.get("tags") or []) if str(tag).strip()][:20]
+    categories = [str(cat).strip() for cat in list(info.get("categories") or []) if str(cat).strip()][:8]
+    upload_date = str(info.get("upload_date", "") or "").strip()
+    public_summary_parts = [
+        f"Title: {title}" if title else "",
+        f"Channel: {channel}" if channel else "",
+        f"Duration: {duration_sec}s" if duration_sec > 0 else "",
+        f"Views: {view_count}" if view_count > 0 else "",
+        f"Likes: {like_count}" if like_count > 0 else "",
+        f"Comments: {comment_count}" if comment_count > 0 else "",
+        f"Tags: {', '.join(tags[:8])}" if tags else "",
+        f"Top chapters: {', '.join(ch['title'] for ch in chapters[:4] if ch.get('title'))}" if chapters else "",
+        f"Transcript excerpt: {transcript_excerpt}" if transcript_excerpt else "",
+    ]
+
+    return {
+        "source_url": normalized_url,
+        "canonical_url": str(info.get("webpage_url", "") or normalized_url),
+        "platform": str(info.get("extractor_key", "") or info.get("extractor", "") or "web").strip(),
+        "title": title,
+        "description": description,
+        "channel": channel,
+        "channel_url": str(info.get("channel_url", "") or "").strip(),
+        "thumbnail_url": str(info.get("thumbnail", "") or "").strip(),
+        "duration_sec": duration_sec,
+        "view_count": view_count,
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "upload_date": upload_date,
+        "tags": tags,
+        "categories": categories,
+        "chapters": chapters,
+        "transcript_excerpt": transcript_excerpt,
+        "public_summary": " | ".join(part for part in public_summary_parts if part),
+    }
+
+
+def _marketing_doctrine_text(extra_notes: str = "") -> str:
+    doctrine = list(CATALYST_MARKETING_DOCTRINE)
+    if str(extra_notes or "").strip():
+        doctrine.append(str(extra_notes).strip())
+    return "\n".join(f"- {line}" for line in doctrine if str(line).strip())
+
+
+async def _build_source_performance_analysis(
+    source_bundle: dict,
+    analytics_notes: str = "",
+    topic: str = "",
+    input_title: str = "",
+    input_description: str = "",
+    strategy_notes: str = "",
+) -> dict:
+    if not source_bundle and not analytics_notes:
+        return {}
+    system_prompt = (
+        "You are a YouTube growth strategist for NYPTID Studio. "
+        "Analyze a source video using public metadata plus optional operator notes. "
+        "Output strict JSON with keys: what_worked, what_hurt, hook_learnings, click_drivers, "
+        "dropoff_risks, improvement_moves, title_angles, thumbnail_angles, description_angles. "
+        "Keep every field practical and specific for building a better follow-up video."
+    )
+    user_prompt = (
+        f"New target topic: {topic}\n"
+        f"Draft title constraint: {input_title}\n"
+        f"Draft description constraint: {input_description}\n"
+        f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
+        f"Private analytics/operator notes: {_clip_text(analytics_notes, 1800)}\n"
+        "Use this marketing doctrine as operating context:\n"
+        f"{_marketing_doctrine_text(strategy_notes)}"
+    )
+    try:
+        return await _xai_json_completion(system_prompt, user_prompt, temperature=0.35, timeout_sec=60)
+    except Exception as e:
+        return {
+            "what_worked": _clip_text((source_bundle or {}).get("public_summary", ""), 220),
+            "what_hurt": _clip_text(analytics_notes, 220),
+            "hook_learnings": [],
+            "click_drivers": [],
+            "dropoff_risks": [],
+            "improvement_moves": [_clip_text(str(e), 220)],
+            "title_angles": [],
+            "thumbnail_angles": [],
+            "description_angles": [],
+        }
+
+
+def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "") -> str:
+    parts: list[str] = []
+    if source_bundle:
+        parts.append("Public source analysis:")
+        parts.append(str(source_bundle.get("public_summary", "") or "").strip())
+    if source_analysis:
+        worked = source_analysis.get("what_worked")
+        hurt = source_analysis.get("what_hurt")
+        if worked:
+            parts.append("What worked: " + _clip_text(str(worked), 240))
+        if hurt:
+            parts.append("What hurt: " + _clip_text(str(hurt), 240))
+        moves = source_analysis.get("improvement_moves") or []
+        if isinstance(moves, list) and moves:
+            parts.append("Improvement moves: " + "; ".join(_clip_text(str(m), 120) for m in moves[:5] if str(m).strip()))
+    if str(analytics_notes or "").strip():
+        parts.append("Private analytics notes: " + _clip_text(analytics_notes, 320))
+    return "\n".join(part for part in parts if part)
+
+
 def _normalize_longform_scenes_for_render(scenes: list) -> list:
     normalized = []
     for idx, raw_scene in enumerate(scenes or []):
@@ -4157,12 +4437,15 @@ async def _generate_longform_chapter(
     topic: str,
     input_title: str,
     input_description: str,
+    format_preset: str,
     chapter_index: int,
     chapter_count: int,
     chapter_target_sec: float,
     language: str = "en",
     brand_slot: str = "",
     fix_note: str = "",
+    source_context: str = "",
+    strategy_notes: str = "",
 ) -> dict:
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
@@ -4172,7 +4455,8 @@ async def _generate_longform_chapter(
         "Output strict JSON with keys: chapter_title, chapter_summary, scenes, chapter_description. "
         f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay. "
         "narration must be concise and engaging; visual_description must be render-ready and specific. "
-        "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat."
+        "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
+        "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler."
     )
     if template == "skeleton":
         system_prompt += (
@@ -4192,9 +4476,14 @@ async def _generate_longform_chapter(
         f"Topic: {topic}\n"
         f"Video title constraint: {input_title}\n"
         f"Video description constraint: {input_description}\n"
+        f"Format preset: {format_preset}\n"
         f"Chapter {chapter_index + 1} of {chapter_count}, target chapter duration: {int(chapter_target_sec)} seconds.\n"
         "The chapter must push the story forward with strong pacing and retention.\n"
     )
+    if source_context:
+        user_prompt += f"Source-video context to learn from:\n{source_context}\n"
+    if strategy_notes:
+        user_prompt += f"Strategy doctrine:\n{strategy_notes}\n"
     if str(brand_slot or "").strip().lower() == "outro":
         user_prompt += (
             "Include one natural NYPTID Studio mention only in the final scene narration of this chapter. "
@@ -10452,9 +10741,13 @@ def _longform_public_session(session: dict) -> dict:
     return {
         "session_id": str(s.get("session_id", "") or ""),
         "template": str(s.get("template", "") or ""),
+        "format_preset": str(s.get("format_preset", "explainer") or "explainer"),
         "topic": str(s.get("topic", "") or ""),
         "input_title": str(s.get("input_title", "") or ""),
         "input_description": str(s.get("input_description", "") or ""),
+        "source_url": str(s.get("source_url", "") or ""),
+        "analytics_notes": str(s.get("analytics_notes", "") or ""),
+        "strategy_notes": str(s.get("strategy_notes", "") or ""),
         "target_minutes": float(s.get("target_minutes", 0) or 0),
         "language": str(s.get("language", "en") or "en"),
         "resolution": str(s.get("resolution", "720p_landscape") or "720p_landscape"),
@@ -10492,8 +10785,10 @@ def _longform_session_summary(session: dict) -> dict:
     return {
         "session_id": str(s.get("session_id", "") or ""),
         "template": str(s.get("template", "") or ""),
+        "format_preset": str(s.get("format_preset", "explainer") or "explainer"),
         "topic": str(s.get("topic", "") or ""),
         "input_title": str(s.get("input_title", "") or ""),
+        "source_url": str(s.get("source_url", "") or ""),
         "target_minutes": float(s.get("target_minutes", 0) or 0),
         "language": str(s.get("language", "en") or "en"),
         "resolution": str(s.get("resolution", "720p_landscape") or "720p_landscape"),
@@ -10768,9 +11063,13 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
             return
 
         template = _normalize_longform_template(session.get("template", "story"))
+        format_preset = str(session.get("format_preset", "explainer") or "explainer").strip().lower()
         topic = str(session.get("topic", "") or "").strip()
         input_title = str(session.get("input_title", "") or "").strip()
         input_description = str(session.get("input_description", "") or "").strip()
+        metadata_pack = dict(session.get("metadata_pack") or {})
+        source_context = str(metadata_pack.get("source_context", "") or "").strip()
+        strategy_notes = _marketing_doctrine_text(str(session.get("strategy_notes", "") or "").strip())
         language = _normalize_longform_language(session.get("language", "en"))
         resolution = str(session.get("resolution", "720p_landscape") or "720p_landscape")
         chapter_tone = _longform_detect_tone(template, topic, input_title, input_description)
@@ -10790,11 +11089,14 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 topic=topic,
                 input_title=input_title,
                 input_description=input_description,
+                format_preset=format_preset,
                 chapter_index=chapter_index,
                 chapter_count=chapter_count,
                 chapter_target_sec=chapter_target_sec,
                 language=language,
                 brand_slot=slot,
+                source_context=source_context,
+                strategy_notes=strategy_notes,
             )
             chapter["last_error"] = ""
         except Exception as e:
@@ -11256,9 +11558,17 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     template = _normalize_longform_template(req.template)
+    format_preset = str(getattr(req, "format_preset", "explainer") or "explainer").strip().lower()
+    if format_preset not in {"recap", "explainer", "documentary", "story_channel"}:
+        format_preset = "explainer"
     topic = str(req.topic or "").strip()
     input_title = str(req.input_title or "").strip()
     input_description = str(req.input_description or "").strip()
+    source_url = _normalize_external_source_url(getattr(req, "source_url", ""))
+    if str(getattr(req, "source_url", "") or "").strip() and not source_url:
+        raise HTTPException(400, "Source URL is invalid")
+    analytics_notes = str(getattr(req, "analytics_notes", "") or "").strip()
+    strategy_notes = str(getattr(req, "strategy_notes", "") or "").strip()
     if not topic:
         raise HTTPException(400, "Topic is required")
     if not input_title:
@@ -11268,6 +11578,16 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
     target_minutes = _normalize_longform_target_minutes(req.target_minutes)
     language = _normalize_longform_language(req.language)
     whisper_mode = _normalize_longform_whisper_mode(req.whisper_mode)
+    source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
+    source_analysis = await _build_source_performance_analysis(
+        source_bundle=source_bundle,
+        analytics_notes=analytics_notes,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        strategy_notes=strategy_notes,
+    )
+    source_context = _render_source_context(source_bundle, source_analysis, analytics_notes)
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
     chapters = [
@@ -11285,6 +11605,7 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         _longform_title_variant(input_title, topic),
         f"{input_title} | Full Breakdown",
         f"{topic} - Complete Breakdown",
+        *list(source_analysis.get("title_angles") or []),
     ]:
         tt = str(t or "").strip()
         if tt and tt not in title_variants:
@@ -11295,19 +11616,40 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         input_description,
         (input_description + " Built with NYPTID Studio."),
         ("Built in NYPTID Studio: " + input_description),
+        *list(source_analysis.get("description_angles") or []),
     ]:
         dd = str(d or "").strip()
         if dd and dd not in description_variants:
             description_variants.append(dd)
 
+    thumbnail_prompts: list[str] = []
+    for prompt in [
+        *list(source_analysis.get("thumbnail_angles") or []),
+        f"{input_title} cinematic hero frame, high contrast, readable face/subject, YouTube thumbnail style",
+        f"{topic} dramatic split-moment scene, premium documentary look, 16:9 thumbnail",
+        f"{topic} faceless YouTube thumbnail, strong contrast, one clear emotional focal point, 16:9",
+    ]:
+        candidate = str(prompt or "").strip()
+        if candidate and candidate not in thumbnail_prompts:
+            thumbnail_prompts.append(candidate)
+
     metadata_pack = {
-        "title_variants": title_variants,
-        "description_variants": description_variants,
-        "thumbnail_prompts": [
-            f"{input_title} cinematic hero frame, high contrast, readable face/subject, YouTube thumbnail style",
-            f"{topic} dramatic split-moment scene, premium documentary look, 16:9 thumbnail",
+        "title_variants": title_variants[:3],
+        "description_variants": description_variants[:3],
+        "thumbnail_prompts": thumbnail_prompts[:3],
+        "tags": [
+            template,
+            format_preset,
+            "nyptid",
+            "longform",
+            topic[:32].replace(" ", "_").lower(),
+            *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:6] if str(tag).strip()],
         ],
-        "tags": [template, "nyptid", "longform", topic[:32].replace(" ", "_").lower()],
+        "source_video": source_bundle,
+        "source_analysis": source_analysis,
+        "source_context": source_context,
+        "strategy_notes": strategy_notes,
+        "marketing_doctrine": list(CATALYST_MARKETING_DOCTRINE),
     }
     session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
     now = time.time()
@@ -11315,9 +11657,13 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         "session_id": session_id,
         "user_id": str(user.get("id", "") or ""),
         "template": template,
+        "format_preset": format_preset,
         "topic": topic,
         "input_title": input_title,
         "input_description": input_description,
+        "source_url": source_url,
+        "analytics_notes": analytics_notes,
+        "strategy_notes": strategy_notes,
         "target_minutes": float(target_minutes),
         "language": language,
         "resolution": "720p_landscape",
@@ -11569,12 +11915,15 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         topic=str(session_copy.get("topic", "") or ""),
         input_title=str(session_copy.get("input_title", "") or ""),
         input_description=str(session_copy.get("input_description", "") or ""),
+        format_preset=str(session_copy.get("format_preset", "explainer") or "explainer"),
         chapter_index=chapter_index,
         chapter_count=len(list(session_copy.get("chapters") or [])),
         chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
         language=_normalize_longform_language(session_copy.get("language", "en")),
         brand_slot=str(chapter.get("brand_slot", "") or ""),
         fix_note=str(req.reason or "").strip(),
+        source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
+        strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -11633,12 +11982,15 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         topic=str(session_copy.get("topic", "") or ""),
         input_title=str(session_copy.get("input_title", "") or ""),
         input_description=str(session_copy.get("input_description", "") or ""),
+        format_preset=str(session_copy.get("format_preset", "explainer") or "explainer"),
         chapter_index=chapter_index,
         chapter_count=len(list(session_copy.get("chapters") or [])),
         chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
         language=_normalize_longform_language(session_copy.get("language", "en")),
         brand_slot=str(chapter.get("brand_slot", "") or ""),
         fix_note=str(req.fix_note or "").strip(),
+        source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
+        strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -13345,7 +13697,7 @@ async def public_config():
     return {
         "supabase_url": SUPABASE_URL,
         "supabase_anon_key": SUPABASE_ANON_KEY,
-        "stripe_enabled": bool(STRIPE_SECRET_KEY),
+        "stripe_enabled": bool(STRIPE_SECRET_KEY and STRIPE_TOPUP_PUBLIC_ENABLED),
         "waitlist_only_mode": False,
         "waitlist_requires_stripe_payment": False,
         "maintenance_banner_enabled": _maintenance_banner_enabled,
@@ -13359,7 +13711,7 @@ async def public_config():
             for name, features in PLAN_FEATURES.items()
         },
         "plan_prices_usd": {k: float(v) for k, v in PLAN_PRICE_USD.items()},
-        "prices": {v: k for k, v in STRIPE_PRICE_TO_PLAN.items()},
+        "prices": ({v: k for k, v in STRIPE_PRICE_TO_PLAN.items()} if STRIPE_TOPUP_PUBLIC_ENABLED else {}),
         "topup_packs": [
             {"price_id": price_id, **meta}
             for price_id, meta in TOPUP_PACKS.items()
@@ -13377,6 +13729,7 @@ async def public_config():
             "model": "membership_plus_credits",
             "default_membership_plan_id": _default_membership_plan_id(),
             "membership_label": "Catalyst Membership",
+            "paypal_primary": True,
             "slideshows_free": True,
             "animated_credit_label": "Catalyst credits",
             "non_animated_credit_label": "script/image/slideshow operations",
@@ -13966,11 +14319,13 @@ async def transcribe_audio_with_grok(audio_path: str) -> str:
     return f"Audio duration: {duration:.1f}s"
 
 
-async def analyze_viral_video(topic: str, video_description: str, transcript_hint: str = "") -> dict:
+async def analyze_viral_video(topic: str, video_description: str, transcript_hint: str = "", source_notes: str = "") -> dict:
     user_parts = []
     user_parts.append("Source viral video context: " + video_description)
     if transcript_hint:
         user_parts.append("Audio/timing info from source: " + transcript_hint)
+    if source_notes:
+        user_parts.append("Operator notes / analytics hints: " + source_notes)
     user_parts.append("New topic to apply the viral formula to: " + topic)
     user_msg = "\n\n".join(user_parts)
 
@@ -14083,7 +14438,14 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
         return json.loads(content[start:end])
 
 
-async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, resolution: str = "720p"):
+async def run_clone_pipeline(
+    job_id: str,
+    topic: str,
+    video_path: str | None,
+    source_url: str = "",
+    analytics_notes: str = "",
+    resolution: str = "720p",
+):
     try:
         _job_set_stage(job_id, "analyzing", 5)
         log.info(f"[{job_id}] Clone: analyzing viral video for topic '{topic}'")
@@ -14091,20 +14453,36 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
         video_context = topic
         transcript_hint = ""
         meta = {}
+        source_bundle = {}
+        normalized_source_url = _normalize_external_source_url(source_url)
+        if normalized_source_url:
+            source_bundle = await _fetch_source_video_bundle(normalized_source_url)
+            if source_bundle:
+                jobs[job_id]["source_video"] = {
+                    "source_url": str(source_bundle.get("source_url", "") or normalized_source_url),
+                    "title": str(source_bundle.get("title", "") or ""),
+                    "channel": str(source_bundle.get("channel", "") or ""),
+                    "duration_sec": int(source_bundle.get("duration_sec", 0) or 0),
+                    "thumbnail_url": str(source_bundle.get("thumbnail_url", "") or ""),
+                    "public_summary": str(source_bundle.get("public_summary", "") or ""),
+                }
+                video_context = str(source_bundle.get("public_summary", "") or topic)
+                transcript_hint = str(source_bundle.get("transcript_excerpt", "") or "")
         if video_path:
             meta = await extract_video_metadata(video_path) or {}
             if meta:
-                video_context = (
+                upload_context = (
                     "Source video file uploaded: "
                     + str(meta.get("duration_sec", "?")) + "s long, "
                     + str(meta.get("width", "?")) + "x" + str(meta.get("height", "?")) + " resolution"
                 )
+                video_context = f"{video_context}\n{upload_context}".strip()
             audio_path = await extract_audio_from_video(video_path)
             if audio_path:
-                transcript_hint = await transcribe_audio_with_grok(audio_path)
+                transcript_hint = await transcribe_audio_with_grok(audio_path) or transcript_hint
                 Path(audio_path).unlink(missing_ok=True)
 
-        analysis = await analyze_viral_video(topic, video_context, transcript_hint)
+        analysis = await analyze_viral_video(topic, video_context, transcript_hint, analytics_notes)
         detected_template = analysis.get("detected_template", "random")
         viral_info = analysis.get("viral_analysis", {})
 
@@ -14288,6 +14666,8 @@ async def run_clone_pipeline(job_id: str, topic: str, video_path: str | None, re
 async def clone_video(
     topic: str = Form(...),
     resolution: str = Form("720p"),
+    source_url: str = Form(""),
+    analytics_notes: str = Form(""),
     file: UploadFile = File(None),
     background_tasks: BackgroundTasks = None,
     request: Request = None,
@@ -14316,6 +14696,7 @@ async def clone_video(
         "progress": 0,
         "template": "analyzing...",
         "topic": topic,
+        "source_url": _normalize_external_source_url(source_url),
         "lane": "clone",
         "mode": "clone_rebuild",
         "resolution": res,
@@ -14326,7 +14707,12 @@ async def clone_video(
     }
 
     try:
-        await enqueue_generation_job(job_id, "starter", run_clone_pipeline, (job_id, topic, video_path, res))
+        await enqueue_generation_job(
+            job_id,
+            "starter",
+            run_clone_pipeline,
+            (job_id, topic, video_path, source_url, analytics_notes, res),
+        )
     except QueueFullError as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -15115,9 +15501,9 @@ async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(
         raise HTTPException(400, "Invalid top-up pack")
     if user.get("email", "") in ADMIN_EMAILS:
         raise HTTPException(400, "Admin account does not require top-up packs")
-    preferred_method = str(getattr(req, "preferred_method", "card") or "card").strip().lower()
+    preferred_method = str(getattr(req, "preferred_method", "paypal") or "paypal").strip().lower()
     if preferred_method not in {"card", "paypal"}:
-        preferred_method = "card"
+        preferred_method = "paypal"
     if preferred_method == "card" and not STRIPE_TOPUP_PUBLIC_ENABLED:
         raise HTTPException(400, "Stripe checkout is coming soon. Use PayPal for now.")
     if preferred_method == "paypal":
@@ -15658,12 +16044,206 @@ THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
 THUMBNAIL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_OUTPUT_DIR = THUMBNAIL_DIR / "generated"
 THUMBNAIL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAIL_SHARE_DIR = THUMBNAIL_DIR / "shared"
+THUMBNAIL_SHARE_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAIL_SHARE_STATE_FILE = THUMBNAIL_DIR / "share_links.json"
+THUMBNAIL_STYLE_STATE_FILE = THUMBNAIL_DIR / "pikzels_style_profiles.json"
+_thumbnail_share_links: dict[str, dict] = {}
+_thumbnail_share_lock = asyncio.Lock()
+_thumbnail_style_profiles: dict[str, dict] = {}
+_thumbnail_style_lock = asyncio.Lock()
 
 THUMBNAIL_RUNPOD_HOST = os.getenv("THUMBNAIL_RUNPOD_HOST", "root@69.30.85.41")
 THUMBNAIL_RUNPOD_SSH_PORT = os.getenv("THUMBNAIL_RUNPOD_SSH_PORT", "22118")
 RUNPOD_SSH = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p {THUMBNAIL_RUNPOD_SSH_PORT} {THUMBNAIL_RUNPOD_HOST}"
 RUNPOD_TRAINING_DIR = "/workspace/thumbnail_training/images"
 LORA_NAME = "nyptid_thumbnails.safetensors"
+
+
+def _load_thumbnail_share_links() -> None:
+    global _thumbnail_share_links
+    try:
+        if THUMBNAIL_SHARE_STATE_FILE.exists():
+            data = json.loads(THUMBNAIL_SHARE_STATE_FILE.read_text(encoding="utf-8"))
+            _thumbnail_share_links = data if isinstance(data, dict) else {}
+        else:
+            _thumbnail_share_links = {}
+    except Exception:
+        _thumbnail_share_links = {}
+
+
+def _save_thumbnail_share_links() -> None:
+    THUMBNAIL_SHARE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    THUMBNAIL_SHARE_STATE_FILE.write_text(json.dumps(_thumbnail_share_links, indent=2), encoding="utf-8")
+
+
+def _load_thumbnail_style_profiles() -> None:
+    global _thumbnail_style_profiles
+    try:
+        if THUMBNAIL_STYLE_STATE_FILE.exists():
+            data = json.loads(THUMBNAIL_STYLE_STATE_FILE.read_text(encoding="utf-8"))
+            _thumbnail_style_profiles = data if isinstance(data, dict) else {}
+        else:
+            _thumbnail_style_profiles = {}
+    except Exception:
+        _thumbnail_style_profiles = {}
+
+
+def _save_thumbnail_style_profiles() -> None:
+    THUMBNAIL_STYLE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    THUMBNAIL_STYLE_STATE_FILE.write_text(json.dumps(_thumbnail_style_profiles, indent=2), encoding="utf-8")
+
+
+def _thumbnail_style_profile_key(user: Optional[dict]) -> str:
+    return _storage_safe_user_segment(user)
+
+
+def _thumbnail_share_url(token: str) -> str:
+    return f"{_api_public_url().rstrip('/')}/api/public/thumbnail-share/{quote(str(token or '').strip())}"
+
+
+async def _register_thumbnail_share(path: Path, user: Optional[dict], ttl_sec: int = 7200) -> str:
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    token = secrets.token_urlsafe(24)
+    async with _thumbnail_share_lock:
+        _load_thumbnail_share_links()
+        _thumbnail_share_links[token] = {
+            "path": str(path),
+            "user_id": str((user or {}).get("id", "") or ""),
+            "expires_at": int(time.time() + max(300, int(ttl_sec or 7200))),
+        }
+        _save_thumbnail_share_links()
+    return token
+
+
+def _thumbnail_library_images(user: Optional[dict]) -> list[Path]:
+    library_dir = _thumbnail_library_dir_for_user(user) if user else THUMBNAIL_UPLOAD_DIR
+    files = [
+        p for p in library_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+    ] if library_dir.exists() else []
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+async def _build_thumbnail_style_zip(user: Optional[dict]) -> tuple[Path, list[str], str]:
+    files = _thumbnail_library_images(user)[:3]
+    if len(files) < 1:
+        raise RuntimeError("Upload at least 1 thumbnail before building a style pack.")
+    safe_user = _storage_safe_user_segment(user)
+    signature = "|".join(
+        f"{p.name}:{int(p.stat().st_size)}:{int(p.stat().st_mtime)}"
+        for p in files
+    )
+    zip_path = THUMBNAIL_SHARE_DIR / f"{safe_user}_style_pack.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx, file_path in enumerate(files, start=1):
+            ext = ".jpg" if file_path.suffix.lower() not in {".png", ".jpg", ".jpeg"} else file_path.suffix.lower()
+            zf.write(file_path, arcname=f"reference_{idx}{ext}")
+    return zip_path, [p.name for p in files], signature
+
+
+def _pikzels_error_message(payload: dict, fallback: str) -> str:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message", "") or "").strip()
+            details = str(error.get("details", "") or "").strip()
+            if message and details:
+                return f"{message}: {details}"
+            if message:
+                return message
+    return fallback
+
+
+async def _pikzels_request(method: str, path: str, json_body: Optional[dict] = None, params: Optional[dict] = None) -> dict:
+    if not PIKZELS_API_KEY:
+        raise RuntimeError("PIKZELS_API_KEY not configured")
+    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
+        resp = await client.request(
+            method.upper(),
+            f"https://api.pikzels.com{path}",
+            headers={
+                "X-Api-Key": PIKZELS_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=json_body,
+            params=params,
+        )
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(_pikzels_error_message(payload, f"Pikzels request failed ({resp.status_code})"))
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _refresh_thumbnail_style_profile(user: Optional[dict]) -> dict:
+    key = _thumbnail_style_profile_key(user)
+    async with _thumbnail_style_lock:
+        _load_thumbnail_style_profiles()
+        profile = dict(_thumbnail_style_profiles.get(key, {}) or {})
+    style_id = str(profile.get("style_id", "") or "").strip()
+    if not style_id or not PIKZELS_API_KEY:
+        return profile
+    try:
+        data = await _pikzels_request("GET", "/v1/style", params={"id": style_id})
+        normalized_status = str(data.get("status", "") or "").strip().lower()
+        profile.update({
+            "style_id": style_id,
+            "status": normalized_status,
+            "progress": int(float(data.get("progress", 0) or 0)),
+            "name": str(data.get("name", profile.get("name", "")) or ""),
+            "preview_url": str(data.get("temp_portrait_url", profile.get("preview_url", "")) or ""),
+            "last_checked_at": int(time.time()),
+        })
+        async with _thumbnail_style_lock:
+            _load_thumbnail_style_profiles()
+            _thumbnail_style_profiles[key] = profile
+            _save_thumbnail_style_profiles()
+    except Exception as e:
+        profile["last_error"] = str(e)
+    return profile
+
+
+async def _train_thumbnail_style_profile(user: Optional[dict]) -> dict:
+    if not PIKZELS_API_KEY:
+        raise RuntimeError("PIKZELS_API_KEY not configured")
+    zip_path, selected_files, signature = await _build_thumbnail_style_zip(user)
+    key = _thumbnail_style_profile_key(user)
+    safe_user = re.sub(r"[^a-zA-Z0-9_-]+", "", key)[:20] or "studio"
+    async with _thumbnail_style_lock:
+        _load_thumbnail_style_profiles()
+        existing = dict(_thumbnail_style_profiles.get(key, {}) or {})
+    if str(existing.get("library_signature", "") or "") == signature and str(existing.get("style_id", "") or "").strip():
+        return await _refresh_thumbnail_style_profile(user)
+    share_token = await _register_thumbnail_share(zip_path, user, ttl_sec=10800)
+    style_name = f"{safe_user[:20]}-{int(time.time())}"[:25]
+    result = await _pikzels_request(
+        "POST",
+        "/v1/style",
+        json_body={
+            "name": style_name,
+            "training_data": _thumbnail_share_url(share_token),
+        },
+    )
+    profile = {
+        "style_id": str(result.get("id", "") or ""),
+        "status": str(result.get("status", "queued") or "queued").strip().lower(),
+        "progress": 0,
+        "name": style_name,
+        "preview_url": "",
+        "library_signature": signature,
+        "reference_files": selected_files,
+        "last_synced_at": int(time.time()),
+    }
+    async with _thumbnail_style_lock:
+        _load_thumbnail_style_profiles()
+        _thumbnail_style_profiles[key] = profile
+        _save_thumbnail_style_profiles()
+    return profile
 
 
 def _storage_safe_user_segment(user: Optional[dict]) -> str:
@@ -15915,74 +16495,27 @@ async def sync_thumbnail_to_runpod(local_path: str) -> tuple[bool, str]:
 
 
 async def check_lora_status(user: Optional[dict] = None) -> dict:
-    """Check if the LoRA trainer is running and if a trained LoRA exists on RunPod."""
+    """Expose thumbnail style-training status using Pikzels-backed profiles."""
     library_dir = _thumbnail_library_dir_for_user(user) if user else THUMBNAIL_UPLOAD_DIR
     local_count = len([p for p in library_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]) if library_dir.exists() else 0
-    if not _is_admin_user(user):
-        return {
-            "lora_available": False,
-            "is_training": False,
-            "total_images": local_count,
-            "local_library_images": local_count,
-            "trained_images": 0,
-            "version": 0,
-            "last_train": 0,
-            "training_available": False,
-        }
-    try:
-        cmd = (
-            f"{RUNPOD_SSH} '"
-            "ls -la /workspace/ComfyUI/models/loras/nyptid_thumbnails.safetensors 2>/dev/null; "
-            "cat /workspace/thumbnail_training/output/training_state.json 2>/dev/null; "
-            "test -f /workspace/thumbnail_training/output/training.lock && echo TRAINING_ACTIVE || echo TRAINING_IDLE; "
-            "ls /workspace/thumbnail_training/images/ 2>/dev/null | wc -l"
-            "'"
-        )
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        output = stdout.decode()
-
-        has_lora = "nyptid_thumbnails.safetensors" in output and "No such file" not in output
-        is_training = "TRAINING_ACTIVE" in output
-        lines = output.strip().split("\n")
-        image_count = 0
-        for line in lines:
-            if line.strip().isdigit():
-                image_count = int(line.strip())
-
-        state = {}
-        try:
-            for line in lines:
-                if line.strip().startswith("{"):
-                    state = json.loads(line.strip())
-                    break
-        except Exception:
-            pass
-
-        return {
-            "lora_available": has_lora,
-            "is_training": is_training,
-            "total_images": image_count,
-            "local_library_images": local_count,
-            "trained_images": state.get("image_count", 0),
-            "version": state.get("version", 0),
-            "last_train": state.get("last_train", 0),
-            "training_available": True,
-        }
-    except Exception as e:
-        log.warning(f"LoRA status check failed: {e}")
-        return {
-            "lora_available": False,
-            "is_training": False,
-            "total_images": 0,
-            "local_library_images": local_count,
-            "trained_images": 0,
-            "version": 0,
-            "last_train": 0,
-            "training_available": True,
-        }
+    profile = await _refresh_thumbnail_style_profile(user)
+    status = str(profile.get("status", "") or "").strip().lower()
+    ready = status == "ready"
+    is_training = status in {"queued", "analyzing", "training"}
+    return {
+        "lora_available": ready,
+        "is_training": is_training,
+        "total_images": len(list(profile.get("reference_files") or [])),
+        "local_library_images": local_count,
+        "trained_images": len(list(profile.get("reference_files") or [])),
+        "version": 1 if ready else 0,
+        "last_train": int(profile.get("last_synced_at", 0) or 0),
+        "training_available": bool(PIKZELS_API_KEY) and local_count >= 1,
+        "provider": "pikzels",
+        "style_id": str(profile.get("style_id", "") or ""),
+        "style_status": status,
+        "portrait_url": str(profile.get("preview_url", "") or ""),
+    }
 
 
 @app.get("/api/thumbnails/training-status")
@@ -15992,32 +16525,20 @@ async def training_status(user: dict = Depends(require_auth)):
 
 @app.post("/api/thumbnails/sync-library")
 async def sync_thumbnail_library(user: dict = Depends(require_auth)):
-    if not _is_admin_user(user):
-        raise HTTPException(403, "Admin only")
-    library_dir = _thumbnail_library_dir_for_user(user)
-    files = [p for p in library_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+    files = _thumbnail_library_images(user)
     if not files:
         return {"status": "no_files", "queued": 0, "synced": 0, "failed": 0}
-
-    synced = 0
-    failed = 0
-    failed_files = []
-    for p in files:
-        ok, err = await sync_thumbnail_to_runpod(str(p))
-        if ok:
-            synced += 1
-        else:
-            failed += 1
-            failed_files.append({"file": p.name, "error": err[:180]})
-
-    status = "complete" if failed == 0 else ("partial" if synced > 0 else "failed")
-    log.info(f"Thumbnail library sync finished: status={status}, synced={synced}, failed={failed}, total={len(files)}")
+    try:
+        profile = await _train_thumbnail_style_profile(user)
+    except Exception as e:
+        raise HTTPException(400, str(e))
     return {
-        "status": status,
-        "queued": len(files),
-        "synced": synced,
-        "failed": failed,
-        "failed_files": failed_files[:10],
+        "status": str(profile.get("status", "queued") or "queued"),
+        "queued": min(3, len(files)),
+        "synced": min(3, len(list(profile.get("reference_files") or []))),
+        "failed": 0,
+        "style_id": str(profile.get("style_id", "") or ""),
+        "style_status": str(profile.get("status", "") or ""),
     }
 
 
@@ -16101,6 +16622,32 @@ async def delete_thumbnail(filename: str, user: dict = Depends(require_auth)):
     return {"status": "deleted"}
 
 
+@app.get("/api/public/thumbnail-share/{token}")
+async def serve_public_thumbnail_share(token: str):
+    async with _thumbnail_share_lock:
+        _load_thumbnail_share_links()
+        entry = dict(_thumbnail_share_links.get(token, {}) or {})
+        if not entry:
+            raise HTTPException(404, "Shared asset not found")
+        expires_at = int(entry.get("expires_at", 0) or 0)
+        if expires_at > 0 and expires_at < int(time.time()):
+            _thumbnail_share_links.pop(token, None)
+            _save_thumbnail_share_links()
+            raise HTTPException(410, "Shared asset expired")
+    path = Path(str(entry.get("path", "") or ""))
+    if not path.exists():
+        raise HTTPException(404, "Shared asset missing")
+    suffix = path.suffix.lower()
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".zip": "application/zip",
+    }.get(suffix, "application/octet-stream")
+    return FileResponse(str(path), media_type=media_type, filename=path.name)
+
+
 @app.get("/api/thumbnails/generated/{filename}")
 async def serve_generated_thumbnail(filename: str, request: Request):
     user = await get_current_user_from_request(request)
@@ -16113,7 +16660,7 @@ async def serve_generated_thumbnail(filename: str, request: Request):
     return FileResponse(str(path), media_type=mime)
 
 
-THUMBNAIL_ANALYSIS_PROMPT = """You are an elite YouTube thumbnail design strategist and art director. You analyze what makes thumbnails get clicks and generate precise SDXL image prompts to create thumbnails that outperform human designers.
+THUMBNAIL_ANALYSIS_PROMPT = """You are an elite YouTube thumbnail design strategist and art director. You analyze what makes thumbnails get clicks and generate precise production prompts that create thumbnails that outperform human designers.
 
 You understand:
 - Color psychology (red/yellow = urgency, blue = trust, contrast = attention)
@@ -16126,7 +16673,7 @@ When given a video description, style reference, or sketch, you produce a detail
 
 Output MUST be valid JSON:
 {
-  "prompt": "Detailed SDXL prompt for the thumbnail image. Include: subject, composition, lighting, colors, text elements, style, camera angle. Be extremely specific about every visual element. 8k quality, professional YouTube thumbnail.",
+  "prompt": "Detailed thumbnail prompt. Include: subject, composition, lighting, colors, text elements, style, camera angle. Be extremely specific about every visual element. High-end professional YouTube thumbnail.",
   "negative_prompt": "Elements to avoid in the generation",
   "title_text": "The 3-5 word overlay text for the thumbnail (if applicable, empty string if none)",
   "style_notes": "Brief description of the design strategy being used"
@@ -16144,7 +16691,7 @@ Then apply that exact style to the new content.
 
 Output MUST be valid JSON:
 {
-  "prompt": "Detailed SDXL prompt combining the reference style with new content. 8k quality, professional YouTube thumbnail, 1920x1080 composition.",
+  "prompt": "Detailed thumbnail prompt combining the reference style with new content. Professional YouTube thumbnail, 1920x1080 composition.",
   "negative_prompt": "Elements to avoid",
   "title_text": "The overlay text for this thumbnail (3-5 words, empty string if none)",
   "style_notes": "How the reference style was adapted"
@@ -16159,7 +16706,7 @@ Analyze for: recurring color schemes, text styles, composition patterns, emotion
 
 Output MUST be valid JSON:
 {
-  "prompt": "Detailed SDXL prompt for a new thumbnail following the user's proven style. 8k quality, professional YouTube thumbnail, 1920x1080.",
+  "prompt": "Detailed thumbnail prompt for a new thumbnail following the user's proven style. Professional YouTube thumbnail, 1920x1080.",
   "negative_prompt": "Elements to avoid",
   "title_text": "Overlay text (3-5 words, empty if none)",
   "style_notes": "Pattern analysis of what works for this channel",
@@ -16241,134 +16788,75 @@ async def _enforce_thumbnail_1080(output_path: str) -> str:
     return output_path
 
 
-async def _generate_thumbnail_image(prompt: str, negative_prompt: str, output_path: str, style_ref_path: str = "") -> str:
-    """Generate a thumbnail using SDXL via ComfyUI, with trained LoRA if available."""
-    use_lora = await _check_lora_exists()
-    if use_lora:
-        log.info("Using trained thumbnail LoRA for generation")
+async def _generate_thumbnail_image(
+    prompt: str,
+    negative_prompt: str,
+    output_path: str,
+    user: Optional[dict],
+    mode: str = "describe",
+    style_ref_path: str = "",
+) -> dict:
+    """Generate a thumbnail via Pikzels and save the image locally."""
+    if not PIKZELS_API_KEY:
+        raise RuntimeError("PIKZELS_API_KEY not configured")
 
-    model_source = ["1", 0]
-    clip_source = ["1", 1]
-    if use_lora:
-        model_source = ["99", 0]
-        clip_source = ["99", 1]
+    mode_normalized = str(mode or "describe").strip().lower()
+    profile = await _refresh_thumbnail_style_profile(user)
+    style_id = ""
+    if str(profile.get("status", "") or "").strip().lower() == "ready":
+        style_id = str(profile.get("style_id", "") or "").strip()
 
-    lora_node = {}
-    if use_lora:
-        lora_node = {
-            "99": {
-                "class_type": "LoraLoader",
-                "inputs": {
-                    "lora_name": LORA_NAME,
-                    "strength_model": 0.75,
-                    "strength_clip": 0.75,
-                    "model": ["1", 0],
-                    "clip": ["1", 1],
-                },
-            },
-        }
+    composed_prompt = str(prompt or "").strip()
+    if negative_prompt:
+        composed_prompt = f"{composed_prompt}\nAvoid: {negative_prompt.strip()}"
 
     if style_ref_path and Path(style_ref_path).exists():
-        uploaded_name = await _upload_image_to_comfyui(style_ref_path)
-        workflow = {
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
-            },
-            **lora_node,
-            "2": {
-                "class_type": "LoadImage",
-                "inputs": {"image": uploaded_name},
-            },
-            "3": {
-                "class_type": "VAEEncode",
-                "inputs": {"pixels": ["2", 0], "vae": ["1", 2]},
-            },
-            "4": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": prompt, "clip": clip_source},
-            },
-            "5": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": negative_prompt, "clip": clip_source},
-            },
-            "6": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "seed": random.randint(0, 2**32),
-                    "steps": 30,
-                    "cfg": 7.0,
-                    "sampler_name": "dpmpp_2m",
-                    "scheduler": "karras",
-                    "denoise": 0.65,
-                    "model": model_source,
-                    "positive": ["4", 0],
-                    "negative": ["5", 0],
-                    "latent_image": ["3", 0],
-                },
-            },
-            "7": {
-                "class_type": "VAEDecode",
-                "inputs": {"samples": ["6", 0], "vae": ["1", 2]},
-            },
-            "8": {
-                "class_type": "SaveImage",
-                "inputs": {"filename_prefix": "nyptid_thumb", "images": ["7", 0]},
-            },
+        ref_token = await _register_thumbnail_share(Path(style_ref_path), user, ttl_sec=7200)
+        body = {
+            "prompt": composed_prompt,
+            "image_url": _thumbnail_share_url(ref_token),
+            "model": PIKZELS_RECREATE_MODEL,
+            "format": "16:9",
         }
+        if style_id:
+            body["style"] = style_id
+        result = await _pikzels_request("POST", "/v1/recreate", json_body=body)
+        provider_mode = "recreate"
     else:
-        workflow = {
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
-            },
-            **lora_node,
-            "2": {
-                "class_type": "EmptyLatentImage",
-                "inputs": {"width": 1920, "height": 1080, "batch_size": 1},
-            },
-            "3": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": prompt, "clip": clip_source},
-            },
-            "4": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": negative_prompt, "clip": clip_source},
-            },
-            "5": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "seed": random.randint(0, 2**32),
-                    "steps": 30,
-                    "cfg": 7.5,
-                    "sampler_name": "dpmpp_2m",
-                    "scheduler": "karras",
-                    "denoise": 1.0,
-                    "model": model_source,
-                    "positive": ["3", 0],
-                    "negative": ["4", 0],
-                    "latent_image": ["2", 0],
-                },
-            },
-            "6": {
-                "class_type": "VAEDecode",
-                "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
-            },
-            "7": {
-                "class_type": "SaveImage",
-                "inputs": {"filename_prefix": "nyptid_thumb", "images": ["6", 0]},
-            },
+        body = {
+            "prompt": composed_prompt,
+            "model": PIKZELS_THUMBNAIL_MODEL,
+            "format": "16:9",
         }
+        if style_id and mode_normalized in {"describe", "screenshot_analysis", "style_transfer"}:
+            body["style"] = style_id
+        result = await _pikzels_request("POST", "/v1/thumbnail", json_body=body)
+        provider_mode = "thumbnail"
 
-    result = await _run_comfyui_workflow(workflow, "8" if style_ref_path else "7", "images")
-    await _download_comfyui_file(result["images"][0], output_path)
-    return output_path
+    output_url = str(result.get("output", "") or "").strip()
+    if not output_url:
+        raise RuntimeError("Pikzels did not return an output URL")
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        download = await client.get(output_url)
+        if download.status_code != 200:
+            raise RuntimeError("Failed to download Pikzels thumbnail output")
+    with open(output_path, "wb") as f:
+        f.write(download.content)
+    return {
+        "path": output_path,
+        "output_url": output_url,
+        "request_id": str(result.get("request_id", "") or ""),
+        "style_id": style_id,
+        "provider_mode": provider_mode,
+    }
 
 
 @app.post("/api/thumbnails/generate")
 async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
+    if not PIKZELS_API_KEY:
+        raise HTTPException(500, "PIKZELS_API_KEY not configured")
     library_dir = _thumbnail_library_dir_for_user(user)
     output_dir = _thumbnail_output_dir_for_user(user)
 
@@ -16396,6 +16884,8 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
             thumb_negative = ai_result.get("negative_prompt", NEGATIVE_PROMPT)
             title_text = ai_result.get("title_text", "")
             style_notes = ai_result.get("style_notes", "")
+            if title_text:
+                thumb_prompt = f"{thumb_prompt} Prominent thumbnail text overlay: {title_text}."
 
             jobs[job_id]["status"] = "generating"
             jobs[job_id]["progress"] = 30
@@ -16413,46 +16903,29 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
 
             output_name = f"{job_id}.png"
             output_path = str(output_dir / output_name)
-            await _generate_thumbnail_image(thumb_prompt, thumb_negative, output_path, style_ref_path)
-
-            if title_text:
-                try:
-                    safe_title = title_text.replace("'", "'\\''").replace(":", "\\:")
-                    titled_out = str(output_dir / (job_id + "_titled.png"))
-                    vf_filter = (
-                        "drawtext=text='" + safe_title + "':"
-                        "fontsize=72:fontcolor=white:borderw=5:bordercolor=black:"
-                        "x=(w-text_w)/2:y=h*0.78:"
-                        "fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", output_path,
-                        "-vf", vf_filter,
-                        titled_out,
-                    ]
-                    proc = await asyncio.create_subprocess_exec(
-                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    _, stderr = await proc.communicate()
-                    if proc.returncode == 0:
-                        titled_path = Path(titled_out)
-                        if titled_path.exists():
-                            Path(output_path).unlink(missing_ok=True)
-                            titled_path.rename(output_path)
-                except Exception as e:
-                    log.warning(f"[{job_id}] Title overlay failed, using without text: {e}")
+            render_result = await _generate_thumbnail_image(
+                thumb_prompt,
+                thumb_negative,
+                output_path,
+                user=user,
+                mode=req.mode,
+                style_ref_path=style_ref_path,
+            )
 
             await _enforce_thumbnail_1080(output_path)
             thumb_gen_id = await _save_training_candidate(
                 thumb_prompt,
                 output_path,
                 template="thumbnail",
-                source="thumbnail_ai",
+                source="pikzels",
                 metadata={
                     "mode": req.mode,
                     "title_text": title_text,
                     "user_id": user.get("id", ""),
+                    "provider_mode": str(render_result.get("provider_mode", "") or ""),
+                    "provider_request_id": str(render_result.get("request_id", "") or ""),
+                    "output_url": str(render_result.get("output_url", "") or ""),
+                    "style_id": str(render_result.get("style_id", "") or ""),
                 },
             )
 
@@ -16461,6 +16934,8 @@ async def generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: Ba
             jobs[job_id]["output_file"] = output_name
             jobs[job_id]["output_url"] = f"/api/thumbnails/generated/{output_name}"
             jobs[job_id]["generation_id"] = thumb_gen_id
+            jobs[job_id]["provider"] = "pikzels"
+            jobs[job_id]["provider_request_id"] = str(render_result.get("request_id", "") or "")
             log.info(f"[{job_id}] Thumbnail COMPLETE: {output_name}")
 
         except Exception as e:

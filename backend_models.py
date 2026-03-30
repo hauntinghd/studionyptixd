@@ -108,6 +108,10 @@ class LongFormSessionCreateRequest(BaseModel):
     topic: str
     input_title: str
     input_description: str
+    format_preset: str = "explainer"
+    source_url: str = ""
+    analytics_notes: str = ""
+    strategy_notes: str = ""
     target_minutes: float = 8.0
     language: str = "en"
     animation_enabled: bool = True

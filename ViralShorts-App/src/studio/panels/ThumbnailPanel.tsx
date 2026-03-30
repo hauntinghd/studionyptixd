@@ -17,7 +17,7 @@ interface TrainingStatus {
 }
 
 export default function ThumbnailPanel() {
-    const { session, ownerOverride, role } = useContext(AuthContext);
+    const { session } = useContext(AuthContext);
     const [subTab, setSubTab] = useState<'generate' | 'library'>('generate');
     const [mode, setMode] = useState<'describe' | 'style_transfer' | 'screenshot_analysis'>('describe');
     const [description, setDescription] = useState('');
@@ -62,7 +62,7 @@ export default function ThumbnailPanel() {
         } catch { /* ignore */ }
     }, [session, parseJsonResponse]);
 
-    const trainingControlsAvailable = Boolean(trainingStatus?.training_available) && (ownerOverride || role === 'admin');
+    const trainingControlsAvailable = Boolean(trainingStatus?.training_available);
 
     const fetchTrainingStatus = useCallback(async () => {
         try {
@@ -147,10 +147,12 @@ export default function ThumbnailPanel() {
             const total = Number(data?.queued || 0);
             if (data?.status === 'no_files') {
                 setSyncMessage('No local library files found on this server instance.');
+            } else if (['queued', 'analyzing', 'training'].includes(String(data?.style_status || data?.status || '').toLowerCase())) {
+                setSyncMessage('Style pack queued. Pikzels is training it now.');
             } else if (failed > 0) {
                 setSyncMessage(`Synced ${synced}/${total}. ${failed} failed; check server logs.`);
             } else {
-                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed into the training set.`);
+                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed into your Pikzels style pack.`);
             }
             await fetchTrainingStatus();
         } catch {
@@ -275,21 +277,21 @@ export default function ThumbnailPanel() {
                                     trainingStatus.is_training ? 'text-amber-300' : trainingStatus.lora_available ? 'text-emerald-300' : 'text-gray-400'
                                 }`}>
                                     {trainingStatus.is_training
-                                        ? 'Catalyst is training on the owner thumbnail set...'
+                                        ? 'Catalyst is training a Pikzels style pack from your thumbnail winners...'
                                         : trainingStatus.lora_available
-                                            ? `Catalyst thumbnail training ready (v${trainingStatus.version}, ${trainingStatus.trained_images} images)`
+                                            ? `Catalyst style pack ready (${trainingStatus.trained_images} reference images)`
                                             : pendingSync
-                                                ? `Syncing ${localCount} uploaded thumbnails into the training set...`
+                                                ? `Syncing ${localCount} uploaded thumbnails into the style pack...`
                                                 : trainingControlsAvailable
-                                                    ? `Upload ${Math.max(0, 5 - remoteCount)} more thumbnails to start training`
+                                                    ? 'Upload 1-3 winning thumbnails and sync them into a reusable style pack'
                                                     : 'Your private library is ready for describe and style-reference generation'
                                     }
                                 </p>
                                 <p className="text-gray-600 text-xs mt-0.5">
-                                    {remoteCount} synced training images
+                                    {remoteCount} synced reference images
                                     {localCount > remoteCount ? ` (${localCount} in local library)` : ''}
                                     {trainingStatus.lora_available && trainingStatus.total_images > trainingStatus.trained_images &&
-                                        ` (${trainingStatus.total_images - trainingStatus.trained_images} new, will retrain soon)`
+                                        ` (${trainingStatus.total_images - trainingStatus.trained_images} new, resync to retrain)`
                                     }
                                 </p>
                                 {canSyncNow && (
@@ -299,17 +301,12 @@ export default function ThumbnailPanel() {
                                             disabled={syncingLibrary}
                                             className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
                                         >
-                                            {syncingLibrary ? 'Syncing...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
+                                            {syncingLibrary ? 'Syncing...' : `Sync ${localCount - remoteCount} thumbnails into style pack`}
                                         </button>
                                         {syncMessage && (
                                             <p className="text-[11px] text-gray-500 mt-1">{syncMessage}</p>
                                         )}
                                     </>
-                                )}
-                                {!trainingControlsAvailable && (
-                                    <p className="text-[11px] text-gray-500 mt-2">
-                                        Owner-only training sync stays internal. Public accounts can still upload references and generate thumbnails from their private library.
-                                    </p>
                                 )}
                                         </>
                                     );

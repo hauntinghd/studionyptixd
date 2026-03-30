@@ -71,6 +71,8 @@ services:
         sync: false
       - key: FAL_AI_KEY
         sync: false
+      - key: PIKZELS_API_KEY
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

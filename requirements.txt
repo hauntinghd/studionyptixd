@@ -9,3 +9,4 @@ paramiko
 redis
 pillow
 pydub
+yt-dlp

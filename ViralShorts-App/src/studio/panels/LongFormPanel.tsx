@@ -47,9 +47,13 @@ type LongFormDraftProgress = {
 type LongFormSession = {
     session_id: string;
     template: string;
+    format_preset: string;
     topic: string;
     input_title: string;
     input_description: string;
+    source_url: string;
+    analytics_notes: string;
+    strategy_notes: string;
     target_minutes: number;
     language: string;
     resolution: string;
@@ -64,6 +68,11 @@ type LongFormSession = {
         description_variants?: string[];
         thumbnail_prompts?: string[];
         tags?: string[];
+        source_video?: Record<string, any>;
+        source_analysis?: Record<string, any>;
+        source_context?: string;
+        strategy_notes?: string;
+        marketing_doctrine?: string[];
     };
     chapters: LongFormChapter[];
     review_state: LongFormReviewState;
@@ -82,8 +91,10 @@ type LongFormSession = {
 type LongFormSessionSummary = {
     session_id: string;
     template: string;
+    format_preset: string;
     topic: string;
     input_title: string;
+    source_url: string;
     target_minutes: number;
     language: string;
     resolution: string;
@@ -99,6 +110,24 @@ type LongFormSessionSummary = {
 };
 
 type LongFormPreset = 'recap' | 'explainer' | 'documentary' | 'story_channel';
+
+const MARKETING_DOCTRINE_POINTS = [
+    "Be active in the Daily Marketing Channel.",
+    "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
+    "Small, daily improvements in your marketing skills can lead to significant progress over time due to compounding.",
+    "Just like in boxing or other martial arts, consistent practice and real-world application are crucial for mastering marketing.",
+    "Engage with the daily challenges to continuously hone your skills. Missing a day occasionally is okay, but don't make it a habit.",
+    "Regardless of your field or business, understanding and practicing marketing is fundamental to success.",
+    "Treat the daily marketing challenges seriously and make it a part of your routine to see substantial benefits in your marketing abilities.",
+    "Mastering marketing has enabled Arno to start and scale companies and avoid manual labor by understanding how to attract clients and improve businesses.",
+    "It is a long-lasting skill. Marketing has been around for millennia and will continue to be valuable in the future.",
+    "Anyone can learn it. It doesn't require special skills, abilities, or connections. Pay attention, focus, and you can succeed.",
+    "High ROI (Return On Investment). Direct response marketing offers the highest and most reliable return on investment, outperforming traditional investments.",
+    "Learning marketing helps you see opportunities and gaps that others miss, making life easier.",
+    "You don't need to be the world's best marketer; being better than most is enough to succeed.",
+    "It is a fast skill to learn. With ten days of dedicated study, you can acquire valuable marketing skills.",
+    "Be ready for a significant change as you learn and apply these marketing skills.",
+];
 
 const STATUS_LABELS: Record<string, string> = {
     awaiting_previous_approval: 'Waiting For Prior Chapter Approval',
@@ -127,6 +156,9 @@ export default function LongFormPanel() {
     const [topic, setTopic] = useState('');
     const [inputTitle, setInputTitle] = useState('');
     const [inputDescription, setInputDescription] = useState('');
+    const [sourceUrl, setSourceUrl] = useState('');
+    const [analyticsNotes, setAnalyticsNotes] = useState('');
+    const [applyMarketingDoctrine, setApplyMarketingDoctrine] = useState(true);
     const [targetMinutes, setTargetMinutes] = useState(8);
     const [language, setLanguage] = useState('en');
     const [languages, setLanguages] = useState<Array<{ code: string; name: string }>>([{ code: 'en', name: 'English' }]);
@@ -298,6 +330,10 @@ export default function LongFormPanel() {
                     topic: topic.trim(),
                     input_title: inputTitle.trim(),
                     input_description: `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim(),
+                    format_preset: formatPreset,
+                    source_url: sourceUrl.trim(),
+                    analytics_notes: analyticsNotes.trim(),
+                    strategy_notes: applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '',
                     target_minutes: targetMinutes,
                     language,
                     animation_enabled: animationEnabled,
@@ -322,8 +358,11 @@ export default function LongFormPanel() {
         inputDescription,
         inputTitle,
         language,
+        analyticsNotes,
+        applyMarketingDoctrine,
         persistSessionId,
         session,
+        sourceUrl,
         sfxEnabled,
         targetMinutes,
         template,
@@ -395,6 +434,8 @@ export default function LongFormPanel() {
     const outputUrl = outputFile ? `${API}/api/download/${outputFile}` : '';
     const review = lfSession?.review_state;
     const draftProgress = lfSession?.draft_progress;
+    const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
+    const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
     const resolveSceneImageUrl = useCallback((raw: string) => {
         const u = String(raw || '').trim();
         if (!u) return '';
@@ -508,6 +549,25 @@ export default function LongFormPanel() {
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
                         />
                     </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                        Source Video URL
+                        <input
+                            value={sourceUrl}
+                            onChange={(e) => setSourceUrl(e.target.value)}
+                            placeholder="Optional: paste a YouTube video URL so Catalyst can study the source title, description, chapters, transcript, and public packaging."
+                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
+                        />
+                    </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                        Private Performance Notes
+                        <textarea
+                            value={analyticsNotes}
+                            onChange={(e) => setAnalyticsNotes(e.target.value)}
+                            rows={3}
+                            placeholder="Optional: CTR, average view duration, where viewers dropped, why you think the old video worked, and what absolutely must improve."
+                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
+                        />
+                    </label>
                     <label className="text-sm text-gray-300">
                         Language
                         <select value={language} onChange={(e) => setLanguage(e.target.value)}
@@ -536,6 +596,23 @@ export default function LongFormPanel() {
                         <input type="checkbox" checked={sfxEnabled} onChange={(e) => setSfxEnabled(e.target.checked)} />
                         SFX enabled
                     </label>
+                    <label className="inline-flex items-center gap-2 text-gray-300">
+                        <input type="checkbox" checked={applyMarketingDoctrine} onChange={(e) => setApplyMarketingDoctrine(e.target.checked)} />
+                        Apply marketing doctrine
+                    </label>
+                </div>
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Marketing Doctrine</p>
+                    <p className="mt-2 text-xs text-gray-400">
+                        The lesson points you sent are now available as a reusable strategy layer for Long Form. When enabled, Catalyst uses them to shape packaging and retention decisions.
+                    </p>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {MARKETING_DOCTRINE_POINTS.map((point) => (
+                            <div key={point} className="rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2 text-xs text-gray-300">
+                                {point}
+                            </div>
+                        ))}
+                    </div>
                 </div>
                 <div className="flex flex-wrap gap-3">
                     <button
@@ -621,6 +698,43 @@ export default function LongFormPanel() {
                                     >
                                         Force Accept
                                     </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {(lfSession.source_url || sourceVideo.title || sourceAnalysis.what_worked || sourceAnalysis.what_hurt) && (
+                            <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/5 p-4 space-y-3">
+                                <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Source Analysis</p>
+                                    {lfSession.source_url && (
+                                        <p className="mt-2 text-xs text-gray-400 break-all">{lfSession.source_url}</p>
+                                    )}
+                                </div>
+                                {sourceVideo.title && (
+                                    <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                        <p className="text-sm font-semibold text-white">{String(sourceVideo.title)}</p>
+                                        <p className="mt-1 text-xs text-gray-500">
+                                            {sourceVideo.channel ? `${String(sourceVideo.channel)} · ` : ''}
+                                            {sourceVideo.duration_sec ? `${Number(sourceVideo.duration_sec)}s analyzed` : 'public source analyzed'}
+                                        </p>
+                                        {sourceVideo.public_summary && (
+                                            <p className="mt-2 text-xs text-gray-400">{String(sourceVideo.public_summary)}</p>
+                                        )}
+                                    </div>
+                                )}
+                                <div className="grid gap-3 md:grid-cols-2">
+                                    {sourceAnalysis.what_worked && (
+                                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">What Worked</p>
+                                            <p className="mt-2 text-sm text-gray-300">{String(sourceAnalysis.what_worked)}</p>
+                                        </div>
+                                    )}
+                                    {sourceAnalysis.what_hurt && (
+                                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">What Hurt</p>
+                                            <p className="mt-2 text-sm text-gray-300">{String(sourceAnalysis.what_hurt)}</p>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
