@@ -3714,7 +3714,9 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     async def _call_script_gen(prompt_text: str, temp: float = 0.8) -> dict:
         user_prompt = (
             "Adapt this exact source script into an editable short-form scene plan. "
-            "Do not invent a new premise, do not skip late beats, and do not replace the core story.\n\n"
+            "Preserve chronology beat-by-beat from the opening line to the closing payoff. "
+            "Do not invent a new premise, do not skip late beats, do not merge major turns into vague filler, and do not replace the core story. "
+            "Every scene must correspond to consecutive lines or ideas from the source script so the user can see the script reflected directly in the generated prompts.\n\n"
             f"SOURCE SCRIPT:\n{topic_text}"
             if script_to_short_mode
             else "Create a viral short that stays tightly anchored to this exact topic.\n\n"
@@ -3833,7 +3835,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         + "\n\nQUALITY OVERRIDE (MUST FOLLOW): "
         + (("Ensure 12-15 scenes with explicit emotional escalation, ") if story_script_to_short_mode else ("Ensure 10-12 scenes with explicit emotional escalation, "))
         + "maintain continuity of people/locations/timeline based on the script beat (do not force a single protagonist in every scene), "
-        + "and include camera/motion continuity language in each scene."
+        + "include camera/motion continuity language in each scene, and preserve beat-by-beat coverage of the full script without skipping the ending."
         + retention_tuning
     )
     second = await _call_script_gen(hardened_prompt, temp=0.65)
@@ -3845,7 +3847,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             hardened_prompt
             + "\n\nFAILSAFE OVERRIDE (MUST FOLLOW): "
             + "Do NOT truncate. Complete all script beats in order. "
-            + "Output exactly 12-15 scenes with no premature ending and no skipped late-script events."
+            + "Output exactly 12-15 scenes with no premature ending, no skipped late-script events, and no generic replacement prompts."
         )
         third = await _call_script_gen(ultra_hardened, temp=0.55)
         third_score, _ = _score_story_script_quality(third)
@@ -11598,9 +11600,14 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "\n\nSCRIPT-TO-SHORT MODE: The user input is already a full script. "
             "Do not invent a different story. Keep the original intent and wording as much as possible while adapting for timing. "
             f"Split into {scene_range} scenes with clear visual progression and strong retention pacing. "
+            "Process the script in strict chronological order from the first sentence to the final payoff. "
+            "Do not skip late beats, collapse major transitions into generic filler, or rewrite the source into a different premise. "
+            "Each scene must map to one consecutive beat from the exact source script and preserve the same subject, setting, action, and emotional turn implied by that beat. "
+            "If the script names a person, object, outfit, location, mechanism, number, or timeframe, keep it in the matching scene instead of generalizing it away. "
             "Do not force a single unchanged main character in every scene; match subjects to each script beat. "
             "Each scene must have concise narration and a cinematic visual_description that can be directly rendered. "
-            "Make the visual_description fields self-contained, specific, and editable so users can regenerate each scene from the prompt alone."
+            "Make the visual_description fields self-contained, specific, and editable so users can regenerate each scene from the prompt alone. "
+            "Every visual_description should read like a production-ready image prompt with the exact subject, setting, action, framing, lighting, and key props required by that script beat."
         )
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     try:

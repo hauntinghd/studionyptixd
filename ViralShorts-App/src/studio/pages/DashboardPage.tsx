@@ -1,9 +1,14 @@
 import { useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
 import { BarChart3, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext } from '../shared';
+import { AuthContext, isOwnerEmail } from '../shared';
 import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
+import AutoClipperPanel from '../panels/AutoClipperPanel';
+import ClonePanel from '../panels/ClonePanel';
 import CreatePanel from '../panels/CreatePanel';
+import DemoPanel from '../panels/DemoPanel';
+import LongFormPanel from '../panels/LongFormPanel';
+import ThumbnailPanel from '../panels/ThumbnailPanel';
 
 type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics';
 
@@ -18,6 +23,8 @@ type SidebarItem = {
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, role, backendOffline, creditsTotalRemaining, requiresTopup, monthlyCreditsRemaining } = useContext(AuthContext);
     const isAdmin = role === 'admin';
+    const isOwner = isOwnerEmail(session?.user?.email);
+    const ownerToolAccess = isOwner;
     const [tab, setTab] = useState<DashboardTab>('create');
     const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
     const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
@@ -44,32 +51,32 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         id: 'clone',
         label: 'Clone',
         icon: Copy,
-        comingSoon: true,
+        comingSoon: !ownerToolAccess,
     }, {
         id: 'longform',
         label: 'Long Form',
         icon: Film,
-        comingSoon: true,
+        comingSoon: !ownerToolAccess,
     }, {
         id: 'thumbnails',
         label: 'Thumbnails',
         icon: Image,
-        comingSoon: true,
+        comingSoon: !ownerToolAccess,
     }, {
         id: 'demo',
         label: 'Product Demo',
         icon: Monitor,
-        comingSoon: true,
+        comingSoon: !ownerToolAccess,
     }, {
         id: 'autoclipper',
         label: 'Auto Clipper',
         icon: Clapperboard,
-        comingSoon: true,
+        comingSoon: !ownerToolAccess,
     }, {
         id: 'analytics',
         label: 'Product Analytics',
         icon: BarChart3,
-        hidden: !isAdmin,
+        hidden: !isAdmin && !ownerToolAccess,
     }] as SidebarItem[]).filter((item) => !item.hidden);
 
     const openCreateWorkspace = () => {
@@ -83,8 +90,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             openCreateWorkspace();
             return;
         }
-        if (item.id === 'analytics' && isAdmin) {
-            setTab('analytics');
+        const analyticsUnlocked = item.id === 'analytics' && (isAdmin || ownerToolAccess);
+        const ownerUnlocked = item.id !== 'analytics' && ownerToolAccess;
+        if (analyticsUnlocked || ownerUnlocked) {
+            setTab(item.id);
             setCreateWorkspaceOpen(false);
             setSidebarPeekOpen(false);
             return;
@@ -95,7 +104,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const sidebarVisible = !createImmersive || sidebarPeekOpen;
 
     const panel = (() => {
-        if (tab === 'analytics' && isAdmin) return <AdminAnalyticsPanel />;
+        if (tab === 'analytics' && (isAdmin || ownerToolAccess)) return <AdminAnalyticsPanel />;
+        if (tab === 'clone' && ownerToolAccess) return <ClonePanel />;
+        if (tab === 'longform' && ownerToolAccess) return <LongFormPanel />;
+        if (tab === 'thumbnails' && ownerToolAccess) return <ThumbnailPanel />;
+        if (tab === 'demo' && ownerToolAccess) return <DemoPanel />;
+        if (tab === 'autoclipper' && ownerToolAccess) return <AutoClipperPanel />;
         return <CreatePanel />;
     })();
 
@@ -103,12 +117,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         <div className="min-h-screen">
             <NavBar onNavigate={onNavigate} active="dashboard" />
 
-            {createImmersive && (
+            {createImmersive && !sidebarVisible && (
                 <button
                     type="button"
                     onClick={() => setSidebarPeekOpen((value) => !value)}
                     onMouseEnter={() => setSidebarPeekOpen(true)}
-                    className="fixed left-3 top-24 z-30 inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-[#0d0d11]/95 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-black/40 transition hover:border-violet-500/40 hover:bg-violet-500/10"
+                    className="fixed left-3 top-[92px] z-30 inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-[#0d0d11]/95 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-black/40 transition hover:border-violet-500/40 hover:bg-violet-500/10"
                 >
                     <PanelLeftOpen className="h-4 w-4 text-violet-300" />
                     Menu
@@ -139,7 +153,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <div className="space-y-1">
                                     {sidebarItems.map((item) => {
                                         const active = tab === item.id;
-                                        const disabled = item.id !== 'create' && item.id !== 'analytics';
+                                        const disabled = item.id === 'create'
+                                            ? false
+                                            : item.id === 'analytics'
+                                                ? !(isAdmin || ownerToolAccess)
+                                                : !ownerToolAccess;
                                         const Icon = item.icon;
                                         return (
                                             <button
@@ -179,12 +197,14 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         </div>
                                         <h1 className="mt-3 text-4xl font-bold text-white">{greeting}, {session.user.email?.split('@')[0] || 'creator'}</h1>
                                         <p className="mt-3 max-w-3xl text-sm text-gray-400">
-                                            NYPTID Studio is now focused on one live path: Create. The rail shows the future surface, but only the sellable workflow is active.
+                                            {ownerToolAccess
+                                                ? 'Owner preview is active on this account. Every Studio lane is open here while non-owner accounts still see the public launch surface.'
+                                                : 'NYPTID Studio is now focused on one live path: Create. The rail shows the future surface, but only the sellable workflow is active.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">
                                         <MetricCard label="AI Credits" value={acCredits} accent="cyan" helper={requiresTopup ? 'Top up before your next animation run' : 'Ready to animate'} />
-                                        <MetricCard label="Clipper Credits" value={clipperCredits} accent="violet" helper="AutoClipper stays marked coming soon" />
+                                        <MetricCard label="Clipper Credits" value={clipperCredits} accent="violet" helper={ownerToolAccess ? 'Owner preview lane unlocked' : 'AutoClipper stays marked coming soon'} />
                                     </div>
                                 </div>
                             </section>

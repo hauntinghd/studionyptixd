@@ -47,7 +47,7 @@ const OWNER_EMAILS = new Set(
         .map((email) => email.trim().toLowerCase())
         .filter(Boolean)
 );
-const isOwnerEmail = (email?: string | null): boolean => {
+export const isOwnerEmail = (email?: string | null): boolean => {
     return Boolean(email && OWNER_EMAILS.has(String(email).trim().toLowerCase()));
 };
 export const GENERATION_API = (() => {

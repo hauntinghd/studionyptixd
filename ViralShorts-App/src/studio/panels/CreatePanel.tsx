@@ -1136,7 +1136,7 @@ export default function CreatePanel() {
             const generatedScenes: CreativeScene[] = (data.scenes || []).map((s: any, i: number) => ({
                 index: i,
                 narration: String(s?.narration || ""),
-                visual_description: creativeMode === 'script_to_short' ? "" : String(s?.visual_description || ""),
+                visual_description: String(s?.visual_description || ""),
                 negative_prompt: String(s?.negative_prompt || ""),
                 duration_sec: Number(s?.duration_sec || 5),
             }));
@@ -1931,6 +1931,7 @@ export default function CreatePanel() {
     const animationCreditsRequired = Math.max(1, promptSceneCount || creativeScenes.length || 1);
     const animationCreditsShort = !isAdmin && effectiveAnimationEnabled && animationCreditsRequired > animationCreditsAvailable;
     const showGenerateScenes = creativeMode === 'creative' || creativeMode === 'script_to_short';
+    const canAdvanceToScenes = hasNarration && !sceneBuildLoading;
     const activeTemplateMeta = templates.find((template) => template.id === selectedTemplate);
     const workspaceReadiness = [
         { label: 'Script ready', done: hasNarration },
@@ -1942,12 +1943,14 @@ export default function CreatePanel() {
         script: {
             title: 'Script Workspace',
             description: creativeMode === 'script_to_short'
-                ? 'Write or paste the narration, then build scene beats. Clients can still replace every image prompt manually.'
+                ? 'Paste the exact narration here, then move into Scenes to generate prompt beats locked to the script order.'
                 : 'Lock the narration, art style, and sound direction before moving into scene generation.',
         },
         scenes: {
             title: 'Scene Workspace',
-            description: 'Generate images, fix prompts scene-by-scene, and keep every beat production-ready before render.',
+            description: creativeMode === 'script_to_short'
+                ? 'Generate script-locked scene prompts, then fix or regenerate images scene-by-scene before final render.'
+                : 'Generate images, fix prompts scene-by-scene, and keep every beat production-ready before render.',
         },
         finale: {
             title: 'Finale Workspace',
@@ -1998,7 +2001,7 @@ export default function CreatePanel() {
                         </p>
                         <p className="text-xs text-amber-200/80 mt-1">
                             {creativeMode === 'script_to_short'
-                                ? 'Generate the scene beats here, then keep every prompt editable. When you click Generate Images, Studio will walk the open scenes one by one.'
+                                ? 'Generate prompt beats from the exact narration in order. Studio keeps every prompt editable, but it no longer starts from a blank scene list.'
                                 : 'Start in Scenes, build the scene list, then generate images one by one across the full set before you render.'}
                         </p>
                         <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -2007,7 +2010,7 @@ export default function CreatePanel() {
                                 disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
                                 className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
                             >
-                                {sceneBuildLoading ? "Generating scenes..." : (scriptScenesReady ? "Regenerate Scenes" : "Generate Scenes")}
+                                {sceneBuildLoading ? "Generating scene prompts..." : (scriptScenesReady ? "Regenerate Prompts" : "Generate Scene Prompts")}
                             </button>
                             <button
                                 onClick={handleGenerateSceneImageBatch}
@@ -2033,38 +2036,10 @@ export default function CreatePanel() {
                     </div>
                 )}
 
-                {workspaceStage === 'script' && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
-                        <div>
-                            <p className="text-sm font-semibold text-white">Sound References</p>
-                            <p className="mt-1 text-xs text-gray-500">
-                                Set the intended sound language before Finale so the pacing and final VO feel coherent.
-                            </p>
-                        </div>
-                        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                            {soundReferenceOptions.map((option) => (
-                                <button
-                                    key={option.id}
-                                    type="button"
-                                    onClick={() => setSoundReferencePreset(option.id)}
-                                    className={`rounded-xl border p-3 text-left transition ${
-                                        soundReferencePreset === option.id
-                                            ? 'border-cyan-400/70 bg-cyan-500/10'
-                                            : 'border-white/[0.08] bg-black/20 hover:border-white/20'
-                                    }`}
-                                >
-                                    <p className="text-sm font-semibold text-white">{option.label}</p>
-                                    <p className="mt-1 text-[11px] text-gray-400">{option.desc}</p>
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
-
                 {workspaceStage === 'script' && sceneBuildLoading && (
                     <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-4 flex items-center gap-3">
                         <Loader2 className="w-4 h-4 text-cyan-300 animate-spin" />
-                        <p className="text-sm text-cyan-100">Generating scenes from your script... this can take 10-30 seconds.</p>
+                        <p className="text-sm text-cyan-100">Generating scene prompts from your script... this can take 10-30 seconds.</p>
                     </div>
                 )}
 
@@ -2079,6 +2054,28 @@ export default function CreatePanel() {
                             className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y"
                         />
                         <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
+                    </div>
+                )}
+
+                {workspaceStage === 'script' && creativeMode === 'script_to_short' && (
+                    <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-cyan-100">Next step: open the Scenes tab</p>
+                                <p className="mt-1 text-xs text-cyan-100/80">
+                                    Scene prompts are now generated from this exact narration in order, then you can edit every prompt before images are created.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setWorkspaceStage('scenes')}
+                                disabled={!canAdvanceToScenes}
+                                className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-40"
+                            >
+                                Next: Scenes
+                                <ArrowRight className="h-4 w-4" />
+                            </button>
+                        </div>
                     </div>
                 )}
 
@@ -2240,6 +2237,14 @@ export default function CreatePanel() {
                                 </div>
                             </div>
                             <div className="p-4 space-y-3">
+                                {creativeMode === 'script_to_short' && (
+                                    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-3">
+                                        <label className="mb-1 block text-xs uppercase tracking-wider text-cyan-200">Scene Beat From Script</label>
+                                        <p className="text-sm leading-6 text-cyan-50">
+                                            {scene.narration || 'No narration beat generated yet. Click Generate Scene Prompts above.'}
+                                        </p>
+                                    </div>
+                                )}
                                 <div>
                                     <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what this scene looks like)</label>
                                     <textarea
