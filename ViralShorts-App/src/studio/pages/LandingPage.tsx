@@ -51,7 +51,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
     const roadmapLanes = [
         {
             title: 'AutoClipper',
-            desc: 'Visible in Studio now, but still held back until clipping quality, scoring, and packaging beat the lazy “coming soon” bar.',
+            desc: 'Visible in Studio now, but still held back until clipping quality, scoring, and packaging beat the lazy "coming soon" bar.',
             icon: <ScissorsLineDashed className="h-5 w-5" />,
         },
         {
