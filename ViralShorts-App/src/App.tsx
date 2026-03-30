@@ -38,6 +38,20 @@ function AppShell() {
     }, [thumblabHost]);
 
     useEffect(() => {
+        if (thumblabHost) return;
+        try {
+            const search = new URLSearchParams(window.location.search);
+            if (search.get('focus')) return;
+            const referrerHost = new URL(document.referrer || '').hostname.toLowerCase();
+            if (referrerHost === 'thumblab.nyptidindustries.com') {
+                window.location.replace('https://studio.nyptidindustries.com/?focus=thumbnails');
+            }
+        } catch {
+            // ignore referrer parsing issues
+        }
+    }, [thumblabHost]);
+
+    useEffect(() => {
         try {
             localStorage.setItem('nyptid_page', page);
         } catch {
