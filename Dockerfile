@@ -35,6 +35,7 @@ COPY backend_worker.py .
 COPY ops ./ops
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
+COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
 
 RUN chmod +x ./ops/run_render_service.sh
 
