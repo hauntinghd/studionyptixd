@@ -1,15 +1,78 @@
-import { useContext, useEffect } from 'react';
-import { Bell, Globe2, SlidersHorizontal, WalletCards } from 'lucide-react';
+import { useCallback, useContext, useEffect, useState } from 'react';
+import { Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, BILLING_SITE_URL } from '../shared';
+import { API, AuthContext, BILLING_SITE_URL } from '../shared';
+
+type ConnectedYouTubeChannel = {
+    channel_id: string;
+    title: string;
+    channel_handle?: string;
+    analytics_snapshot?: {
+        channel_summary?: string;
+    };
+};
 
 export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
+    const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
+    const [youtubeDefaultChannelId, setYoutubeDefaultChannelId] = useState('');
+    const [youtubeLoading, setYoutubeLoading] = useState(false);
+    const [youtubeConnecting, setYoutubeConnecting] = useState(false);
+    const [youtubeError, setYoutubeError] = useState('');
 
     useEffect(() => {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
+
+    const loadYouTubeChannels = useCallback(async () => {
+        if (!session) return;
+        setYoutubeLoading(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/youtube/channels?sync=true`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            setYoutubeChannels(Array.isArray((payload as any).channels) ? (payload as any).channels : []);
+            setYoutubeDefaultChannelId(String((payload as any).default_channel_id || '').trim());
+        } catch (e: any) {
+            setYoutubeChannels([]);
+            setYoutubeError(e?.message || 'Failed to load connected YouTube channels');
+        } finally {
+            setYoutubeLoading(false);
+        }
+    }, [session]);
+
+    const startYouTubeConnect = useCallback(async () => {
+        if (!session) return;
+        setYoutubeConnecting(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ next_url: window.location.href }),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            const authUrl = String((payload as any).auth_url || '').trim();
+            if (!authUrl) throw new Error('Google auth URL missing');
+            window.location.href = authUrl;
+        } catch (e: any) {
+            setYoutubeError(e?.message || 'Failed to start Google YouTube connection');
+            setYoutubeConnecting(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        if (!session) return;
+        void loadYouTubeChannels();
+    }, [session, loadYouTubeChannels]);
 
     if (!session) return null;
 
@@ -23,6 +86,41 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
 
                 <div className="space-y-6">
+                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <Youtube className="w-5 h-5 text-red-300" />
+                                <div>
+                                    <h2 className="text-lg font-semibold text-white">YouTube Channels</h2>
+                                    <p className="mt-1 text-sm text-gray-400">Connect one or more channels so Catalyst can learn from private title, thumbnail, and analytics patterns.</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-2">
+                                <button type="button" onClick={() => void loadYouTubeChannels()} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06]">
+                                    {youtubeLoading ? 'Refreshing...' : 'Refresh'}
+                                </button>
+                                <button type="button" onClick={startYouTubeConnect} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500">
+                                    {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
+                                </button>
+                            </div>
+                        </div>
+                        {youtubeError ? <p className="mt-4 text-sm text-red-400">{youtubeError}</p> : null}
+                        {youtubeChannels.length > 0 ? (
+                            <div className="mt-4 grid gap-3 md:grid-cols-2">
+                                {youtubeChannels.map((channel) => (
+                                    <div key={channel.channel_id} className={`rounded-xl border p-4 ${youtubeDefaultChannelId === channel.channel_id ? 'border-cyan-400/30 bg-cyan-500/10' : 'border-white/[0.08] bg-black/20'}`}>
+                                        <p className="text-sm font-semibold text-white">{channel.title}</p>
+                                        {channel.channel_handle ? <p className="mt-1 text-xs text-cyan-200">{channel.channel_handle}</p> : null}
+                                        {channel.analytics_snapshot?.channel_summary ? <p className="mt-2 text-xs text-gray-400">{channel.analytics_snapshot.channel_summary}</p> : null}
+                                        {youtubeDefaultChannelId === channel.channel_id ? <p className="mt-3 text-[11px] uppercase tracking-[0.18em] text-cyan-300">Default channel for Catalyst</p> : null}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p className="mt-4 text-sm text-gray-400">No YouTube channels connected yet.</p>
+                        )}
+                    </section>
+
                     <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
                         <div className="flex items-center gap-3">
                             <Globe2 className="w-5 h-5 text-cyan-300" />

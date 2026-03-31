@@ -44,6 +44,25 @@ type LongFormDraftProgress = {
     stage?: string;
 };
 
+type ConnectedYouTubeChannel = {
+    channel_id: string;
+    title: string;
+    channel_handle?: string;
+    channel_url?: string;
+    thumbnail_url?: string;
+    subscriber_count?: number;
+    video_count?: number;
+    analytics_snapshot?: {
+        channel_summary?: string;
+        title_pattern_hints?: string[];
+        recent_upload_titles?: string[];
+        top_video_titles?: string[];
+        packaging_learnings?: string[];
+        retention_learnings?: string[];
+    };
+    last_sync_error?: string;
+};
+
 type LongFormSession = {
     session_id: string;
     template: string;
@@ -53,6 +72,7 @@ type LongFormSession = {
     input_title: string;
     input_description: string;
     source_url: string;
+    youtube_channel_id?: string;
     analytics_notes: string;
     strategy_notes: string;
     target_minutes: number;
@@ -71,6 +91,7 @@ type LongFormSession = {
         tags?: string[];
         source_video?: Record<string, any>;
         source_analysis?: Record<string, any>;
+        youtube_channel?: Record<string, any>;
         source_context?: string;
         strategy_notes?: string;
         marketing_doctrine?: string[];
@@ -173,6 +194,7 @@ export default function LongFormPanel() {
     const [inputTitle, setInputTitle] = useState('');
     const [inputDescription, setInputDescription] = useState('');
     const [sourceUrl, setSourceUrl] = useState('');
+    const [youtubeChannelId, setYoutubeChannelId] = useState('');
     const [analyticsNotes, setAnalyticsNotes] = useState('');
     const [transcriptText, setTranscriptText] = useState('');
     const [analyticsImages, setAnalyticsImages] = useState<File[]>([]);
@@ -194,6 +216,10 @@ export default function LongFormPanel() {
     const [chapterReasons, setChapterReasons] = useState<Record<number, string>>({});
     const [fixNote, setFixNote] = useState('');
     const [autoPipeline, setAutoPipeline] = useState(false);
+    const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
+    const [youtubeLoading, setYoutubeLoading] = useState(false);
+    const [youtubeError, setYoutubeError] = useState('');
+    const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [sessionIdInput, setSessionIdInput] = useState('');
     const [projectSessions, setProjectSessions] = useState<LongFormSessionSummary[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
@@ -257,6 +283,56 @@ export default function LongFormPanel() {
         }
         return payload;
     }, [authOnlyHeaders]);
+
+    const loadYouTubeChannels = useCallback(async (silent = false) => {
+        if (!session) return;
+        if (!silent) setYoutubeLoading(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/youtube/channels?sync=true`, {
+                headers: authOnlyHeaders,
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            const rows = Array.isArray((payload as any).channels) ? (payload as any).channels as ConnectedYouTubeChannel[] : [];
+            setYoutubeChannels(rows);
+            const defaultId = String((payload as any).default_channel_id || '').trim();
+            if (defaultId) {
+                setYoutubeChannelId(defaultId);
+            } else if (rows.length > 0) {
+                setYoutubeChannelId(String(rows[0]?.channel_id || '').trim());
+            }
+        } catch (e: any) {
+            setYoutubeChannels([]);
+            setYoutubeError(e?.message || 'Failed to load connected YouTube channels');
+        } finally {
+            if (!silent) setYoutubeLoading(false);
+        }
+    }, [authOnlyHeaders, session]);
+
+    const startYouTubeConnect = useCallback(async () => {
+        if (!session) return;
+        setYoutubeConnecting(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
+                method: 'POST',
+                headers: {
+                    ...authOnlyHeaders,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ next_url: window.location.href }),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            const authUrl = String((payload as any).auth_url || '').trim();
+            if (!authUrl) throw new Error('Google auth URL missing');
+            window.location.href = authUrl;
+        } catch (e: any) {
+            setYoutubeError(e?.message || 'Failed to start Google YouTube connection');
+            setYoutubeConnecting(false);
+        }
+    }, [authOnlyHeaders, session]);
 
     const refreshStatus = useCallback(async (id?: string, silent = false) => {
         const targetId = String(id || lfSession?.session_id || '').trim();
@@ -332,6 +408,11 @@ export default function LongFormPanel() {
     }, [activeTab, loadProjects]);
 
     useEffect(() => {
+        if (!session) return;
+        void loadYouTubeChannels(true);
+    }, [session, loadYouTubeChannels]);
+
+    useEffect(() => {
         const uid = String(session?.user?.id || '').trim();
         if (!uid) return;
         if (restoredSessionUserRef.current === uid) return;
@@ -379,6 +460,7 @@ export default function LongFormPanel() {
                     formData.append('input_description', formattedDescription);
                     formData.append('format_preset', formatPreset);
                     formData.append('source_url', sourceUrl.trim());
+                    formData.append('youtube_channel_id', youtubeChannelId.trim());
                     formData.append('analytics_notes', analyticsNotes.trim());
                     formData.append('strategy_notes', applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '');
                     formData.append('transcript_text', transcriptText.trim());
@@ -400,6 +482,7 @@ export default function LongFormPanel() {
                         input_description: formattedDescription,
                         format_preset: formatPreset,
                         source_url: sourceUrl.trim(),
+                        youtube_channel_id: youtubeChannelId.trim(),
                         analytics_notes: analyticsNotes.trim(),
                         strategy_notes: applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '',
                         transcript_text: transcriptText.trim(),
@@ -512,6 +595,7 @@ export default function LongFormPanel() {
     const draftProgress = lfSession?.draft_progress;
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
+    const connectedYouTubeChannel = (lfSession?.metadata_pack?.youtube_channel || {}) as Record<string, any>;
     const titleVariants = hasPublishPackage && Array.isArray(lfSession?.package?.title_variants) ? lfSession?.package?.title_variants as string[] : [];
     const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
     const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
@@ -576,6 +660,64 @@ export default function LongFormPanel() {
                     New Long-Form Session
                 </h3>
                 <div className="grid md:grid-cols-2 gap-3">
+                    <div className="text-sm text-gray-300 md:col-span-2">
+                        Connected YouTube Channel
+                        <div className="mt-1 flex flex-col gap-3 md:flex-row md:items-start">
+                            <select
+                                value={youtubeChannelId}
+                                onChange={(e) => setYoutubeChannelId(e.target.value)}
+                                className="w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white md:max-w-xl"
+                            >
+                                <option value="">No connected channel selected</option>
+                                {youtubeChannels.map((channel) => (
+                                    <option key={channel.channel_id} value={channel.channel_id}>
+                                        {channel.title}{channel.channel_handle ? ` (${channel.channel_handle})` : ''}
+                                    </option>
+                                ))}
+                            </select>
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={startYouTubeConnect}
+                                    disabled={youtubeConnecting}
+                                    className="rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/20 disabled:opacity-60"
+                                >
+                                    {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => void loadYouTubeChannels(false)}
+                                    disabled={youtubeLoading}
+                                    className="rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm font-medium text-white transition hover:bg-white/[0.08] disabled:opacity-60"
+                                >
+                                    {youtubeLoading ? 'Refreshing...' : 'Refresh Channels'}
+                                </button>
+                            </div>
+                        </div>
+                        <p className="mt-2 text-xs text-cyan-300/80">
+                            When selected, Catalyst will use this channel’s recent winners, packaging patterns, and private analytics context while building the next long-form video.
+                        </p>
+                        {youtubeError ? <p className="mt-2 text-xs text-red-400">{youtubeError}</p> : null}
+                        {youtubeChannels.length > 0 && youtubeChannelId ? (
+                            <div className="mt-3 rounded-lg border border-cyan-400/20 bg-cyan-500/5 p-3 text-xs text-gray-300">
+                                {(() => {
+                                    const current = youtubeChannels.find((row) => row.channel_id === youtubeChannelId);
+                                    if (!current) return <span>No saved channel context yet.</span>;
+                                    return (
+                                        <>
+                                            <p className="font-semibold text-white">{current.title}</p>
+                                            {current.analytics_snapshot?.channel_summary ? (
+                                                <p className="mt-2">{current.analytics_snapshot.channel_summary}</p>
+                                            ) : null}
+                                            {current.last_sync_error ? (
+                                                <p className="mt-2 text-amber-300">Last sync note: {current.last_sync_error}</p>
+                                            ) : null}
+                                        </>
+                                    );
+                                })()}
+                            </div>
+                        ) : null}
+                    </div>
                     <label className="text-sm text-gray-300">
                         Content Format
                         <select value={formatPreset} onChange={(e) => setFormatPreset(e.target.value as LongFormPreset)}
@@ -857,7 +999,7 @@ export default function LongFormPanel() {
                             </div>
                         )}
 
-                        {(lfSession.source_url || sourceVideo.title || sourceAnalysis.what_worked || sourceAnalysis.what_hurt) && (
+                                {(lfSession.source_url || sourceVideo.title || sourceAnalysis.what_worked || sourceAnalysis.what_hurt || connectedYouTubeChannel.channel_title) && (
                             <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/5 p-4 space-y-3">
                                 <div>
                                     <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Source Analysis</p>
@@ -877,6 +1019,22 @@ export default function LongFormPanel() {
                                         )}
                                     </div>
                                 )}
+                                {connectedYouTubeChannel.channel_title ? (
+                                    <div className="rounded-lg border border-cyan-400/20 bg-black/20 p-3">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Connected Channel Context</p>
+                                        <p className="mt-2 text-sm font-semibold text-white">{String(connectedYouTubeChannel.channel_title)}</p>
+                                        {connectedYouTubeChannel.summary ? (
+                                            <p className="mt-2 text-xs text-gray-400">{String(connectedYouTubeChannel.summary)}</p>
+                                        ) : null}
+                                        {Array.isArray(connectedYouTubeChannel.title_pattern_hints) && connectedYouTubeChannel.title_pattern_hints.length > 0 ? (
+                                            <ul className="mt-2 space-y-1 text-xs text-gray-300">
+                                                {connectedYouTubeChannel.title_pattern_hints.slice(0, 4).map((item: string, idx: number) => (
+                                                    <li key={`channel-title-hint-${idx}`}>- {item}</li>
+                                                ))}
+                                            </ul>
+                                        ) : null}
+                                    </div>
+                                ) : null}
                                 <div className="grid gap-3 md:grid-cols-2">
                                     {sourceAnalysis.what_worked && (
                                         <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">

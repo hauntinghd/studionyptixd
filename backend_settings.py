@@ -20,6 +20,13 @@ COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudfl
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", os.getenv("GOOGLE_YOUTUBE_API_KEY", ""))
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "https://api.nyptidindustries.com/api/oauth/google/youtube/callback",
+)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_TOPUP_PUBLIC_ENABLED = os.getenv("STRIPE_TOPUP_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
@@ -270,4 +277,16 @@ CREATIVE_SESSION_PERSISTENCE_ENABLED = os.getenv("CREATIVE_SESSION_PERSISTENCE_E
 PROJECTS_STORE_FILE = _resolve_data_path(
     os.getenv("PROJECTS_STORE_FILE", ""),
     TEMP_DIR / "projects_store.json",
+)
+YOUTUBE_CONNECTIONS_FILE = _resolve_data_path(
+    os.getenv("YOUTUBE_CONNECTIONS_FILE", ""),
+    TEMP_DIR / "youtube_connections.json",
+)
+YOUTUBE_OAUTH_STATES_FILE = _resolve_data_path(
+    os.getenv("YOUTUBE_OAUTH_STATES_FILE", ""),
+    TEMP_DIR / "youtube_oauth_states.json",
+)
+YOUTUBE_SIGNAL_LOG_FILE = _resolve_data_path(
+    os.getenv("YOUTUBE_SIGNAL_LOG_FILE", ""),
+    TRAINING_DATA_DIR / "youtube_channel_signals.jsonl",
 )

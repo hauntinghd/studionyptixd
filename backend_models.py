@@ -116,6 +116,7 @@ class LongFormSessionCreateRequest(BaseModel):
     input_description: str = ""
     format_preset: str = "explainer"
     source_url: str = ""
+    youtube_channel_id: str = ""
     analytics_notes: str = ""
     strategy_notes: str = ""
     transcript_text: str = ""
@@ -137,3 +138,11 @@ class LongFormResolveErrorRequest(BaseModel):
     chapter_index: int
     fix_note: str = ""
     force_accept: bool = False
+
+
+class YouTubeOAuthStartRequest(BaseModel):
+    next_url: str = ""
+
+
+class YouTubeChannelSelectRequest(BaseModel):
+    channel_id: str = ""

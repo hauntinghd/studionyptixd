@@ -16,9 +16,9 @@ import zipfile
 import html as html_lib
 import httpx
 import jwt
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import quote, urlparse, unquote, parse_qs
+from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -35,6 +35,10 @@ from backend_settings import (
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
     SUPABASE_JWT_SECRET,
+    YOUTUBE_API_KEY,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
     STRIPE_TOPUP_PUBLIC_ENABLED,
@@ -130,6 +134,9 @@ from backend_settings import (
     TEMP_DIR,
     THUMBNAIL_DIR,
     TRAINING_DATA_DIR,
+    YOUTUBE_CONNECTIONS_FILE,
+    YOUTUBE_OAUTH_STATES_FILE,
+    YOUTUBE_SIGNAL_LOG_FILE,
 )
 from backend_catalog import (
     PLAN_LIMITS,
@@ -169,6 +176,8 @@ from backend_models import (
     LongFormSessionCreateRequest,
     LongFormChapterActionRequest,
     LongFormResolveErrorRequest,
+    YouTubeOAuthStartRequest,
+    YouTubeChannelSelectRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -525,6 +534,21 @@ _paypal_subscriptions: dict[str, dict] = {}
 _paypal_subscriptions_lock = asyncio.Lock()
 _landing_notifications: list[dict] = []
 _landing_notifications_lock = asyncio.Lock()
+YOUTUBE_OAUTH_STATE_TTL_SEC = 20 * 60
+YOUTUBE_TOKEN_REFRESH_MARGIN_SEC = 120
+YOUTUBE_SCOPES = [
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+]
+YOUTUBE_AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+YOUTUBE_DATA_API_BASE = "https://www.googleapis.com/youtube/v3"
+YOUTUBE_ANALYTICS_API_BASE = "https://youtubeanalytics.googleapis.com/v2"
+_youtube_connections: dict[str, dict] = {}
+_youtube_connections_lock = asyncio.Lock()
+_youtube_oauth_states: dict[str, dict] = {}
+_youtube_oauth_states_lock = asyncio.Lock()
 
 
 def _load_kpi_metrics() -> None:
@@ -679,6 +703,114 @@ def _save_landing_notifications() -> None:
             json.dumps(_landing_notifications[-LANDING_NOTIFICATIONS_LIMIT:], ensure_ascii=True, indent=2),
             encoding="utf-8",
         )
+    except Exception:
+        pass
+
+
+def _load_youtube_connections() -> None:
+    global _youtube_connections
+    try:
+        if YOUTUBE_CONNECTIONS_FILE.exists():
+            data = json.loads(YOUTUBE_CONNECTIONS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _youtube_connections = data
+                return
+    except Exception:
+        pass
+    _youtube_connections = {}
+
+
+def _save_youtube_connections() -> None:
+    try:
+        YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        YOUTUBE_CONNECTIONS_FILE.write_text(json.dumps(_youtube_connections, ensure_ascii=True, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _prune_youtube_oauth_states() -> None:
+    now = time.time()
+    stale = [
+        state for state, payload in list(_youtube_oauth_states.items())
+        if now - float((payload or {}).get("created_at", 0.0) or 0.0) > YOUTUBE_OAUTH_STATE_TTL_SEC
+    ]
+    for state in stale:
+        _youtube_oauth_states.pop(state, None)
+
+
+def _load_youtube_oauth_states() -> None:
+    global _youtube_oauth_states
+    try:
+        if YOUTUBE_OAUTH_STATES_FILE.exists():
+            data = json.loads(YOUTUBE_OAUTH_STATES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _youtube_oauth_states = data
+                _prune_youtube_oauth_states()
+                return
+    except Exception:
+        pass
+    _youtube_oauth_states = {}
+
+
+def _save_youtube_oauth_states() -> None:
+    try:
+        _prune_youtube_oauth_states()
+        YOUTUBE_OAUTH_STATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        YOUTUBE_OAUTH_STATES_FILE.write_text(json.dumps(_youtube_oauth_states, ensure_ascii=True, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _youtube_auth_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
+
+
+def _youtube_bucket_for_user(user_id: str) -> dict:
+    user_key = str(user_id or "").strip()
+    bucket = _youtube_connections.get(user_key)
+    if not isinstance(bucket, dict):
+        bucket = {"default_channel_id": "", "channels": {}}
+        _youtube_connections[user_key] = bucket
+    channels = bucket.get("channels")
+    if not isinstance(channels, dict):
+        channels = {}
+        bucket["channels"] = channels
+    return bucket
+
+
+def _youtube_connection_public_view(record: dict) -> dict:
+    data = dict(record or {})
+    analytics_snapshot = dict(data.get("analytics_snapshot") or {})
+    return {
+        "channel_id": str(data.get("channel_id", "") or ""),
+        "title": str(data.get("title", "") or ""),
+        "custom_url": str(data.get("custom_url", "") or ""),
+        "thumbnail_url": str(data.get("thumbnail_url", "") or ""),
+        "channel_handle": str(data.get("channel_handle", "") or ""),
+        "channel_url": str(data.get("channel_url", "") or ""),
+        "subscriber_count": int(data.get("subscriber_count", 0) or 0),
+        "video_count": int(data.get("video_count", 0) or 0),
+        "view_count": int(data.get("view_count", 0) or 0),
+        "linked_at": float(data.get("linked_at", 0.0) or 0.0),
+        "last_synced_at": float(data.get("last_synced_at", 0.0) or 0.0),
+        "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
+        "analytics_snapshot": {
+            "channel_summary": str(analytics_snapshot.get("channel_summary", "") or ""),
+            "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
+            "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+            "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
+            "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
+            "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
+            "top_videos": list(analytics_snapshot.get("top_videos") or []),
+        },
+    }
+
+
+def _append_youtube_signal_log(entry: dict) -> None:
+    try:
+        YOUTUBE_SIGNAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with YOUTUBE_SIGNAL_LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
     except Exception:
         pass
 
@@ -1524,6 +1656,17 @@ def _title_is_too_close_to_source(candidate: str, source_title: str) -> bool:
         return True
     if shared >= 4 and len(source_tokens) <= 5:
         return True
+    return False
+
+
+def _title_is_too_close_to_any(candidate: str, existing_titles: list[str]) -> bool:
+    cand = str(candidate or "").strip()
+    if not cand:
+        return False
+    for existing in list(existing_titles or []):
+        current = str(existing or "").strip()
+        if current and _title_is_too_close_to_source(cand, current):
+            return True
     return False
 
 
@@ -3517,6 +3660,8 @@ _load_paypal_orders()
 _load_paypal_subscriptions()
 _load_landing_notifications()
 _load_longform_sessions()
+_load_youtube_connections()
+_load_youtube_oauth_states()
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -5105,6 +5250,539 @@ def _build_analytics_contact_sheet(image_paths: list[str], output_path: str, col
     return output_path
 
 
+def _youtube_redirect_target(next_url: str, ok: bool, message: str = "") -> str:
+    fallback = f"{SITE_URL.rstrip('/')}/?page=settings"
+    target = str(next_url or "").strip()
+    if not target:
+        target = fallback
+    try:
+        parsed = urlparse(target)
+        allowed_hosts = {
+            "studio.nyptidindustries.com",
+            "www.studio.nyptidindustries.com",
+            "localhost",
+            "127.0.0.1",
+        }
+        if parsed.scheme not in {"http", "https"} or str(parsed.hostname or "").lower() not in allowed_hosts:
+            target = fallback
+    except Exception:
+        target = fallback
+    sep = "&" if "?" in target else "?"
+    status_value = "connected" if ok else "error"
+    out = f"{target}{sep}youtube={status_value}"
+    if message:
+        out += "&youtube_message=" + quote(_clip_text(message, 160), safe="")
+    return out
+
+
+def _youtube_build_auth_url(state_token: str) -> str:
+    query = urlencode(
+        {
+            "client_id": GOOGLE_CLIENT_ID,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "response_type": "code",
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+            "prompt": "consent",
+            "scope": " ".join(YOUTUBE_SCOPES),
+            "state": state_token,
+        }
+    )
+    return f"{YOUTUBE_AUTH_BASE_URL}?{query}"
+
+
+async def _google_exchange_code_for_tokens(code: str) -> dict:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Google token exchange failed ({resp.status_code}): {_clip_text(resp.text, 220)}")
+    payload = resp.json()
+    if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
+        raise RuntimeError("Google token exchange returned no access token")
+    return payload
+
+
+async def _google_refresh_access_token(refresh_token: str) -> dict:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "refresh_token": refresh_token,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Google token refresh failed ({resp.status_code}): {_clip_text(resp.text, 220)}")
+    payload = resp.json()
+    if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
+        raise RuntimeError("Google token refresh returned no access token")
+    return payload
+
+
+async def _youtube_api_get(access_token: str, path: str, *, params: dict | None = None, analytics: bool = False) -> dict:
+    base = YOUTUBE_ANALYTICS_API_BASE if analytics else YOUTUBE_DATA_API_BASE
+    url = path if path.startswith("http") else f"{base}{path}"
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.get(
+            url,
+            params=params or {},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"YouTube API failed ({resp.status_code}): {_clip_text(resp.text, 260)}")
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("YouTube API returned an invalid payload")
+    return payload
+
+
+def _youtube_channel_url(channel_id: str, custom_url: str = "") -> str:
+    custom = str(custom_url or "").strip().lstrip("@")
+    if custom:
+        return f"https://www.youtube.com/@{custom}"
+    cid = str(channel_id or "").strip()
+    return f"https://www.youtube.com/channel/{cid}" if cid else ""
+
+
+async def _youtube_fetch_my_channels(access_token: str) -> list[dict]:
+    payload = await _youtube_api_get(
+        access_token,
+        "/channels",
+        params={
+            "part": "snippet,statistics,contentDetails",
+            "mine": "true",
+            "maxResults": 50,
+        },
+    )
+    out: list[dict] = []
+    for raw in list(payload.get("items") or []):
+        if not isinstance(raw, dict):
+            continue
+        snippet = dict(raw.get("snippet") or {})
+        stats = dict(raw.get("statistics") or {})
+        thumbs = dict(snippet.get("thumbnails") or {})
+        thumb = (
+            ((thumbs.get("high") or {}).get("url"))
+            or ((thumbs.get("medium") or {}).get("url"))
+            or ((thumbs.get("default") or {}).get("url"))
+            or ""
+        )
+        channel_id = str(raw.get("id", "") or "").strip()
+        custom_url = str(snippet.get("customUrl", "") or "").strip()
+        uploads_playlist = str(((raw.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads", "") or "").strip()
+        out.append(
+            {
+                "channel_id": channel_id,
+                "title": str(snippet.get("title", "") or "").strip(),
+                "description": str(snippet.get("description", "") or "").strip(),
+                "custom_url": custom_url,
+                "channel_handle": ("@" + custom_url.lstrip("@")) if custom_url else "",
+                "thumbnail_url": str(thumb or "").strip(),
+                "channel_url": _youtube_channel_url(channel_id, custom_url),
+                "subscriber_count": int(float(stats.get("subscriberCount", 0) or 0)),
+                "video_count": int(float(stats.get("videoCount", 0) or 0)),
+                "view_count": int(float(stats.get("viewCount", 0) or 0)),
+                "uploads_playlist_id": uploads_playlist,
+            }
+        )
+    return out
+
+
+async def _youtube_fetch_videos(access_token: str, video_ids: list[str]) -> list[dict]:
+    ids = [str(v).strip() for v in list(video_ids or []) if str(v).strip()]
+    if not ids:
+        return []
+    payload = await _youtube_api_get(
+        access_token,
+        "/videos",
+        params={
+            "part": "snippet,statistics,contentDetails",
+            "id": ",".join(ids[:50]),
+            "maxResults": min(50, len(ids)),
+        },
+    )
+    items_by_id: dict[str, dict] = {}
+    for raw in list(payload.get("items") or []):
+        if not isinstance(raw, dict):
+            continue
+        vid = str(raw.get("id", "") or "").strip()
+        snippet = dict(raw.get("snippet") or {})
+        stats = dict(raw.get("statistics") or {})
+        items_by_id[vid] = {
+            "video_id": vid,
+            "title": str(snippet.get("title", "") or "").strip(),
+            "description": str(snippet.get("description", "") or "").strip(),
+            "published_at": str(snippet.get("publishedAt", "") or "").strip(),
+            "thumbnail_url": str((((snippet.get("thumbnails") or {}).get("high") or {}).get("url") or "")).strip(),
+            "views": int(float(stats.get("viewCount", 0) or 0)),
+            "likes": int(float(stats.get("likeCount", 0) or 0)),
+            "comments": int(float(stats.get("commentCount", 0) or 0)),
+        }
+    return [items_by_id[vid] for vid in ids if vid in items_by_id]
+
+
+def _parse_youtube_iso8601_duration(raw_duration: str) -> int:
+    value = str(raw_duration or "").strip().upper()
+    if not value.startswith("PT"):
+        return 0
+    hours_match = re.search(r"(\d+)H", value)
+    minutes_match = re.search(r"(\d+)M", value)
+    seconds_match = re.search(r"(\d+)S", value)
+    hours = int(hours_match.group(1) or 0) if hours_match else 0
+    minutes = int(minutes_match.group(1) or 0) if minutes_match else 0
+    seconds = int(seconds_match.group(1) or 0) if seconds_match else 0
+    return (hours * 3600) + (minutes * 60) + seconds
+
+
+async def _youtube_fetch_public_video_bundle_api_key(source_url: str) -> dict:
+    video_id = _source_url_video_id(source_url)
+    if not video_id or not YOUTUBE_API_KEY:
+        return {}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(
+            f"{YOUTUBE_DATA_API_BASE}/videos",
+            params={
+                "part": "snippet,contentDetails,statistics",
+                "id": video_id,
+                "key": YOUTUBE_API_KEY,
+            },
+        )
+    if resp.status_code != 200:
+        return {}
+    payload = resp.json()
+    items = list(payload.get("items") or [])
+    if not items:
+        return {}
+    raw = dict(items[0] or {})
+    snippet = dict(raw.get("snippet") or {})
+    stats = dict(raw.get("statistics") or {})
+    thumbs = dict(snippet.get("thumbnails") or {})
+    tags = [str(tag).strip() for tag in list(snippet.get("tags") or []) if str(tag).strip()][:20]
+    categories = [str(snippet.get("categoryId", "") or "").strip()] if str(snippet.get("categoryId", "") or "").strip() else []
+    duration_sec = _parse_youtube_iso8601_duration(str((raw.get("contentDetails") or {}).get("duration", "") or ""))
+    title = str(snippet.get("title", "") or "").strip()
+    channel = str(snippet.get("channelTitle", "") or "").strip()
+    description = str(snippet.get("description", "") or "").strip()
+    thumbnail_url = str((((thumbs.get("high") or {}).get("url")) or ((thumbs.get("medium") or {}).get("url")) or ((thumbs.get("default") or {}).get("url")) or "")).strip()
+    view_count = int(float(stats.get("viewCount", 0) or 0))
+    like_count = int(float(stats.get("likeCount", 0) or 0))
+    comment_count = int(float(stats.get("commentCount", 0) or 0))
+    summary_parts = [
+        f"Title: {title}" if title else "",
+        f"Channel: {channel}" if channel else "",
+        f"Duration: {duration_sec}s" if duration_sec > 0 else "",
+        f"Views: {view_count}" if view_count > 0 else "",
+        f"Likes: {like_count}" if like_count > 0 else "",
+        f"Tags: {', '.join(tags[:8])}" if tags else "",
+        "Metadata extracted through the official YouTube Data API.",
+    ]
+    return {
+        "source_url": str(source_url or "").strip(),
+        "canonical_url": f"https://www.youtube.com/watch?v={video_id}",
+        "platform": "youtube_data_api",
+        "title": title,
+        "description": description,
+        "channel": channel,
+        "channel_url": "",
+        "thumbnail_url": thumbnail_url,
+        "duration_sec": duration_sec,
+        "view_count": view_count,
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "upload_date": str(snippet.get("publishedAt", "") or "").strip(),
+        "tags": tags,
+        "categories": categories,
+        "chapters": [],
+        "transcript_excerpt": "",
+        "public_summary": " | ".join(part for part in summary_parts if part),
+    }
+
+
+async def _youtube_fetch_channel_search(access_token: str, channel_id: str, order: str = "date", max_results: int = 12) -> list[dict]:
+    payload = await _youtube_api_get(
+        access_token,
+        "/search",
+        params={
+            "part": "snippet",
+            "channelId": channel_id,
+            "order": order,
+            "maxResults": max(1, min(25, int(max_results or 12))),
+            "type": "video",
+        },
+    )
+    video_ids = []
+    for raw in list(payload.get("items") or []):
+        if not isinstance(raw, dict):
+            continue
+        vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
+        if vid:
+            video_ids.append(vid)
+    return await _youtube_fetch_videos(access_token, video_ids)
+
+
+async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -> dict:
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=90)
+    summary_payload = {}
+    try:
+        summary_payload = await _youtube_api_get(
+            access_token,
+            "/reports",
+            analytics=True,
+            params={
+                "ids": f"channel=={channel_id}",
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat(),
+                "metrics": "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,impressions,impressionClickThroughRate",
+            },
+        )
+    except Exception:
+        summary_payload = await _youtube_api_get(
+            access_token,
+            "/reports",
+            analytics=True,
+            params={
+                "ids": f"channel=={channel_id}",
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat(),
+                "metrics": "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost",
+            },
+        )
+
+    summary_headers = [str(v) for v in list(summary_payload.get("columnHeaders") or []) if isinstance(v, dict)]
+    summary_rows = list(summary_payload.get("rows") or [])
+    summary_map: dict[str, float] = {}
+    if summary_rows:
+        first_row = list(summary_rows[0] or [])
+        header_names = [str((col or {}).get("name", "") or "") for col in list(summary_payload.get("columnHeaders") or [])]
+        for idx, header in enumerate(header_names):
+            if idx < len(first_row):
+                try:
+                    summary_map[header] = float(first_row[idx] or 0)
+                except Exception:
+                    pass
+
+    top_videos_payload = {}
+    top_rows: list = []
+    top_header_names: list[str] = []
+    for metrics in (
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+    ):
+        try:
+            top_videos_payload = await _youtube_api_get(
+                access_token,
+                "/reports",
+                analytics=True,
+                params={
+                    "ids": f"channel=={channel_id}",
+                    "startDate": start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                    "dimensions": "video",
+                    "sort": "-views",
+                    "maxResults": 10,
+                    "metrics": metrics,
+                },
+            )
+            top_rows = list(top_videos_payload.get("rows") or [])
+            top_header_names = [str((col or {}).get("name", "") or "") for col in list(top_videos_payload.get("columnHeaders") or [])]
+            break
+        except Exception:
+            top_rows = []
+            top_header_names = []
+            continue
+
+    top_video_ids = [str(row[0] or "").strip() for row in top_rows if isinstance(row, list) and row]
+    top_video_meta = {str(v.get("video_id", "")): v for v in await _youtube_fetch_videos(access_token, top_video_ids)}
+    top_videos: list[dict] = []
+    for row in top_rows:
+        if not isinstance(row, list) or not row:
+            continue
+        video_id = str(row[0] or "").strip()
+        metrics_map: dict[str, float] = {}
+        for idx, header in enumerate(top_header_names):
+            if idx >= len(row):
+                continue
+            try:
+                metrics_map[header] = float(row[idx] or 0)
+            except Exception:
+                pass
+        meta = dict(top_video_meta.get(video_id) or {})
+        top_videos.append(
+            {
+                "video_id": video_id,
+                "title": str(meta.get("title", "") or "").strip(),
+                "published_at": str(meta.get("published_at", "") or "").strip(),
+                "thumbnail_url": str(meta.get("thumbnail_url", "") or "").strip(),
+                "views": int(metrics_map.get("views", meta.get("views", 0) or 0) or 0),
+                "average_view_duration_sec": int(metrics_map.get("averageViewDuration", 0) or 0),
+                "average_view_percentage": round(float(metrics_map.get("averageViewPercentage", 0.0) or 0.0), 2),
+                "impressions": int(metrics_map.get("impressions", 0) or 0),
+                "impression_click_through_rate": round(float(metrics_map.get("impressionClickThroughRate", 0.0) or 0.0), 2),
+            }
+        )
+
+    recent_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="date", max_results=12)
+    popular_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="viewCount", max_results=12)
+    popular_titles = [str(v.get("title", "") or "").strip() for v in popular_uploads if str(v.get("title", "") or "").strip()]
+    recent_titles = [str(v.get("title", "") or "").strip() for v in recent_uploads if str(v.get("title", "") or "").strip()]
+    title_tokens = _packaging_tokens(" ".join(popular_titles), max_items=18)
+    title_pattern_hints = []
+    if title_tokens:
+        title_pattern_hints.append("Winning topics/keywords recently cluster around: " + ", ".join(title_tokens[:8]))
+    if top_videos:
+        title_pattern_hints.append("Top channel titles avoid exact repetition while staying in one recognizable arena.")
+
+    packaging_learnings: list[str] = []
+    retention_learnings: list[str] = []
+    ctr = summary_map.get("impressionClickThroughRate", 0.0)
+    avp = summary_map.get("averageViewPercentage", 0.0)
+    avd = summary_map.get("averageViewDuration", 0.0)
+    if ctr:
+        packaging_learnings.append(f"Channel CTR over the recent window is about {ctr:.2f}%.")
+    if avp:
+        retention_learnings.append(f"Average percentage viewed is about {avp:.2f}%.")
+    if avd:
+        retention_learnings.append(f"Average view duration is about {int(avd)} seconds.")
+    if top_videos:
+        packaging_learnings.append("Strong packaging tends to revolve around one dominant promise and one obvious focal idea per title.")
+
+    summary_parts = [
+        f"Connected channel recent views: {int(summary_map.get('views', 0) or 0):,}" if summary_map.get("views") else "",
+        f"CTR: {ctr:.2f}%" if ctr else "",
+        f"Average viewed: {avp:.2f}%" if avp else "",
+        f"Top titles: {', '.join(popular_titles[:3])}" if popular_titles else "",
+    ]
+    return {
+        "channel_summary": " | ".join(part for part in summary_parts if part),
+        "recent_upload_titles": recent_titles[:12],
+        "top_video_titles": popular_titles[:12],
+        "top_videos": top_videos[:10],
+        "packaging_learnings": _dedupe_clip_list(packaging_learnings, max_items=6),
+        "retention_learnings": _dedupe_clip_list(retention_learnings, max_items=6),
+        "title_pattern_hints": _dedupe_clip_list(title_pattern_hints, max_items=6),
+    }
+
+
+async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
+    updated = dict(record or {})
+    access_token = str(updated.get("access_token", "") or "").strip()
+    refresh_token = str(updated.get("refresh_token", "") or "").strip()
+    expires_at = float(updated.get("token_expires_at", 0.0) or 0.0)
+    now = time.time()
+    if access_token and expires_at > now + YOUTUBE_TOKEN_REFRESH_MARGIN_SEC:
+        return access_token, updated
+    if not refresh_token:
+        raise RuntimeError("Missing Google refresh token for connected YouTube channel")
+    refreshed = await _google_refresh_access_token(refresh_token)
+    updated["access_token"] = str(refreshed.get("access_token", "") or "").strip()
+    updated["token_expires_at"] = now + max(300, int(refreshed.get("expires_in", 3600) or 3600))
+    if str(refreshed.get("refresh_token", "") or "").strip():
+        updated["refresh_token"] = str(refreshed.get("refresh_token", "") or "").strip()
+    updated["token_scope"] = str(refreshed.get("scope", updated.get("token_scope", "")) or "").strip()
+    updated["last_synced_at"] = now
+    return str(updated.get("access_token", "") or "").strip(), updated
+
+
+async def _youtube_sync_channel_record(record: dict) -> dict:
+    access_token, updated = await _youtube_ensure_access_token(record)
+    channels = await _youtube_fetch_my_channels(access_token)
+    channel_id = str(updated.get("channel_id", "") or "").strip()
+    matching = next((row for row in channels if str(row.get("channel_id", "") or "").strip() == channel_id), None)
+    if matching:
+        updated.update(matching)
+    analytics_snapshot = await _youtube_fetch_channel_analytics(access_token, channel_id)
+    updated["analytics_snapshot"] = analytics_snapshot
+    updated["last_synced_at"] = time.time()
+    _append_youtube_signal_log(
+        {
+            "ts": int(time.time()),
+            "channel_id": channel_id,
+            "channel_title": str(updated.get("title", "") or ""),
+            "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+            "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
+            "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
+            "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
+        }
+    )
+    return updated
+
+
+async def _youtube_selected_channel_context(user: dict, preferred_channel_id: str = "") -> dict:
+    user_id = str((user or {}).get("id", "") or "").strip()
+    if not user_id:
+        return {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        channels = dict(bucket.get("channels") or {})
+        chosen_id = str(preferred_channel_id or bucket.get("default_channel_id", "") or "").strip()
+        if not chosen_id and channels:
+            chosen_id = next(iter(channels.keys()))
+        record = dict(channels.get(chosen_id) or {})
+    if not record:
+        return {}
+    try:
+        refreshed = await _youtube_sync_channel_record(record)
+    except Exception as e:
+        refreshed = dict(record)
+        refreshed["last_sync_error"] = _clip_text(str(e), 220)
+    async with _youtube_connections_lock:
+        bucket = _youtube_bucket_for_user(user_id)
+        bucket["channels"][chosen_id] = refreshed
+        if not str(bucket.get("default_channel_id", "") or "").strip():
+            bucket["default_channel_id"] = chosen_id
+        _save_youtube_connections()
+    analytics_snapshot = dict(refreshed.get("analytics_snapshot") or {})
+    return {
+        "channel_id": chosen_id,
+        "channel_title": str(refreshed.get("title", "") or "").strip(),
+        "channel_handle": str(refreshed.get("channel_handle", "") or "").strip(),
+        "channel_url": str(refreshed.get("channel_url", "") or "").strip(),
+        "summary": str(analytics_snapshot.get("channel_summary", "") or "").strip(),
+        "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+        "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
+        "top_videos": list(analytics_snapshot.get("top_videos") or []),
+        "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
+        "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
+        "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
+        "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
+    }
+
+
+async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> dict:
+    user_key = str(user_id or "").strip()
+    channel_key = str(channel_id or "").strip()
+    if not user_key or not channel_key:
+        return {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
+    if not record:
+        return {}
+    refreshed = await _youtube_sync_channel_record(record)
+    async with _youtube_connections_lock:
+        bucket = _youtube_bucket_for_user(user_key)
+        bucket["channels"][channel_key] = refreshed
+        if not str(bucket.get("default_channel_id", "") or "").strip():
+            bucket["default_channel_id"] = channel_key
+        _save_youtube_connections()
+    return _youtube_connection_public_view(refreshed)
+
+
 CATALYST_MARKETING_DOCTRINE = [
     "Be active in the Daily Marketing Channel.",
     "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
@@ -5416,6 +6094,33 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
     normalized_url = _normalize_external_source_url(source_url)
     if not normalized_url:
         return {}
+    official_api_bundle = await _youtube_fetch_public_video_bundle_api_key(normalized_url)
+    if official_api_bundle:
+        try:
+            info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, normalized_url) if yt_dlp is not None else {}
+            if isinstance(info, dict):
+                merged = dict(official_api_bundle)
+                transcript_excerpt = ""
+                subtitle_url, subtitle_ext = _pick_subtitle_candidate(info, language=language)
+                if subtitle_url and subtitle_ext == "vtt":
+                    try:
+                        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                            resp = await client.get(subtitle_url)
+                            if resp.status_code == 200:
+                                transcript_excerpt = _parse_vtt_text(resp.text)
+                    except Exception:
+                        transcript_excerpt = ""
+                if transcript_excerpt:
+                    merged["transcript_excerpt"] = transcript_excerpt
+                    merged["public_summary"] = " | ".join(
+                        part for part in [
+                            str(merged.get("public_summary", "") or "").strip(),
+                            f"Transcript excerpt: {transcript_excerpt}",
+                        ] if part
+                    )
+                return merged
+        except Exception:
+            return official_api_bundle
     if yt_dlp is None:
         fallback_bundle = await _fetch_public_video_bundle_fallback(normalized_url)
         if fallback_bundle:
@@ -5521,13 +6226,14 @@ def _marketing_doctrine_text(extra_notes: str = "") -> str:
 
 async def _build_source_performance_analysis(
     source_bundle: dict,
+    channel_context: dict | None = None,
     analytics_notes: str = "",
     topic: str = "",
     input_title: str = "",
     input_description: str = "",
     strategy_notes: str = "",
 ) -> dict:
-    if not source_bundle and not analytics_notes:
+    if not source_bundle and not analytics_notes and not channel_context:
         return {}
     format_preset = "documentary" if re.search(r"\b(documentary|explainer|breakdown|analysis)\b", f"{topic} {input_title} {input_description}", flags=re.IGNORECASE) else "explainer"
     heuristic = _heuristic_source_performance_analysis(
@@ -5541,17 +6247,19 @@ async def _build_source_performance_analysis(
     system_prompt = (
         "You are a YouTube growth strategist for NYPTID Studio. "
         "Analyze a source video using public metadata plus optional operator notes. "
+        "If connected-channel context exists, use it to stay inside the channel's proven topic and packaging arena without copying old titles. "
         "Output strict JSON with keys: what_worked, what_hurt, hook_learnings, click_drivers, "
         "dropoff_risks, improvement_moves, title_angles, thumbnail_angles, description_angles. "
         "Keep every field practical and specific for building a better follow-up video. "
         "Stay in the same topic arena as the source title and preserve the same viewer promise category instead of drifting sideways. "
-        "Title angles must not recycle the exact source title, the same numbered-list wording, or the same opening phrase."
+        "Title angles must not recycle the exact source title, the same numbered-list wording, the same opening phrase, or any connected-channel winner title."
     )
     user_prompt = (
         f"New target topic: {topic}\n"
         f"Draft title constraint: {input_title}\n"
         f"Draft description constraint: {input_description}\n"
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
+        f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
         f"Private analytics/operator notes: {_clip_text(analytics_notes, 1800)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{_marketing_doctrine_text(strategy_notes)}"
@@ -5570,13 +6278,16 @@ async def _build_source_performance_analysis(
 async def _derive_longform_seed_from_source(
     source_bundle: dict,
     source_analysis: dict,
+    channel_context: dict | None = None,
     format_preset: str = "explainer",
     strategy_notes: str = "",
 ) -> dict:
-    if not source_bundle and not source_analysis:
+    if not source_bundle and not source_analysis and not channel_context:
         return {}
     source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 140)
     source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 420)
+    channel_title_memory = [str(v).strip() for v in list((channel_context or {}).get("recent_upload_titles") or []) if str(v).strip()]
+    channel_title_memory.extend(str(v).strip() for v in list((channel_context or {}).get("top_video_titles") or []) if str(v).strip())
     improvement_moves = source_analysis.get("improvement_moves") or []
     heuristic_titles = _same_arena_title_variants(source_bundle, topic="", format_preset=format_preset)
     heuristic_descriptions = _same_arena_description_variants(source_bundle, topic="", source_analysis=source_analysis)
@@ -5589,12 +6300,14 @@ async def _derive_longform_seed_from_source(
         "Create a sharper follow-up brief on the same general subject, but improve the angle, hook clarity, and packaging. "
         "Do not drift into a different topic arena. Stay in the same documentary or explainer lane as the source. "
         "Do not copy the source title verbatim. Do not reuse the same lead phrase or the same Top-N phrasing if the source used it. "
+        "Do not reuse any recent connected-channel title verbatim or near-verbatim either. "
         "The new title must feel adjacent but genuinely new. Output strict JSON with keys: topic, title, description."
     )
     user_prompt = (
         f"Format preset: {format_preset}\n"
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
         f"Source performance analysis: {json.dumps(source_analysis or {}, ensure_ascii=True)}\n"
+        f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{_marketing_doctrine_text(strategy_notes)}"
     )
@@ -5609,12 +6322,13 @@ async def _derive_longform_seed_from_source(
         derived_description = ""
     if "follow-up" in derived_topic.lower() or "same arena" in derived_topic.lower():
         derived_topic = ""
-    if derived_title and _title_is_too_close_to_source(derived_title, source_title):
+    if derived_title and (_title_is_too_close_to_source(derived_title, source_title) or _title_is_too_close_to_any(derived_title, channel_title_memory)):
         derived_title = ""
     fallback_topic = derived_topic or _same_arena_follow_up_topic(source_bundle, format_preset=format_preset) or source_title or "Follow-up video breakdown"
     if derived_title and not _title_stays_in_same_arena(derived_title, source_title, fallback_topic):
         derived_title = ""
-    fallback_title = derived_title or (title_angles[0] if title_angles else source_title or "New follow-up video")
+    filtered_title_angles = [tt for tt in title_angles if not _title_is_too_close_to_any(tt, [source_title, *channel_title_memory])]
+    fallback_title = derived_title or ((filtered_title_angles or title_angles or [source_title or "New follow-up video"])[0])
     fallback_description = derived_description or (
         description_angles[0]
         if description_angles
@@ -5733,11 +6447,22 @@ async def _summarize_longform_operator_evidence(
     }
 
 
-def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "") -> str:
+def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "", channel_context: dict | None = None) -> str:
     parts: list[str] = []
     if source_bundle:
         parts.append("Public source analysis:")
         parts.append(str(source_bundle.get("public_summary", "") or "").strip())
+    if channel_context:
+        parts.append("Connected YouTube channel context:")
+        summary = str((channel_context or {}).get("summary", "") or "").strip()
+        if summary:
+            parts.append(summary)
+        title_hints = [str(v).strip() for v in list((channel_context or {}).get("title_pattern_hints") or []) if str(v).strip()]
+        if title_hints:
+            parts.append("Channel title pattern hints: " + "; ".join(_clip_text(v, 120) for v in title_hints[:4]))
+        packaging = [str(v).strip() for v in list((channel_context or {}).get("packaging_learnings") or []) if str(v).strip()]
+        if packaging:
+            parts.append("Channel packaging learnings: " + "; ".join(_clip_text(v, 120) for v in packaging[:4]))
     if source_analysis:
         worked = source_analysis.get("what_worked")
         hurt = source_analysis.get("what_hurt")
@@ -12557,6 +13282,7 @@ def _longform_public_session(session: dict) -> dict:
         "input_title": str(s.get("input_title", "") or ""),
         "input_description": str(s.get("input_description", "") or ""),
         "source_url": str(s.get("source_url", "") or ""),
+        "youtube_channel_id": str(s.get("youtube_channel_id", "") or ""),
         "analytics_notes": str(s.get("analytics_notes", "") or ""),
         "strategy_notes": str(s.get("strategy_notes", "") or ""),
         "target_minutes": float(s.get("target_minutes", 0) or 0),
@@ -12601,6 +13327,7 @@ def _longform_session_summary(session: dict) -> dict:
         "topic": str(s.get("topic", "") or ""),
         "input_title": str(s.get("input_title", "") or ""),
         "source_url": str(s.get("source_url", "") or ""),
+        "youtube_channel_id": str(s.get("youtube_channel_id", "") or ""),
         "target_minutes": float(s.get("target_minutes", 0) or 0),
         "language": str(s.get("language", "en") or "en"),
         "resolution": str(s.get("resolution", "720p_landscape") or "720p_landscape"),
@@ -13503,6 +14230,7 @@ async def _create_longform_session_internal(
     input_description: str = "",
     format_preset: str = "explainer",
     source_url: str = "",
+    youtube_channel_id: str = "",
     analytics_notes: str = "",
     strategy_notes: str = "",
     transcript_text: str = "",
@@ -13529,6 +14257,7 @@ async def _create_longform_session_internal(
     input_description = str(input_description or "").strip()
     raw_source_url = str(source_url or "").strip()
     source_url = _normalize_external_source_url(raw_source_url)
+    youtube_channel_id = str(youtube_channel_id or "").strip()
     if raw_source_url and not source_url:
         raise HTTPException(400, "Source URL is invalid")
     analytics_notes = str(analytics_notes or "").strip()
@@ -13539,6 +14268,7 @@ async def _create_longform_session_internal(
     whisper_mode = _normalize_longform_whisper_mode(whisper_mode)
     analytics_image_paths = [str(p).strip() for p in list(analytics_image_paths or []) if str(p).strip()]
     auto_pipeline = bool(auto_pipeline_requested and _is_admin_user(user))
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=youtube_channel_id)
 
     source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
     if source_bundle:
@@ -13560,6 +14290,7 @@ async def _create_longform_session_internal(
     )
     source_analysis = dict(await _build_source_performance_analysis(
         source_bundle=source_bundle,
+        channel_context=channel_context,
         analytics_notes=merged_analytics_notes,
         topic=topic,
         input_title=input_title,
@@ -13584,6 +14315,7 @@ async def _create_longform_session_internal(
         auto_seed = await _derive_longform_seed_from_source(
             source_bundle=source_bundle,
             source_analysis=source_analysis,
+            channel_context=channel_context,
             format_preset=format_preset,
             strategy_notes=strategy_notes,
         )
@@ -13595,6 +14327,7 @@ async def _create_longform_session_internal(
             input_description = str(auto_seed.get("description", "") or "").strip()
         source_analysis = dict(await _build_source_performance_analysis(
             source_bundle=source_bundle,
+            channel_context=channel_context,
             analytics_notes=merged_analytics_notes,
             topic=topic,
             input_title=input_title,
@@ -13619,7 +14352,7 @@ async def _create_longform_session_internal(
         raise HTTPException(400, "Video title is required unless a source URL can be analyzed into a follow-up brief")
     if not input_description:
         raise HTTPException(400, "Video description is required unless a source URL can be analyzed into a follow-up brief")
-    source_context = _render_source_context(source_bundle, source_analysis, merged_analytics_notes)
+    source_context = _render_source_context(source_bundle, source_analysis, merged_analytics_notes, channel_context=channel_context)
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
     chapters = [
@@ -13633,6 +14366,14 @@ async def _create_longform_session_internal(
     ]
 
     source_title = str(source_bundle.get("title", "") or "").strip()
+    channel_title_memory = [
+        str(v).strip()
+        for v in [
+            *list((channel_context or {}).get("recent_upload_titles") or []),
+            *list((channel_context or {}).get("top_video_titles") or []),
+        ]
+        if str(v).strip()
+    ]
     title_variants = []
     for t in [
         *list(source_analysis.get("title_angles") or []),
@@ -13649,15 +14390,18 @@ async def _create_longform_session_internal(
             continue
         if source_title and _title_is_too_close_to_source(tt, source_title):
             continue
+        if _title_is_too_close_to_any(tt, channel_title_memory):
+            continue
         if tt not in title_variants:
             title_variants.append(tt)
     if not title_variants:
-        title_variants = _same_arena_title_variants(
+        title_variants = [
+            tt for tt in _same_arena_title_variants(
             source_bundle or {"title": topic or input_title},
             topic=topic or input_title,
             format_preset=format_preset,
             max_items=3,
-        )
+        ) if not _title_is_too_close_to_any(tt, [source_title, *channel_title_memory])]
 
     description_variants = []
     for d in [
@@ -13695,6 +14439,7 @@ async def _create_longform_session_internal(
         ],
         "source_video": source_bundle,
         "source_analysis": source_analysis,
+        "youtube_channel": channel_context,
         "source_context": source_context,
         "strategy_notes": strategy_notes,
         "marketing_doctrine": list(CATALYST_MARKETING_DOCTRINE),
@@ -13722,6 +14467,7 @@ async def _create_longform_session_internal(
         "input_title": input_title,
         "input_description": input_description,
         "source_url": source_url,
+        "youtube_channel_id": str((channel_context or {}).get("channel_id", "") or youtube_channel_id),
         "analytics_notes": analytics_notes,
         "strategy_notes": strategy_notes,
         "transcript_text": _clip_text(transcript_text, 12000),
@@ -13771,6 +14517,7 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         input_description=req.input_description,
         format_preset=req.format_preset,
         source_url=req.source_url,
+        youtube_channel_id=getattr(req, "youtube_channel_id", ""),
         analytics_notes=req.analytics_notes,
         strategy_notes=req.strategy_notes,
         transcript_text=getattr(req, "transcript_text", ""),
@@ -13793,6 +14540,7 @@ def _create_longform_bootstrap_placeholder_session(
     input_description: str,
     format_preset: str,
     source_url: str,
+    youtube_channel_id: str,
     analytics_notes: str,
     strategy_notes: str,
     transcript_text: str,
@@ -13814,6 +14562,7 @@ def _create_longform_bootstrap_placeholder_session(
         "tags": [],
         "source_video": {},
         "source_analysis": {},
+        "youtube_channel": {},
         "source_context": "",
         "strategy_notes": strategy_notes,
         "marketing_doctrine": list(CATALYST_MARKETING_DOCTRINE),
@@ -13834,6 +14583,7 @@ def _create_longform_bootstrap_placeholder_session(
         "input_title": str(input_title or "").strip(),
         "input_description": str(input_description or "").strip(),
         "source_url": str(source_url or "").strip(),
+        "youtube_channel_id": str(youtube_channel_id or "").strip(),
         "analytics_notes": str(analytics_notes or "").strip(),
         "strategy_notes": str(strategy_notes or "").strip(),
         "transcript_text": _clip_text(str(transcript_text or "").strip(), 12000),
@@ -13881,6 +14631,7 @@ async def _bootstrap_longform_session_background(
     input_description: str,
     format_preset: str,
     source_url: str,
+    youtube_channel_id: str,
     analytics_notes: str,
     strategy_notes: str,
     transcript_text: str,
@@ -13901,6 +14652,7 @@ async def _bootstrap_longform_session_background(
             input_description=input_description,
             format_preset=format_preset,
             source_url=source_url,
+            youtube_channel_id=youtube_channel_id,
             analytics_notes=analytics_notes,
             strategy_notes=strategy_notes,
             transcript_text=transcript_text,
@@ -13944,6 +14696,7 @@ async def create_longform_session_bootstrap(
     input_description: str = Form(""),
     format_preset: str = Form("explainer"),
     source_url: str = Form(""),
+    youtube_channel_id: str = Form(""),
     analytics_notes: str = Form(""),
     strategy_notes: str = Form(""),
     transcript_text: str = Form(""),
@@ -13997,6 +14750,7 @@ async def create_longform_session_bootstrap(
         input_description=input_description,
         format_preset=normalized_format_preset,
         source_url=normalized_source_url,
+        youtube_channel_id=str(youtube_channel_id or "").strip(),
         analytics_notes=analytics_notes,
         strategy_notes=strategy_notes,
         transcript_text=transcript_text,
@@ -14022,6 +14776,7 @@ async def create_longform_session_bootstrap(
             input_description=input_description,
             format_preset=normalized_format_preset,
             source_url=normalized_source_url,
+            youtube_channel_id=str(youtube_channel_id or "").strip(),
             analytics_notes=analytics_notes,
             strategy_notes=strategy_notes,
             transcript_text=transcript_text,
@@ -16197,6 +16952,12 @@ async def public_config():
             "animation_markup_multiplier": ANIMATION_MARKUP_MULTIPLIER,
             "animation_credit_unit_usd": ANIMATION_CREDIT_UNIT_USD,
         },
+        "youtube_integration": {
+            "oauth_configured": _youtube_auth_configured(),
+            "api_key_configured": bool(YOUTUBE_API_KEY),
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "multiple_channels_supported": True,
+        },
         "feature_flags": {
             "script_to_short_enabled": SCRIPT_TO_SHORT_ENABLED,
             "story_advanced_controls_enabled": STORY_ADVANCED_CONTROLS_ENABLED,
@@ -16254,6 +17015,11 @@ async def get_me(user: dict = Depends(require_auth)):
     membership_plan_id = _membership_plan_for_user(user, access_snapshot)
     features = _plan_features_for(effective_plan, is_admin=is_admin)
     lane_access = _public_lane_access_for_user(user, access_snapshot)
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        yt_bucket = _youtube_bucket_for_user(str(user.get("id", "") or ""))
+        yt_channels = dict(yt_bucket.get("channels") or {})
+        yt_default_channel_id = str(yt_bucket.get("default_channel_id", "") or "")
     return {
         "id": user["id"],
         "email": email,
@@ -16295,7 +17061,198 @@ async def get_me(user: dict = Depends(require_auth)):
         "demo_price_id": DEMO_PRO_PRICE_ID,
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
         "longform_owner_beta": bool(lane_access.get("longform")),
+        "youtube_oauth_configured": _youtube_auth_configured(),
+        "youtube_connected_channel_count": len(yt_channels),
+        "youtube_default_channel_id": yt_default_channel_id,
     }
+
+
+@app.post("/api/oauth/google/youtube/start")
+async def start_google_youtube_oauth(
+    req: YouTubeOAuthStartRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _youtube_auth_configured():
+        raise HTTPException(500, "Google YouTube OAuth is not configured on the backend yet")
+    state_token = secrets.token_urlsafe(32)
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        _youtube_oauth_states[state_token] = {
+            "user_id": str(user.get("id", "") or "").strip(),
+            "created_at": time.time(),
+            "next_url": str((req or {}).next_url or "").strip(),
+        }
+        _save_youtube_oauth_states()
+    return {"auth_url": _youtube_build_auth_url(state_token)}
+
+
+@app.get("/api/oauth/google/youtube/callback")
+async def google_youtube_oauth_callback(
+    code: str = "",
+    state: str = "",
+    error: str = "",
+):
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        state_payload = dict(_youtube_oauth_states.pop(str(state or "").strip(), {}) or {})
+        _save_youtube_oauth_states()
+    next_url = str(state_payload.get("next_url", "") or "").strip()
+    user_id = str(state_payload.get("user_id", "") or "").strip()
+    if error:
+        return RedirectResponse(_youtube_redirect_target(next_url, False, f"Google OAuth error: {error}"), status_code=302)
+    if not user_id or not code:
+        return RedirectResponse(_youtube_redirect_target(next_url, False, "Google OAuth callback was missing state or code"), status_code=302)
+    try:
+        token_payload = await _google_exchange_code_for_tokens(code)
+        access_token = str(token_payload.get("access_token", "") or "").strip()
+        refresh_token = str(token_payload.get("refresh_token", "") or "").strip()
+        expires_in = max(300, int(token_payload.get("expires_in", 3600) or 3600))
+        scope = str(token_payload.get("scope", "") or "").strip()
+        channels = await _youtube_fetch_my_channels(access_token)
+        if not channels:
+            return RedirectResponse(_youtube_redirect_target(next_url, False, "Google account returned no YouTube channels"), status_code=302)
+        now = time.time()
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            bucket = _youtube_bucket_for_user(user_id)
+            existing_channels = dict(bucket.get("channels") or {})
+            for channel in channels:
+                channel_id = str(channel.get("channel_id", "") or "").strip()
+                if not channel_id:
+                    continue
+                previous = dict(existing_channels.get(channel_id) or {})
+                existing_channels[channel_id] = {
+                    **previous,
+                    **channel,
+                    "channel_id": channel_id,
+                    "user_id": user_id,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token or str(previous.get("refresh_token", "") or "").strip(),
+                    "token_expires_at": now + expires_in,
+                    "token_scope": scope,
+                    "linked_at": float(previous.get("linked_at", now) or now),
+                    "last_synced_at": float(previous.get("last_synced_at", 0.0) or 0.0),
+                    "last_sync_error": "",
+                }
+            bucket["channels"] = existing_channels
+            default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
+            if not default_channel_id or default_channel_id not in existing_channels:
+                bucket["default_channel_id"] = str(channels[0].get("channel_id", "") or "").strip()
+            _save_youtube_connections()
+            default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
+        if default_channel_id:
+            try:
+                await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
+            except Exception:
+                pass
+        return RedirectResponse(_youtube_redirect_target(next_url, True, "YouTube channel connected"), status_code=302)
+    except Exception as e:
+        return RedirectResponse(_youtube_redirect_target(next_url, False, str(e)), status_code=302)
+
+
+@app.get("/api/youtube/channels")
+async def list_connected_youtube_channels(
+    request: Request,
+    sync: bool = True,
+):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    user_id = str(user.get("id", "") or "").strip()
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
+        channels = {str(k): dict(v or {}) for k, v in dict(bucket.get("channels") or {}).items()}
+    if sync and default_channel_id in channels:
+        try:
+            channels[default_channel_id] = await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
+        except Exception as e:
+            stale = dict(channels.get(default_channel_id) or {})
+            stale["last_sync_error"] = _clip_text(str(e), 220)
+            channels[default_channel_id] = stale
+    public_channels = []
+    for channel_id, record in channels.items():
+        if "analytics_snapshot" in record or "access_token" in record:
+            public_channels.append(_youtube_connection_public_view(record))
+        else:
+            public_channels.append(dict(record))
+    public_channels.sort(key=lambda row: 0 if str(row.get("channel_id", "") or "") == default_channel_id else 1)
+    return {
+        "oauth_configured": _youtube_auth_configured(),
+        "default_channel_id": default_channel_id,
+        "channels": public_channels,
+    }
+
+
+@app.post("/api/youtube/channels/select")
+async def select_connected_youtube_channel(
+    req: YouTubeChannelSelectRequest,
+    request: Request,
+):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    user_id = str(user.get("id", "") or "").strip()
+    channel_id = str((req or {}).channel_id or "").strip()
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        channels = dict(bucket.get("channels") or {})
+        if channel_id not in channels:
+            raise HTTPException(404, "Connected YouTube channel not found")
+        bucket["default_channel_id"] = channel_id
+        _save_youtube_connections()
+    channel_public = await _youtube_sync_and_persist_for_user(user_id, channel_id)
+    return {
+        "ok": True,
+        "default_channel_id": channel_id,
+        "channel": channel_public,
+    }
+
+
+@app.post("/api/youtube/channels/{channel_id}/sync")
+async def sync_connected_youtube_channel(channel_id: str, request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    channel_public = await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id)
+    if not channel_public:
+        raise HTTPException(404, "Connected YouTube channel not found")
+    return {"ok": True, "channel": channel_public}
+
+
+@app.delete("/api/youtube/channels/{channel_id}")
+async def disconnect_connected_youtube_channel(channel_id: str, request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    user_id = str(user.get("id", "") or "").strip()
+    channel_key = str(channel_id or "").strip()
+    removed = {}
+    default_channel_id = ""
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        channels = dict(bucket.get("channels") or {})
+        removed = dict(channels.pop(channel_key, {}) or {})
+        bucket["channels"] = channels
+        if str(bucket.get("default_channel_id", "") or "").strip() == channel_key:
+            bucket["default_channel_id"] = next(iter(channels.keys()), "")
+        default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
+        _save_youtube_connections()
+    refresh_token = str(removed.get("refresh_token", "") or "").strip()
+    if refresh_token:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                await client.post(GOOGLE_REVOKE_URL, data={"token": refresh_token})
+        except Exception:
+            pass
+    return {"ok": True, "default_channel_id": default_channel_id}
 
 
 def _user_has_paid_access(user: dict | None) -> bool:

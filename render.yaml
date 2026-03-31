@@ -67,6 +67,14 @@ services:
         value: eleven_multilingual_v2
       - key: XAI_API_KEY
         sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
       - key: FAL_AI_KEY
