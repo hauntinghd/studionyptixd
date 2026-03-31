@@ -193,7 +193,7 @@ function chapterStatusClass(status: string): string {
 }
 
 export default function LongFormPanel() {
-    const { session, ownerOverride } = useContext(AuthContext);
+    const { session, ownerOverride, longformOwnerBeta } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
     const template = 'story' as const;
     const [formatPreset, setFormatPreset] = useState<LongFormPreset>('documentary');
@@ -441,8 +441,25 @@ export default function LongFormPanel() {
         }
     }, [ownerOverride]);
 
+    const canUseDeepAnalysis = Boolean(ownerOverride || longformOwnerBeta);
+    const missingManualBrief = !topic.trim() || !inputTitle.trim() || !inputDescription.trim();
+    const deepAnalysisRequested = Boolean(
+        sourceUrl.trim()
+        || youtubeChannelId.trim()
+        || analyticsNotes.trim()
+        || transcriptText.trim()
+        || analyticsImages.length > 0
+        || (ownerOverride && autoPipeline)
+    );
+    const canCreateFromSourceOnly = canUseDeepAnalysis && Boolean(sourceUrl.trim());
+    const createDisabled = creating || (!canCreateFromSourceOnly && missingManualBrief);
+
     const createSession = useCallback(async () => {
         if (!session) return;
+        if (deepAnalysisRequested && !canUseDeepAnalysis) {
+            setError('Source-video deep analysis is owner beta for now. Public Long Form stays on the lighter manual workflow while Catalyst is being tuned.');
+            return;
+        }
         setCreating(true);
         setError('');
         setLfSession(null);
@@ -453,14 +470,7 @@ export default function LongFormPanel() {
             const formattedDescription = inputDescription.trim()
                 ? `Format preset: ${PRESET_LABELS[formatPreset]}. ${inputDescription.trim()}`.trim()
                 : '';
-            const useBootstrapRoute = Boolean(
-                sourceUrl.trim()
-                || youtubeChannelId.trim()
-                || analyticsNotes.trim()
-                || transcriptText.trim()
-                || analyticsImages.length > 0
-                || (ownerOverride && autoPipeline)
-            );
+            const useBootstrapRoute = Boolean(canUseDeepAnalysis && deepAnalysisRequested);
             const payload = useBootstrapRoute
                 ? await (() => {
                     const formData = new FormData();
@@ -491,12 +501,12 @@ export default function LongFormPanel() {
                         input_title: inputTitle.trim(),
                         input_description: formattedDescription,
                         format_preset: formatPreset,
-                        source_url: sourceUrl.trim(),
-                        youtube_channel_id: youtubeChannelId.trim(),
-                        analytics_notes: analyticsNotes.trim(),
+                        source_url: '',
+                        youtube_channel_id: '',
+                        analytics_notes: '',
                         strategy_notes: applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '',
-                        transcript_text: transcriptText.trim(),
-                        auto_pipeline: ownerOverride && autoPipeline,
+                        transcript_text: '',
+                        auto_pipeline: false,
                         target_minutes: targetMinutes,
                         language,
                         animation_enabled: animationEnabled,
@@ -520,6 +530,8 @@ export default function LongFormPanel() {
         apiCall,
         apiCallFormData,
         autoPipeline,
+        canUseDeepAnalysis,
+        deepAnalysisRequested,
         inputDescription,
         inputTitle,
         language,
@@ -681,6 +693,7 @@ export default function LongFormPanel() {
                             <select
                                 value={youtubeChannelId}
                                 onChange={(e) => setYoutubeChannelId(e.target.value)}
+                                disabled={!canUseDeepAnalysis}
                                 className="w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white md:max-w-xl"
                             >
                                 <option value="">No connected channel selected</option>
@@ -694,7 +707,7 @@ export default function LongFormPanel() {
                                 <button
                                     type="button"
                                     onClick={startYouTubeConnect}
-                                    disabled={youtubeConnecting}
+                                    disabled={!canUseDeepAnalysis || youtubeConnecting}
                                     className="rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/20 disabled:opacity-60"
                                 >
                                     {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
@@ -702,7 +715,7 @@ export default function LongFormPanel() {
                                 <button
                                     type="button"
                                     onClick={() => void loadYouTubeChannels(false)}
-                                    disabled={youtubeLoading}
+                                    disabled={!canUseDeepAnalysis || youtubeLoading}
                                     className="rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm font-medium text-white transition hover:bg-white/[0.08] disabled:opacity-60"
                                 >
                                     {youtubeLoading ? 'Refreshing...' : 'Refresh Channels'}
@@ -801,7 +814,9 @@ export default function LongFormPanel() {
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                         <p className="mt-2 text-xs text-cyan-300/80">
-                            If you only paste a source URL, Catalyst now auto-derives the follow-up topic, title, and description from the source video and rebuilds a stronger version from that angle.
+                            {canUseDeepAnalysis
+                                ? 'If you only paste a source URL, Catalyst now auto-derives the follow-up topic, title, and description from the source video and rebuilds a stronger version from that angle.'
+                                : 'Source-video analysis stays owner beta for now. Public Long Form needs a manual topic, title, and description while the heavier Catalyst path is being tuned.'}
                         </p>
                     </label>
                     <label className="text-sm text-gray-300 md:col-span-2">
@@ -926,10 +941,10 @@ export default function LongFormPanel() {
                 <div className="flex flex-wrap gap-3">
                     <button
                         onClick={createSession}
-                        disabled={creating || (!sourceUrl.trim() && (!topic.trim() || !inputTitle.trim() || !inputDescription.trim()))}
+                        disabled={createDisabled}
                         className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium disabled:opacity-60 transition"
                     >
-                        {creating ? 'Creating...' : ownerOverride && autoPipeline ? 'Create + Auto Run' : sourceUrl.trim() && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
+                        {creating ? 'Creating...' : ownerOverride && autoPipeline ? 'Create + Auto Run' : canCreateFromSourceOnly && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
                     </button>
                     <div className="flex items-center gap-2">
                         <input

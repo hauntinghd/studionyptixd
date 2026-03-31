@@ -13,7 +13,7 @@ type ConnectedYouTubeChannel = {
 };
 
 export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, role } = useContext(AuthContext);
+    const { session, role, longformOwnerBeta } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
     const [youtubeDefaultChannelId, setYoutubeDefaultChannelId] = useState('');
@@ -96,14 +96,19 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                                 </div>
                             </div>
                             <div className="flex gap-2">
-                                <button type="button" onClick={() => void loadYouTubeChannels()} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06]">
+                                <button type="button" onClick={() => void loadYouTubeChannels()} disabled={!longformOwnerBeta || youtubeLoading} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06] disabled:opacity-60">
                                     {youtubeLoading ? 'Refreshing...' : 'Refresh'}
                                 </button>
-                                <button type="button" onClick={startYouTubeConnect} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500">
+                                <button type="button" onClick={startYouTubeConnect} disabled={!longformOwnerBeta} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60">
                                     {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
                                 </button>
                             </div>
                         </div>
+                        {!longformOwnerBeta ? (
+                            <p className="mt-4 text-xs text-amber-300">
+                                Connected-channel deep analysis is owner beta right now. Public Studio users stay on the lighter manual Long Form workflow while Catalyst is being tuned.
+                            </p>
+                        ) : null}
                         {youtubeError ? <p className="mt-4 text-sm text-red-400">{youtubeError}</p> : null}
                         {youtubeChannels.length > 0 ? (
                             <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -166,7 +171,7 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <WalletCards className="w-5 h-5 text-emerald-300" />
                                 <div>
                                     <h2 className="text-lg font-semibold text-white">Billing</h2>
-                                    <p className="mt-1 text-sm text-gray-400">Open the dedicated billing surface for plans and AC credit packs.</p>
+                                    <p className="mt-1 text-sm text-gray-400">Open the dedicated billing surface for Free, the three monthly plans, and the top-up packs.</p>
                                 </div>
                             </div>
                             <button type="button" onClick={() => { window.location.href = `${BILLING_SITE_URL}?view=checkout`; }} className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500">

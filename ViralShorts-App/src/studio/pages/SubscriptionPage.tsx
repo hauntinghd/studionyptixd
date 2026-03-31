@@ -3,6 +3,10 @@ import { ArrowLeft, BadgeCheck, Sparkles } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
+type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
+
+const PUBLIC_PLAN_ORDER: PublicPlanId[] = ['free', 'starter', 'creator', 'pro'];
+
 export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
@@ -17,7 +21,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         manageBilling,
         publicPlanLimits,
         publicPlanPrices,
-        defaultMembershipPlanId,
     } = useContext(AuthContext);
     const params = useMemo(() => {
         if (typeof window === 'undefined') return new URLSearchParams();
@@ -26,23 +29,47 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const subscriptionError = String(params.get('error') || '').trim();
     const [actionError, setActionError] = useState('');
-    const [loading, setLoading] = useState(false);
+    const [loadingPlanId, setLoadingPlanId] = useState('');
 
-    const membershipPrice = useMemo(() => {
-        const raw = Number((publicPlanPrices as Record<string, number>)[defaultMembershipPlanId || 'starter']);
-        if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
-        return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
-    }, [defaultMembershipPlanId, publicPlanPrices]);
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
-    const starterLimits = (publicPlanLimits as Record<string, any>)[defaultMembershipPlanId || 'starter'] || {};
-    const includedAnimatedCredits = Number(starterLimits.animated_renders_per_month || 0);
-    const membershipMaxDurationMinutes = Math.max(1, Math.round(Number(starterLimits.max_duration_sec || 0) / 60));
-    const membershipResolution = String(starterLimits.max_resolution || '720p').toUpperCase();
-    const membershipStatus = billingActive
-        ? `Active on ${membershipPlanId || defaultMembershipPlanId || 'starter'}`
-        : 'Inactive';
+    const normalizedCurrentPlan = useMemo<PublicPlanId>(() => {
+        const raw = String(membershipPlanId || 'free').trim().toLowerCase();
+        if (raw === 'starter' || raw === 'creator' || raw === 'pro') return raw;
+        return 'free';
+    }, [membershipPlanId]);
+
+    const plans = useMemo(() => {
+        return PUBLIC_PLAN_ORDER.map((planId) => {
+            const limits = (publicPlanLimits as Record<string, any>)[planId] || {};
+            const price = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
+            const animatedCredits = Number(limits.animated_renders_per_month || 0);
+            return {
+                id: planId,
+                title: capitalizePlan(planId),
+                priceLabel: planId === 'free' ? '$0' : `$${price.toFixed(price % 1 === 0 ? 0 : 2)}/mo`,
+                subtitle:
+                    planId === 'free'
+                        ? 'Enough included credits for two short-form animated renders.'
+                        : planId === 'starter'
+                            ? 'Best for solo operators getting started with Catalyst.'
+                            : planId === 'creator'
+                                ? 'More monthly headroom for active creators.'
+                                : 'Highest public monthly headroom for teams and daily operators.',
+                bullets: [
+                    `${animatedCredits} included animation credits${planId === 'free' ? '' : ' per month'}`,
+                    `${Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60))} minute max jobs`,
+                    `${String(limits.max_resolution || '720p').toUpperCase()} output`,
+                    planId === 'free'
+                        ? 'Create, Thumbnails, Clone, and Long Form included'
+                        : 'Create, Thumbnails, Clone, Long Form, and Chat Story',
+                ],
+            };
+        });
+    }, [publicPlanLimits, publicPlanPrices]);
+
+    const currentStatus = billingActive ? `Active on ${capitalizePlan(normalizedCurrentPlan)}` : 'Free plan active';
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -60,27 +87,36 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         onNavigate('billing');
     };
 
-    const handleMembershipAction = useCallback(async () => {
+    const handlePlanAction = useCallback(async (planId: PublicPlanId) => {
+        if (planId === 'free') {
+            if (!session) onNavigate('auth');
+            return;
+        }
         if (!session) {
             onNavigate('auth');
             return;
         }
         setActionError('');
-        setLoading(true);
+        setLoadingPlanId(planId);
         try {
-            if (usesStripeMembership) {
-                const err = await manageBilling();
-                if (err) setActionError(err);
-                return;
+            if (billingActive && normalizedCurrentPlan === planId) {
+                if (usesStripeMembership) {
+                    const err = await manageBilling();
+                    if (err) setActionError(err);
+                    return;
+                }
+                if (usesManualPayPalMembership) {
+                    const err = await checkout(planId);
+                    if (err) setActionError(err);
+                    return;
+                }
             }
-            const err = billingActive && !usesManualPayPalMembership
-                ? await manageBilling()
-                : await checkout('membership');
+            const err = await checkout(planId);
             if (err) setActionError(err);
         } finally {
-            setLoading(false);
+            setLoadingPlanId('');
         }
-    }, [billingActive, checkout, manageBilling, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
+    }, [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
 
     return (
         <>
@@ -90,11 +126,11 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                     <div>
                         <div className="flex items-center gap-2 text-violet-300 text-sm font-semibold uppercase tracking-[0.18em]">
                             <Sparkles className="h-4 w-4" />
-                            Membership
+                            Plans
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white">Catalyst Membership</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white">Free, Starter, Creator, and Pro</h1>
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            One membership unlocks the public Studio lanes. Included credits burn before the wallet so you can run membership-only, usage-only, or hybrid accounts without changing products.
+                            Free gets users into Catalyst. The three monthly plans add more included credits and unlock Chat Story, while wallet top-ups stay separate on the billing page.
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
@@ -118,52 +154,64 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
 
                 <div className="grid gap-6 lg:grid-cols-[1.1fr,0.9fr]">
                     <section className="rounded-3xl border border-violet-500/20 bg-violet-500/[0.06] p-6">
-                        <div className="flex flex-wrap items-start justify-between gap-4">
-                            <div>
-                                <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Current Status</p>
-                                <h2 className="mt-2 text-3xl font-bold text-white">{membershipStatus}</h2>
-                                <p className="mt-3 max-w-2xl text-sm text-gray-300">
-                                    Membership is the simple unlock layer for the public Catalyst lanes: Create, Thumbnails, Clone, Long Form, and Chat Story. Wallet credits remain available for heavier render usage.
-                                </p>
-                            </div>
-                            <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-5 py-4 text-right">
-                                <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Price</p>
-                                <p className="mt-2 text-3xl font-bold text-white">{membershipPrice}</p>
-                            </div>
-                        </div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Current Status</p>
+                        <h2 className="mt-2 text-3xl font-bold text-white">{currentStatus}</h2>
+                        <p className="mt-3 max-w-2xl text-sm text-gray-300">
+                            Included credits burn before the wallet. If you stay on Free, you still keep enough included credits for two short-form animated renders every cycle.
+                        </p>
 
-                        <div className="mt-6 grid gap-3 md:grid-cols-2">
-                            {[
-                                'Unlocks Create, Thumbnails, Clone, Long Form, and Chat Story',
-                                includedAnimatedCredits > 0
-                                    ? `${includedAnimatedCredits} included animation credits reset every billing cycle`
-                                    : 'Included animation credits reset every billing cycle',
-                                `${membershipResolution} output cap with up to ${membershipMaxDurationMinutes} minute jobs on the Starter unlock`,
-                                'Wallet top-ups still stack for hybrid accounts',
-                                'PayPal membership renewals are manual for now',
-                            ].map((feature) => (
-                                <div key={feature} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
-                                    <BadgeCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
-                                    <span>{feature}</span>
-                                </div>
-                            ))}
-                        </div>
-
-                        <button
-                            type="button"
-                            onClick={() => void handleMembershipAction()}
-                            className="mt-6 rounded-xl bg-white/[0.1] px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.16]"
-                        >
-                            {loading
-                                ? 'Opening...'
-                                : usesManualPayPalMembership
-                                    ? 'Extend Membership'
-                                    : usesStripeMembership
-                                        ? 'Manage Membership'
+                        <div className="mt-6 grid gap-4 md:grid-cols-2">
+                            {plans.map((planCard) => {
+                                const isCurrent = normalizedCurrentPlan === planCard.id;
+                                const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
+                                const actionLabel = planCard.id === 'free'
+                                    ? (isCurrent && !billingActive ? 'Current plan' : 'Included with account')
+                                    : isPaidCurrent
+                                        ? (usesStripeMembership ? 'Manage plan' : 'Extend plan')
                                         : billingActive
-                                            ? 'Membership Details'
-                                        : 'Start Membership'}
-                        </button>
+                                            ? `Switch to ${planCard.title}`
+                                            : `Start ${planCard.title}`;
+                                return (
+                                    <div
+                                        key={planCard.id}
+                                        className={`rounded-2xl border p-4 ${
+                                            isCurrent
+                                                ? 'border-violet-500/40 bg-black/20'
+                                                : 'border-white/[0.08] bg-black/20'
+                                        }`}
+                                    >
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-sm font-bold text-white">{planCard.title}</p>
+                                                <p className="mt-2 text-2xl font-bold text-white">{planCard.priceLabel}</p>
+                                            </div>
+                                            {isCurrent && (
+                                                <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
+                                                    Current
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="mt-3 text-sm text-gray-300">{planCard.subtitle}</p>
+                                        <div className="mt-4 space-y-2">
+                                            {planCard.bullets.map((bullet) => (
+                                                <div key={bullet} className="flex items-start gap-2 text-sm text-gray-300">
+                                                    <BadgeCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+                                                    <span>{bullet}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => void handlePlanAction(planCard.id)}
+                                            disabled={loadingPlanId === planCard.id || (planCard.id === 'free' && isCurrent && !billingActive)}
+                                            className="mt-5 w-full rounded-xl bg-white/[0.08] px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.14] disabled:opacity-60"
+                                        >
+                                            {loadingPlanId === planCard.id ? 'Opening...' : actionLabel}
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </section>
 
                     <aside className="space-y-6">
@@ -176,12 +224,12 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                             </div>
                         </section>
                         <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">How Billing Works</h2>
+                            <h2 className="text-lg font-semibold text-white">How billing works</h2>
                             <div className="mt-4 space-y-3 text-sm text-gray-300">
-                                <p>1. Membership unlocks the public Studio lanes.</p>
-                                <p>2. Included credits burn first on eligible jobs.</p>
-                                <p>3. Wallet credits cover overflow and usage-only accounts.</p>
-                                <p>4. If membership expires, wallet credits stay on the account.</p>
+                                <p>1. Every signed-in account starts on Free.</p>
+                                <p>2. Paid plans add more included credits and unlock Chat Story.</p>
+                                <p>3. Top-up packs live on the billing page and stack on top of any plan.</p>
+                                <p>4. If a monthly plan expires, wallet credits stay on the account.</p>
                             </div>
                         </section>
                     </aside>
@@ -194,22 +242,26 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                 )}
                 {subscriptionResult === 'success' && (
                     <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        Catalyst Membership is active. Included credits will now burn before the wallet.
+                        Your monthly plan is active. Included credits now burn before the wallet.
                     </p>
                 )}
                 {subscriptionResult === 'manual' && (
                     <p className="mt-6 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-5 py-4 text-sm text-cyan-100">
-                        This account is on manual PayPal renewal. Click the membership button again whenever you want to extend another month.
+                        This account is on manual PayPal renewal. Click the same plan again whenever you want to extend another month.
                     </p>
                 )}
                 {subscriptionResult === 'cancelled' && (
                     <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                        Membership checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
+                        Monthly checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
                     </p>
                 )}
             </div>
         </>
     );
+}
+
+function capitalizePlan(planId: PublicPlanId) {
+    return planId.charAt(0).toUpperCase() + planId.slice(1);
 }
 
 function MetricCard({ label, value }: { label: string; value: number }) {

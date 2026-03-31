@@ -1,14 +1,20 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, CheckCircle2, Sparkles, WalletCards } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { AuthContext, STUDIO_SITE_URL, isBillingHost } from '../shared';
+
+type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
+
+const PUBLIC_PLAN_ORDER: PublicPlanId[] = ['free', 'starter', 'creator', 'pro'];
 
 export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
         billingActive,
+        membershipPlanId,
         membershipSource,
         nextRenewalSource,
+        plan,
         checkout,
         checkoutTopup,
         manageBilling,
@@ -18,7 +24,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         creditsTotalRemaining,
         publicPlanLimits,
         publicPlanPrices,
-        defaultMembershipPlanId,
         requiresTopup,
     } = useContext(AuthContext);
     const params = useMemo(() => {
@@ -32,25 +37,51 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const [selectedPackId, setSelectedPackId] = useState('');
     const [checkoutError, setCheckoutError] = useState('');
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
-    const [membershipLoading, setMembershipLoading] = useState(false);
+    const [planLoadingId, setPlanLoadingId] = useState('');
 
+    const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
+    const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
+    const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
     const sortedPacks = useMemo(() => [...topupPacks].sort((a, b) => a.credits - b.credits), [topupPacks]);
     const selectedPack = useMemo(
         () => sortedPacks.find((pack) => pack.price_id === selectedPackId) || null,
         [selectedPackId, sortedPacks],
     );
-    const membershipPrice = useMemo(() => {
-        const raw = Number((publicPlanPrices as Record<string, number>)[defaultMembershipPlanId || 'starter']);
-        if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
-        return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
-    }, [defaultMembershipPlanId, publicPlanPrices]);
-    const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
-    const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
-    const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
-    const starterLimits = (publicPlanLimits as Record<string, any>)[defaultMembershipPlanId || 'starter'] || {};
-    const includedAnimatedCredits = Number(starterLimits.animated_renders_per_month || 0);
-    const membershipMaxDurationMinutes = Math.max(1, Math.round(Number(starterLimits.max_duration_sec || 0) / 60));
-    const membershipResolution = String(starterLimits.max_resolution || '720p').toUpperCase();
+    const normalizedCurrentPlan = useMemo<PublicPlanId>(() => {
+        const raw = String(membershipPlanId || plan || 'free').trim().toLowerCase();
+        if (raw === 'creator' || raw === 'pro' || raw === 'starter') return raw;
+        return 'free';
+    }, [membershipPlanId, plan]);
+    const publicPlans = useMemo(() => {
+        return PUBLIC_PLAN_ORDER.map((planId) => {
+            const limits = (publicPlanLimits as Record<string, any>)[planId] || {};
+            const price = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
+            const durationMinutes = Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60));
+            const animatedCredits = Number(limits.animated_renders_per_month || 0);
+            return {
+                id: planId,
+                title: planId === 'free' ? 'Free' : capitalizePlan(planId),
+                price,
+                priceLabel: planId === 'free' ? '$0' : `$${price.toFixed(price % 1 === 0 ? 0 : 2)}/mo`,
+                description:
+                    planId === 'free'
+                        ? 'Try the live Studio lanes and get enough included credits for two short-form animated renders.'
+                        : planId === 'starter'
+                            ? 'Best for solo operators shipping consistent shorts and testing Long Form without overcommitting.'
+                            : planId === 'creator'
+                                ? 'More monthly headroom for active creators running shorts, thumbnails, cloning, and Long Form together.'
+                                : 'Highest public headroom for daily operators and teams running Catalyst hard.',
+                features: [
+                    `${animatedCredits} included animation credits${planId === 'free' ? '' : ' per month'}`,
+                    `${durationMinutes} minute max job length`,
+                    `${String(limits.max_resolution || '720p').toUpperCase()} output cap`,
+                    planId === 'free'
+                        ? 'Create, Thumbnails, Clone, and Long Form lanes included'
+                        : 'Create, Thumbnails, Clone, Long Form, and Chat Story unlocked',
+                ],
+            };
+        });
+    }, [publicPlanLimits, publicPlanPrices]);
 
     useEffect(() => {
         if (!sortedPacks.length) return;
@@ -72,35 +103,36 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         onNavigate('dashboard');
     };
 
-    const handleOpenMembership = () => {
-        if (isBillingHost) {
-            window.location.href = `${BILLING_SITE_URL}?page=subscription`;
+    const handlePlanAction = useCallback(async (planId: PublicPlanId) => {
+        if (planId === 'free') {
+            if (!session) onNavigate('auth');
             return;
         }
-        onNavigate('subscription');
-    };
-
-    const handleMembershipCheckout = useCallback(async () => {
         if (!session) {
             onNavigate('auth');
             return;
         }
         setCheckoutError('');
-        setMembershipLoading(true);
+        setPlanLoadingId(planId);
         try {
-            if (usesStripeMembership) {
-                const err = await manageBilling();
-                if (err) setCheckoutError(err);
-                return;
+            if (billingActive && normalizedCurrentPlan === planId) {
+                if (usesStripeMembership) {
+                    const err = await manageBilling();
+                    if (err) setCheckoutError(err);
+                    return;
+                }
+                if (usesManualPayPalMembership) {
+                    const err = await checkout(planId);
+                    if (err) setCheckoutError(err);
+                    return;
+                }
             }
-            const err = billingActive && !usesManualPayPalMembership
-                ? await manageBilling()
-                : await checkout('membership');
+            const err = await checkout(planId);
             if (err) setCheckoutError(err);
         } finally {
-            setMembershipLoading(false);
+            setPlanLoadingId('');
         }
-    }, [billingActive, checkout, manageBilling, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
+    }, [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
 
     const handlePackCheckout = useCallback(async () => {
         if (!selectedPack) {
@@ -131,79 +163,87 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <WalletCards className="h-4 w-4" />
                             Billing
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white">Catalyst Membership + Credit Wallet</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white">Free plan, 3 monthly plans, and top-up packs</h1>
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            NYPTID Studio now sells one faceless YouTube operating system. Membership unlocks the public Studio lanes and includes starter credits. Wallet top-ups cover heavier animation usage on the same account.
+                            Studio now exposes one clean public billing model: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
                         </p>
                     </div>
-                    <div className="flex flex-wrap gap-3">
-                        <button
-                            type="button"
-                            onClick={handleBack}
-                            className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
-                        >
-                            <ArrowLeft className="h-4 w-4" />
-                            Back
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleOpenMembership}
-                            className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
-                        >
-                            Membership Details
-                        </button>
-                    </div>
+                    <button
+                        type="button"
+                        onClick={handleBack}
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                    >
+                        <ArrowLeft className="h-4 w-4" />
+                        Back
+                    </button>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
+                <div className="grid gap-6 xl:grid-cols-[1.25fr,0.75fr]">
                     <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                        <div className="flex flex-wrap items-center justify-between gap-4">
-                            <div>
-                                <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Unified Offer</p>
-                                <h2 className="mt-2 text-2xl font-bold text-white">Catalyst Membership</h2>
-                                <p className="mt-2 text-sm text-gray-400">
-                                    Unlock Create, Thumbnails, Clone, Long Form, and Chat Story on one account. Included credits burn before the wallet, so hybrid customers do not lose their monthly headroom.
-                                </p>
-                            </div>
-                            <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-5 py-4 text-right">
-                                <p className="text-[10px] uppercase tracking-[0.18em] text-violet-200/70">Membership</p>
-                                <p className="mt-2 text-3xl font-bold text-white">{membershipPrice}</p>
-                            </div>
+                        <div className="mb-5">
+                            <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Public Plans</p>
+                            <h2 className="mt-2 text-2xl font-bold text-white">Choose the plan that fits your run rate</h2>
+                            <p className="mt-2 text-sm text-gray-400">
+                                Free gives two short-form animated renders. Paid plans add more monthly credits and unlock Chat Story. Wallet credits always stack on top.
+                            </p>
                         </div>
-
-                        <div className="mt-6 grid gap-4 md:grid-cols-2">
-                            {[
-                                'Create, Thumbnails, Clone, Long Form, and Chat Story on one login',
-                                includedAnimatedCredits > 0
-                                    ? `${includedAnimatedCredits} included animation credits reset monthly when membership is active`
-                                    : 'Included animation credits reset monthly when membership is active',
-                                `${membershipResolution} output cap with up to ${membershipMaxDurationMinutes} minute jobs on the Starter unlock`,
-                                'Wallet top-ups stack on top for heavier renders and operator usage',
-                                'PayPal is the live membership checkout path for now',
-                            ].map((feature) => (
-                                <div key={feature} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
-                                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
-                                    <span>{feature}</span>
-                                </div>
-                            ))}
-                        </div>
-
-                        <button
-                            type="button"
-                            onClick={() => void handleMembershipCheckout()}
-                            className="mt-6 inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-500"
-                        >
-                            <Sparkles className="h-4 w-4" />
-                            {membershipLoading
-                                ? 'Opening...'
-                                : usesManualPayPalMembership
-                                    ? 'Extend Membership'
-                                    : usesStripeMembership
-                                        ? 'Manage Membership'
+                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                            {publicPlans.map((planCard) => {
+                                const isCurrent = normalizedCurrentPlan === planCard.id;
+                                const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
+                                const actionLabel = planCard.id === 'free'
+                                    ? (session ? (isCurrent && !billingActive ? 'Current plan' : 'Included with account') : 'Sign in to start')
+                                    : isPaidCurrent
+                                        ? (usesStripeMembership ? 'Manage plan' : 'Extend plan')
                                         : billingActive
-                                            ? 'Membership Details'
-                                        : 'Start Membership'}
-                        </button>
+                                            ? `Switch to ${planCard.title}`
+                                            : `Start ${planCard.title}`;
+                                return (
+                                    <div
+                                        key={planCard.id}
+                                        className={`rounded-3xl border p-5 ${
+                                            isCurrent
+                                                ? 'border-violet-500/40 bg-violet-500/[0.08]'
+                                                : 'border-white/[0.08] bg-black/20'
+                                        }`}
+                                    >
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">{planCard.id === 'free' ? 'Free plan' : 'Monthly plan'}</p>
+                                                <h3 className="mt-2 text-xl font-bold text-white">{planCard.title}</h3>
+                                            </div>
+                                            {isCurrent && (
+                                                <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
+                                                    Current
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="mt-4 text-3xl font-bold text-white">{planCard.priceLabel}</p>
+                                        <p className="mt-3 text-sm text-gray-300">{planCard.description}</p>
+                                        <div className="mt-5 space-y-3">
+                                            {planCard.features.map((feature) => (
+                                                <div key={feature} className="flex items-start gap-2 text-sm text-gray-300">
+                                                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+                                                    <span>{feature}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => void handlePlanAction(planCard.id)}
+                                            disabled={planLoadingId === planCard.id || (planCard.id === 'free' && !!session && isCurrent && !billingActive)}
+                                            className={`mt-6 w-full rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                                                isCurrent
+                                                    ? 'bg-white/[0.08] text-white hover:bg-white/[0.14]'
+                                                    : 'bg-violet-600 text-white hover:bg-violet-500'
+                                            } disabled:opacity-60`}
+                                        >
+                                            {planLoadingId === planCard.id ? 'Opening...' : actionLabel}
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </section>
 
                     <aside className="space-y-6">
@@ -211,7 +251,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <h2 className="text-lg font-semibold text-white">Balance Overview</h2>
                             <div className="mt-4 grid gap-3">
                                 <BalanceCard label="Credit Wallet" value={Number(topupCreditsRemaining || 0)} accent="cyan" helper="Pay-as-you-go balance" />
-                                <BalanceCard label="Included Credits" value={Number(monthlyCreditsRemaining || 0)} accent="violet" helper="Burns first when membership is active" />
+                                <BalanceCard label="Included Credits" value={Number(monthlyCreditsRemaining || 0)} accent="violet" helper="Monthly plan or free-plan included credits" />
                                 <BalanceCard label="Total Available" value={Number(creditsTotalRemaining || 0)} accent="emerald" helper={requiresTopup ? 'Top up before the next animation-heavy run' : 'Ready for Catalyst jobs'} />
                             </div>
                         </section>
@@ -241,22 +281,20 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                                     </button>
                                 </>
                             ) : (
-                                <p className="mt-4 text-sm text-gray-400">Select a credit pack below.</p>
+                                <p className="mt-4 text-sm text-gray-400">Select a top-up pack below.</p>
                             )}
                         </section>
                     </aside>
                 </div>
 
                 <section className="mt-8 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                    <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-                        <div>
-                            <h2 className="text-lg font-semibold text-white">Credit Wallet Packs</h2>
-                            <p className="mt-1 text-sm text-gray-400">
-                                Use wallet packs if you want pay-as-you-go only, or combine them with membership for a hybrid setup.
-                            </p>
-                        </div>
+                    <div className="mb-5">
+                        <h2 className="text-lg font-semibold text-white">Top-up packs</h2>
+                        <p className="mt-1 text-sm text-gray-400">
+                            Use wallet packs for pay-as-you-go only, or combine them with a monthly plan for hybrid usage.
+                        </p>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         {sortedPacks.map((pack) => {
                             const active = pack.price_id === selectedPackId;
                             return (
@@ -292,17 +330,21 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 )}
                 {subscriptionResult === 'success' && (
                     <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        Catalyst Membership is active. Included credits will burn before the wallet on eligible jobs.
+                        Your monthly plan is active. Included credits now burn before the wallet.
                     </p>
                 )}
                 {subscriptionResult === 'cancelled' && (
                     <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                        Membership checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
+                        Monthly checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
                     </p>
                 )}
             </div>
         </>
     );
+}
+
+function capitalizePlan(planId: PublicPlanId) {
+    return planId.charAt(0).toUpperCase() + planId.slice(1);
 }
 
 function BalanceCard({
@@ -321,12 +363,11 @@ function BalanceCard({
         : accent === 'violet'
             ? 'border-violet-500/20 bg-violet-500/10 text-violet-100'
             : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100';
-
     return (
         <div className={`rounded-2xl border px-4 py-3 ${accentClasses}`}>
-            <p className="text-[10px] uppercase tracking-[0.18em] opacity-70">{label}</p>
-            <p className="mt-2 text-2xl font-bold">{value}</p>
-            <p className="mt-1 text-xs opacity-75">{helper}</p>
+            <p className="text-[10px] uppercase tracking-[0.18em] text-white/60">{label}</p>
+            <p className="mt-2 text-2xl font-bold text-white">{value}</p>
+            <p className="mt-1 text-xs text-white/70">{helper}</p>
         </div>
     );
 }

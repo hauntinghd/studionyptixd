@@ -5,11 +5,12 @@ import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } f
 export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription') => void;
 
 export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }) {
-    const { session, role, signOut, topupCreditsRemaining, monthlyCreditsRemaining, membershipActive } = useContext(AuthContext);
+    const { session, role, signInWithGoogle, signOut, topupCreditsRemaining, monthlyCreditsRemaining, membershipActive } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const billingHost = isBillingHost;
     const discordUrl = 'https://discord.gg/zMZxRRu7BS';
     const [menuOpen, setMenuOpen] = useState(false);
+    const [googleLoading, setGoogleLoading] = useState(false);
     const menuRef = useRef<HTMLDivElement | null>(null);
     const accountLabel = useMemo(() => {
         const email = String(session?.user?.email || '').trim();
@@ -79,6 +80,13 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         await signOut();
     };
 
+    const handleGoogleAuth = async () => {
+        setGoogleLoading(true);
+        const error = await signInWithGoogle();
+        setGoogleLoading(false);
+        if (error) onNavigate('auth');
+    };
+
     return (
         <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/[0.06] bg-[#09090b]/88 backdrop-blur-xl">
             <div className="h-16 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
@@ -101,10 +109,11 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                             Join Discord
                         </a>
                         <button
-                            onClick={() => onNavigate('auth')}
+                            onClick={() => void handleGoogleAuth()}
+                            disabled={googleLoading}
                             className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500"
                         >
-                            Sign In
+                            {googleLoading ? 'Opening Google...' : 'Continue with Google'}
                         </button>
                     </div>
                 ) : (

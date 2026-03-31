@@ -39,7 +39,7 @@ const monthlyPlanCardMeta = [
         id: 'starter',
         title: 'Starter',
         fallbackPrice: '$14/mo',
-        desc: 'Unlocks Chat Story plus starter AutoClipper beta access.',
+        desc: 'Unlocks Chat Story on the first paid Catalyst membership tier.',
         bullets: ['Chat Story access', 'Recurring monthly access', 'Free chat renders', 'Standard queue priority'],
     },
     {

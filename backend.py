@@ -129,6 +129,8 @@ from backend_settings import (
     STRIPE_PRICE_TO_PLAN,
     DEMO_PRO_PRICE_ID,
     TOPUP_PACKS,
+    PUBLIC_PLAN_IDS,
+    PUBLIC_TOPUP_PACK_IDS,
     SUPABASE_SERVICE_KEY,
     OUTPUT_DIR,
     TEMP_DIR,
@@ -494,6 +496,14 @@ LONGFORM_PREVIEW_DIR = TEMP_DIR / "longform_previews"
 LONGFORM_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 _longform_sessions: dict[str, dict] = {}
 _longform_sessions_lock = asyncio.Lock()
+_longform_analysis_semaphore = asyncio.Semaphore(1)
+_longform_draft_semaphore = asyncio.Semaphore(1)
+_longform_render_semaphore = asyncio.Semaphore(1)
+CATALYST_LEARNING_RECORDS_FILE = TEMP_DIR / "catalyst_learning_records.json"
+CATALYST_CHANNEL_MEMORY_FILE = TEMP_DIR / "catalyst_channel_memory.json"
+_catalyst_learning_records: dict[str, dict] = {}
+_catalyst_channel_memory: dict[str, dict] = {}
+_catalyst_memory_lock = asyncio.Lock()
 _JOB_RETENTION_ACTIVE_SEC = 12 * 3600
 _JOB_RETENTION_FINAL_SEC = 2 * 3600
 
@@ -661,6 +671,136 @@ def _save_longform_sessions() -> None:
         LONGFORM_SESSIONS_FILE.write_text(json.dumps(_longform_sessions, ensure_ascii=True), encoding="utf-8")
     except Exception:
         pass
+
+
+def _load_catalyst_memory() -> None:
+    global _catalyst_learning_records, _catalyst_channel_memory
+    try:
+        if CATALYST_LEARNING_RECORDS_FILE.exists():
+            data = json.loads(CATALYST_LEARNING_RECORDS_FILE.read_text(encoding="utf-8"))
+            _catalyst_learning_records = data if isinstance(data, dict) else {}
+        else:
+            _catalyst_learning_records = {}
+    except Exception:
+        _catalyst_learning_records = {}
+    try:
+        if CATALYST_CHANNEL_MEMORY_FILE.exists():
+            data = json.loads(CATALYST_CHANNEL_MEMORY_FILE.read_text(encoding="utf-8"))
+            _catalyst_channel_memory = data if isinstance(data, dict) else {}
+        else:
+            _catalyst_channel_memory = {}
+    except Exception:
+        _catalyst_channel_memory = {}
+
+
+def _save_catalyst_memory() -> None:
+    try:
+        CATALYST_LEARNING_RECORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CATALYST_LEARNING_RECORDS_FILE.write_text(
+            json.dumps(_catalyst_learning_records, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        CATALYST_CHANNEL_MEMORY_FILE.write_text(
+            json.dumps(_catalyst_channel_memory, ensure_ascii=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _catalyst_channel_memory_key(user_id: str, channel_id: str, format_preset: str) -> str:
+    user_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(user_id or "").strip()) or "anon"
+    channel_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(channel_id or "").strip()) or "unbound"
+    format_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(format_preset or "").strip().lower()) or "explainer"
+    return f"{user_key}:{channel_key}:{format_key}"
+
+
+def _dedupe_preserve_order(values: list[str], max_items: int = 8, max_chars: int = 200) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in list(values or []):
+        value = _clip_text(str(raw or "").strip(), max_chars)
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+_CATALYST_KEYWORD_STOPWORDS = {
+    "the", "and", "with", "that", "this", "from", "your", "into", "what", "when", "will", "have",
+    "about", "their", "them", "they", "over", "more", "than", "just", "make", "made", "make", "video",
+    "videos", "how", "why", "top", "best", "worst", "full", "complete", "guide", "explained", "breakdown",
+    "documentary", "channel", "studio", "nyptid",
+}
+
+
+def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
+    scores: dict[str, int] = {}
+    for text in texts:
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", str(text or "").lower()):
+            if token in _CATALYST_KEYWORD_STOPWORDS:
+                continue
+            scores[token] = scores.get(token, 0) + 1
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    return [token for token, _ in ranked[:max_items]]
+
+
+def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
+    data = dict(memory or {})
+    return {
+        "key": str(data.get("key", "") or ""),
+        "channel_id": str(data.get("channel_id", "") or ""),
+        "format_preset": str(data.get("format_preset", "") or ""),
+        "run_count": int(data.get("run_count", 0) or 0),
+        "summary": str(data.get("summary", "") or ""),
+        "proven_keywords": list(data.get("proven_keywords") or []),
+        "hook_learnings": list(data.get("hook_learnings") or []),
+        "pacing_learnings": list(data.get("pacing_learnings") or []),
+        "visual_learnings": list(data.get("visual_learnings") or []),
+        "sound_learnings": list(data.get("sound_learnings") or []),
+        "packaging_learnings": list(data.get("packaging_learnings") or []),
+        "retention_watchouts": list(data.get("retention_watchouts") or []),
+        "next_video_moves": list(data.get("next_video_moves") or []),
+        "recent_source_titles": list(data.get("recent_source_titles") or []),
+        "recent_selected_titles": list(data.get("recent_selected_titles") or []),
+        "preferred_transition_style": str(data.get("preferred_transition_style", "") or ""),
+        "preferred_music_profile": str(data.get("preferred_music_profile", "") or ""),
+        "preferred_visual_engine": str(data.get("preferred_visual_engine", "") or ""),
+        "last_session_id": str(data.get("last_session_id", "") or ""),
+        "updated_at": float(data.get("updated_at", 0) or 0),
+    }
+
+
+def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
+    public = _catalyst_channel_memory_public_view(memory)
+    if not any(public.values()):
+        return ""
+    parts: list[str] = []
+    if public.get("summary"):
+        parts.append("Catalyst channel memory summary: " + _clip_text(str(public.get("summary", "")), 320))
+    if public.get("proven_keywords"):
+        parts.append("Proven arena keywords: " + ", ".join(list(public.get("proven_keywords") or [])[:8]))
+    if public.get("hook_learnings"):
+        parts.append("Hook learnings: " + "; ".join(list(public.get("hook_learnings") or [])[:4]))
+    if public.get("pacing_learnings"):
+        parts.append("Pacing learnings: " + "; ".join(list(public.get("pacing_learnings") or [])[:4]))
+    if public.get("visual_learnings"):
+        parts.append("Visual learnings: " + "; ".join(list(public.get("visual_learnings") or [])[:4]))
+    if public.get("sound_learnings"):
+        parts.append("Sound learnings: " + "; ".join(list(public.get("sound_learnings") or [])[:4]))
+    if public.get("packaging_learnings"):
+        parts.append("Packaging learnings: " + "; ".join(list(public.get("packaging_learnings") or [])[:4]))
+    if public.get("retention_watchouts"):
+        parts.append("Retention watchouts: " + "; ".join(list(public.get("retention_watchouts") or [])[:4]))
+    if public.get("next_video_moves"):
+        parts.append("Next-video moves: " + "; ".join(list(public.get("next_video_moves") or [])[:4]))
+    return "\n".join(part for part in parts if part)
 
 
 def _mask_email_for_public(email: str) -> str:
@@ -867,12 +1007,12 @@ def _wallet_for_user(user_id: str) -> dict:
 
 
 def _plan_monthly_animated_limit(plan: str) -> int:
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("starter", {}))
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("free", PLAN_LIMITS.get("starter", {})))
     return int(limits.get("animated_renders_per_month", limits.get("videos_per_month", 0)) or 0)
 
 
 def _plan_monthly_non_animated_limit(plan: str) -> int:
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("starter", {}))
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("free", PLAN_LIMITS.get("starter", {})))
     fallback = int(limits.get("animated_renders_per_month", limits.get("videos_per_month", 0)) or 0) * 10
     return int(limits.get("non_animated_ops_per_month", fallback) or 0)
 
@@ -902,8 +1042,9 @@ def _credit_state_for_user(user: dict, effective_plan: str, billing_active: bool
     mk = _month_key()
     animated_used = int((wallet.get("monthly_usage", {}) or {}).get(mk, 0) or 0)
     non_animated_used = int((wallet.get("monthly_usage_non_animated", {}) or {}).get(mk, 0) or 0)
-    animated_limit = _plan_monthly_animated_limit(effective_plan) if billing_active else 0
-    non_animated_limit = 999999
+    plan_with_included_credits = billing_active or str(effective_plan or "").strip().lower() == "free"
+    animated_limit = _plan_monthly_animated_limit(effective_plan) if plan_with_included_credits else 0
+    non_animated_limit = _plan_monthly_non_animated_limit(effective_plan)
     animated_remaining = max(0, animated_limit - animated_used)
     non_animated_remaining = max(0, non_animated_limit - non_animated_used)
     topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
@@ -1332,18 +1473,18 @@ def _normalize_output_resolution(requested: str, priority_allowed: bool = False)
 
 def _resolve_user_plan_for_limits(user: dict | None) -> tuple[str, dict]:
     if not user:
-        return "starter", PLAN_LIMITS["starter"]
+        return "free", PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
     email = str(user.get("email", "") or "")
     if email in ADMIN_EMAILS:
         pro = dict(PLAN_LIMITS.get("pro", PLAN_LIMITS["starter"]))
         pro["videos_per_month"] = max(int(pro.get("videos_per_month", 300) or 300), 9999)
         return "pro", pro
-    plan = str(user.get("plan", "starter") or "starter")
-    if plan in {"free", "none", "admin"}:
-        plan = "starter"
+    plan = str(user.get("plan", "free") or "free").strip().lower()
+    if plan in {"none", "admin"}:
+        plan = "free"
     if plan not in PLAN_LIMITS:
-        plan = "starter"
-    return plan, PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+        plan = "free"
+    return plan, PLAN_LIMITS.get(plan, PLAN_LIMITS.get("free", PLAN_LIMITS["starter"]))
 
 
 def _plan_features_for(plan: str, is_admin: bool = False) -> list[str]:
@@ -1375,6 +1516,10 @@ LONGFORM_WHISPER_MODES = {"off", "subtle", "cinematic"}
 
 def _longform_owner_beta_enabled(user: dict | None) -> bool:
     return bool((_public_lane_access_for_user(user) or {}).get("longform"))
+
+
+def _longform_deep_analysis_enabled(user: dict | None) -> bool:
+    return _is_admin_user(user)
 
 
 def _normalize_longform_template(value: str) -> str:
@@ -1837,10 +1982,12 @@ def _longform_build_publish_package_candidates(
     source_bundle: dict | None = None,
     source_analysis: dict | None = None,
     channel_context: dict | None = None,
+    channel_memory: dict | None = None,
 ) -> dict:
     source_bundle = dict(source_bundle or {})
     source_analysis = dict(source_analysis or {})
     channel_context = dict(channel_context or {})
+    channel_memory = _catalyst_channel_memory_public_view(channel_memory)
     source_title = str(source_bundle.get("title", "") or "").strip()
     effective_topic = str(topic or input_title or source_title or "Follow-up video breakdown").strip()
     channel_title_memory = [
@@ -1848,6 +1995,7 @@ def _longform_build_publish_package_candidates(
         for v in [
             *list(channel_context.get("recent_upload_titles") or []),
             *list(channel_context.get("top_video_titles") or []),
+            *list(channel_memory.get("recent_selected_titles") or []),
         ]
         if str(v).strip()
     ]
@@ -1855,6 +2003,10 @@ def _longform_build_publish_package_candidates(
     title_variants: list[str] = []
     for candidate in [
         *list(source_analysis.get("title_angles") or []),
+        *[
+            f"{effective_topic} | {keyword}".replace("|", "vs.") if " vs." not in effective_topic.lower() else f"{effective_topic} {keyword}"
+            for keyword in list(channel_memory.get("proven_keywords") or [])[:2]
+        ],
         *_same_arena_title_variants(
             source_bundle or {"title": effective_topic},
             topic=effective_topic,
@@ -1887,6 +2039,7 @@ def _longform_build_publish_package_candidates(
     for candidate in [
         input_description,
         *list(source_analysis.get("description_angles") or []),
+        *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_description_variants(
             source_bundle or {"title": effective_topic},
             topic=effective_topic,
@@ -1901,6 +2054,7 @@ def _longform_build_publish_package_candidates(
     thumbnail_prompts: list[str] = []
     for candidate in [
         *list(source_analysis.get("thumbnail_angles") or []),
+        *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_thumbnail_angles(
             source_bundle or {"title": effective_topic},
             topic=effective_topic,
@@ -1921,6 +2075,7 @@ def _longform_build_publish_package_candidates(
         "longform",
         effective_topic[:32].replace(" ", "_").lower(),
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:10] if str(tag).strip()],
+        *[str(tag).strip().replace(" ", "_").lower() for tag in list(channel_memory.get("proven_keywords") or [])[:6] if str(tag).strip()],
     ]:
         value = str(candidate or "").strip()
         if value and value not in tags:
@@ -1932,6 +2087,490 @@ def _longform_build_publish_package_candidates(
         "thumbnail_prompts": thumbnail_prompts[:3],
         "tags": tags[:16],
     }
+
+
+def _catalyst_default_visual_engine(template: str, format_preset: str) -> str:
+    fmt = str(format_preset or "").strip().lower()
+    if fmt == "documentary":
+        return "Catalyst Documentary 3D"
+    if fmt == "recap":
+        return "Catalyst Recap Cinema"
+    if fmt == "story_channel":
+        return "Catalyst Storyworld"
+    if template == "chatstory":
+        return "Catalyst Chat Hybrid"
+    return "Catalyst Explainer 3D"
+
+
+def _catalyst_default_sound_profile(topic: str, input_title: str, format_preset: str) -> tuple[str, str]:
+    text = f"{topic} {input_title} {format_preset}".lower()
+    if re.search(r"\b(kill|killed|crime|dark|secret|disturb|psychology|war|danger|fear|mind)\b", text):
+        return "dark_psychology", "cinematic_dark_tension"
+    if format_preset == "documentary":
+        return "premium_documentary", "documentary_tension"
+    if format_preset == "recap":
+        return "high_pressure_recap", "kinetic_recap_bed"
+    if format_preset == "story_channel":
+        return "story_channel_cinematic", "story_pulse_bed"
+    return "clean_explainer", "precision_explainer_bed"
+
+
+def _heuristic_catalyst_chapter_blueprints(
+    *,
+    chapter_count: int,
+    subject: str,
+    improvement_moves: list[str] | None = None,
+    retention_findings: list[str] | None = None,
+) -> list[dict]:
+    improvement_moves = [str(v).strip() for v in list(improvement_moves or []) if str(v).strip()]
+    retention_findings = [str(v).strip() for v in list(retention_findings or []) if str(v).strip()]
+    base_arc = [
+        ("Hook the viewer with the most concrete high-stakes reveal.", "Start on the promise and immediate consequence.", "unexpected reveal", "hero object under aggressive spotlight", "fast push-in then hard contrast cutaway", "opening hit plus sub-bass tension", "No throat-clearing. First 10 seconds must state the payoff."),
+        ("Expose the hidden mechanism that makes the topic work.", "Translate abstract theory into visible cause-and-effect.", "mechanism cutaway", "macro cross-section or exploded system view", "precise motion-graphic overlays and clean dolly move", "tight whooshes, ticks, and system sweeps", "Make the viewer feel smarter, not confused."),
+        ("Escalate with a consequence the viewer can feel immediately.", "Move from explanation into personal stakes.", "consequence illustration", "stylized human-versus-system composition", "pattern interrupt with scale change", "impact sting then low drone", "Introduce tension before the halfway point."),
+        ("Contrast myth versus reality or before versus after.", "Deliver a clean reversal that resets attention.", "contrast frame", "before-versus-after split world or timeline board", "sharp cut, wipe, or x-ray transition", "contrast hit plus quick suction transition", "Break repetition with a visual reversal."),
+        ("Prove the idea through a memorable system or case study.", "Ground the theory in something people will remember.", "proof moment", "miniature world, map room, or operating table system view", "orchestrated map or system sweep", "documentary trailer accents", "Raise trust while keeping tension alive."),
+        ("Land the payoff and set up the next obsession.", "Close the loop and leave one more open loop.", "payoff + lingering question", "symbolic final hero shot with one unsettling cue", "controlled slow pull-back with clean end-card energy", "resolve hit with trailing ambience", "End with resolution plus curiosity, not a flat summary."),
+    ]
+    blueprints: list[dict] = []
+    for idx in range(max(1, int(chapter_count or 1))):
+        base = base_arc[idx % len(base_arc)]
+        improvement = improvement_moves[idx % len(improvement_moves)] if improvement_moves else ""
+        retention = retention_findings[idx % len(retention_findings)] if retention_findings else ""
+        blueprints.append({
+            "index": idx,
+            "focus": f"{base[0]} Subject focus: {subject}.",
+            "hook_job": base[1],
+            "shock_device": base[2],
+            "visual_motif": f"{base[3]} built around {subject}.",
+            "motion_note": base[4],
+            "sound_note": base[5],
+            "retention_goal": _clip_text(retention or base[6], 180),
+            "improvement_focus": _clip_text(improvement or "Keep the promise clearer and the payoff more immediate.", 180),
+        })
+    return blueprints
+
+
+def _heuristic_catalyst_edit_blueprint(
+    *,
+    template: str,
+    format_preset: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    chapter_count: int,
+    chapter_target_sec: float,
+    source_analysis: dict | None = None,
+    channel_context: dict | None = None,
+    channel_memory: dict | None = None,
+) -> dict:
+    source_analysis = dict(source_analysis or {})
+    channel_context = dict(channel_context or {})
+    memory_view = _catalyst_channel_memory_public_view(channel_memory)
+    subject = _same_arena_subject({"title": input_title or topic}, topic=topic or input_title) or _clip_text(topic or input_title or "the core subject", 80)
+    improvement_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
+    retention_findings = [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
+    packaging_findings = [str(v).strip() for v in list(source_analysis.get("packaging_findings") or []) if str(v).strip()]
+    title_hints = [str(v).strip() for v in list(channel_context.get("title_pattern_hints") or []) if str(v).strip()]
+    sound_profile, music_profile = _catalyst_default_sound_profile(topic, input_title, format_preset)
+    transition_style = "cinematic" if format_preset in {"documentary", "explainer", "recap"} else "smooth"
+    chapter_blueprints = _heuristic_catalyst_chapter_blueprints(
+        chapter_count=chapter_count,
+        subject=subject,
+        improvement_moves=improvement_moves,
+        retention_findings=retention_findings,
+    )
+    primary_move = _clip_text(improvement_moves[0] if improvement_moves else "Tighten the promise and reach the first reveal faster.", 180)
+    hook_warning = _clip_text(retention_findings[0] if retention_findings else "The opening needs a stronger promise before any explanation.", 180)
+    packaging_warning = _clip_text(packaging_findings[0] if packaging_findings else "Use one dominant promise and one dominant visual symbol.", 180)
+    return {
+        "version": "catalyst_edit_v1",
+        "visual_engine": _catalyst_default_visual_engine(template, format_preset),
+        "format_preset": format_preset,
+        "analysis_required_before_generation": True,
+        "hook_strategy": {
+            "promise": f"Open on the strongest hidden consequence around {subject}, not generic setup.",
+            "open_loop": primary_move,
+            "shock_device": "Use one unsettling or counterintuitive reveal within the first 15 seconds.",
+            "first_30s_mission": hook_warning,
+        },
+        "pacing_strategy": {
+            "scene_duration_sec": 5.0,
+            "chapter_target_sec": round(float(chapter_target_sec or 0.0), 2),
+            "chapter_count": int(chapter_count or 0),
+            "escalation_curve": "hook -> mechanism -> consequence -> contrast -> payoff",
+            "pattern_interrupt_interval_sec": 15 if format_preset == "documentary" else 12,
+            "transition_style": transition_style,
+            "micro_escalation_mode": bool(format_preset in {"documentary", "explainer", "recap"}),
+            "pacing_rules": _dedupe_preserve_order([
+                primary_move,
+                "Do not spend more than two scenes on the same visual idea.",
+                "Every chapter needs at least one contrast or reversal beat.",
+                "Escalate the consequences before the viewer settles into the pattern.",
+                *retention_findings[:3],
+            ], max_items=6, max_chars=180),
+        },
+        "motion_strategy": {
+            "camera_language": _dedupe_preserve_order([
+                "controlled dolly pushes into hero objects",
+                "macro cutaways that reveal the hidden mechanism",
+                "miniature-world system sweeps for context",
+                "sharp pattern interrupts when the point changes",
+                *list(memory_view.get("visual_learnings") or [])[:2],
+            ], max_items=6, max_chars=160),
+            "motion_graphics": _dedupe_preserve_order([
+                "clean HUD-style overlays only when they clarify the beat",
+                "diagram callouts that explain one mechanism at a time",
+                "before-versus-after or myth-versus-reality comparisons",
+                packaging_warning,
+            ], max_items=6, max_chars=180),
+            "transition_style": transition_style,
+            "visual_rules": _dedupe_preserve_order([
+                "Stay obviously 3D and intentionally designed, not live-action.",
+                "Keep one dominant subject per frame and one dominant lighting cue.",
+                "Use contrast and scale shifts to reset attention.",
+                *list(memory_view.get("retention_watchouts") or [])[:2],
+            ], max_items=6, max_chars=180),
+        },
+        "sound_strategy": {
+            "sfx_profile": sound_profile,
+            "music_profile": music_profile,
+            "mix_notes": _dedupe_preserve_order([
+                "Use trailer-grade impacts only on real reveals, not every scene.",
+                "Keep the ambience bed present but under narration.",
+                "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
+                *list(memory_view.get("sound_learnings") or [])[:2],
+            ], max_items=6, max_chars=160),
+            "silence_rules": _dedupe_preserve_order([
+                "Drop the bed briefly before the biggest reveal in each chapter.",
+                "Leave short pockets of space after heavy claims so the next hit lands harder.",
+            ], max_items=4, max_chars=160),
+            "voice_direction": _dedupe_preserve_order([
+                "Confident, controlled, and slightly ominous.",
+                "Short declarative lines in the first 20 to 30 seconds.",
+                "Speed up on mechanism beats and slow slightly on payoffs.",
+            ], max_items=4, max_chars=160),
+        },
+        "retention_targets": {
+            "main_bottleneck": hook_warning,
+            "main_opportunity": primary_move,
+            "packaging_opportunity": packaging_warning,
+            "channel_title_hints": title_hints[:4],
+            "memory_keywords": list(memory_view.get("proven_keywords") or [])[:8],
+        },
+        "scoring_rubric": _dedupe_preserve_order([
+            "First 15 seconds must promise a concrete payoff.",
+            "Every scene must visualize the exact narration beat, not a generic metaphor.",
+            "Every chapter needs at least one escalation and one pattern interrupt.",
+            "Packaging must stay in the same arena while avoiding title repetition.",
+            *list(memory_view.get("hook_learnings") or [])[:2],
+            *list(memory_view.get("packaging_learnings") or [])[:2],
+        ], max_items=8, max_chars=180),
+        "chapter_blueprints": chapter_blueprints,
+    }
+
+
+def _normalize_catalyst_edit_blueprint(raw: dict | None, heuristic: dict, chapter_count: int) -> dict:
+    raw = dict(raw or {})
+    hook_in = dict(raw.get("hook_strategy") or {})
+    pacing_in = dict(raw.get("pacing_strategy") or {})
+    motion_in = dict(raw.get("motion_strategy") or {})
+    sound_in = dict(raw.get("sound_strategy") or {})
+    retention_in = dict(raw.get("retention_targets") or {})
+    heuristic_chapters = list(heuristic.get("chapter_blueprints") or [])
+    raw_chapters = list(raw.get("chapter_blueprints") or [])
+    chapter_blueprints: list[dict] = []
+    for idx in range(max(1, int(chapter_count or len(heuristic_chapters) or 1))):
+        base = dict(heuristic_chapters[idx] if idx < len(heuristic_chapters) else {})
+        incoming = dict(raw_chapters[idx] if idx < len(raw_chapters) and isinstance(raw_chapters[idx], dict) else {})
+        chapter_blueprints.append({
+            "index": idx,
+            "focus": _clip_text(str(incoming.get("focus", base.get("focus", "")) or ""), 220),
+            "hook_job": _clip_text(str(incoming.get("hook_job", base.get("hook_job", "")) or ""), 180),
+            "shock_device": _clip_text(str(incoming.get("shock_device", base.get("shock_device", "")) or ""), 160),
+            "visual_motif": _clip_text(str(incoming.get("visual_motif", base.get("visual_motif", "")) or ""), 220),
+            "motion_note": _clip_text(str(incoming.get("motion_note", base.get("motion_note", "")) or ""), 180),
+            "sound_note": _clip_text(str(incoming.get("sound_note", base.get("sound_note", "")) or ""), 180),
+            "retention_goal": _clip_text(str(incoming.get("retention_goal", base.get("retention_goal", "")) or ""), 180),
+            "improvement_focus": _clip_text(str(incoming.get("improvement_focus", base.get("improvement_focus", "")) or ""), 180),
+        })
+    return {
+        "version": str(raw.get("version", heuristic.get("version", "catalyst_edit_v1")) or "catalyst_edit_v1"),
+        "visual_engine": _clip_text(str(raw.get("visual_engine", heuristic.get("visual_engine", "")) or ""), 120),
+        "format_preset": str(raw.get("format_preset", heuristic.get("format_preset", "")) or ""),
+        "analysis_required_before_generation": bool(raw.get("analysis_required_before_generation", heuristic.get("analysis_required_before_generation", True))),
+        "hook_strategy": {
+            "promise": _clip_text(str(hook_in.get("promise", heuristic.get("hook_strategy", {}).get("promise", "")) or ""), 220),
+            "open_loop": _clip_text(str(hook_in.get("open_loop", heuristic.get("hook_strategy", {}).get("open_loop", "")) or ""), 220),
+            "shock_device": _clip_text(str(hook_in.get("shock_device", heuristic.get("hook_strategy", {}).get("shock_device", "")) or ""), 180),
+            "first_30s_mission": _clip_text(str(hook_in.get("first_30s_mission", heuristic.get("hook_strategy", {}).get("first_30s_mission", "")) or ""), 220),
+        },
+        "pacing_strategy": {
+            "scene_duration_sec": float(pacing_in.get("scene_duration_sec", heuristic.get("pacing_strategy", {}).get("scene_duration_sec", 5.0)) or 5.0),
+            "chapter_target_sec": float(pacing_in.get("chapter_target_sec", heuristic.get("pacing_strategy", {}).get("chapter_target_sec", 50.0)) or 50.0),
+            "chapter_count": int(pacing_in.get("chapter_count", heuristic.get("pacing_strategy", {}).get("chapter_count", chapter_count)) or chapter_count),
+            "escalation_curve": _clip_text(str(pacing_in.get("escalation_curve", heuristic.get("pacing_strategy", {}).get("escalation_curve", "")) or ""), 160),
+            "pattern_interrupt_interval_sec": int(pacing_in.get("pattern_interrupt_interval_sec", heuristic.get("pacing_strategy", {}).get("pattern_interrupt_interval_sec", 12)) or 12),
+            "transition_style": str(pacing_in.get("transition_style", heuristic.get("pacing_strategy", {}).get("transition_style", "smooth")) or "smooth"),
+            "micro_escalation_mode": bool(pacing_in.get("micro_escalation_mode", heuristic.get("pacing_strategy", {}).get("micro_escalation_mode", False))),
+            "pacing_rules": _dedupe_preserve_order(list(pacing_in.get("pacing_rules") or heuristic.get("pacing_strategy", {}).get("pacing_rules", []) or []), max_items=8, max_chars=180),
+        },
+        "motion_strategy": {
+            "camera_language": _dedupe_preserve_order(list(motion_in.get("camera_language") or heuristic.get("motion_strategy", {}).get("camera_language", []) or []), max_items=8, max_chars=160),
+            "motion_graphics": _dedupe_preserve_order(list(motion_in.get("motion_graphics") or heuristic.get("motion_strategy", {}).get("motion_graphics", []) or []), max_items=8, max_chars=180),
+            "transition_style": str(motion_in.get("transition_style", heuristic.get("motion_strategy", {}).get("transition_style", "smooth")) or "smooth"),
+            "visual_rules": _dedupe_preserve_order(list(motion_in.get("visual_rules") or heuristic.get("motion_strategy", {}).get("visual_rules", []) or []), max_items=8, max_chars=180),
+        },
+        "sound_strategy": {
+            "sfx_profile": _clip_text(str(sound_in.get("sfx_profile", heuristic.get("sound_strategy", {}).get("sfx_profile", "")) or ""), 120),
+            "music_profile": _clip_text(str(sound_in.get("music_profile", heuristic.get("sound_strategy", {}).get("music_profile", "")) or ""), 120),
+            "mix_notes": _dedupe_preserve_order(list(sound_in.get("mix_notes") or heuristic.get("sound_strategy", {}).get("mix_notes", []) or []), max_items=8, max_chars=180),
+            "silence_rules": _dedupe_preserve_order(list(sound_in.get("silence_rules") or heuristic.get("sound_strategy", {}).get("silence_rules", []) or []), max_items=6, max_chars=180),
+            "voice_direction": _dedupe_preserve_order(list(sound_in.get("voice_direction") or heuristic.get("sound_strategy", {}).get("voice_direction", []) or []), max_items=6, max_chars=180),
+        },
+        "retention_targets": {
+            "main_bottleneck": _clip_text(str(retention_in.get("main_bottleneck", heuristic.get("retention_targets", {}).get("main_bottleneck", "")) or ""), 220),
+            "main_opportunity": _clip_text(str(retention_in.get("main_opportunity", heuristic.get("retention_targets", {}).get("main_opportunity", "")) or ""), 220),
+            "packaging_opportunity": _clip_text(str(retention_in.get("packaging_opportunity", heuristic.get("retention_targets", {}).get("packaging_opportunity", "")) or ""), 220),
+            "channel_title_hints": _dedupe_preserve_order(list(retention_in.get("channel_title_hints") or heuristic.get("retention_targets", {}).get("channel_title_hints", []) or []), max_items=6, max_chars=160),
+            "memory_keywords": _dedupe_preserve_order(list(retention_in.get("memory_keywords") or heuristic.get("retention_targets", {}).get("memory_keywords", []) or []), max_items=10, max_chars=80),
+        },
+        "scoring_rubric": _dedupe_preserve_order(list(raw.get("scoring_rubric") or heuristic.get("scoring_rubric", []) or []), max_items=10, max_chars=180),
+        "chapter_blueprints": chapter_blueprints,
+    }
+
+
+async def _build_catalyst_edit_blueprint(
+    *,
+    template: str,
+    format_preset: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    chapter_count: int,
+    chapter_target_sec: float,
+    source_bundle: dict | None = None,
+    source_analysis: dict | None = None,
+    channel_context: dict | None = None,
+    channel_memory: dict | None = None,
+    strategy_notes: str = "",
+) -> dict:
+    heuristic = _heuristic_catalyst_edit_blueprint(
+        template=template,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        chapter_count=chapter_count,
+        chapter_target_sec=chapter_target_sec,
+        source_analysis=source_analysis,
+        channel_context=channel_context,
+        channel_memory=channel_memory,
+    )
+    system_prompt = (
+        "You are Catalyst Engine, the edit strategist for NYPTID Studio. "
+        "Build a render blueprint for a faceless YouTube long-form video. "
+        "This blueprint must tell the renderer how to handle the hook, pacing, motion graphics, sound design, and chapter escalation. "
+        "Output strict JSON with keys: version, visual_engine, format_preset, analysis_required_before_generation, "
+        "hook_strategy, pacing_strategy, motion_strategy, sound_strategy, retention_targets, scoring_rubric, chapter_blueprints. "
+        "chapter_blueprints must be an array of objects with keys: focus, hook_job, shock_device, visual_motif, motion_note, sound_note, retention_goal, improvement_focus."
+    )
+    user_prompt = (
+        f"Template: {template}\n"
+        f"Format preset: {format_preset}\n"
+        f"Topic: {topic}\n"
+        f"Title: {input_title}\n"
+        f"Description: {input_description}\n"
+        f"Chapter count: {chapter_count}\n"
+        f"Target seconds per chapter: {chapter_target_sec}\n"
+        f"Source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
+        f"Source analysis: {json.dumps(source_analysis or {}, ensure_ascii=True)}\n"
+        f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
+        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory), ensure_ascii=True)}\n"
+        "Use this marketing doctrine as operating context:\n"
+        f"{_marketing_doctrine_text(strategy_notes)}"
+    )
+    try:
+        raw = await _xai_json_completion(system_prompt, user_prompt, temperature=0.35, timeout_sec=60)
+        return _normalize_catalyst_edit_blueprint(raw, heuristic, chapter_count)
+    except Exception as e:
+        fallback = _normalize_catalyst_edit_blueprint({}, heuristic, chapter_count)
+        fallback["retention_targets"]["main_opportunity"] = _clip_text("Fallback blueprint used after strategy issue. " + str(e), 220)
+        return fallback
+
+
+def _heuristic_catalyst_learning_record(
+    *,
+    session_snapshot: dict,
+    edit_blueprint: dict | None = None,
+    chapter_markers: list[dict] | None = None,
+    package: dict | None = None,
+) -> dict:
+    session_snapshot = dict(session_snapshot or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    source_analysis = dict(metadata_pack.get("source_analysis") or {})
+    source_video = dict(metadata_pack.get("source_video") or {})
+    channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    edit_blueprint = dict(edit_blueprint or session_snapshot.get("edit_blueprint") or {})
+    package = dict(package or session_snapshot.get("package") or {})
+    chapters = list(session_snapshot.get("chapters") or [])
+    preview_total = 0
+    preview_ready = 0
+    preview_failed = 0
+    for chapter in chapters:
+        for scene in list((chapter or {}).get("scenes") or []):
+            preview_total += 1
+            status = str((scene or {}).get("image_status", "") or "").strip().lower()
+            if status == "ready":
+                preview_ready += 1
+            if status == "error":
+                preview_failed += 1
+    avg_viral = 0.0
+    if chapters:
+        avg_viral = sum(float((chapter or {}).get("viral_score", 0) or 0) for chapter in chapters) / max(1, len(chapters))
+    selected_title = str(package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
+    selected_description = str(package.get("selected_description", "") or "").strip()
+    source_title = str(source_video.get("title", "") or "").strip()
+    what_hurt = _clip_text(str(source_analysis.get("what_hurt", "") or "").strip(), 220)
+    what_worked = _clip_text(str(source_analysis.get("what_worked", "") or "").strip(), 220)
+    improvement_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
+    retention_findings = [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
+    packaging_findings = [str(v).strip() for v in list(source_analysis.get("packaging_findings") or []) if str(v).strip()]
+    hook_strategy = dict(edit_blueprint.get("hook_strategy") or {})
+    pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
+    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    chapter_count = len(chapters)
+    outcome_summary = (
+        f"Catalyst built a {session_snapshot.get('format_preset', 'documentary')} follow-up around "
+        f"{_clip_text(session_snapshot.get('topic', '') or selected_title, 80)}. "
+        f"Average chapter score: {avg_viral:.1f}. Preview success: {preview_ready}/{max(1, preview_total)} scene frames. "
+        f"Packaging now centers on '{selected_title or source_title}'."
+    )
+    return {
+        "session_id": str(session_snapshot.get("session_id", "") or ""),
+        "channel_id": str(session_snapshot.get("youtube_channel_id", "") or ""),
+        "format_preset": str(session_snapshot.get("format_preset", "") or ""),
+        "mode": "prepublish_learning_record",
+        "created_at": time.time(),
+        "chapter_score_average": round(avg_viral, 2),
+        "preview_success_rate": round((preview_ready / max(1, preview_total)) * 100.0, 2),
+        "outcome_summary": outcome_summary,
+        "wins_to_keep": _dedupe_preserve_order([
+            what_worked,
+            _clip_text(str(hook_strategy.get("promise", "") or ""), 180),
+            _clip_text(str(sound_strategy.get("music_profile", "") or ""), 120),
+            _clip_text(selected_description, 180),
+        ], max_items=6, max_chars=180),
+        "mistakes_to_avoid": _dedupe_preserve_order([
+            what_hurt,
+            *retention_findings[:3],
+            "Do not let packaging or chapter structure drift back toward the source title or source pacing.",
+            "Do not accept black or missing scene previews in a publishable run." if preview_failed else "",
+        ], max_items=6, max_chars=180),
+        "hook_adjustments": _dedupe_preserve_order([
+            _clip_text(str(hook_strategy.get("first_30s_mission", "") or ""), 180),
+            _clip_text(str(hook_strategy.get("open_loop", "") or ""), 180),
+            *retention_findings[:2],
+        ], max_items=6, max_chars=180),
+        "pacing_adjustments": _dedupe_preserve_order([
+            _clip_text(str(pacing_strategy.get("escalation_curve", "") or ""), 160),
+            *list(pacing_strategy.get("pacing_rules") or [])[:3],
+            f"Keep each chapter near {chapter_count} high-signal beats and avoid dead air." if chapter_count else "",
+        ], max_items=6, max_chars=180),
+        "visual_adjustments": _dedupe_preserve_order([
+            *list(motion_strategy.get("visual_rules") or [])[:3],
+            *list(motion_strategy.get("camera_language") or [])[:2],
+            *list(motion_strategy.get("motion_graphics") or [])[:2],
+        ], max_items=8, max_chars=180),
+        "sound_adjustments": _dedupe_preserve_order([
+            *list(sound_strategy.get("mix_notes") or [])[:3],
+            *list(sound_strategy.get("silence_rules") or [])[:2],
+            *list(sound_strategy.get("voice_direction") or [])[:2],
+        ], max_items=8, max_chars=180),
+        "packaging_adjustments": _dedupe_preserve_order([
+            *packaging_findings[:3],
+            f"Use the selected title as the lead package direction: {selected_title}" if selected_title else "",
+            f"Keep tags aligned with the same arena: {', '.join(list(package.get('selected_tags') or [])[:6])}" if list(package.get("selected_tags") or []) else "",
+        ], max_items=8, max_chars=180),
+        "next_video_moves": _dedupe_preserve_order([
+            *improvement_moves[:4],
+            "Use channel memory to stay in the same recognizable arena without repeating exact phrasing.",
+            "Promote the strongest contrast or hidden mechanism into the next title and thumbnail package.",
+        ], max_items=8, max_chars=180),
+        "memory_updates": _dedupe_preserve_order([
+            _clip_text(str(channel_context.get("summary", "") or ""), 180),
+            _clip_text(str(hook_strategy.get("promise", "") or ""), 180),
+            _clip_text(str(sound_strategy.get("music_profile", "") or ""), 120),
+            _clip_text(str(motion_strategy.get("transition_style", "") or ""), 120),
+            _clip_text(selected_title, 160),
+        ], max_items=8, max_chars=180),
+        "selected_title": selected_title,
+        "selected_description": selected_description,
+        "selected_tags": list(package.get("selected_tags") or []),
+        "chapter_markers": list(chapter_markers or []),
+    }
+
+
+def _update_catalyst_channel_memory(
+    *,
+    existing: dict | None,
+    session_snapshot: dict,
+    learning_record: dict,
+    edit_blueprint: dict | None = None,
+    package: dict | None = None,
+) -> dict:
+    existing = dict(existing or {})
+    session_snapshot = dict(session_snapshot or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    source_analysis = dict(metadata_pack.get("source_analysis") or {})
+    source_video = dict(metadata_pack.get("source_video") or {})
+    channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    edit_blueprint = dict(edit_blueprint or session_snapshot.get("edit_blueprint") or {})
+    package = dict(package or session_snapshot.get("package") or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    selected_title = str(learning_record.get("selected_title", "") or package.get("selected_title", "") or "").strip()
+    source_title = str(source_video.get("title", "") or "").strip()
+    format_preset = str(session_snapshot.get("format_preset", "") or existing.get("format_preset", "") or "documentary")
+    proven_keywords = _extract_catalyst_keywords(
+        selected_title,
+        source_title,
+        *list(package.get("selected_tags") or []),
+        *list(channel_context.get("recent_upload_titles") or [])[:4],
+    )
+    updated = dict(existing)
+    run_count = int(updated.get("run_count", 0) or 0) + 1
+    updated.update({
+        "key": str(updated.get("key", "") or session_snapshot.get("channel_memory_key", "") or ""),
+        "channel_id": str(session_snapshot.get("youtube_channel_id", "") or updated.get("channel_id", "") or ""),
+        "format_preset": format_preset,
+        "run_count": run_count,
+        "last_session_id": str(session_snapshot.get("session_id", "") or ""),
+        "preferred_transition_style": str(motion_strategy.get("transition_style", "") or updated.get("preferred_transition_style", "") or ""),
+        "preferred_music_profile": str(sound_strategy.get("music_profile", "") or updated.get("preferred_music_profile", "") or ""),
+        "preferred_visual_engine": str(edit_blueprint.get("visual_engine", "") or updated.get("preferred_visual_engine", "") or ""),
+        "updated_at": time.time(),
+    })
+    updated["recent_source_titles"] = _dedupe_preserve_order([source_title, *list(updated.get("recent_source_titles") or [])], max_items=10, max_chars=160)
+    updated["recent_selected_titles"] = _dedupe_preserve_order([selected_title, *list(updated.get("recent_selected_titles") or [])], max_items=10, max_chars=160)
+    updated["proven_keywords"] = _dedupe_preserve_order([*proven_keywords, *list(updated.get("proven_keywords") or [])], max_items=14, max_chars=80)
+    updated["hook_learnings"] = _dedupe_preserve_order([*list(learning_record.get("hook_adjustments") or []), *list(learning_record.get("wins_to_keep") or [])[:2], *list(updated.get("hook_learnings") or [])], max_items=10, max_chars=180)
+    updated["pacing_learnings"] = _dedupe_preserve_order([*list(learning_record.get("pacing_adjustments") or []), *list(updated.get("pacing_learnings") or [])], max_items=10, max_chars=180)
+    updated["visual_learnings"] = _dedupe_preserve_order([*list(learning_record.get("visual_adjustments") or []), *list(updated.get("visual_learnings") or [])], max_items=10, max_chars=180)
+    updated["sound_learnings"] = _dedupe_preserve_order([*list(learning_record.get("sound_adjustments") or []), *list(updated.get("sound_learnings") or [])], max_items=10, max_chars=180)
+    updated["packaging_learnings"] = _dedupe_preserve_order([*list(learning_record.get("packaging_adjustments") or []), *list(source_analysis.get("packaging_findings") or [])[:2], *list(updated.get("packaging_learnings") or [])], max_items=10, max_chars=180)
+    updated["retention_watchouts"] = _dedupe_preserve_order([*list(learning_record.get("mistakes_to_avoid") or []), *list(source_analysis.get("retention_findings") or [])[:2], *list(updated.get("retention_watchouts") or [])], max_items=10, max_chars=180)
+    updated["next_video_moves"] = _dedupe_preserve_order([*list(learning_record.get("next_video_moves") or []), *list(updated.get("next_video_moves") or [])], max_items=10, max_chars=180)
+    updated["summary"] = _clip_text(
+        "Catalyst has "
+        + f"{run_count} run{'s' if run_count != 1 else ''} on this channel lane. "
+        + ("Keep " + ", ".join(list(updated.get("proven_keywords") or [])[:6]) + ". " if list(updated.get("proven_keywords") or []) else "")
+        + ("Best hook lesson: " + str((list(updated.get("hook_learnings") or []) or [""])[0]) + ". " if list(updated.get("hook_learnings") or []) else "")
+        + ("Current retention watchout: " + str((list(updated.get("retention_watchouts") or []) or [""])[0]) + "." if list(updated.get("retention_watchouts") or []) else ""),
+        320,
+    )
+    return updated
 
 
 def _heuristic_source_performance_analysis(
@@ -3785,6 +4424,7 @@ _load_paypal_orders()
 _load_paypal_subscriptions()
 _load_landing_notifications()
 _load_longform_sessions()
+_load_catalyst_memory()
 _load_youtube_connections()
 _load_youtube_oauth_states()
 
@@ -3817,7 +4457,10 @@ def _membership_plan_for_user(user: Optional[dict], access_snapshot: Optional[di
     plan = str((snapshot or {}).get("plan", "none") or "none").strip().lower()
     if plan in PLAN_LIMITS:
         return plan
-    return _default_membership_plan_id() if bool((snapshot or {}).get("billing_active")) else "none"
+    stored_plan = str((user or {}).get("plan", "free") or "free").strip().lower()
+    if stored_plan in PLAN_LIMITS:
+        return stored_plan
+    return _default_membership_plan_id() if bool((snapshot or {}).get("billing_active")) else "free"
 
 
 def _credit_wallet_balance_for_user(user: Optional[dict]) -> int:
@@ -3832,12 +4475,17 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     authenticated = bool(user)
     snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
     public_live = authenticated
+    membership_plan = _membership_plan_for_user(user, snapshot)
+    chatstory_live = is_admin or (
+        bool((snapshot or {}).get("billing_active"))
+        and membership_plan in CHAT_STORY_ALLOWED_PLANS
+    )
     return {
         "create": public_live,
         "thumbnails": public_live,
         "clone": public_live,
         "longform": public_live,
-        "chatstory": public_live,
+        "chatstory": chatstory_live,
         "autoclipper": is_admin,
         "demo": is_admin,
         "analytics": is_admin,
@@ -4053,8 +4701,9 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
             except Exception:
                 pass
 
-        if not plan or plan == "free":
-            plan = "none"
+        plan = str(plan or "free").strip().lower() or "free"
+        if plan == "none":
+            plan = "free"
 
         manual_snapshot = _paypal_subscription_snapshot_for_user({"id": user_id, "email": email, "plan": plan})
         if manual_snapshot.get("billing_active"):
@@ -4091,9 +4740,9 @@ async def require_auth(cred: HTTPAuthorizationCredentials = Depends(security)) -
 
 
 async def get_user_plan(user: dict) -> dict:
-    """Look up user's plan from Supabase. Falls back to starter."""
+    """Look up user's plan from Supabase. Falls back to free."""
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        return PLAN_LIMITS["starter"]
+        return PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -4106,13 +4755,13 @@ async def get_user_plan(user: dict) -> dict:
             if resp.status_code == 200:
                 data = resp.json()
                 if data:
-                    plan_name = data[0].get("plan", "starter")
-                    if plan_name == "free":
-                        plan_name = "starter"
-                    return PLAN_LIMITS.get(plan_name, PLAN_LIMITS["starter"])
+                    plan_name = str(data[0].get("plan", "free") or "free").strip().lower()
+                    if plan_name == "none":
+                        plan_name = "free"
+                    return PLAN_LIMITS.get(plan_name, PLAN_LIMITS.get("free", PLAN_LIMITS["starter"]))
     except Exception as e:
         log.warning(f"Failed to fetch user plan: {e}")
-    return PLAN_LIMITS["starter"]
+    return PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
 
 
 # ─── xAI Grok Script Generation ───────────────────────────────────────────────
@@ -6393,13 +7042,14 @@ def _marketing_doctrine_text(extra_notes: str = "") -> str:
 async def _build_source_performance_analysis(
     source_bundle: dict,
     channel_context: dict | None = None,
+    channel_memory: dict | None = None,
     analytics_notes: str = "",
     topic: str = "",
     input_title: str = "",
     input_description: str = "",
     strategy_notes: str = "",
 ) -> dict:
-    if not source_bundle and not analytics_notes and not channel_context:
+    if not source_bundle and not analytics_notes and not channel_context and not channel_memory:
         return {}
     format_preset = "documentary" if re.search(r"\b(documentary|explainer|breakdown|analysis)\b", f"{topic} {input_title} {input_description}", flags=re.IGNORECASE) else "explainer"
     heuristic = _heuristic_source_performance_analysis(
@@ -6426,6 +7076,7 @@ async def _build_source_performance_analysis(
         f"Draft description constraint: {input_description}\n"
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
+        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory), ensure_ascii=True)}\n"
         f"Private analytics/operator notes: {_clip_text(analytics_notes, 1800)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{_marketing_doctrine_text(strategy_notes)}"
@@ -6445,15 +7096,17 @@ async def _derive_longform_seed_from_source(
     source_bundle: dict,
     source_analysis: dict,
     channel_context: dict | None = None,
+    channel_memory: dict | None = None,
     format_preset: str = "explainer",
     strategy_notes: str = "",
 ) -> dict:
-    if not source_bundle and not source_analysis and not channel_context:
+    if not source_bundle and not source_analysis and not channel_context and not channel_memory:
         return {}
     source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 140)
     source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 420)
     channel_title_memory = [str(v).strip() for v in list((channel_context or {}).get("recent_upload_titles") or []) if str(v).strip()]
     channel_title_memory.extend(str(v).strip() for v in list((channel_context or {}).get("top_video_titles") or []) if str(v).strip())
+    channel_title_memory.extend(str(v).strip() for v in list((_catalyst_channel_memory_public_view(channel_memory)).get("recent_selected_titles") or []) if str(v).strip())
     improvement_moves = source_analysis.get("improvement_moves") or []
     heuristic_titles = _same_arena_title_variants(source_bundle, topic="", format_preset=format_preset)
     heuristic_descriptions = _same_arena_description_variants(source_bundle, topic="", source_analysis=source_analysis)
@@ -6474,6 +7127,7 @@ async def _derive_longform_seed_from_source(
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
         f"Source performance analysis: {json.dumps(source_analysis or {}, ensure_ascii=True)}\n"
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
+        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory), ensure_ascii=True)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{_marketing_doctrine_text(strategy_notes)}"
     )
@@ -6613,7 +7267,13 @@ async def _summarize_longform_operator_evidence(
     }
 
 
-def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "", channel_context: dict | None = None) -> str:
+def _render_source_context(
+    source_bundle: dict,
+    source_analysis: dict,
+    analytics_notes: str = "",
+    channel_context: dict | None = None,
+    channel_memory: dict | None = None,
+) -> str:
     parts: list[str] = []
     if source_bundle:
         parts.append("Public source analysis:")
@@ -6629,6 +7289,9 @@ def _render_source_context(source_bundle: dict, source_analysis: dict, analytics
         packaging = [str(v).strip() for v in list((channel_context or {}).get("packaging_learnings") or []) if str(v).strip()]
         if packaging:
             parts.append("Channel packaging learnings: " + "; ".join(_clip_text(v, 120) for v in packaging[:4]))
+    memory_context = _render_catalyst_channel_memory_context(channel_memory)
+    if memory_context:
+        parts.append(memory_context)
     if source_analysis:
         worked = source_analysis.get("what_worked")
         hurt = source_analysis.get("what_hurt")
@@ -6688,6 +7351,9 @@ def _normalize_longform_scenes_for_render(scenes: list) -> list:
         scene = dict(raw_scene or {})
         narration = str(scene.get("narration", "") or "").strip()
         visual_description = str(scene.get("visual_description", "") or "").strip()
+        motion_direction = str(scene.get("motion_direction", "") or "").strip()
+        sfx_direction = str(scene.get("sfx_direction", "") or "").strip()
+        engagement_purpose = str(scene.get("engagement_purpose", "") or "").strip()
         if not narration:
             narration = f"Chapter beat {idx + 1}."
         if not visual_description:
@@ -6696,6 +7362,9 @@ def _normalize_longform_scenes_for_render(scenes: list) -> list:
         duration = 5.0
         scene["narration"] = narration
         scene["visual_description"] = visual_description
+        scene["motion_direction"] = motion_direction or "controlled push or cutaway that reinforces the narration beat"
+        scene["sfx_direction"] = sfx_direction or "clean cinematic accent that sells the reveal without overpowering narration"
+        scene["engagement_purpose"] = engagement_purpose or "move the viewer to the next beat immediately"
         scene["scene_num"] = int(scene.get("scene_num", idx + 1) or (idx + 1))
         scene["duration_sec"] = round(duration, 2)
         normalized.append(scene)
@@ -6730,6 +7399,9 @@ def _longform_chapter_retention_score(chapter: dict) -> int:
         score -= 14
     if not re.search(r"\b(why|because|therefore|but|however)\b", narrations):
         score -= 10
+    purposes = " ".join(str((s or {}).get("engagement_purpose", "") or "") for s in scenes).lower()
+    if not re.search(r"\b(hook|reveal|contrast|consequence|payoff|interrupt)\b", purposes):
+        score -= 8
     return max(0, min(100, score))
 
 
@@ -6787,16 +7459,21 @@ async def _generate_longform_chapter(
     fix_note: str = "",
     source_context: str = "",
     strategy_notes: str = "",
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
 ) -> dict:
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
     scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
     subject_lock = _longform_subject_lock(topic, input_title, input_description)
+    edit_blueprint = dict(edit_blueprint or {})
+    chapter_blueprint = dict(chapter_blueprint or {})
     system_prompt = (
         "You are writing one chapter of a long-form YouTube video package for NYPTID Studio. "
         "Output strict JSON with keys: chapter_title, chapter_summary, scenes, chapter_description. "
-        f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay. "
+        f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay, motion_direction, sfx_direction, engagement_purpose. "
         "narration must be concise and engaging; visual_description must be render-ready and specific. "
+        "motion_direction must describe the camera or motion-graphics beat; sfx_direction must describe the sound-design accent; engagement_purpose must explain why the scene keeps attention. "
         "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
         "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler."
     )
@@ -6832,6 +7509,18 @@ async def _generate_longform_chapter(
         f"Chapter {chapter_index + 1} of {chapter_count}, target chapter duration: {int(chapter_target_sec)} seconds.\n"
         "The chapter must push the story forward with strong pacing and retention.\n"
     )
+    if edit_blueprint:
+        user_prompt += (
+            "Catalyst edit blueprint:\n"
+            + json.dumps(edit_blueprint, ensure_ascii=True)
+            + "\n"
+        )
+    if chapter_blueprint:
+        user_prompt += (
+            "Chapter-specific Catalyst directive:\n"
+            + json.dumps(chapter_blueprint, ensure_ascii=True)
+            + "\n"
+        )
     if source_context:
         user_prompt += f"Source-video context to learn from:\n{source_context}\n"
     if strategy_notes:
@@ -13422,6 +14111,9 @@ def _longform_public_session(session: dict) -> dict:
                 "narration": str(scene.get("narration", "") or ""),
                 "visual_description": str(scene.get("visual_description", "") or ""),
                 "text_overlay": str(scene.get("text_overlay", "") or ""),
+                "motion_direction": str(scene.get("motion_direction", "") or ""),
+                "sfx_direction": str(scene.get("sfx_direction", "") or ""),
+                "engagement_purpose": str(scene.get("engagement_purpose", "") or ""),
                 "image_url": str(scene.get("image_url", "") or ""),
                 "image_status": str(scene.get("image_status", "missing") or "missing"),
                 "image_error": str(scene.get("image_error", "") or ""),
@@ -13461,6 +14153,9 @@ def _longform_public_session(session: dict) -> dict:
         "job_id": str(s.get("job_id", "") or ""),
         "paused_error": s.get("paused_error", None),
         "metadata_pack": dict(s.get("metadata_pack") or {}),
+        "edit_blueprint": dict(s.get("edit_blueprint") or {}),
+        "learning_record": dict(s.get("learning_record") or {}),
+        "channel_memory": _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
         "chapters": chapters,
         "review_state": _longform_review_state(s),
         "draft_progress": dict(s.get("draft_progress") or {}),
@@ -13602,9 +14297,24 @@ def _longform_fallback_chapter(
     brand_slot: str = "",
     tone: str = "neutral",
     template: str = "story",
+    format_preset: str = "explainer",
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
 ) -> dict:
     scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
     topic_focus = _longform_fallback_visual_focus(topic, input_title)
+    edit_blueprint = dict(edit_blueprint or {})
+    chapter_blueprint = dict(chapter_blueprint or {})
+    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    blueprint_focus = _clip_text(str(chapter_blueprint.get("focus", "") or ""), 180)
+    blueprint_hook = _clip_text(str(chapter_blueprint.get("hook_job", "") or ""), 160)
+    blueprint_shock = _clip_text(str(chapter_blueprint.get("shock_device", "") or ""), 80)
+    blueprint_visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or ""), 180)
+    blueprint_motion = _clip_text(str(chapter_blueprint.get("motion_note", "") or ""), 140)
+    blueprint_sound = _clip_text(str(chapter_blueprint.get("sound_note", "") or ""), 140)
+    blueprint_retention = _clip_text(str(chapter_blueprint.get("retention_goal", "") or ""), 140)
+    blueprint_improvement = _clip_text(str(chapter_blueprint.get("improvement_focus", "") or ""), 140)
     visual_modes = [
         "isolated hero-object stage composition with one dominant subject",
         "macro mechanism cutaway with one clearly visible internal process",
@@ -13629,22 +14339,26 @@ def _longform_fallback_chapter(
         scenes.append({
             "scene_num": beat,
             "duration_sec": 5.0,
-            "narration": narration_mode,
+            "narration": " ".join(part for part in [blueprint_hook or narration_mode, blueprint_focus or blueprint_improvement] if part).strip(),
             "visual_description": (
                 f"Premium 3D documentary explainer frame focused on {topic_focus}. "
-                f"Use {visual_mode}, clean cinematic lighting, readable subject hierarchy, strong depth, "
-                "and one unmistakable visual change from the previous beat. Keep the named subject exact; do not substitute a different organ, device, or symbol. "
+                f"Use {blueprint_visual_motif or visual_mode}, clean cinematic lighting, readable subject hierarchy, strong depth, "
+                f"and one unmistakable visual change from the previous beat. Shock device: {blueprint_shock or 'clear escalation or contrast'}. "
+                "Keep the named subject exact; do not substitute a different organ, device, or symbol. "
                 "Make it feel unmistakably designed in 3D, not photographic. No written words, no interface overlays, no chapter cards."
             ),
             "text_overlay": "",
+            "motion_direction": blueprint_motion or str(motion_strategy.get("transition_style", "") or "controlled push-in and clean contrast cut"),
+            "sfx_direction": blueprint_sound or str(sound_strategy.get("music_profile", "") or "premium documentary tension accent"),
+            "engagement_purpose": blueprint_retention or "advance the explanation with a stronger hook, escalation, or contrast",
         })
     normalized = _normalize_longform_scenes_for_render(scenes)
     normalized = _scale_scene_durations_to_target(normalized, chapter_target_sec)
-    normalized = _longform_enforce_tone_on_scenes(normalized, tone=tone, template=template)
+    normalized = _longform_enforce_tone_on_scenes(normalized, tone=tone, template=template, format_preset=format_preset)
     out = {
         "index": int(chapter_index),
         "title": f"Chapter {chapter_index + 1}",
-        "summary": "Auto-built chapter draft ready for review.",
+        "summary": blueprint_focus or "Auto-built chapter draft ready for review.",
         "tone": str(tone or "neutral"),
         "target_sec": round(float(len(normalized) * 5.0), 2),
         "scenes": normalized,
@@ -13895,124 +14609,138 @@ def _longform_approved_chapter_count(chapters: list[dict]) -> int:
     return sum(1 for chapter in list(chapters or []) if str((chapter or {}).get("status", "") or "") == "approved")
 
 
+def _catalyst_chapter_blueprint_for_index(edit_blueprint: dict | None, chapter_index: int) -> dict:
+    blueprint = dict(edit_blueprint or {})
+    chapter_blueprints = list(blueprint.get("chapter_blueprints") or [])
+    if 0 <= int(chapter_index) < len(chapter_blueprints):
+        return dict(chapter_blueprints[int(chapter_index)] or {})
+    return {}
+
+
 async def _generate_longform_chapter_for_session(session_id: str, chapter_index: int) -> None:
     chapter_count = 0
-    fallback_used = 0
     should_continue = False
-    try:
-        async with _longform_sessions_lock:
-            session = dict(_longform_sessions.get(session_id) or {})
-        if not session:
-            return
-
-        template = _normalize_longform_template(session.get("template", "story"))
-        format_preset = str(session.get("format_preset", "explainer") or "explainer").strip().lower()
-        topic = str(session.get("topic", "") or "").strip()
-        input_title = str(session.get("input_title", "") or "").strip()
-        input_description = str(session.get("input_description", "") or "").strip()
-        metadata_pack = dict(session.get("metadata_pack") or {})
-        source_context = str(metadata_pack.get("source_context", "") or "").strip()
-        strategy_notes = _marketing_doctrine_text(str(session.get("strategy_notes", "") or "").strip())
-        language = _normalize_longform_language(session.get("language", "en"))
-        resolution = str(session.get("resolution", "720p_landscape") or "720p_landscape")
-        chapter_tone = _longform_detect_tone(template, topic, input_title, input_description)
-        target_minutes = _normalize_longform_target_minutes(session.get("target_minutes", LONGFORM_DEFAULT_TARGET_MINUTES))
-        chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
-
-        chapter_list = list(session.get("chapters") or [])
-        if chapter_index < 0 or chapter_index >= len(chapter_list):
-            return
-        chapter_seed = dict(chapter_list[chapter_index] or {})
-        slot = str(chapter_seed.get("brand_slot", "") or _longform_brand_slot(chapter_index, chapter_count))
-        prior_retry = int(chapter_seed.get("retry_count", 0) or 0)
-
+    async with _longform_draft_semaphore:
         try:
-            chapter = await _generate_longform_chapter(
-                template=template,
-                topic=topic,
-                input_title=input_title,
-                input_description=input_description,
-                format_preset=format_preset,
-                chapter_index=chapter_index,
-                chapter_count=chapter_count,
-                chapter_target_sec=chapter_target_sec,
-                language=language,
-                brand_slot=slot,
-                source_context=source_context,
-                strategy_notes=strategy_notes,
-            )
-            chapter["last_error"] = ""
-        except Exception as e:
-            fallback_used = 1
-            chapter = _longform_fallback_chapter(
-                topic=topic,
-                input_title=input_title or topic or "Untitled",
-                chapter_index=chapter_index,
-                chapter_target_sec=chapter_target_sec,
-                chapter_count=chapter_count,
-                brand_slot=slot,
-                tone=chapter_tone,
-                template=template,
-            )
-            chapter["last_error"] = ""
-            log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used: {e}")
-
-        chapter = await _longform_attach_scene_previews(
-            session_id=session_id,
-            template=template,
-            chapter=chapter,
-            resolution=resolution,
-            format_preset=str(session.get("format_preset", "") or ""),
-        )
-        auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
-        chapter["status"] = "approved" if auto_pipeline else "pending_review"
-        chapter["retry_count"] = max(prior_retry, int(chapter.get("retry_count", 0) or 0))
-
-        async with _longform_sessions_lock:
-            live = _longform_sessions.get(session_id)
-            if not isinstance(live, dict):
+            async with _longform_sessions_lock:
+                session = dict(_longform_sessions.get(session_id) or {})
+            if not session:
                 return
-            chapters_live = list(live.get("chapters") or [])
-            if chapter_index >= len(chapters_live):
+
+            template = _normalize_longform_template(session.get("template", "story"))
+            format_preset = str(session.get("format_preset", "explainer") or "explainer").strip().lower()
+            topic = str(session.get("topic", "") or "").strip()
+            input_title = str(session.get("input_title", "") or "").strip()
+            input_description = str(session.get("input_description", "") or "").strip()
+            metadata_pack = dict(session.get("metadata_pack") or {})
+            source_context = str(metadata_pack.get("source_context", "") or "").strip()
+            strategy_notes = _marketing_doctrine_text(str(session.get("strategy_notes", "") or "").strip())
+            language = _normalize_longform_language(session.get("language", "en"))
+            resolution = str(session.get("resolution", "720p_landscape") or "720p_landscape")
+            chapter_tone = _longform_detect_tone(template, topic, input_title, input_description)
+            target_minutes = _normalize_longform_target_minutes(session.get("target_minutes", LONGFORM_DEFAULT_TARGET_MINUTES))
+            chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
+            edit_blueprint = dict(session.get("edit_blueprint") or {})
+
+            chapter_list = list(session.get("chapters") or [])
+            if chapter_index < 0 or chapter_index >= len(chapter_list):
                 return
-            chapters_live[chapter_index] = chapter
-            live["chapters"] = chapters_live
-            progress = dict(live.get("draft_progress") or {})
-            live["status"] = "draft_review"
-            live["draft_progress"] = {
-                "total_chapters": int(len(chapters_live)),
-                "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
-                "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
-                "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-                "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
-            }
-            live["updated_at"] = time.time()
-            _save_longform_sessions()
-            should_continue = bool(auto_pipeline) and not live.get("paused_error")
-        if should_continue:
-            await _queue_next_longform_chapter_if_ready(session_id)
-    except Exception as e:
-        log.error(f"[longform:{session_id}] chapter generation failed: {e}", exc_info=True)
-        async with _longform_sessions_lock:
-            live = _longform_sessions.get(session_id)
-            if isinstance(live, dict):
-                live["status"] = "error"
-                live["paused_error"] = {
-                    "stage": "draft_generation",
-                    "chapter_index": int(chapter_index),
-                    "error": str(e),
-                }
+            chapter_seed = dict(chapter_list[chapter_index] or {})
+            chapter_blueprint = _catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_index)
+            slot = str(chapter_seed.get("brand_slot", "") or _longform_brand_slot(chapter_index, chapter_count))
+            prior_retry = int(chapter_seed.get("retry_count", 0) or 0)
+
+            try:
+                chapter = await _generate_longform_chapter(
+                    template=template,
+                    topic=topic,
+                    input_title=input_title,
+                    input_description=input_description,
+                    format_preset=format_preset,
+                    chapter_index=chapter_index,
+                    chapter_count=chapter_count,
+                    chapter_target_sec=chapter_target_sec,
+                    language=language,
+                    brand_slot=slot,
+                    source_context=source_context,
+                    strategy_notes=strategy_notes,
+                    edit_blueprint=edit_blueprint,
+                    chapter_blueprint=chapter_blueprint,
+                )
+                chapter["last_error"] = ""
+            except Exception as e:
+                chapter = _longform_fallback_chapter(
+                    topic=topic,
+                    input_title=input_title or topic or "Untitled",
+                    chapter_index=chapter_index,
+                    chapter_target_sec=chapter_target_sec,
+                    chapter_count=chapter_count,
+                    brand_slot=slot,
+                    tone=chapter_tone,
+                    template=template,
+                    format_preset=format_preset,
+                    edit_blueprint=edit_blueprint,
+                    chapter_blueprint=chapter_blueprint,
+                )
+                chapter["last_error"] = ""
+                log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used: {e}")
+
+            chapter = await _longform_attach_scene_previews(
+                session_id=session_id,
+                template=template,
+                chapter=chapter,
+                resolution=resolution,
+                format_preset=str(session.get("format_preset", "") or ""),
+            )
+            auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
+            chapter["status"] = "approved" if auto_pipeline else "pending_review"
+            chapter["retry_count"] = max(prior_retry, int(chapter.get("retry_count", 0) or 0))
+
+            async with _longform_sessions_lock:
+                live = _longform_sessions.get(session_id)
+                if not isinstance(live, dict):
+                    return
                 chapters_live = list(live.get("chapters") or [])
+                if chapter_index >= len(chapters_live):
+                    return
+                chapters_live[chapter_index] = chapter
+                live["chapters"] = chapters_live
                 progress = dict(live.get("draft_progress") or {})
+                live["status"] = "draft_review"
                 live["draft_progress"] = {
-                    "total_chapters": int(chapter_count or len(chapters_live)),
+                    "total_chapters": int(len(chapters_live)),
                     "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
                     "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
                     "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-                    "stage": "error",
+                    "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
                 }
                 live["updated_at"] = time.time()
                 _save_longform_sessions()
+                should_continue = bool(auto_pipeline) and not live.get("paused_error")
+            if should_continue:
+                await _queue_next_longform_chapter_if_ready(session_id)
+        except Exception as e:
+            log.error(f"[longform:{session_id}] chapter generation failed: {e}", exc_info=True)
+            async with _longform_sessions_lock:
+                live = _longform_sessions.get(session_id)
+                if isinstance(live, dict):
+                    live["status"] = "error"
+                    live["paused_error"] = {
+                        "stage": "draft_generation",
+                        "chapter_index": int(chapter_index),
+                        "error": str(e),
+                    }
+                    chapters_live = list(live.get("chapters") or [])
+                    progress = dict(live.get("draft_progress") or {})
+                    live["draft_progress"] = {
+                        "total_chapters": int(chapter_count or len(chapters_live)),
+                        "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
+                        "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
+                        "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                        "stage": "error",
+                    }
+                    live["updated_at"] = time.time()
+                    _save_longform_sessions()
 
 
 async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
@@ -14130,6 +14858,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         input_title = str(session_snapshot.get("input_title", "") or topic or "Untitled")
         input_description = str(session_snapshot.get("input_description", "") or "")
         format_preset = str(session_snapshot.get("format_preset", "explainer") or "explainer").strip().lower()
+        edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
+        channel_memory_snapshot = dict(session_snapshot.get("channel_memory") or {})
         session_tone = _longform_detect_tone(template, topic, input_title, input_description)
         chapter_tones = {
             int((chapter or {}).get("index", idx) or idx): str((chapter or {}).get("tone", session_tone) or session_tone)
@@ -14138,8 +14868,19 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         render_horror_audio = _longform_is_horror_tone(session_tone) or any(
             _longform_is_horror_tone(tone) for tone in chapter_tones.values()
         )
-        transition_style = "cinematic" if format_preset in {"recap", "explainer", "documentary"} else "smooth"
-        micro_escalation_mode = bool(format_preset in {"recap", "explainer", "documentary"} or animation_enabled)
+        transition_style = _normalize_transition_style(
+            str(
+                edit_blueprint.get("motion_strategy", {}).get("transition_style", "")
+                or ("cinematic" if format_preset in {"recap", "explainer", "documentary"} else "smooth")
+            )
+        )
+        micro_escalation_mode = _normalize_micro_escalation_mode(
+            edit_blueprint.get("motion_strategy", {}).get(
+                "micro_escalation_mode",
+                bool(format_preset in {"recap", "explainer", "documentary"} or animation_enabled),
+            ),
+            template=template,
+        )
 
         scenes: list[dict] = []
         chapter_markers: list[dict] = []
@@ -14187,7 +14928,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         jobs[job_id]["total_scenes"] = len(scenes)
         jobs[job_id]["generation_mode"] = "video" if animation_enabled else "image"
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
-        if _longform_prefers_3d_documentary_visuals(template, str(session.get("format_preset", "") or "")):
+        if _longform_prefers_3d_documentary_visuals(template, format_preset):
             neg_prompt = (
                 neg_prompt
                 + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
@@ -14202,9 +14943,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         scene_prompts: list[str] = []
         skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
         reference_image_url = _normalize_reference_with_default(template, "")
-        longform_art_style = _longform_default_art_style(template, str(session.get("format_preset", "") or ""))
+        longform_art_style = _longform_default_art_style(template, format_preset)
         total_steps = len(scenes) * (2 if animation_enabled else 1)
-        gen_ts = str(int(time.time() * 1000))
 
         for i, scene in enumerate(scenes):
             jobs[job_id]["current_scene"] = i + 1
@@ -14216,7 +14956,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 str(scene.get("visual_description", "") or ""),
                 tone=chapter_tone,
                 template=template,
-                format_preset=str(session.get("format_preset", "") or ""),
+                format_preset=format_preset,
             )
             scene["visual_description"] = locked_visual
             full_prompt = _build_scene_prompt_with_reference(
@@ -14242,7 +14982,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                         resolution=resolution,
                         negative_prompt=neg_prompt,
                         template=template,
-                        format_preset=str(session.get("format_preset", "") or ""),
+                        format_preset=format_preset,
                         reference_image_url=reference_image_url,
                         reference_lock_mode="strict",
                         best_of_enabled=False,
@@ -14334,7 +15074,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                     str(scene.get("visual_description", "") or ""),
                     tone=chapter_tone,
                     template=template,
-                    format_preset=str(session.get("format_preset", "") or ""),
+                    format_preset=format_preset,
                 ) + whisper_hint
                 dur = float(scene.get("duration_sec", 6) or 6)
                 sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
@@ -14399,6 +15139,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             source_bundle=dict(metadata_pack_snapshot.get("source_video") or {}),
             source_analysis=dict(metadata_pack_snapshot.get("source_analysis") or {}),
             channel_context=dict(metadata_pack_snapshot.get("youtube_channel") or {}),
+            channel_memory=channel_memory_snapshot,
         )
         package_title_variants = list(publish_candidates.get("title_variants") or [])
         package_description_variants = list(publish_candidates.get("description_variants") or [])
@@ -14430,6 +15171,50 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 jobs[job_id]["thumbnail_request_id"] = str(thumbnail_render.get("request_id", "") or "")
             except Exception as e:
                 package_thumbnail_error = str(e)[:240]
+        package_payload = {
+            "output_file": output_filename,
+            "chapters": chapter_markers,
+            "title_variants": list(package_title_variants),
+            "description_variants": list(package_description_variants),
+            "thumbnail_prompts": list(package_thumbnail_prompts),
+            "tags": list(package_tags),
+            "selected_title": selected_title,
+            "selected_description": selected_description,
+            "selected_tags": list(selected_tags),
+            "thumbnail_prompt": thumbnail_prompt_selected,
+            "thumbnail_file": package_thumbnail_file,
+            "thumbnail_url": package_thumbnail_url,
+            "thumbnail_error": package_thumbnail_error,
+        }
+        learning_record = _heuristic_catalyst_learning_record(
+            session_snapshot=session_snapshot,
+            edit_blueprint=edit_blueprint,
+            chapter_markers=chapter_markers,
+            package=package_payload,
+        )
+        updated_channel_memory = _update_catalyst_channel_memory(
+            existing=channel_memory_snapshot,
+            session_snapshot=session_snapshot,
+            learning_record=learning_record,
+            edit_blueprint=edit_blueprint,
+            package=package_payload,
+        )
+        async with _catalyst_memory_lock:
+            _load_catalyst_memory()
+            learning_key = str(session_snapshot.get("session_id", "") or job_id or f"longform:{session_id}")
+            _catalyst_learning_records[learning_key] = learning_record
+            channel_memory_key = str(
+                session_snapshot.get("channel_memory_key", "")
+                or _catalyst_channel_memory_key(
+                    str(session_snapshot.get("user_id", "") or ""),
+                    str(session_snapshot.get("youtube_channel_id", "") or ""),
+                    format_preset,
+                )
+            )
+            if channel_memory_key:
+                updated_channel_memory["key"] = channel_memory_key
+                _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
+            _save_catalyst_memory()
         _job_diag_finalize(job_id)
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
@@ -14441,22 +15226,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 live_metadata_pack["description_variants"] = list(package_description_variants)
                 live_metadata_pack["thumbnail_prompts"] = list(package_thumbnail_prompts)
                 live_metadata_pack["tags"] = list(package_tags)
+                live_metadata_pack["catalyst_channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
                 session_live["metadata_pack"] = live_metadata_pack
-                session_live["package"] = {
-                    "output_file": output_filename,
-                    "chapters": chapter_markers,
-                    "title_variants": list(package_title_variants),
-                    "description_variants": list(package_description_variants),
-                    "thumbnail_prompts": list(package_thumbnail_prompts),
-                    "tags": list(package_tags),
-                    "selected_title": selected_title,
-                    "selected_description": selected_description,
-                    "selected_tags": list(selected_tags),
-                    "thumbnail_prompt": thumbnail_prompt_selected,
-                    "thumbnail_file": package_thumbnail_file,
-                    "thumbnail_url": package_thumbnail_url,
-                    "thumbnail_error": package_thumbnail_error,
-                }
+                session_live["package"] = package_payload
+                session_live["learning_record"] = learning_record
+                session_live["channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()
     except LongFormPauseError as e:
@@ -14482,6 +15256,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                     session_live["paused_error"] = dict(pause_details)
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()
+
+
+async def _run_longform_pipeline_isolated(job_id: str, session_id: str) -> None:
+    async with _longform_render_semaphore:
+        await _run_longform_pipeline(job_id, session_id)
 
 
 async def _create_longform_session_internal(
@@ -14532,6 +15311,11 @@ async def _create_longform_session_internal(
     analytics_image_paths = [str(p).strip() for p in list(analytics_image_paths or []) if str(p).strip()]
     auto_pipeline = bool(auto_pipeline_requested and _is_admin_user(user))
     channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=youtube_channel_id)
+    memory_channel_id = str((channel_context or {}).get("channel_id", "") or youtube_channel_id or "").strip()
+    channel_memory_key = _catalyst_channel_memory_key(str(user.get("id", "") or ""), memory_channel_id, format_preset)
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        channel_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or {})
 
     source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
     if source_bundle:
@@ -14554,6 +15338,7 @@ async def _create_longform_session_internal(
     source_analysis = dict(await _build_source_performance_analysis(
         source_bundle=source_bundle,
         channel_context=channel_context,
+        channel_memory=channel_memory,
         analytics_notes=merged_analytics_notes,
         topic=topic,
         input_title=input_title,
@@ -14579,6 +15364,7 @@ async def _create_longform_session_internal(
             source_bundle=source_bundle,
             source_analysis=source_analysis,
             channel_context=channel_context,
+            channel_memory=channel_memory,
             format_preset=format_preset,
             strategy_notes=strategy_notes,
         )
@@ -14591,6 +15377,7 @@ async def _create_longform_session_internal(
         source_analysis = dict(await _build_source_performance_analysis(
             source_bundle=source_bundle,
             channel_context=channel_context,
+            channel_memory=channel_memory,
             analytics_notes=merged_analytics_notes,
             topic=topic,
             input_title=input_title,
@@ -14615,9 +15402,29 @@ async def _create_longform_session_internal(
         raise HTTPException(400, "Video title is required unless a source URL can be analyzed into a follow-up brief")
     if not input_description:
         raise HTTPException(400, "Video description is required unless a source URL can be analyzed into a follow-up brief")
-    source_context = _render_source_context(source_bundle, source_analysis, merged_analytics_notes, channel_context=channel_context)
+    source_context = _render_source_context(
+        source_bundle,
+        source_analysis,
+        merged_analytics_notes,
+        channel_context=channel_context,
+        channel_memory=channel_memory,
+    )
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
+    edit_blueprint = await _build_catalyst_edit_blueprint(
+        template=template,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        chapter_count=chapter_count,
+        chapter_target_sec=chapter_target_sec,
+        source_bundle=source_bundle,
+        source_analysis=source_analysis,
+        channel_context=channel_context,
+        channel_memory=channel_memory,
+        strategy_notes=strategy_notes,
+    )
     chapters = [
         _longform_placeholder_chapter(
             i,
@@ -14637,6 +15444,7 @@ async def _create_longform_session_internal(
         source_bundle=source_bundle,
         source_analysis=source_analysis,
         channel_context=channel_context,
+        channel_memory=channel_memory,
     )
 
     metadata_pack = {
@@ -14655,6 +15463,7 @@ async def _create_longform_session_internal(
         "manual_transcript_supplied": bool(transcript_text),
         "manual_transcript_excerpt": _clip_text(transcript_text, 2000),
         "analytics_notes_effective": _clip_text(merged_analytics_notes, 2400),
+        "catalyst_channel_memory": _catalyst_channel_memory_public_view(channel_memory),
     }
     session_id = str(session_id_override or "").strip() or f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
     now = time.time()
@@ -14689,6 +15498,10 @@ async def _create_longform_session_internal(
         "paused_error": None,
         "job_id": "",
         "metadata_pack": metadata_pack,
+        "edit_blueprint": edit_blueprint,
+        "learning_record": dict(existing_session.get("learning_record") or {}) if existing_session else {},
+        "channel_memory_key": channel_memory_key,
+        "channel_memory": _catalyst_channel_memory_public_view(channel_memory),
         "draft_progress": {
             "total_chapters": int(chapter_count),
             "generated_chapters": 0,
@@ -14716,25 +15529,45 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
         raise HTTPException(403, "Long-form owner beta is restricted")
-    session_public = await _create_longform_session_internal(
-        user=user,
-        template=req.template,
-        topic=req.topic,
-        input_title=req.input_title,
-        input_description=req.input_description,
-        format_preset=req.format_preset,
-        source_url=req.source_url,
-        youtube_channel_id=getattr(req, "youtube_channel_id", ""),
-        analytics_notes=req.analytics_notes,
-        strategy_notes=req.strategy_notes,
-        transcript_text=getattr(req, "transcript_text", ""),
-        target_minutes=req.target_minutes,
-        language=req.language,
-        animation_enabled=req.animation_enabled,
-        sfx_enabled=req.sfx_enabled,
-        whisper_mode=req.whisper_mode,
-        auto_pipeline_requested=getattr(req, "auto_pipeline", False),
-    )
+    busy_session_id = await _active_longform_capacity_session_id(str(user.get("id", "") or ""))
+    if busy_session_id:
+        raise HTTPException(
+            409,
+            f"Long-form isolated capacity is already busy on session {busy_session_id}. Wait for that run to finish before starting another active Long Form generation.",
+        )
+    if not _longform_deep_analysis_enabled(user):
+        wants_deep_analysis = bool(
+            str(getattr(req, "source_url", "") or "").strip()
+            or str(getattr(req, "youtube_channel_id", "") or "").strip()
+            or str(getattr(req, "analytics_notes", "") or "").strip()
+            or str(getattr(req, "transcript_text", "") or "").strip()
+            or bool(getattr(req, "auto_pipeline", False))
+        )
+        if wants_deep_analysis:
+            raise HTTPException(
+                403,
+                "Source-video deep analysis is owner beta for now. Public Long Form stays on the lighter manual workflow while Catalyst is being tuned.",
+            )
+    async with _longform_analysis_semaphore:
+        session_public = await _create_longform_session_internal(
+            user=user,
+            template=req.template,
+            topic=req.topic,
+            input_title=req.input_title,
+            input_description=req.input_description,
+            format_preset=req.format_preset,
+            source_url=req.source_url,
+            youtube_channel_id=getattr(req, "youtube_channel_id", ""),
+            analytics_notes=req.analytics_notes,
+            strategy_notes=req.strategy_notes,
+            transcript_text=getattr(req, "transcript_text", ""),
+            target_minutes=req.target_minutes,
+            language=req.language,
+            animation_enabled=req.animation_enabled,
+            sfx_enabled=req.sfx_enabled,
+            whisper_mode=req.whisper_mode,
+            auto_pipeline_requested=getattr(req, "auto_pipeline", False),
+        )
     return {"session": session_public}
 
 
@@ -14778,6 +15611,7 @@ def _create_longform_bootstrap_placeholder_session(
         "manual_transcript_supplied": bool(str(transcript_text or "").strip()),
         "manual_transcript_excerpt": _clip_text(str(transcript_text or "").strip(), 2000),
         "analytics_notes_effective": _clip_text(str(analytics_notes or "").strip(), 2400),
+        "catalyst_channel_memory": {},
     }
     return {
         "session_id": session_id,
@@ -14813,6 +15647,10 @@ def _create_longform_bootstrap_placeholder_session(
         "paused_error": None,
         "job_id": "",
         "metadata_pack": metadata_pack,
+        "edit_blueprint": {},
+        "learning_record": {},
+        "channel_memory_key": _catalyst_channel_memory_key(str(user.get("id", "") or ""), str(youtube_channel_id or "").strip(), str(format_preset or "explainer").strip().lower() or "explainer"),
+        "channel_memory": {},
         "draft_progress": {
             "total_chapters": int(chapter_count),
             "generated_chapters": 0,
@@ -14826,6 +15664,35 @@ def _create_longform_bootstrap_placeholder_session(
         "created_at": now,
         "updated_at": now,
     }
+
+
+def _longform_session_uses_isolated_capacity(session: dict | None) -> bool:
+    s = dict(session or {})
+    status = str(s.get("status", "") or "").strip().lower()
+    if status in {"bootstrapping", "draft_generating", "rendering"}:
+        return True
+    chapters = list(s.get("chapters") or [])
+    for chapter in chapters:
+        chapter_status = str((chapter or {}).get("status", "") or "").strip().lower()
+        if chapter_status in {"regenerating", "draft_generating_images"}:
+            return True
+    return False
+
+
+async def _active_longform_capacity_session_id(user_id: str) -> str:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return ""
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        sessions = list(_longform_sessions.values())
+    sessions.sort(key=lambda s: float((s or {}).get("updated_at", 0) or 0), reverse=True)
+    for session in sessions:
+        if str((session or {}).get("user_id", "") or "").strip() != normalized_user_id:
+            continue
+        if _longform_session_uses_isolated_capacity(session):
+            return str((session or {}).get("session_id", "") or "").strip()
+    return ""
 
 
 async def _bootstrap_longform_session_background(
@@ -14851,27 +15718,28 @@ async def _bootstrap_longform_session_background(
     auto_pipeline_requested: bool,
 ) -> None:
     try:
-        await _create_longform_session_internal(
-            user=user,
-            template=template,
-            topic=topic,
-            input_title=input_title,
-            input_description=input_description,
-            format_preset=format_preset,
-            source_url=source_url,
-            youtube_channel_id=youtube_channel_id,
-            analytics_notes=analytics_notes,
-            strategy_notes=strategy_notes,
-            transcript_text=transcript_text,
-            analytics_image_paths=analytics_image_paths,
-            target_minutes=target_minutes,
-            language=language,
-            animation_enabled=animation_enabled,
-            sfx_enabled=sfx_enabled,
-            whisper_mode=whisper_mode,
-            auto_pipeline_requested=auto_pipeline_requested,
-            session_id_override=session_id,
-        )
+        async with _longform_analysis_semaphore:
+            await _create_longform_session_internal(
+                user=user,
+                template=template,
+                topic=topic,
+                input_title=input_title,
+                input_description=input_description,
+                format_preset=format_preset,
+                source_url=source_url,
+                youtube_channel_id=youtube_channel_id,
+                analytics_notes=analytics_notes,
+                strategy_notes=strategy_notes,
+                transcript_text=transcript_text,
+                analytics_image_paths=analytics_image_paths,
+                target_minutes=target_minutes,
+                language=language,
+                animation_enabled=animation_enabled,
+                sfx_enabled=sfx_enabled,
+                whisper_mode=whisper_mode,
+                auto_pipeline_requested=auto_pipeline_requested,
+                session_id_override=session_id,
+            )
     except Exception as e:
         log.error(f"[longform:{session_id}] bootstrap failed: {e}", exc_info=True)
         async with _longform_sessions_lock:
@@ -14919,8 +15787,17 @@ async def create_longform_session_bootstrap(
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+    busy_session_id = await _active_longform_capacity_session_id(str(user.get("id", "") or ""))
+    if busy_session_id:
+        raise HTTPException(
+            409,
+            f"Long-form isolated capacity is already busy on session {busy_session_id}. Wait for that run to finish before starting another active Long Form generation.",
+        )
+    if not _longform_deep_analysis_enabled(user):
+        raise HTTPException(
+            403,
+            "Source-video deep analysis is owner beta for now. Public Long Form stays on the lighter manual workflow while Catalyst is being tuned.",
+        )
     normalized_template = _normalize_longform_template(template)
     normalized_format_preset = str(format_preset or "explainer").strip().lower()
     if normalized_format_preset not in {"recap", "explainer", "documentary", "story_channel"}:
@@ -15307,6 +16184,8 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         fix_note=str(req.fix_note or "").strip(),
         source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
         strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
+        edit_blueprint=dict(session_copy.get("edit_blueprint") or {}),
+        chapter_blueprint=_catalyst_chapter_blueprint_for_index(dict(session_copy.get("edit_blueprint") or {}), chapter_index),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -15404,19 +16283,7 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
         _save_longform_sessions()
 
     _job_diag_init(job_id, "longform")
-    try:
-        await enqueue_generation_job(job_id, "pro", _run_longform_pipeline, (job_id, session_id))
-    except QueueFullError as e:
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
-        await persist_job_state(job_id, jobs[job_id])
-        async with _longform_sessions_lock:
-            session_live = _longform_sessions.get(session_id)
-            if isinstance(session_live, dict):
-                session_live["status"] = "draft_review"
-                session_live["updated_at"] = time.time()
-                _save_longform_sessions()
-        raise HTTPException(429, str(e))
+    asyncio.create_task(_run_longform_pipeline_isolated(job_id, session_id))
     return job_id
 
 
@@ -17103,28 +17970,39 @@ async def admin_set_maintenance_banner(body: dict, user: dict = Depends(require_
 
 @app.get("/api/config")
 async def public_config():
+    public_plans = {
+        name: {k: v for k, v in limits.items()}
+        for name, limits in PLAN_LIMITS.items()
+        if name in PUBLIC_PLAN_IDS
+    }
+    public_plan_features = {
+        name: list(features)
+        for name, features in PLAN_FEATURES.items()
+        if name in PUBLIC_PLAN_IDS
+    }
+    public_plan_prices = {
+        k: float(v)
+        for k, v in PLAN_PRICE_USD.items()
+        if k in PUBLIC_PLAN_IDS
+    }
+    public_topup_packs = [
+        {"price_id": price_id, **meta}
+        for price_id, meta in TOPUP_PACKS.items()
+        if price_id in PUBLIC_TOPUP_PACK_IDS
+    ]
     return {
         "supabase_url": SUPABASE_URL,
         "supabase_anon_key": SUPABASE_ANON_KEY,
-        "stripe_enabled": bool(STRIPE_SECRET_KEY and STRIPE_TOPUP_PUBLIC_ENABLED),
+        "stripe_enabled": False,
         "waitlist_only_mode": False,
         "waitlist_requires_stripe_payment": False,
         "maintenance_banner_enabled": _maintenance_banner_enabled,
         "maintenance_banner_message": _maintenance_banner_message,
-        "plans": {
-            name: {k: v for k, v in limits.items()}
-            for name, limits in PLAN_LIMITS.items()
-        },
-        "plan_features": {
-            name: list(features)
-            for name, features in PLAN_FEATURES.items()
-        },
-        "plan_prices_usd": {k: float(v) for k, v in PLAN_PRICE_USD.items()},
-        "prices": ({v: k for k, v in STRIPE_PRICE_TO_PLAN.items()} if STRIPE_TOPUP_PUBLIC_ENABLED else {}),
-        "topup_packs": [
-            {"price_id": price_id, **meta}
-            for price_id, meta in TOPUP_PACKS.items()
-        ],
+        "plans": public_plans,
+        "plan_features": public_plan_features,
+        "plan_prices_usd": public_plan_prices,
+        "prices": {},
+        "topup_packs": public_topup_packs,
         "transition_styles": list(TRANSITION_STYLE_MAP.keys()),
         "story_art_style_count": len(ART_STYLE_PRESETS),
         "render_capabilities": {
@@ -17166,6 +18044,10 @@ async def public_config():
             "redirect_uri": GOOGLE_REDIRECT_URI,
             "multiple_channels_supported": True,
         },
+        "auth": {
+            "primary_provider": "google",
+            "email_fallback_enabled": True,
+        },
         "feature_flags": {
             "script_to_short_enabled": SCRIPT_TO_SHORT_ENABLED,
             "story_advanced_controls_enabled": STORY_ADVANCED_CONTROLS_ENABLED,
@@ -17195,8 +18077,8 @@ async def get_me(user: dict = Depends(require_auth)):
     access_snapshot = _paid_access_snapshot_for_user(user)
     billing_active = bool(access_snapshot.get("billing_active"))
     plan = str(access_snapshot.get("plan", user.get("plan", "none")) or "none").strip().lower()
-    if plan == "free":
-        plan = "none"
+    if plan == "none":
+        plan = "free"
     next_renewal_unix = int(access_snapshot.get("next_renewal_unix", 0) or 0)
     next_renewal_source = str(access_snapshot.get("next_renewal_source", "") or "")
     billing_anchor_unix = int(access_snapshot.get("billing_anchor_unix", 0) or 0)
@@ -17216,7 +18098,7 @@ async def get_me(user: dict = Depends(require_auth)):
         limits = PLAN_LIMITS["pro"]
         limits = {**limits, "videos_per_month": 9999}
     else:
-        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS.get("free", PLAN_LIMITS["starter"]))
     credit_state = _credit_state_for_user(user, plan if not is_admin else "pro", billing_active, is_admin=is_admin)
     has_demo = is_admin or (PRODUCT_DEMO_PUBLIC_ENABLED and plan == "demo_pro")
     effective_plan = "pro" if is_admin else plan
@@ -17268,7 +18150,7 @@ async def get_me(user: dict = Depends(require_auth)):
         "demo_access": has_demo,
         "demo_price_id": DEMO_PRO_PRICE_ID,
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
-        "longform_owner_beta": bool(lane_access.get("longform")),
+        "longform_owner_beta": bool(_longform_deep_analysis_enabled(user)),
         "youtube_oauth_configured": _youtube_auth_configured(),
         "youtube_connected_channel_count": len(yt_channels),
         "youtube_default_channel_id": yt_default_channel_id,

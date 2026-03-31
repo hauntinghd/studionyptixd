@@ -3,9 +3,9 @@ import { Crown, Scissors, Sparkles } from 'lucide-react';
 import { AuthContext, BILLING_SITE_URL } from '../shared';
 
 export default function AutoClipperPanel() {
-    const { role, billingActive, plan } = useContext(AuthContext);
+    const { role } = useContext(AuthContext);
     const isAdmin = role === 'admin';
-    const unlocked = isAdmin || billingActive || ['starter', 'creator', 'pro', 'elite', 'scale'].includes(plan);
+    const unlocked = isAdmin;
     const [url, setUrl] = useState('');
 
     return (
@@ -18,11 +18,11 @@ export default function AutoClipperPanel() {
                     </div>
                     <h2 className="mt-3 text-2xl font-bold text-white">Auto Clipper</h2>
                         <p className="mt-2 max-w-2xl text-sm text-gray-400">
-                        Extract viral-ready clips from long-form uploads and scored URLs. Catalyst membership will unlock beta access once the clipping and scoring slice is ready for public use.
+                        Extract viral-ready clips from long-form uploads and scored URLs. AutoClipper stays owner-preview only until clipping quality and scoring are strong enough for a real public release.
                         </p>
                 </div>
                 <div className={`rounded-xl border px-4 py-2 text-sm font-semibold ${unlocked ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/20 bg-amber-500/10 text-amber-300'}`}>
-                    {unlocked ? 'Premium alpha access' : 'Upgrade required'}
+                    {unlocked ? 'Owner preview access' : 'Coming soon'}
                 </div>
             </div>
 
@@ -45,7 +45,7 @@ export default function AutoClipperPanel() {
                     </button>
                     {!unlocked && (
                         <p className="mt-3 text-xs text-amber-300">
-                            Auto Clipper stays in the roadmap until the quality bar is real. Membership and credit metering will come after the backend scoring slice is stable.
+                            Auto Clipper is intentionally not sellable yet. It stays visible in Studio, but only the owner preview account can use it until the scoring and packaging engine is stable.
                         </p>
                     )}
                 </div>
@@ -65,7 +65,7 @@ export default function AutoClipperPanel() {
                         className="mt-6 inline-flex items-center gap-2 rounded-xl border border-white/[0.1] bg-white/[0.03] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06]"
                     >
                         <Crown className="w-4 h-4 text-violet-300" />
-                        Open Billing
+                        View Pricing
                     </button>
                 </div>
             </div>

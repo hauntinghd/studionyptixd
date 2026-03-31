@@ -72,10 +72,10 @@ export const hasChatStoryTemplateAccess = (
     billingActive: boolean,
     role?: string | null
 ): boolean => {
-    void planName;
-    void billingActive;
-    void role;
-    return true;
+    const normalizedPlan = String(planName || "").trim().toLowerCase();
+    const normalizedRole = String(role || "").trim().toLowerCase();
+    if (normalizedRole === "admin") return true;
+    return Boolean(billingActive && CHAT_STORY_MONTHLY_PLAN_IDS.has(normalizedPlan));
 };
 export const CLONE_COMING_SOON = true;
 export const Logo = ({ size = 24 }: { size?: number }) => (
@@ -97,7 +97,7 @@ create extension if not exists pgcrypto;
 create table if not exists public.waiting_list (
   id uuid primary key default gen_random_uuid(),
   email text not null unique,
-  plan text not null check (plan in ('starter','creator','pro','elite')),
+  plan text not null check (plan in ('starter','creator','pro')),
   price_usd numeric(10,2) not null default 0,
   paid boolean not null default false,
   stripe_session_id text,
@@ -182,7 +182,7 @@ const readJsonResponse = async <T = any>(res: Response): Promise<{ data: T | nul
 
 const normalizeWaitlistPlan = (planName: string): string => {
     const normalized = String(planName || "").trim().toLowerCase();
-    if (["starter", "creator", "pro", "elite"].includes(normalized)) return normalized;
+    if (["starter", "creator", "pro"].includes(normalized)) return normalized;
     return "starter";
 };
 
@@ -301,7 +301,7 @@ export const upsertWaitlistFallbackRow = async (
 // ── Waiting List Plan Config ────────────────────────────────────────────────
 export const WAITLIST_PLANS: { name: string; label: string; price: number }[] = [];
 
-export type Plan = 'none' | 'starter' | 'creator' | 'pro' | 'elite';
+export type Plan = 'none' | 'free' | 'starter' | 'creator' | 'pro';
 export type TopupPack = { price_id: string; pack: string; credits: number; price_usd: number };
 export type PlanLimit = {
     videos_per_month?: number;
@@ -317,13 +317,6 @@ export type PlanLimitMap = Record<string, PlanLimit>;
 export type PlanFeatureMap = Record<string, string[]>;
 export type PlanPriceMap = Record<string, number>;
 export type LaneAccessMap = Record<string, boolean>;
-const PRICE_IDS: Record<string, string> = {
-    starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
-    creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
-    pro: "price_1T4eTjBL8lRmwao2q6WkoZLH",
-    elite: "price_1T9uMwBL8lRmwao2Lk89pxiz",
-};
-
 export interface AuthContextType {
     session: Session | null;
     supabase: SupabaseClient | null;
@@ -358,6 +351,7 @@ export interface AuthContextType {
     studioLaneAccess: LaneAccessMap;
     defaultMembershipPlanId: string;
     signIn: (email: string, password: string) => Promise<string | null>;
+    signInWithGoogle: () => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
     checkout: (plan: string) => Promise<string | null>;
@@ -379,7 +373,7 @@ export const AuthContext = createContext<AuthContextType>({
     longformOwnerBeta: false,
     waitlistOnlyMode: false,
     waitlistRequiresStripePayment: false,
-    signIn: async () => null, signUp: async () => null, signOut: async () => {},
+    signIn: async () => null, signInWithGoogle: async () => null, signUp: async () => null, signOut: async () => {},
     checkout: async () => null, checkoutTopup: async () => null, checkoutDemo: async () => {}, manageBilling: async () => null,
     joinWaitingList: async () => null,
 });
@@ -433,15 +427,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     const applyOwnerAccess = useCallback(() => {
         setRole('admin');
-        setPlan('elite');
+        setPlan('pro');
         setBillingActive(true);
         setMembershipActive(true);
-        setMembershipPlanId(defaultMembershipPlanId || 'starter');
+        setMembershipPlanId('pro');
         setMembershipSource('admin');
         setOwnerOverride(true);
         setStudioLaneAccess(ownerLaneAccess);
         setLongformOwnerBeta(true);
-    }, [defaultMembershipPlanId]);
+    }, []);
+    const normalizeViewerPlanId = useCallback((rawValue: unknown, fallback: Plan = 'free'): Plan => {
+        const normalized = String(rawValue || '').trim().toLowerCase();
+        if (normalized === 'demo_pro' || normalized === 'elite') return 'pro';
+        if (normalized === 'free' || normalized === 'none') return 'free';
+        if (normalized === 'starter' || normalized === 'creator' || normalized === 'pro') return normalized as Plan;
+        return fallback;
+    }, []);
     const refreshViewerState = useCallback(async () => {
         if (!session) {
             setPlan('none');
@@ -489,13 +490,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (!res.ok) throw new Error('Unable to refresh account state');
             const { data } = await readJsonResponse<any>(res);
             if (!data || typeof data !== "object") throw new Error("Invalid /api/me payload");
-            const incomingPlan = (data.plan === 'free' ? 'none' : data.plan) || 'none';
-            setPlan((['none', 'starter', 'creator', 'pro', 'elite'].includes(incomingPlan) ? incomingPlan : 'none') as Plan);
+            const incomingPlan = normalizeViewerPlanId(data.plan, 'free');
+            const incomingMembershipPlanId = normalizeViewerPlanId(data.membership_plan_id || incomingPlan, incomingPlan);
+            setPlan(incomingPlan);
             setRole(isOwner ? 'admin' : 'user');
             const incomingMembershipActive = Boolean(data.membership_active ?? data.billing_active);
             setBillingActive(incomingMembershipActive);
             setMembershipActive(incomingMembershipActive);
-            setMembershipPlanId(String(data.membership_plan_id || incomingPlan || 'none'));
+            setMembershipPlanId(incomingMembershipPlanId);
             setMembershipSource(String(data.membership_source || data.next_renewal_source || ''));
             setOwnerOverride(Boolean(data.owner_override || isOwner));
             setNextRenewalUnix(Number(data.next_renewal_unix || 0));
@@ -538,7 +540,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setDemoAccess(false);
             setDemoComingSoon(true);
         }
-    }, [session, backendOffline, applyOwnerAccess]);
+    }, [session, backendOffline, applyOwnerAccess, normalizeViewerPlanId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -717,6 +719,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return error ? error.message : null;
     }, [supabase]);
 
+    const signInWithGoogle = useCallback(async (): Promise<string | null> => {
+        if (!supabase) return "Auth not configured yet";
+        const redirectTo = isLocalDevHost ? `${window.location.origin}?page=dashboard` : `${STUDIO_SITE_URL}?page=dashboard`;
+        const { error } = await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                redirectTo,
+            },
+        });
+        return error ? error.message : null;
+    }, [supabase]);
+
     const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {
         if (!supabase) return "Auth not configured yet";
         const { error } = await supabase.auth.signUp({
@@ -750,8 +764,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
         const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'starter') : normalizedPlanName;
-        const priceId = PRICE_IDS[targetPlanId];
-        if (!isMembershipCheckout && !priceId) return "Missing membership checkout details";
+        const validPlan = targetPlanId === 'starter' || targetPlanId === 'creator' || targetPlanId === 'pro';
+        if (!validPlan) return "Missing membership checkout details";
         try {
             const res = await fetch(`${API}/api/checkout`, {
                 method: "POST",
@@ -760,9 +774,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     Authorization: `Bearer ${session.access_token}`,
                 },
                 body: JSON.stringify(
-                    isMembershipCheckout
-                        ? { product: 'membership', plan: targetPlanId }
-                        : { price_id: priceId, plan: targetPlanId }
+                    { product: 'membership', plan: targetPlanId }
                 ),
             });
             const { data } = await readJsonResponse<any>(res);
@@ -864,7 +876,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             publicPlanLimits, publicPlanFeatures, publicPlanPrices, studioLaneAccess, defaultMembershipPlanId,
             maintenanceBannerEnabled, maintenanceBannerMessage,
             waitlistOnlyMode, waitlistRequiresStripePayment,
-            signIn, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,
+            signIn, signInWithGoogle, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,
             joinWaitingList,
         }}>
             {children}

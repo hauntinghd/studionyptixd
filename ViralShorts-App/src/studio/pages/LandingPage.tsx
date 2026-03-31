@@ -1,17 +1,13 @@
-import { useContext, useMemo } from 'react';
+import { useContext, useState } from 'react';
 import { ArrowRight, CheckCircle2, Copy, Film, Image, Rocket, ScissorsLineDashed, Sparkles, Workflow, Wrench } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
 export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { session, topupPacks, publicPlanPrices, defaultMembershipPlanId } = useContext(AuthContext);
+    const { session, signInWithGoogle, topupPacks } = useContext(AuthContext);
     const billingHost = isBillingHost;
     const sortedPacks = [...topupPacks].sort((a, b) => a.credits - b.credits);
-    const membershipPrice = useMemo(() => {
-        const raw = Number((publicPlanPrices as Record<string, number>)[defaultMembershipPlanId || 'starter']);
-        if (!Number.isFinite(raw) || raw <= 0) return '$14/mo';
-        return `$${raw.toFixed(raw % 1 === 0 ? 0 : 2)}/mo`;
-    }, [defaultMembershipPlanId, publicPlanPrices]);
+    const [googleLoading, setGoogleLoading] = useState(false);
 
     const openBilling = () => {
         window.location.href = billingHost ? `${window.location.origin}?page=billing` : `${BILLING_SITE_URL}?page=billing`;
@@ -22,7 +18,12 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
             onNavigate('dashboard');
             return;
         }
-        onNavigate('auth');
+        void (async () => {
+            setGoogleLoading(true);
+            const error = await signInWithGoogle();
+            setGoogleLoading(false);
+            if (error) onNavigate('auth');
+        })();
     };
 
     const liveLanes = [
@@ -106,9 +107,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <button
                                     type="button"
                                     onClick={openDashboard}
+                                    disabled={!session && googleLoading}
                                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                                 >
-                                    {session ? 'Open Studio' : 'Sign In'}
+                                    {session ? 'Open Studio' : (googleLoading ? 'Opening Google...' : 'Continue with Google')}
                                     <ArrowRight className="h-5 w-5" />
                                 </button>
                                 <button
@@ -121,7 +123,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
                                 <StatCard label="Live Public Lanes" value="4" />
-                                <StatCard label="Membership" value={membershipPrice} />
+                                <StatCard label="Plans" value="Free + 3 Monthly" />
                                 <StatCard label="Checkout" value="PayPal" />
                             </div>
                         </div>
@@ -181,20 +183,20 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Offer Design</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">One product, two ways to pay</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            Membership unlocks the product. Credit packs cover usage spikes. Customers can run membership-only, wallet-only, or both together without switching platforms.
+                            Every signed-in account starts on Free. Then there are only three monthly plans and the credit wallet packs for usage spikes.
                         </p>
                     </div>
                     <div className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
                         <div className="rounded-[32px] border border-violet-500/20 bg-violet-500/[0.06] p-6">
-                            <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Catalyst Membership</p>
-                            <p className="mt-3 text-4xl font-bold text-white">{membershipPrice}</p>
+                            <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Plans</p>
+                            <p className="mt-3 text-4xl font-bold text-white">Free, Starter, Creator, Pro</p>
                             <p className="mt-3 text-sm text-gray-300">
-                                Unlock the live public lanes and get starter included credits. Included credits burn before the wallet on eligible jobs.
+                                Free includes enough credits for two short-form animated renders. The three paid monthly plans add more included credits and unlock Chat Story.
                             </p>
                             <ul className="mt-6 space-y-3 text-sm text-gray-300">
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Create, Thumbnails, Clone, Long Form, and Chat Story on one login</li>
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Starter included credits reset monthly</li>
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Manual PayPal renewal for now</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Free plan starts every signed-in account with two short-form animated renders</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Starter, Creator, and Pro add more included credits each month</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Chat Story stays monthly-only on the paid plans</li>
                             </ul>
                         </div>
                         <div className="rounded-[32px] border border-white/[0.06] bg-white/[0.02] p-6">
@@ -267,9 +269,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <button
                             type="button"
                             onClick={openDashboard}
+                            disabled={!session && googleLoading}
                             className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                         >
-                            {session ? 'Open Studio' : 'Sign In'}
+                            {session ? 'Open Studio' : (googleLoading ? 'Opening Google...' : 'Continue with Google')}
                             <ArrowRight className="h-5 w-5" />
                         </button>
                         <button

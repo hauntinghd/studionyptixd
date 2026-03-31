@@ -1,4 +1,14 @@
 PLAN_LIMITS = {
+    "free": {
+        "videos_per_month": 20,
+        "animated_renders_per_month": 2,
+        "non_animated_ops_per_month": 120,
+        "max_duration_sec": 90,
+        "max_resolution": "720p",
+        "can_clone": True,
+        "priority": False,
+        "demo_access": False,
+    },
     "starter": {
         "videos_per_month": 90,
         "animated_renders_per_month": 10,
@@ -52,6 +62,14 @@ PLAN_LIMITS = {
 }
 
 PLAN_FEATURES = {
+    "free": [
+        "catalyst_core",
+        "create_lane",
+        "clone_lane",
+        "longform_lane",
+        "thumbnail_lane",
+        "free_trial_credits",
+    ],
     "starter": [
         "catalyst_core",
         "create_lane",

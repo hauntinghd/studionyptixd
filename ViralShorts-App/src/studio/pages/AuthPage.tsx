@@ -4,13 +4,14 @@ import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, Logo } from '../shared';
 
 export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { signIn, signUp, session } = useContext(AuthContext);
+    const { signIn, signInWithGoogle, signUp, session } = useContext(AuthContext);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [mode, setMode] = useState<'signin' | 'signup'>('signin');
     const [error, setError] = useState('');
     const [info, setInfo] = useState('');
     const [loading, setLoading] = useState(false);
+    const [googleLoading, setGoogleLoading] = useState(false);
 
     if (session) {
         onNavigate('landing');
@@ -34,6 +35,15 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
         }
     };
 
+    const handleGoogleSignIn = async () => {
+        setError('');
+        setInfo('');
+        setGoogleLoading(true);
+        const err = await signInWithGoogle();
+        setGoogleLoading(false);
+        if (err) setError(err);
+    };
+
     return (
         <>
             <NavBar onNavigate={onNavigate} />
@@ -43,16 +53,32 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                     <h1 className="text-3xl font-bold mt-4">{mode === 'signin' ? 'Welcome Back' : 'Create Account'}</h1>
                     <p className="text-gray-500 text-sm mt-2">
                         {mode === 'signin'
-                            ? 'Sign in to access your Studio dashboard.'
+                            ? 'Google is the primary sign-in. Email stays available as a fallback.'
                             : (
                                 <>
-                                    Sign up to start using NYPTID Studio.
+                                    Google is the fastest way in, but you can also create an email account below.
                                     <br />1) Create an account below.
                                     <br />2) Verify your email.
                                     <br />3) Open your dashboard and start creating.
                                 </>
                             )}
                     </p>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={() => void handleGoogleSignIn()}
+                    disabled={googleLoading || loading}
+                    className="mb-4 flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition hover:border-white/[0.14] hover:bg-white/[0.08] disabled:opacity-60"
+                >
+                    <GoogleMark />
+                    {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
+                </button>
+
+                <div className="mb-4 flex items-center gap-3 text-xs uppercase tracking-[0.18em] text-gray-500">
+                    <div className="h-px flex-1 bg-white/[0.08]" />
+                    <span>Email fallback</span>
+                    <div className="h-px flex-1 bg-white/[0.08]" />
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
@@ -101,5 +127,17 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                 </p>
             </div>
         </>
+    );
+}
+
+function GoogleMark() {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5">
+            <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.8-6-6.2s2.7-6.2 6-6.2c1.9 0 3.2.8 3.9 1.5l2.7-2.6C17 2.8 14.8 2 12 2 6.9 2 2.8 6.4 2.8 11.8S6.9 21.6 12 21.6c6.1 0 9.1-4.3 9.1-6.5 0-.4 0-.7-.1-.9H12Z" />
+            <path fill="#4285F4" d="M21.1 15.1c0-.4 0-.7-.1-.9H12v3.9h5.5c-.3 1.5-1.5 2.8-3.1 3.6l3 2.4c2.7-2.5 3.7-6.1 3.7-9Z" opacity=".001" />
+            <path fill="#FBBC05" d="M6.5 14.2c-.2-.7-.4-1.5-.4-2.4s.1-1.6.4-2.4L3.4 7C2.9 8.3 2.6 9.9 2.6 11.8s.3 3.4.8 4.8l3.1-2.4Z" />
+            <path fill="#34A853" d="M12 21.6c2.8 0 5.1-.9 6.9-2.5l-3-2.4c-.8.6-2 1.1-3.9 1.1-2.5 0-4.7-1.7-5.5-4l-3.1 2.4c1.5 3 4.5 5.4 8.6 5.4Z" />
+            <path fill="#4285F4" d="M6.5 9.4c.8-2.3 3-4 5.5-4 1.9 0 3.2.8 3.9 1.5l2.9-2.8C17 2.8 14.8 2 12 2 7.9 2 4.9 4.4 3.4 7l3.1 2.4Z" />
+        </svg>
     );
 }

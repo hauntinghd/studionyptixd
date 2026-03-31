@@ -8,7 +8,7 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
         session,
         role,
         ownerOverride,
-        membershipActive,
+        billingActive,
         membershipPlanId,
         studioLaneAccess,
         monthlyCreditsRemaining,
@@ -35,6 +35,13 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [ownerOverride, studioLaneAccess]);
 
     if (!session) return null;
+
+    const normalizedPlan = String(membershipPlanId || '').trim().toLowerCase();
+    const currentPlanLabel = ownerOverride
+        ? 'Owner override (Pro)'
+        : billingActive
+            ? `Active (${normalizedPlan || 'starter'})`
+            : 'Free';
 
     const handleOpenBilling = () => {
         if (isBillingHost) {
@@ -81,7 +88,7 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         </div>
 
                         <div className="mt-6 grid gap-3">
-                            <OverviewCard label="Membership" value={membershipActive ? `Active (${membershipPlanId || 'starter'})` : 'Inactive'} />
+                            <OverviewCard label="Current Plan" value={currentPlanLabel} />
                             <OverviewCard label="Included Credits" value={String(Number(monthlyCreditsRemaining || 0))} />
                             <OverviewCard label="Credit Wallet" value={String(Number(topupCreditsRemaining || 0))} />
                             <OverviewCard label="Total Available" value={String(Number(creditsTotalRemaining || 0))} />

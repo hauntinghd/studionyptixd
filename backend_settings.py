@@ -202,6 +202,7 @@ STRIPE_PRICE_TO_PLAN = {
 }
 
 PLAN_PRICE_USD = {
+    "free": 0.0,
     "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
     "creator": float(os.getenv("PLAN_PRICE_CREATOR_USD", "24")),
     "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
@@ -221,16 +222,10 @@ ANIMATION_CREDIT_UNIT_USD = round(
 
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 TOPUP_PACK_SPECS = [
-    {"id": "ac_trial", "pack": "trial", "credits": 1, "price_usd": 0.60},
-    {"id": "ac_starter", "pack": "starter", "credits": 3, "price_usd": 1.80},
     {"id": "ac_mini", "pack": "mini", "credits": 5, "price_usd": 3.00},
-    {"id": "ac_lite", "pack": "lite", "credits": 10, "price_usd": 6.00},
     {"id": "ac_basic", "pack": "basic", "credits": 25, "price_usd": 15.00},
-    {"id": "ac_creator", "pack": "creator", "credits": 50, "price_usd": 30.00},
     {"id": "ac_growth", "pack": "growth", "credits": 100, "price_usd": 60.00},
     {"id": "ac_scale", "pack": "scale", "credits": 250, "price_usd": 150.00},
-    {"id": "ac_studio", "pack": "studio", "credits": 500, "price_usd": 300.00},
-    {"id": "ac_agency", "pack": "agency", "credits": 1000, "price_usd": 600.00},
 ]
 TOPUP_PACKS = {
     str(spec["id"]): {
@@ -241,6 +236,8 @@ TOPUP_PACKS = {
     }
     for spec in TOPUP_PACK_SPECS
 }
+PUBLIC_PLAN_IDS = ("free", "starter", "creator", "pro")
+PUBLIC_TOPUP_PACK_IDS = tuple(str(spec["id"]) for spec in TOPUP_PACK_SPECS)
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 APP_ROOT = Path(__file__).resolve().parent
