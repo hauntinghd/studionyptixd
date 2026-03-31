@@ -13884,6 +13884,8 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
         live = _longform_sessions.get(session_id)
         if not isinstance(live, dict):
             return
+        if str(live.get("status", "") or "") == "bootstrapping":
+            return
         chapters = list(live.get("chapters") or [])
         if not chapters:
             return
@@ -14867,6 +14869,7 @@ async def longform_session_status(session_id: str, request: Request = None):
         _load_longform_sessions()
         session = _longform_sessions.get(session_id)
         if isinstance(session, dict):
+            session_status = str(session.get("status", "") or "")
             chapters = list(session.get("chapters") or [])
             in_progress_idx = -1
             in_progress_status = ""
@@ -14934,7 +14937,7 @@ async def longform_session_status(session_id: str, request: Request = None):
                     session["updated_at"] = now
                     _save_longform_sessions()
                     should_resume = bool(auto_pipeline and missing_count == 0)
-            elif any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
+            elif session_status != "bootstrapping" and any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
                 should_resume = True
     if not session:
         raise HTTPException(404, "Long-form session not found")
