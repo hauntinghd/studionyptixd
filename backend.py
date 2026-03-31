@@ -1342,6 +1342,12 @@ def _longform_tone_locked_visual_description(
     if _longform_prefers_3d_documentary_visuals(template, format_preset) and "3d documentary style lock:" not in lower:
         base = (base + " " + LONGFORM_3D_DOC_VISUAL_DIRECTIVE).strip()
         lower = base.lower()
+    if not re.search(r"\b(no on-screen text|no typography|no captions|no labels|no logos|no watermarks)\b", lower):
+        base = (
+            base
+            + " No on-screen text, no typography, no captions, no labels, no logos, no watermarks, and no chapter cards inside the image itself."
+        ).strip()
+        lower = base.lower()
     if not _longform_is_horror_tone(tone):
         return base
     if "horror tone lock:" in lower:
@@ -12141,6 +12147,33 @@ def _longform_placeholder_chapter(
     }
 
 
+def _longform_fallback_visual_focus(topic: str, input_title: str) -> str:
+    raw = str(topic or input_title or "").strip()
+    if not raw:
+        return "the central mechanism, object, or environment being explained"
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", raw)
+    cleaned = re.sub(r"\btop\s+\d+\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(disturbing|shocking|crazy|insane|mind[-\s]?blowing|secrets?|facts?|truth|ultimate|complete|full)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(explained|breakdown|hidden from you|hides from you|you need to know|that no one tells you)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\byour\b", "the subject's", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -,:")
+    if not cleaned:
+        return "the central mechanism, object, or environment being explained"
+    if len(cleaned.split()) > 7 or re.search(r"\b(top|best|worst|secrets?|facts?|reasons?|ways?)\b", cleaned, flags=re.IGNORECASE):
+        return "the central mechanism, object, or environment being explained"
+    return cleaned.lower()
+
+
 def _longform_fallback_chapter(
     topic: str,
     input_title: str,
@@ -12152,21 +12185,32 @@ def _longform_fallback_chapter(
     template: str = "story",
 ) -> dict:
     scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    topic_focus = _longform_fallback_visual_focus(topic, input_title)
+    shot_cues = [
+        "wide establishing composition with one dominant focal subject",
+        "medium hero composition with clean foreground-background separation",
+        "close detail shot with one mechanism clearly visible",
+        "over-shoulder explanatory framing with readable depth",
+        "low-angle dramatic composition with one strong silhouette",
+        "center-weighted lab-style composition with floating detail elements",
+    ]
     scenes: list[dict] = []
     for i in range(scene_goal):
         beat = i + 1
+        shot_cue = shot_cues[i % len(shot_cues)]
         scenes.append({
             "scene_num": beat,
             "duration_sec": 5.0,
             "narration": (
-                f"{input_title}: chapter {chapter_index + 1}, beat {beat}. "
-                f"This section deepens the core idea of {topic} with clear progression and stakes."
+                "This beat pushes the explanation forward with one concrete reveal, "
+                "clear progression, and higher stakes."
             ),
             "visual_description": (
-                f"Cinematic documentary frame for {topic}, chapter {chapter_index + 1}, beat {beat}; "
-                "clear subject, dynamic camera motion, realistic lighting, high detail."
+                f"Premium 3D documentary explainer frame focused on {topic_focus}. "
+                f"Show one distinct visual beat with {shot_cue}, clean cinematic lighting, readable subject hierarchy, "
+                "strong depth, and no written words or interface elements."
             ),
-            "text_overlay": f"Chapter {chapter_index + 1} - Beat {beat}",
+            "text_overlay": "",
         })
     normalized = _normalize_longform_scenes_for_render(scenes)
     normalized = _scale_scene_durations_to_target(normalized, chapter_target_sec)
@@ -12864,12 +12908,14 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             if isinstance(session_live, dict):
                 session_live["status"] = "complete"
                 session_live["paused_error"] = None
+                package_tags = list(((session_live.get("metadata_pack") or {}).get("tags") or []))
                 session_live["package"] = {
                     "output_file": output_filename,
                     "chapters": chapter_markers,
                     "title_variants": list(((session_live.get("metadata_pack") or {}).get("title_variants") or [])),
                     "description_variants": list(((session_live.get("metadata_pack") or {}).get("description_variants") or [])),
                     "thumbnail_prompts": list(((session_live.get("metadata_pack") or {}).get("thumbnail_prompts") or [])),
+                    "tags": package_tags,
                 }
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()

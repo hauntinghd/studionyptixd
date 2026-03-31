@@ -91,6 +91,7 @@ type LongFormSession = {
         title_variants?: string[];
         description_variants?: string[];
         thumbnail_prompts?: string[];
+        tags?: string[];
     };
 };
 
@@ -504,13 +505,15 @@ export default function LongFormPanel() {
 
     const outputFile = String(jobStatus?.output_file || lfSession?.package?.output_file || '');
     const outputUrl = outputFile ? `${API}/api/download/${outputFile}` : '';
+    const hasPublishPackage = Boolean(outputFile);
     const review = lfSession?.review_state;
     const draftProgress = lfSession?.draft_progress;
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
-    const titleVariants = Array.isArray(lfSession?.metadata_pack?.title_variants) ? lfSession?.metadata_pack?.title_variants as string[] : [];
-    const descriptionVariants = Array.isArray(lfSession?.metadata_pack?.description_variants) ? lfSession?.metadata_pack?.description_variants as string[] : [];
-    const thumbnailPrompts = Array.isArray(lfSession?.metadata_pack?.thumbnail_prompts) ? lfSession?.metadata_pack?.thumbnail_prompts as string[] : [];
+    const titleVariants = hasPublishPackage && Array.isArray(lfSession?.package?.title_variants) ? lfSession?.package?.title_variants as string[] : [];
+    const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
+    const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
+    const publishTags = hasPublishPackage && Array.isArray(lfSession?.package?.tags) ? lfSession?.package?.tags as string[] : [];
     const resolveSceneImageUrl = useCallback((raw: string) => {
         const u = String(raw || '').trim();
         if (!u) return '';
@@ -914,7 +917,7 @@ export default function LongFormPanel() {
                                         ) : null}
                                     </div>
                                 ) : null}
-                                {(titleVariants.length > 0 || descriptionVariants.length > 0 || thumbnailPrompts.length > 0) ? (
+                                {hasPublishPackage && (titleVariants.length > 0 || descriptionVariants.length > 0 || thumbnailPrompts.length > 0 || publishTags.length > 0) ? (
                                     <div className="grid gap-3 lg:grid-cols-3">
                                         {titleVariants.length > 0 ? (
                                             <div className="rounded-lg border border-violet-400/20 bg-violet-500/5 p-3">
@@ -944,6 +947,18 @@ export default function LongFormPanel() {
                                                         <li key={`thumb-${idx}`}>{idx + 1}. {item}</li>
                                                     ))}
                                                 </ul>
+                                            </div>
+                                        ) : null}
+                                        {publishTags.length > 0 ? (
+                                            <div className="rounded-lg border border-sky-400/20 bg-sky-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-300">Tags</p>
+                                                <div className="mt-2 flex flex-wrap gap-2 text-xs text-sky-100">
+                                                    {publishTags.slice(0, 16).map((item, idx) => (
+                                                        <span key={`tag-${idx}`} className="rounded-full border border-sky-400/25 bg-sky-500/10 px-2 py-1">
+                                                            {item}
+                                                        </span>
+                                                    ))}
+                                                </div>
                                             </div>
                                         ) : null}
                                     </div>
@@ -1063,35 +1078,45 @@ export default function LongFormPanel() {
                         </div>
                     </div>
 
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5">
-                        <h3 className="font-semibold text-white mb-3">Metadata Pack</h3>
-                        <div className="grid md:grid-cols-3 gap-4 text-xs text-gray-300">
-                            <div>
-                                <p className="text-gray-500 mb-1">Title Variants</p>
-                                <ul className="space-y-1">
-                                    {(lfSession.metadata_pack?.title_variants || []).map((t, idx) => (
-                                        <li key={`${t}-${idx}`}>- {t}</li>
-                                    ))}
-                                </ul>
-                            </div>
-                            <div>
-                                <p className="text-gray-500 mb-1">Description Variants</p>
-                                <ul className="space-y-1">
-                                    {(lfSession.metadata_pack?.description_variants || []).map((d, idx) => (
-                                        <li key={`${idx}-${d.slice(0, 20)}`}>- {d}</li>
-                                    ))}
-                                </ul>
-                            </div>
-                            <div>
-                                <p className="text-gray-500 mb-1">Thumbnail Prompts</p>
-                                <ul className="space-y-1">
-                                    {(lfSession.metadata_pack?.thumbnail_prompts || []).map((p, idx) => (
-                                        <li key={`${idx}-${p.slice(0, 20)}`}>- {p}</li>
-                                    ))}
-                                </ul>
+                    {hasPublishPackage ? (
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5">
+                            <h3 className="font-semibold text-white mb-3">Publish Package</h3>
+                            <div className="grid md:grid-cols-4 gap-4 text-xs text-gray-300">
+                                <div>
+                                    <p className="text-gray-500 mb-1">Title Variants</p>
+                                    <ul className="space-y-1">
+                                        {titleVariants.map((t, idx) => (
+                                            <li key={`${t}-${idx}`}>- {t}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                                <div>
+                                    <p className="text-gray-500 mb-1">Description Variants</p>
+                                    <ul className="space-y-1">
+                                        {descriptionVariants.map((d, idx) => (
+                                            <li key={`${idx}-${d.slice(0, 20)}`}>- {d}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                                <div>
+                                    <p className="text-gray-500 mb-1">Thumbnail Angles</p>
+                                    <ul className="space-y-1">
+                                        {thumbnailPrompts.map((p, idx) => (
+                                            <li key={`${idx}-${p.slice(0, 20)}`}>- {p}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                                <div>
+                                    <p className="text-gray-500 mb-1">Tags</p>
+                                    <ul className="space-y-1">
+                                        {publishTags.map((tag, idx) => (
+                                            <li key={`${idx}-${tag}`}>- {tag}</li>
+                                        ))}
+                                    </ul>
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    ) : null}
                 </div>
             )}
                 </>
