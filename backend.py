@@ -1846,7 +1846,25 @@ def _heuristic_source_performance_analysis(
         what_worked_parts.append(f"Channel context: {channel}.")
     if public_summary:
         what_worked_parts.append(public_summary)
-    what_hurt = _clip_text(analytics_notes, 240) or "No private analytics notes were supplied, so improvement focus should stay on the hook, thumbnail clarity, and first-minute pacing."
+    operator_lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in str(analytics_notes or "").splitlines()
+        if str(line or "").strip()
+    ]
+    operator_hurt_candidates: list[str] = []
+    for line in operator_lines:
+        lowered = line.lower()
+        if lowered.startswith("weak points:") or lowered.startswith("retention findings:") or lowered.startswith("improvement moves:"):
+            operator_hurt_candidates.extend(part.strip() for part in line.split(":", 1)[1].split(";") if part.strip())
+        elif lowered.startswith("private analytics notes:"):
+            operator_hurt_candidates.append(line.split(":", 1)[1].strip())
+    cleaned_operator_notes = _strip_model_reasoning_artifacts(analytics_notes)
+    if cleaned_operator_notes and _contains_analytics_signal(cleaned_operator_notes):
+        operator_hurt_candidates.append(cleaned_operator_notes)
+    what_hurt = _clip_text(
+        next((item for item in operator_hurt_candidates if str(item or "").strip()), ""),
+        240,
+    ) or "No private analytics notes were supplied, so improvement focus should stay on the hook, thumbnail clarity, and first-minute pacing."
     hook_learnings = [
         "Keep the first beat readable in under three seconds.",
         "Use one dominant promise, not three competing ideas in the opening.",
@@ -5024,6 +5042,43 @@ def _extract_json_object_from_text(content: str, source_name: str = "model respo
     return json.loads(text[start:end])
 
 
+def _strip_model_reasoning_artifacts(content: str) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?is)```[a-zA-Z0-9_-]*\s*(.*?)\s*```", r"\1", text)
+    text = re.sub(r"(?is)<think>.*?</think>", " ", text)
+    text = re.sub(r"(?i)</?think>", " ", text)
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
+    cleaned: list[str] = []
+    for raw_sentence in sentences:
+        sentence = re.sub(r"\s+", " ", str(raw_sentence or "").strip())
+        if not sentence:
+            continue
+        if re.search(
+            r"^(okay|first|next|now|let'?s|let me|i need to|i should|the user wants|we need to|we should|"
+            r"this task|for more information check)\b",
+            sentence,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        cleaned.append(sentence)
+    return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
+def _contains_analytics_signal(text: str) -> bool:
+    compact = str(text or "").strip()
+    if not compact:
+        return False
+    return bool(re.search(
+        r"\b(views?|impressions|likes?|comments?|subscribers?|ctr|click[- ]through|average view duration|avd|"
+        r"average percentage viewed|retention|watch time|browse features|traffic sources?|title:|channel:|duration|"
+        r"tags?:|analytics|audience|reach|engagement)\b",
+        compact,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _dedupe_clip_list(values: list[str], max_items: int = 8, max_chars: int = 180) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -5090,7 +5145,7 @@ async def _fal_image_understanding_text(
     content = str((data or {}).get("text", "") or "").strip()
     if not content:
         raise ValueError("fal.ai image understanding returned no text")
-    stripped = re.sub(r"(?is)<think>.*?(?:</think>|$)", "", content).strip()
+    stripped = _strip_model_reasoning_artifacts(content)
     return stripped or content
 
 
@@ -5139,7 +5194,7 @@ def _extract_duration_metric(source: str, patterns: tuple[str, ...]) -> int:
 
 
 def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict | None = None) -> dict:
-    text = str(extracted_text or "").strip()
+    text = _strip_model_reasoning_artifacts(extracted_text)
     compact = re.sub(r"\s+", " ", text).strip()
     if not compact:
         return {
@@ -5208,8 +5263,12 @@ def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict 
         retention_findings.append("The screenshot explicitly mentions an early drop-off in the opening section.")
         improvement_moves.append("Rewrite the intro so the first line names the payoff immediately instead of warming up too slowly.")
 
-    if not summary_parts:
+    if not summary_parts and _contains_analytics_signal(compact):
         summary_parts.append(_clip_text(compact, 220))
+    elif not summary_parts:
+        weak_points.append(
+            "The uploaded analytics screenshots did not yield clean machine-readable metrics, so Catalyst should rely on channel context and manual notes instead of guessing."
+        )
 
     return {
         "analytics_summary": " ".join(_dedupe_clip_list(summary_parts, max_items=3, max_chars=220)),
@@ -13473,7 +13532,7 @@ def _longform_preview_url(filename: str) -> str:
 
 def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        candidates = ["flux_2_pro", "grok_imagine"] if FAL_AI_KEY else ["grok_imagine"]
+        candidates = ["grok_imagine"]
     else:
         candidates = ["grok_imagine"]
     deduped: list[str] = []
@@ -13498,21 +13557,24 @@ async def _longform_generate_scene_image(
 ) -> dict:
     errors: list[str] = []
     for model_id in _longform_hosted_image_model_candidates(template, format_preset):
-        try:
-            return await generate_scene_image(
-                prompt,
-                output_path,
-                resolution=resolution,
-                negative_prompt=negative_prompt,
-                template=template,
-                reference_image_url=reference_image_url,
-                reference_lock_mode=reference_lock_mode,
-                best_of_enabled=best_of_enabled,
-                salvage_enabled=salvage_enabled,
-                selected_model_id=model_id,
-            )
-        except Exception as e:
-            errors.append(f"{model_id}: {e}")
+        for attempt in range(2):
+            try:
+                return await generate_scene_image(
+                    prompt,
+                    output_path,
+                    resolution=resolution,
+                    negative_prompt=negative_prompt,
+                    template=template,
+                    reference_image_url=reference_image_url,
+                    reference_lock_mode=reference_lock_mode,
+                    best_of_enabled=best_of_enabled,
+                    salvage_enabled=salvage_enabled,
+                    selected_model_id=model_id,
+                )
+            except Exception as e:
+                errors.append(f"{model_id} attempt {attempt + 1}: {e}")
+                if attempt == 0:
+                    await asyncio.sleep(1.5)
     detail = " | ".join(errors[-2:]) if errors else "no hosted image models were available"
     raise RuntimeError(f"Long-form hosted image generation failed: {detail}")
 
