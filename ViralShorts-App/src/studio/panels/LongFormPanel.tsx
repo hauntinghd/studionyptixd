@@ -48,6 +48,7 @@ type LongFormSession = {
     session_id: string;
     template: string;
     format_preset: string;
+    auto_pipeline: boolean;
     topic: string;
     input_title: string;
     input_description: string;
@@ -73,6 +74,11 @@ type LongFormSession = {
         source_context?: string;
         strategy_notes?: string;
         marketing_doctrine?: string[];
+        analytics_evidence_summary?: string;
+        analytics_asset_count?: number;
+        manual_transcript_supplied?: boolean;
+        manual_transcript_excerpt?: string;
+        analytics_notes_effective?: string;
     };
     chapters: LongFormChapter[];
     review_state: LongFormReviewState;
@@ -92,6 +98,7 @@ type LongFormSessionSummary = {
     session_id: string;
     template: string;
     format_preset: string;
+    auto_pipeline: boolean;
     topic: string;
     input_title: string;
     source_url: string;
@@ -149,7 +156,7 @@ function chapterStatusClass(status: string): string {
 }
 
 export default function LongFormPanel() {
-    const { session } = useContext(AuthContext);
+    const { session, ownerOverride } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
     const [template, setTemplate] = useState<'story' | 'skeleton'>('story');
     const [formatPreset, setFormatPreset] = useState<LongFormPreset>('explainer');
@@ -158,6 +165,8 @@ export default function LongFormPanel() {
     const [inputDescription, setInputDescription] = useState('');
     const [sourceUrl, setSourceUrl] = useState('');
     const [analyticsNotes, setAnalyticsNotes] = useState('');
+    const [transcriptText, setTranscriptText] = useState('');
+    const [analyticsImages, setAnalyticsImages] = useState<File[]>([]);
     const [applyMarketingDoctrine, setApplyMarketingDoctrine] = useState(true);
     const [targetMinutes, setTargetMinutes] = useState(8);
     const [language, setLanguage] = useState('en');
@@ -175,6 +184,7 @@ export default function LongFormPanel() {
     const [projectsError, setProjectsError] = useState('');
     const [chapterReasons, setChapterReasons] = useState<Record<number, string>>({});
     const [fixNote, setFixNote] = useState('');
+    const [autoPipeline, setAutoPipeline] = useState(false);
     const [sessionIdInput, setSessionIdInput] = useState('');
     const [projectSessions, setProjectSessions] = useState<LongFormSessionSummary[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
@@ -204,6 +214,12 @@ export default function LongFormPanel() {
         return out;
     }, [session]);
 
+    const authOnlyHeaders = useMemo(() => {
+        const out: Record<string, string> = {};
+        if (session) out.Authorization = `Bearer ${session.access_token}`;
+        return out;
+    }, [session]);
+
     const apiCall = useCallback(async (path: string, init: RequestInit = {}) => {
         const merged: RequestInit = {
             ...init,
@@ -219,6 +235,19 @@ export default function LongFormPanel() {
         }
         return payload;
     }, [authHeaders]);
+
+    const apiCallFormData = useCallback(async (path: string, body: FormData) => {
+        const res = await fetch(`${API}${path}`, {
+            method: 'POST',
+            headers: authOnlyHeaders,
+            body,
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+        }
+        return payload;
+    }, [authOnlyHeaders]);
 
     const refreshStatus = useCallback(async (id?: string, silent = false) => {
         const targetId = String(id || lfSession?.session_id || '').trim();
@@ -312,6 +341,12 @@ export default function LongFormPanel() {
         persistSessionId(lfSession.session_id);
     }, [lfSession?.session_id, persistSessionId]);
 
+    useEffect(() => {
+        if (ownerOverride) {
+            setAutoPipeline(true);
+        }
+    }, [ownerOverride]);
+
     const createSession = useCallback(async () => {
         if (!session) return;
         setCreating(true);
@@ -323,26 +358,55 @@ export default function LongFormPanel() {
                 documentary: 'Documentary',
                 story_channel: 'Story Channel',
             };
-            const payload = await apiCall('/api/longform/session', {
-                method: 'POST',
-                body: JSON.stringify({
-                    template,
-                    topic: topic.trim(),
-                    input_title: inputTitle.trim(),
-                    input_description: inputDescription.trim()
-                        ? `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim()
-                        : '',
-                    format_preset: formatPreset,
-                    source_url: sourceUrl.trim(),
-                    analytics_notes: analyticsNotes.trim(),
-                    strategy_notes: applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '',
-                    target_minutes: targetMinutes,
-                    language,
-                    animation_enabled: animationEnabled,
-                    sfx_enabled: sfxEnabled,
-                    whisper_mode: whisperMode,
-                }),
-            });
+            const formattedDescription = inputDescription.trim()
+                ? `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim()
+                : '';
+            const useBootstrapRoute = Boolean(
+                transcriptText.trim()
+                || analyticsImages.length > 0
+                || (ownerOverride && autoPipeline)
+            );
+            const payload = useBootstrapRoute
+                ? await (() => {
+                    const formData = new FormData();
+                    formData.append('template', template);
+                    formData.append('topic', topic.trim());
+                    formData.append('input_title', inputTitle.trim());
+                    formData.append('input_description', formattedDescription);
+                    formData.append('format_preset', formatPreset);
+                    formData.append('source_url', sourceUrl.trim());
+                    formData.append('analytics_notes', analyticsNotes.trim());
+                    formData.append('strategy_notes', applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '');
+                    formData.append('transcript_text', transcriptText.trim());
+                    formData.append('auto_pipeline', ownerOverride && autoPipeline ? 'true' : 'false');
+                    formData.append('target_minutes', String(targetMinutes));
+                    formData.append('language', language);
+                    formData.append('animation_enabled', animationEnabled ? 'true' : 'false');
+                    formData.append('sfx_enabled', sfxEnabled ? 'true' : 'false');
+                    formData.append('whisper_mode', whisperMode);
+                    analyticsImages.forEach((file) => formData.append('analytics_images', file));
+                    return apiCallFormData('/api/longform/session/bootstrap', formData);
+                })()
+                : await apiCall('/api/longform/session', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        template,
+                        topic: topic.trim(),
+                        input_title: inputTitle.trim(),
+                        input_description: formattedDescription,
+                        format_preset: formatPreset,
+                        source_url: sourceUrl.trim(),
+                        analytics_notes: analyticsNotes.trim(),
+                        strategy_notes: applyMarketingDoctrine ? MARKETING_DOCTRINE_POINTS.join('\n') : '',
+                        transcript_text: transcriptText.trim(),
+                        auto_pipeline: ownerOverride && autoPipeline,
+                        target_minutes: targetMinutes,
+                        language,
+                        animation_enabled: animationEnabled,
+                        sfx_enabled: sfxEnabled,
+                        whisper_mode: whisperMode,
+                    }),
+                });
             const created = (payload as any).session as LongFormSession;
             setLfSession(created);
             setJobStatus(null);
@@ -357,11 +421,15 @@ export default function LongFormPanel() {
     }, [
         animationEnabled,
         apiCall,
+        apiCallFormData,
+        autoPipeline,
         inputDescription,
         inputTitle,
         language,
         analyticsNotes,
+        analyticsImages,
         applyMarketingDoctrine,
+        ownerOverride,
         persistSessionId,
         session,
         sourceUrl,
@@ -369,6 +437,7 @@ export default function LongFormPanel() {
         targetMinutes,
         template,
         topic,
+        transcriptText,
         formatPreset,
         whisperMode,
     ]);
@@ -458,7 +527,7 @@ export default function LongFormPanel() {
                     <p className="text-sm font-semibold">Catalyst Long Form (2 to 10 minutes)</p>
                 </div>
                 <p className="text-xs text-violet-100/80 mt-1">
-                    End-to-end faceless pipeline: topic to chapters, chapter review/approve, finalize render, then package export.
+                    End-to-end faceless pipeline: topic to chapters, chapter review/approve, finalize render, then package export. Owner autopilot can now use source URL, transcript, and analytics screenshots together.
                 </p>
             </div>
 
@@ -573,6 +642,63 @@ export default function LongFormPanel() {
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
                         />
                     </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                        Manual Transcript
+                        <textarea
+                            value={transcriptText}
+                            onChange={(e) => setTranscriptText(e.target.value)}
+                            rows={5}
+                            placeholder="Optional: paste the transcript or the most important spoken beats so Catalyst can improve the follow-up script even before YouTube API access is restored."
+                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
+                        />
+                    </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                        Analytics Screenshots
+                        <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            onChange={(e) => {
+                                const incoming = Array.from(e.target.files || []);
+                                if (incoming.length > 0) {
+                                    setAnalyticsImages((prev) => [...prev, ...incoming]);
+                                }
+                                e.currentTarget.value = '';
+                            }}
+                            className="mt-1 block w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white file:mr-3 file:rounded-md file:border-0 file:bg-violet-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white"
+                        />
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                            <span>{analyticsImages.length} screenshot{analyticsImages.length === 1 ? '' : 's'} selected</span>
+                            {analyticsImages.length > 0 ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setAnalyticsImages([])}
+                                    className="rounded-md border border-white/[0.12] px-2 py-1 text-[11px] text-white hover:bg-white/[0.06]"
+                                >
+                                    Clear
+                                </button>
+                            ) : null}
+                        </div>
+                        {analyticsImages.length > 0 ? (
+                            <p className="mt-2 text-xs text-cyan-300/80">
+                                Catalyst will inspect up to the first 24 screenshots and turn them into retention and packaging guidance for the next version.
+                            </p>
+                        ) : null}
+                        {analyticsImages.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                                {analyticsImages.slice(0, 10).map((file, idx) => (
+                                    <span key={`${file.name}-${idx}`} className="rounded-md border border-white/[0.08] bg-black/20 px-2 py-1 text-[11px] text-gray-300">
+                                        {file.name}
+                                    </span>
+                                ))}
+                                {analyticsImages.length > 10 ? (
+                                    <span className="rounded-md border border-white/[0.08] bg-black/20 px-2 py-1 text-[11px] text-gray-400">
+                                        +{analyticsImages.length - 10} more
+                                    </span>
+                                ) : null}
+                            </div>
+                        ) : null}
+                    </label>
                     <label className="text-sm text-gray-300">
                         Language
                         <select value={language} onChange={(e) => setLanguage(e.target.value)}
@@ -605,6 +731,12 @@ export default function LongFormPanel() {
                         <input type="checkbox" checked={applyMarketingDoctrine} onChange={(e) => setApplyMarketingDoctrine(e.target.checked)} />
                         Apply marketing doctrine
                     </label>
+                    {ownerOverride ? (
+                        <label className="inline-flex items-center gap-2 text-cyan-200">
+                            <input type="checkbox" checked={autoPipeline} onChange={(e) => setAutoPipeline(e.target.checked)} />
+                            Owner autopilot: auto-approve chapters and auto-render
+                        </label>
+                    ) : null}
                 </div>
                 <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Marketing Doctrine</p>
@@ -625,7 +757,7 @@ export default function LongFormPanel() {
                         disabled={creating || (!sourceUrl.trim() && (!topic.trim() || !inputTitle.trim() || !inputDescription.trim()))}
                         className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium disabled:opacity-60 transition"
                     >
-                        {creating ? 'Creating...' : sourceUrl.trim() && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
+                        {creating ? 'Creating...' : ownerOverride && autoPipeline ? 'Create + Auto Run' : sourceUrl.trim() && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
                     </button>
                     <div className="flex items-center gap-2">
                         <input
@@ -655,6 +787,9 @@ export default function LongFormPanel() {
                                 <p className="text-xs text-gray-500">
                                     Status: {STATUS_LABELS[lfSession.status] || lfSession.status}
                                 </p>
+                                {lfSession.auto_pipeline ? (
+                                    <p className="mt-1 text-xs text-cyan-300">Owner autopilot is active on this session.</p>
+                                ) : null}
                             </div>
                             <div className="text-xs text-gray-400">
                                 {review ? `${review.approved_chapters}/${review.total_chapters} chapters approved` : 'No review stats'}
@@ -741,6 +876,40 @@ export default function LongFormPanel() {
                                         </div>
                                     )}
                                 </div>
+                                {lfSession.metadata_pack?.analytics_evidence_summary ? (
+                                    <div className="rounded-lg border border-violet-400/20 bg-violet-500/5 p-3">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-300">Analytics Evidence Summary</p>
+                                        <p className="mt-2 text-sm text-gray-300">{String(lfSession.metadata_pack.analytics_evidence_summary)}</p>
+                                        <p className="mt-2 text-xs text-gray-500">
+                                            {Number(lfSession.metadata_pack.analytics_asset_count || 0)} screenshot{Number(lfSession.metadata_pack.analytics_asset_count || 0) === 1 ? '' : 's'} analyzed
+                                            {lfSession.metadata_pack.manual_transcript_supplied ? ' · manual transcript supplied' : ''}
+                                        </p>
+                                    </div>
+                                ) : null}
+                                {(Array.isArray(sourceAnalysis.retention_findings) && sourceAnalysis.retention_findings.length > 0) || (Array.isArray(sourceAnalysis.packaging_findings) && sourceAnalysis.packaging_findings.length > 0) ? (
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                        {Array.isArray(sourceAnalysis.retention_findings) && sourceAnalysis.retention_findings.length > 0 ? (
+                                            <div className="rounded-lg border border-sky-400/20 bg-sky-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-300">Retention Findings</p>
+                                                <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                    {sourceAnalysis.retention_findings.slice(0, 5).map((item: string, idx: number) => (
+                                                        <li key={`retention-${idx}`}>- {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                        {Array.isArray(sourceAnalysis.packaging_findings) && sourceAnalysis.packaging_findings.length > 0 ? (
+                                            <div className="rounded-lg border border-amber-400/20 bg-amber-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">Packaging Findings</p>
+                                                <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                    {sourceAnalysis.packaging_findings.slice(0, 5).map((item: string, idx: number) => (
+                                                        <li key={`packaging-${idx}`}>- {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                ) : null}
                             </div>
                         )}
 
@@ -934,6 +1103,9 @@ export default function LongFormPanel() {
                                                 <p className="text-xs text-gray-400">
                                                     {project.template} - {STATUS_LABELS[project.status] || project.status} - {approved}/{total} chapters approved
                                                 </p>
+                                                {project.auto_pipeline ? (
+                                                    <p className="text-xs text-cyan-300">Owner autopilot enabled</p>
+                                                ) : null}
                                                 <p className="text-xs text-gray-500">
                                                     Updated {formatTimestamp(project.updated_at)}
                                                 </p>

@@ -4072,6 +4072,53 @@ async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature
     return json.loads(content[start:end])
 
 
+async def _xai_json_completion_multimodal(
+    system_prompt: str,
+    user_prompt: str,
+    image_paths: list[str] | None = None,
+    temperature: float = 0.35,
+    timeout_sec: int = 120,
+    model: str = "grok-4",
+) -> dict:
+    content_items: list[dict] = [{"type": "text", "text": user_prompt}]
+    for image_path in list(image_paths or [])[:24]:
+        data_url = _file_to_data_image_url(str(image_path), max_bytes=18 * 1024 * 1024)
+        if not data_url:
+            continue
+        content_items.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                    "detail": "high",
+                },
+            }
+        )
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content_items},
+                ],
+                "temperature": temperature,
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON found in xAI multimodal response")
+    return json.loads(content[start:end])
+
+
 CATALYST_MARKETING_DOCTRINE = [
     "Be active in the Daily Marketing Channel.",
     "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
@@ -4375,6 +4422,50 @@ async def _derive_longform_seed_from_source(
     }
 
 
+async def _summarize_longform_operator_evidence(
+    transcript_text: str = "",
+    image_paths: list[str] | None = None,
+    source_bundle: dict | None = None,
+) -> dict:
+    transcript_text = str(transcript_text or "").strip()
+    image_paths = [str(p) for p in list(image_paths or []) if str(p).strip()]
+    if not transcript_text and not image_paths:
+        return {}
+    system_prompt = (
+        "You are a YouTube analytics strategist for NYPTID Studio. "
+        "The user is supplying transcript text and/or screenshots from YouTube analytics so Catalyst can improve the next video. "
+        "Read the screenshots carefully and summarize the practical signals. "
+        "Output strict JSON with keys: analytics_summary, strongest_signals, weak_points, retention_findings, packaging_findings, improvement_moves."
+    )
+    source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 180)
+    source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 700)
+    user_prompt = (
+        f"Source title: {source_title}\n"
+        f"Source summary: {source_summary}\n"
+        f"Manual transcript text (may be partial): {_clip_text(transcript_text, 12000)}\n"
+        "Screenshots may include retention graphs, CTR, AVD, impressions, browse/source data, and other YouTube analytics. "
+        "Turn them into concise operator guidance for the next version."
+    )
+    try:
+        return await _xai_json_completion_multimodal(
+            system_prompt,
+            user_prompt,
+            image_paths=image_paths,
+            temperature=0.2,
+            timeout_sec=120,
+            model="grok-4",
+        )
+    except Exception as e:
+        return {
+            "analytics_summary": _clip_text(f"Manual evidence supplied but multimodal summary failed: {e}", 220),
+            "strongest_signals": [],
+            "weak_points": [],
+            "retention_findings": [],
+            "packaging_findings": [],
+            "improvement_moves": [],
+        }
+
+
 def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "") -> str:
     parts: list[str] = []
     if source_bundle:
@@ -4387,12 +4478,50 @@ def _render_source_context(source_bundle: dict, source_analysis: dict, analytics
             parts.append("What worked: " + _clip_text(str(worked), 240))
         if hurt:
             parts.append("What hurt: " + _clip_text(str(hurt), 240))
+        analytics_summary = source_analysis.get("analytics_summary")
+        if analytics_summary:
+            parts.append("Analytics summary: " + _clip_text(str(analytics_summary), 260))
         moves = source_analysis.get("improvement_moves") or []
         if isinstance(moves, list) and moves:
             parts.append("Improvement moves: " + "; ".join(_clip_text(str(m), 120) for m in moves[:5] if str(m).strip()))
+        retention_findings = source_analysis.get("retention_findings") or []
+        if isinstance(retention_findings, list) and retention_findings:
+            parts.append("Retention findings: " + "; ".join(_clip_text(str(m), 120) for m in retention_findings[:4] if str(m).strip()))
+        packaging_findings = source_analysis.get("packaging_findings") or []
+        if isinstance(packaging_findings, list) and packaging_findings:
+            parts.append("Packaging findings: " + "; ".join(_clip_text(str(m), 120) for m in packaging_findings[:4] if str(m).strip()))
     if str(analytics_notes or "").strip():
         parts.append("Private analytics notes: " + _clip_text(analytics_notes, 320))
     return "\n".join(part for part in parts if part)
+
+
+def _build_longform_operator_notes(
+    analytics_notes: str = "",
+    transcript_text: str = "",
+    operator_evidence: dict | None = None,
+) -> str:
+    notes: list[str] = []
+    analytics_notes = str(analytics_notes or "").strip()
+    transcript_text = str(transcript_text or "").strip()
+    operator_evidence = dict(operator_evidence or {})
+    if analytics_notes:
+        notes.append(analytics_notes)
+    if transcript_text:
+        notes.append("Manual transcript excerpt: " + _clip_text(transcript_text, 2400))
+    analytics_summary = str(operator_evidence.get("analytics_summary", "") or "").strip()
+    if analytics_summary:
+        notes.append("Analytics screenshot summary: " + _clip_text(analytics_summary, 600))
+    for label, key in [
+        ("Strongest signals", "strongest_signals"),
+        ("Weak points", "weak_points"),
+        ("Retention findings", "retention_findings"),
+        ("Packaging findings", "packaging_findings"),
+        ("Improvement moves", "improvement_moves"),
+    ]:
+        values = [str(v).strip() for v in list(operator_evidence.get(key) or []) if str(v).strip()]
+        if values:
+            notes.append(f"{label}: " + "; ".join(_clip_text(v, 160) for v in values[:6]))
+    return "\n".join(note for note in notes if note)
 
 
 def _normalize_longform_scenes_for_render(scenes: list) -> list:
@@ -10796,6 +10925,7 @@ def _longform_public_session(session: dict) -> dict:
         "session_id": str(s.get("session_id", "") or ""),
         "template": str(s.get("template", "") or ""),
         "format_preset": str(s.get("format_preset", "explainer") or "explainer"),
+        "auto_pipeline": bool(s.get("auto_pipeline", False)),
         "topic": str(s.get("topic", "") or ""),
         "input_title": str(s.get("input_title", "") or ""),
         "input_description": str(s.get("input_description", "") or ""),
@@ -10840,6 +10970,7 @@ def _longform_session_summary(session: dict) -> dict:
         "session_id": str(s.get("session_id", "") or ""),
         "template": str(s.get("template", "") or ""),
         "format_preset": str(s.get("format_preset", "explainer") or "explainer"),
+        "auto_pipeline": bool(s.get("auto_pipeline", False)),
         "topic": str(s.get("topic", "") or ""),
         "input_title": str(s.get("input_title", "") or ""),
         "source_url": str(s.get("source_url", "") or ""),
@@ -11110,6 +11241,7 @@ def _longform_approved_chapter_count(chapters: list[dict]) -> int:
 async def _generate_longform_chapter_for_session(session_id: str, chapter_index: int) -> None:
     chapter_count = 0
     fallback_used = 0
+    should_continue = False
     try:
         async with _longform_sessions_lock:
             session = dict(_longform_sessions.get(session_id) or {})
@@ -11174,7 +11306,8 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
             chapter=chapter,
             resolution=resolution,
         )
-        chapter["status"] = "pending_review"
+        auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
+        chapter["status"] = "approved" if auto_pipeline else "pending_review"
         chapter["retry_count"] = max(prior_retry, int(chapter.get("retry_count", 0) or 0))
 
         async with _longform_sessions_lock:
@@ -11193,10 +11326,13 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
                 "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
                 "failed_chapters": int(progress.get("failed_chapters", 0) or 0) + int(fallback_used),
-                "stage": "awaiting_owner_approval",
+                "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
             }
             live["updated_at"] = time.time()
             _save_longform_sessions()
+            should_continue = bool(auto_pipeline) and not live.get("paused_error")
+        if should_continue:
+            await _queue_next_longform_chapter_if_ready(session_id)
     except Exception as e:
         log.error(f"[longform:{session_id}] chapter generation failed: {e}", exc_info=True)
         async with _longform_sessions_lock:
@@ -11223,6 +11359,7 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
 
 async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
     next_idx: int | None = None
+    should_auto_finalize = False
     async with _longform_sessions_lock:
         live = _longform_sessions.get(session_id)
         if not isinstance(live, dict):
@@ -11233,6 +11370,7 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
         if any(str((c or {}).get("status", "") or "") == "draft_generating" for c in chapters):
             return
 
+        auto_pipeline = _bool_from_any(live.get("auto_pipeline"), False)
         for i, chapter in enumerate(chapters):
             status = str((chapter or {}).get("status", "") or "")
             if status == "awaiting_previous_approval":
@@ -11250,44 +11388,55 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
                 "generated_chapters": int(generated),
                 "approved_chapters": int(approved),
                 "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-                "stage": "ready_for_finalize" if approved == len(chapters) else "awaiting_owner_approval",
+                "stage": "ready_for_finalize" if approved == len(chapters) else ("auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval"),
             }
             live["updated_at"] = time.time()
             _save_longform_sessions()
-            return
+            should_auto_finalize = (
+                bool(auto_pipeline)
+                and approved == len(chapters)
+                and len(chapters) > 0
+                and not live.get("paused_error")
+                and str(live.get("status", "") or "") != "complete"
+                and not (str(live.get("job_id", "") or "").strip() and str(live.get("status", "") or "") == "rendering")
+            )
+        else:
+            if any(str((chapters[j] or {}).get("status", "") or "") != "approved" for j in range(next_idx)):
+                live["status"] = "draft_review"
+                live["draft_progress"] = {
+                    "total_chapters": int(len(chapters)),
+                    "generated_chapters": int(generated),
+                    "approved_chapters": int(approved),
+                    "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
+                    "stage": "awaiting_owner_approval",
+                }
+                live["updated_at"] = time.time()
+                _save_longform_sessions()
+                return
 
-        if any(str((chapters[j] or {}).get("status", "") or "") != "approved" for j in range(next_idx)):
-            live["status"] = "draft_review"
+            chapter = dict(chapters[next_idx] or {})
+            chapter["status"] = "draft_generating"
+            chapter["summary"] = chapter.get("summary") or "Generating chapter draft..."
+            chapter["last_error"] = ""
+            chapter["scenes"] = []
+            chapters[next_idx] = chapter
+            live["chapters"] = chapters
+            live["status"] = "draft_generating"
             live["draft_progress"] = {
                 "total_chapters": int(len(chapters)),
                 "generated_chapters": int(generated),
                 "approved_chapters": int(approved),
                 "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-                "stage": "awaiting_owner_approval",
+                "stage": f"generating_chapter_{next_idx + 1}",
             }
             live["updated_at"] = time.time()
             _save_longform_sessions()
-            return
 
-        chapter = dict(chapters[next_idx] or {})
-        chapter["status"] = "draft_generating"
-        chapter["summary"] = chapter.get("summary") or "Generating chapter draft..."
-        chapter["last_error"] = ""
-        chapter["scenes"] = []
-        chapters[next_idx] = chapter
-        live["chapters"] = chapters
-        live["status"] = "draft_generating"
-        live["draft_progress"] = {
-            "total_chapters": int(len(chapters)),
-            "generated_chapters": int(generated),
-            "approved_chapters": int(approved),
-            "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-            "stage": f"generating_chapter_{next_idx + 1}",
-        }
-        live["updated_at"] = time.time()
-        _save_longform_sessions()
-
-    asyncio.create_task(_generate_longform_chapter_for_session(session_id, next_idx))
+    if should_auto_finalize:
+        asyncio.create_task(_auto_finalize_longform_session(session_id))
+        return
+    if next_idx is not None:
+        asyncio.create_task(_generate_longform_chapter_for_session(session_id, next_idx))
 
 
 async def _run_longform_pipeline(job_id: str, session_id: str):
@@ -11599,42 +11748,91 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 _save_longform_sessions()
 
 
-@app.post("/api/longform/session")
-async def create_longform_session(req: LongFormSessionCreateRequest, request: Request = None):
-    user = await get_current_user_from_request(request) if request else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+async def _create_longform_session_internal(
+    *,
+    user: dict,
+    template: str,
+    topic: str = "",
+    input_title: str = "",
+    input_description: str = "",
+    format_preset: str = "explainer",
+    source_url: str = "",
+    analytics_notes: str = "",
+    strategy_notes: str = "",
+    transcript_text: str = "",
+    analytics_image_paths: list[str] | None = None,
+    target_minutes: float = LONGFORM_DEFAULT_TARGET_MINUTES,
+    language: str = "en",
+    animation_enabled: bool = True,
+    sfx_enabled: bool = True,
+    whisper_mode: str = "subtle",
+    auto_pipeline_requested: bool = False,
+) -> dict:
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
     if not ELEVENLABS_API_KEY:
         raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
-    template = _normalize_longform_template(req.template)
-    format_preset = str(getattr(req, "format_preset", "explainer") or "explainer").strip().lower()
+    template = _normalize_longform_template(template)
+    format_preset = str(format_preset or "explainer").strip().lower()
     if format_preset not in {"recap", "explainer", "documentary", "story_channel"}:
         format_preset = "explainer"
-    topic = str(req.topic or "").strip()
-    input_title = str(req.input_title or "").strip()
-    input_description = str(req.input_description or "").strip()
-    source_url = _normalize_external_source_url(getattr(req, "source_url", ""))
-    if str(getattr(req, "source_url", "") or "").strip() and not source_url:
+    topic = str(topic or "").strip()
+    input_title = str(input_title or "").strip()
+    input_description = str(input_description or "").strip()
+    raw_source_url = str(source_url or "").strip()
+    source_url = _normalize_external_source_url(raw_source_url)
+    if raw_source_url and not source_url:
         raise HTTPException(400, "Source URL is invalid")
-    analytics_notes = str(getattr(req, "analytics_notes", "") or "").strip()
-    strategy_notes = str(getattr(req, "strategy_notes", "") or "").strip()
-    target_minutes = _normalize_longform_target_minutes(req.target_minutes)
-    language = _normalize_longform_language(req.language)
-    whisper_mode = _normalize_longform_whisper_mode(req.whisper_mode)
+    analytics_notes = str(analytics_notes or "").strip()
+    strategy_notes = str(strategy_notes or "").strip()
+    transcript_text = str(transcript_text or "").strip()
+    target_minutes = _normalize_longform_target_minutes(target_minutes)
+    language = _normalize_longform_language(language)
+    whisper_mode = _normalize_longform_whisper_mode(whisper_mode)
+    analytics_image_paths = [str(p).strip() for p in list(analytics_image_paths or []) if str(p).strip()]
+    auto_pipeline = bool(auto_pipeline_requested and _is_admin_user(user))
+
     source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
-    source_analysis = await _build_source_performance_analysis(
+    if source_bundle:
+        source_bundle = dict(source_bundle)
+    if transcript_text:
+        source_bundle["manual_transcript_excerpt"] = _clip_text(transcript_text, 12000)
+        if not str(source_bundle.get("transcript_excerpt", "") or "").strip():
+            source_bundle["transcript_excerpt"] = _clip_text(transcript_text, 12000)
+
+    operator_evidence = await _summarize_longform_operator_evidence(
+        transcript_text=transcript_text,
+        image_paths=analytics_image_paths,
         source_bundle=source_bundle,
+    )
+    merged_analytics_notes = _build_longform_operator_notes(
         analytics_notes=analytics_notes,
+        transcript_text=transcript_text,
+        operator_evidence=operator_evidence,
+    )
+    source_analysis = dict(await _build_source_performance_analysis(
+        source_bundle=source_bundle,
+        analytics_notes=merged_analytics_notes,
         topic=topic,
         input_title=input_title,
         input_description=input_description,
         strategy_notes=strategy_notes,
-    )
+    ) or {})
+    analytics_summary = str(operator_evidence.get("analytics_summary", "") or "").strip()
+    if analytics_summary:
+        source_analysis["analytics_summary"] = analytics_summary
+    for key in ("strongest_signals", "weak_points", "retention_findings", "packaging_findings"):
+        values = [str(v).strip() for v in list(operator_evidence.get(key) or []) if str(v).strip()]
+        if values:
+            source_analysis[key] = values[:8]
+    existing_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
+    for move in [str(v).strip() for v in list(operator_evidence.get("improvement_moves") or []) if str(v).strip()]:
+        if move and move not in existing_moves:
+            existing_moves.append(move)
+    if existing_moves:
+        source_analysis["improvement_moves"] = existing_moves[:10]
+
     if source_url and (not topic or not input_title or not input_description):
         auto_seed = await _derive_longform_seed_from_source(
             source_bundle=source_bundle,
@@ -11648,21 +11846,33 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
             input_title = str(auto_seed.get("title", "") or "").strip()
         if not input_description:
             input_description = str(auto_seed.get("description", "") or "").strip()
-        source_analysis = await _build_source_performance_analysis(
+        source_analysis = dict(await _build_source_performance_analysis(
             source_bundle=source_bundle,
-            analytics_notes=analytics_notes,
+            analytics_notes=merged_analytics_notes,
             topic=topic,
             input_title=input_title,
             input_description=input_description,
             strategy_notes=strategy_notes,
-        )
+        ) or {})
+        if analytics_summary:
+            source_analysis["analytics_summary"] = analytics_summary
+        for key in ("strongest_signals", "weak_points", "retention_findings", "packaging_findings"):
+            values = [str(v).strip() for v in list(operator_evidence.get(key) or []) if str(v).strip()]
+            if values:
+                source_analysis[key] = values[:8]
+        existing_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
+        for move in [str(v).strip() for v in list(operator_evidence.get("improvement_moves") or []) if str(v).strip()]:
+            if move and move not in existing_moves:
+                existing_moves.append(move)
+        if existing_moves:
+            source_analysis["improvement_moves"] = existing_moves[:10]
     if not topic:
         raise HTTPException(400, "Topic is required unless a source URL can be analyzed into a follow-up brief")
     if not input_title:
         raise HTTPException(400, "Video title is required unless a source URL can be analyzed into a follow-up brief")
     if not input_description:
         raise HTTPException(400, "Video description is required unless a source URL can be analyzed into a follow-up brief")
-    source_context = _render_source_context(source_bundle, source_analysis, analytics_notes)
+    source_context = _render_source_context(source_bundle, source_analysis, merged_analytics_notes)
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
     chapters = [
@@ -11725,6 +11935,11 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         "source_context": source_context,
         "strategy_notes": strategy_notes,
         "marketing_doctrine": list(CATALYST_MARKETING_DOCTRINE),
+        "analytics_evidence_summary": analytics_summary,
+        "analytics_asset_count": int(len(analytics_image_paths)),
+        "manual_transcript_supplied": bool(transcript_text),
+        "manual_transcript_excerpt": _clip_text(transcript_text, 2000),
+        "analytics_notes_effective": _clip_text(merged_analytics_notes, 2400),
     }
     session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
     now = time.time()
@@ -11733,17 +11948,20 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
         "user_id": str(user.get("id", "") or ""),
         "template": template,
         "format_preset": format_preset,
+        "auto_pipeline": auto_pipeline,
+        "owner_override": bool(_is_admin_user(user)),
         "topic": topic,
         "input_title": input_title,
         "input_description": input_description,
         "source_url": source_url,
         "analytics_notes": analytics_notes,
         "strategy_notes": strategy_notes,
+        "transcript_text": _clip_text(transcript_text, 12000),
         "target_minutes": float(target_minutes),
         "language": language,
         "resolution": "720p_landscape",
-        "animation_enabled": _bool_from_any(req.animation_enabled, True),
-        "sfx_enabled": _bool_from_any(req.sfx_enabled, True),
+        "animation_enabled": _bool_from_any(animation_enabled, True),
+        "sfx_enabled": _bool_from_any(sfx_enabled, True),
         "whisper_mode": whisper_mode,
         "chapters": chapters,
         "status": "draft_review",
@@ -11767,7 +11985,105 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
     await _queue_next_longform_chapter_if_ready(session_id)
     async with _longform_sessions_lock:
         session_live = _longform_sessions.get(session_id, session_data)
-    return {"session": _longform_public_session(session_live)}
+    return _longform_public_session(session_live)
+
+
+@app.post("/api/longform/session")
+async def create_longform_session(req: LongFormSessionCreateRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    session_public = await _create_longform_session_internal(
+        user=user,
+        template=req.template,
+        topic=req.topic,
+        input_title=req.input_title,
+        input_description=req.input_description,
+        format_preset=req.format_preset,
+        source_url=req.source_url,
+        analytics_notes=req.analytics_notes,
+        strategy_notes=req.strategy_notes,
+        transcript_text=getattr(req, "transcript_text", ""),
+        target_minutes=req.target_minutes,
+        language=req.language,
+        animation_enabled=req.animation_enabled,
+        sfx_enabled=req.sfx_enabled,
+        whisper_mode=req.whisper_mode,
+        auto_pipeline_requested=getattr(req, "auto_pipeline", False),
+    )
+    return {"session": session_public}
+
+
+@app.post("/api/longform/session/bootstrap")
+async def create_longform_session_bootstrap(
+    template: str = Form(...),
+    topic: str = Form(""),
+    input_title: str = Form(""),
+    input_description: str = Form(""),
+    format_preset: str = Form("explainer"),
+    source_url: str = Form(""),
+    analytics_notes: str = Form(""),
+    strategy_notes: str = Form(""),
+    transcript_text: str = Form(""),
+    auto_pipeline: bool = Form(False),
+    target_minutes: float = Form(8.0),
+    language: str = Form("en"),
+    animation_enabled: bool = Form(True),
+    sfx_enabled: bool = Form(True),
+    whisper_mode: str = Form("subtle"),
+    analytics_images: list[UploadFile] = File([]),
+    request: Request = None,
+):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    upload_dir = TEMP_DIR / "longform_bootstrap"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_image_paths: list[str] = []
+    try:
+        for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
+            filename = str(getattr(analytics_image, "filename", "") or "").strip()
+            if not filename:
+                continue
+            ext = Path(filename).suffix.lower()
+            if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                ext = ".png"
+            saved_path = upload_dir / f"lf_bootstrap_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
+            with open(saved_path, "wb") as fh:
+                while chunk := await analytics_image.read(1024 * 1024):
+                    fh.write(chunk)
+            if saved_path.exists() and saved_path.stat().st_size > 0:
+                saved_image_paths.append(str(saved_path))
+        session_public = await _create_longform_session_internal(
+            user=user,
+            template=template,
+            topic=topic,
+            input_title=input_title,
+            input_description=input_description,
+            format_preset=format_preset,
+            source_url=source_url,
+            analytics_notes=analytics_notes,
+            strategy_notes=strategy_notes,
+            transcript_text=transcript_text,
+            analytics_image_paths=saved_image_paths,
+            target_minutes=target_minutes,
+            language=language,
+            animation_enabled=animation_enabled,
+            sfx_enabled=sfx_enabled,
+            whisper_mode=whisper_mode,
+            auto_pipeline_requested=auto_pipeline,
+        )
+        return {"session": session_public}
+    finally:
+        for image_path in saved_image_paths:
+            try:
+                Path(image_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @app.get("/api/longform/session/{session_id}/status")
@@ -11815,6 +12131,7 @@ async def longform_session_status(session_id: str, request: Request = None):
                 # Recover from stalled preview-image generation so owner can approve/regenerate and continue.
                 elif in_progress_status == "draft_generating_images" and scene_count > 0 and stalled_sec > 180.0:
                     ready_count = 0
+                    auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
                     for idx, raw_scene in enumerate(chapter_scenes):
                         scene = dict(raw_scene or {})
                         has_img = bool(str(scene.get("image_url", "") or "").strip())
@@ -11829,7 +12146,7 @@ async def longform_session_status(session_id: str, request: Request = None):
 
                     missing_count = max(0, scene_count - ready_count)
                     chapter_live["scenes"] = chapter_scenes
-                    chapter_live["status"] = "pending_review"
+                    chapter_live["status"] = "approved" if (auto_pipeline and missing_count == 0) else "pending_review"
                     chapter_live["last_error"] = (
                         f"Recovered from stalled preview generation ({ready_count}/{scene_count} ready). "
                         f"{missing_count} previews missing; regenerate chapter if needed."
@@ -11848,6 +12165,7 @@ async def longform_session_status(session_id: str, request: Request = None):
                     session["draft_progress"] = progress
                     session["updated_at"] = now
                     _save_longform_sessions()
+                    should_resume = bool(auto_pipeline and missing_count == 0)
             elif any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
                 should_resume = True
     if not session:
@@ -12006,6 +12324,8 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         chapter=regenerated,
         resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
     )
+    auto_pipeline = _bool_from_any(session_copy.get("auto_pipeline"), False)
+    regenerated["status"] = "approved" if auto_pipeline else "pending_review"
     regenerated["retry_count"] = int(chapter.get("retry_count", 1) or 1)
     async with _longform_sessions_lock:
         session_live = _longform_sessions.get(session_id)
@@ -12021,11 +12341,17 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
             "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
             "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
             "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-            "stage": "awaiting_owner_approval",
+            "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
         }
         session_live["updated_at"] = time.time()
         _save_longform_sessions()
-        return {"session": _longform_public_session(session_live), "chapter": regenerated}
+    if auto_pipeline:
+        await _queue_next_longform_chapter_if_ready(session_id)
+    async with _longform_sessions_lock:
+        session_latest = _longform_sessions.get(session_id)
+    if not session_latest:
+        raise HTTPException(404, "Long-form session not found")
+    return {"session": _longform_public_session(session_latest), "chapter": regenerated}
 
 
 @app.post("/api/longform/session/{session_id}/resolve-error")
@@ -12073,7 +12399,8 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         chapter=regenerated,
         resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
     )
-    regenerated["status"] = "approved" if _bool_from_any(req.force_accept, False) else "pending_review"
+    auto_pipeline = _bool_from_any(session_copy.get("auto_pipeline"), False)
+    regenerated["status"] = "approved" if (_bool_from_any(req.force_accept, False) or auto_pipeline) else "pending_review"
     regenerated["retry_count"] = int(chapter.get("retry_count", 0) or 0) + 1
     force_accept = _bool_from_any(req.force_accept, False)
     async with _longform_sessions_lock:
@@ -12091,11 +12418,11 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
             "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
             "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
             "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-            "stage": "awaiting_owner_approval",
+            "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
         }
         session_live["updated_at"] = time.time()
         _save_longform_sessions()
-    if force_accept:
+    if force_accept or auto_pipeline:
         await _queue_next_longform_chapter_if_ready(session_id)
     async with _longform_sessions_lock:
         session_latest = _longform_sessions.get(session_id)
@@ -12104,19 +12431,15 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
     return {"session": _longform_public_session(session_latest), "chapter": regenerated}
 
 
-@app.post("/api/longform/session/{session_id}/finalize")
-async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, request: Request = None):
-    user = await get_current_user_from_request(request) if request else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+async def _start_longform_finalize_internal(session_id: str, acting_user: Optional[dict] = None) -> str:
+    acting_user_id = str((acting_user or {}).get("id", "") or "")
+    acting_is_admin = bool(_is_admin_user(acting_user)) if acting_user else False
     async with _longform_sessions_lock:
         _load_longform_sessions()
         session = _longform_sessions.get(session_id)
         if not session:
             raise HTTPException(404, "Long-form session not found")
-        if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
+        if acting_user_id and str(session.get("user_id", "") or "") != acting_user_id:
             raise HTTPException(403, "Forbidden")
         if session.get("paused_error"):
             raise HTTPException(400, "Session is paused due to an unresolved chapter error")
@@ -12126,6 +12449,9 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
                 400,
                 f"All chapters must be approved before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved).",
             )
+        current_job_id = str(session.get("job_id", "") or "").strip()
+        if current_job_id and str(session.get("status", "") or "") == "rendering":
+            return current_job_id
         job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
         jobs[job_id] = {
             "status": "queued",
@@ -12136,7 +12462,7 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
             "mode": "longform_finalize",
             "resolution": str(session.get("resolution", "720p_landscape") or "720p_landscape"),
             "plan": "pro",
-            "user_id": str(user.get("id", "") or ""),
+            "user_id": str(session.get("user_id", "") or acting_user_id),
             "created_at": time.time(),
             "type": "longform",
             "target_minutes": float(session.get("target_minutes", 0) or 0),
@@ -12152,7 +12478,7 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
             "credit_charged": False,
             "credit_source": "admin",
             "credit_cost": 0,
-            "billing_source": "workspace_access" if not _is_admin_user(user) else "owner_override",
+            "billing_source": "owner_override" if acting_is_admin or _bool_from_any(session.get("owner_override"), False) else "workspace_access",
             "credit_month_key": _month_key(),
             "credit_refunded": False,
         }
@@ -12175,6 +12501,34 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()
         raise HTTPException(429, str(e))
+    return job_id
+
+
+async def _auto_finalize_longform_session(session_id: str) -> None:
+    try:
+        await _start_longform_finalize_internal(session_id, None)
+    except Exception as e:
+        log.error(f"[longform:{session_id}] auto-finalize failed: {e}", exc_info=True)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict) and str(session_live.get("status", "") or "") != "complete":
+                session_live["status"] = "error"
+                session_live["paused_error"] = {
+                    "stage": "auto_finalize",
+                    "error": str(e),
+                }
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+
+
+@app.post("/api/longform/session/{session_id}/finalize")
+async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    job_id = await _start_longform_finalize_internal(session_id, user)
     return {"job_id": job_id}
 
 

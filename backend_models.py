@@ -112,6 +112,8 @@ class LongFormSessionCreateRequest(BaseModel):
     source_url: str = ""
     analytics_notes: str = ""
     strategy_notes: str = ""
+    transcript_text: str = ""
+    auto_pipeline: bool = False
     target_minutes: float = 8.0
     language: str = "en"
     animation_enabled: bool = True
