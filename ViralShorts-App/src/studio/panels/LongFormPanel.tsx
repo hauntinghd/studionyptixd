@@ -199,9 +199,9 @@ export default function LongFormPanel() {
         try {
             const sid = String(value || '').trim();
             if (sid) {
-                localStorage.setItem(lastSessionStorageKey, sid);
+                sessionStorage.setItem(lastSessionStorageKey, sid);
             } else {
-                localStorage.removeItem(lastSessionStorageKey);
+                sessionStorage.removeItem(lastSessionStorageKey);
             }
         } catch {
             // ignore storage errors
@@ -261,6 +261,8 @@ export default function LongFormPanel() {
             setSessionIdInput(targetId);
             persistSessionId(targetId);
         } catch (e: any) {
+            setLfSession(null);
+            setJobStatus(null);
             setError(e?.message || 'Failed to load long-form status');
         } finally {
             if (!silent) setRefreshing(false);
@@ -325,16 +327,11 @@ export default function LongFormPanel() {
         if (!uid) return;
         if (restoredSessionUserRef.current === uid) return;
         restoredSessionUserRef.current = uid;
-        let saved = '';
-        try {
-            saved = String(localStorage.getItem(lastSessionStorageKey) || '').trim();
-        } catch {
-            saved = '';
-        }
-        if (!saved) return;
-        setSessionIdInput(saved);
-        void refreshStatus(saved, true);
-    }, [lastSessionStorageKey, refreshStatus, session?.user?.id]);
+        setLfSession(null);
+        setJobStatus(null);
+        setSessionIdInput('');
+        setError('');
+    }, [session?.user?.id]);
 
     useEffect(() => {
         if (!lfSession?.session_id) return;
@@ -351,6 +348,10 @@ export default function LongFormPanel() {
         if (!session) return;
         setCreating(true);
         setError('');
+        setLfSession(null);
+        setJobStatus(null);
+        setSessionIdInput('');
+        persistSessionId('');
         try {
             const presetLabelMap: Record<LongFormPreset, string> = {
                 recap: 'Recap',
