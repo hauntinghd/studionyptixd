@@ -5586,6 +5586,7 @@ async def generate_scene_sfx(visual_description: str, duration_sec: float,
         "soft zoom swell with airy tail",
         "blur sweep transition texture",
     ]
+    visual_lower = str(visual_description or "").lower()
     if scene_index == 0:
         dynamic_layer = "strong opening hook impact, attention-grabbing stinger"
     elif total_scenes > 0 and scene_index == (total_scenes - 1):
@@ -5594,7 +5595,22 @@ async def generate_scene_sfx(visual_description: str, duration_sec: float,
         dynamic_layer = transition_palette[scene_index % len(transition_palette)]
     else:
         dynamic_layer = "cinematic transition accent"
-    sfx_prompt = f"{style_hint}, {dynamic_layer}, matching visual: {visual_description[:200]}"
+    detail_layers: list[str] = []
+    if any(token in visual_lower for token in ["brain", "science", "medical", "anatomy", "lab", "neural", "memory"]):
+        detail_layers.append("clean digital pulses, subtle lab hum, glossy interface sweeps")
+    if any(token in visual_lower for token in ["business", "money", "market", "finance", "factory", "machine", "strategy"]):
+        detail_layers.append("premium documentary whooshes, restrained sub hits, sharp executive trailer accents")
+    if any(token in visual_lower for token in ["war", "killed", "attack", "crime", "danger", "dark", "mystery", "terror", "secret"]):
+        detail_layers.append("tense low drone, metallic stress texture, ominous rise and impact")
+    if any(token in visual_lower for token in ["map", "city", "location", "timeline", "history", "explainer"]):
+        detail_layers.append("motion-graphic swells, crisp HUD ticks, soft transition suction")
+    if not detail_layers:
+        detail_layers.append("cinematic documentary sweeteners, subtle risers, polished transition texture")
+    detail_layers.append("no speech, no vocals, no melody-led music bed")
+    sfx_prompt = (
+        f"{style_hint}, {dynamic_layer}, {', '.join(detail_layers)}, "
+        f"matching visual: {visual_description[:240]}"
+    )
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -5606,8 +5622,8 @@ async def generate_scene_sfx(visual_description: str, duration_sec: float,
                 },
                 json={
                     "text": sfx_prompt,
-                    "duration_seconds": min(duration_sec, 22.0),
-                    "prompt_influence": 0.58,
+                    "duration_seconds": min(max(duration_sec, 0.8), 22.0),
+                    "prompt_influence": 0.72,
                 },
             )
             if resp.status_code != 200:
@@ -12646,6 +12662,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         topic = str(session_snapshot.get("topic", "") or "")
         input_title = str(session_snapshot.get("input_title", "") or topic or "Untitled")
         input_description = str(session_snapshot.get("input_description", "") or "")
+        format_preset = str(session_snapshot.get("format_preset", "explainer") or "explainer").strip().lower()
         session_tone = _longform_detect_tone(template, topic, input_title, input_description)
         chapter_tones = {
             int((chapter or {}).get("index", idx) or idx): str((chapter or {}).get("tone", session_tone) or session_tone)
@@ -12654,6 +12671,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         render_horror_audio = _longform_is_horror_tone(session_tone) or any(
             _longform_is_horror_tone(tone) for tone in chapter_tones.values()
         )
+        transition_style = "cinematic" if format_preset in {"recap", "explainer", "documentary"} else "smooth"
+        micro_escalation_mode = bool(format_preset in {"recap", "explainer", "documentary"} or animation_enabled)
 
         scenes: list[dict] = []
         chapter_markers: list[dict] = []
@@ -12873,8 +12892,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             subtitle_path=subtitle_path,
             sfx_paths=sfx_paths,
             bgm_track=bgm_track,
-            transition_style="smooth",
-            micro_escalation_mode=False,
+            transition_style=transition_style,
+            micro_escalation_mode=micro_escalation_mode,
         )
 
         for sfx in sfx_paths:
@@ -12963,6 +12982,7 @@ async def _create_longform_session_internal(
     sfx_enabled: bool = True,
     whisper_mode: str = "subtle",
     auto_pipeline_requested: bool = False,
+    session_id_override: str = "",
 ) -> dict:
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
@@ -13137,8 +13157,13 @@ async def _create_longform_session_internal(
         "manual_transcript_excerpt": _clip_text(transcript_text, 2000),
         "analytics_notes_effective": _clip_text(merged_analytics_notes, 2400),
     }
-    session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
+    session_id = str(session_id_override or "").strip() or f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
     now = time.time()
+    created_at = now
+    async with _longform_sessions_lock:
+        existing_session = dict(_longform_sessions.get(session_id) or {}) if session_id_override else {}
+    if existing_session:
+        created_at = float(existing_session.get("created_at", now) or now)
     session_data = {
         "session_id": session_id,
         "user_id": str(user.get("id", "") or ""),
@@ -13172,7 +13197,7 @@ async def _create_longform_session_internal(
             "stage": "queued_first_chapter",
         },
         "package": {},
-        "created_at": now,
+        "created_at": created_at,
         "updated_at": now,
     }
     async with _longform_sessions_lock:
@@ -13212,6 +13237,158 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
     return {"session": session_public}
 
 
+def _create_longform_bootstrap_placeholder_session(
+    *,
+    user: dict,
+    template: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    format_preset: str,
+    source_url: str,
+    analytics_notes: str,
+    strategy_notes: str,
+    transcript_text: str,
+    target_minutes: float,
+    language: str,
+    animation_enabled: bool,
+    sfx_enabled: bool,
+    whisper_mode: str,
+    auto_pipeline: bool,
+    analytics_asset_count: int,
+) -> dict:
+    chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
+    session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
+    now = time.time()
+    metadata_pack = {
+        "title_variants": [],
+        "description_variants": [],
+        "thumbnail_prompts": [],
+        "tags": [],
+        "source_video": {},
+        "source_analysis": {},
+        "source_context": "",
+        "strategy_notes": strategy_notes,
+        "marketing_doctrine": list(CATALYST_MARKETING_DOCTRINE),
+        "analytics_evidence_summary": "",
+        "analytics_asset_count": int(analytics_asset_count),
+        "manual_transcript_supplied": bool(str(transcript_text or "").strip()),
+        "manual_transcript_excerpt": _clip_text(str(transcript_text or "").strip(), 2000),
+        "analytics_notes_effective": _clip_text(str(analytics_notes or "").strip(), 2400),
+    }
+    return {
+        "session_id": session_id,
+        "user_id": str(user.get("id", "") or ""),
+        "template": _normalize_longform_template(template),
+        "format_preset": str(format_preset or "explainer").strip().lower() or "explainer",
+        "auto_pipeline": bool(auto_pipeline),
+        "owner_override": bool(_is_admin_user(user)),
+        "topic": str(topic or "").strip(),
+        "input_title": str(input_title or "").strip(),
+        "input_description": str(input_description or "").strip(),
+        "source_url": str(source_url or "").strip(),
+        "analytics_notes": str(analytics_notes or "").strip(),
+        "strategy_notes": str(strategy_notes or "").strip(),
+        "transcript_text": _clip_text(str(transcript_text or "").strip(), 12000),
+        "target_minutes": float(target_minutes),
+        "language": _normalize_longform_language(language),
+        "resolution": "720p_landscape",
+        "animation_enabled": _bool_from_any(animation_enabled, True),
+        "sfx_enabled": _bool_from_any(sfx_enabled, True),
+        "whisper_mode": _normalize_longform_whisper_mode(whisper_mode),
+        "chapters": [
+            _longform_placeholder_chapter(
+                i,
+                chapter_target_sec,
+                _longform_brand_slot(i, chapter_count),
+                status="awaiting_previous_approval",
+            )
+            for i in range(chapter_count)
+        ],
+        "status": "bootstrapping",
+        "paused_error": None,
+        "job_id": "",
+        "metadata_pack": metadata_pack,
+        "draft_progress": {
+            "total_chapters": int(chapter_count),
+            "generated_chapters": 0,
+            "approved_chapters": 0,
+            "failed_chapters": 0,
+            "preview_scene_total": 0,
+            "preview_scene_generated": 0,
+            "stage": "analyzing_source",
+        },
+        "package": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+async def _bootstrap_longform_session_background(
+    *,
+    session_id: str,
+    user: dict,
+    template: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    format_preset: str,
+    source_url: str,
+    analytics_notes: str,
+    strategy_notes: str,
+    transcript_text: str,
+    analytics_image_paths: list[str],
+    target_minutes: float,
+    language: str,
+    animation_enabled: bool,
+    sfx_enabled: bool,
+    whisper_mode: str,
+    auto_pipeline_requested: bool,
+) -> None:
+    try:
+        await _create_longform_session_internal(
+            user=user,
+            template=template,
+            topic=topic,
+            input_title=input_title,
+            input_description=input_description,
+            format_preset=format_preset,
+            source_url=source_url,
+            analytics_notes=analytics_notes,
+            strategy_notes=strategy_notes,
+            transcript_text=transcript_text,
+            analytics_image_paths=analytics_image_paths,
+            target_minutes=target_minutes,
+            language=language,
+            animation_enabled=animation_enabled,
+            sfx_enabled=sfx_enabled,
+            whisper_mode=whisper_mode,
+            auto_pipeline_requested=auto_pipeline_requested,
+            session_id_override=session_id,
+        )
+    except Exception as e:
+        log.error(f"[longform:{session_id}] bootstrap failed: {e}", exc_info=True)
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if isinstance(session_live, dict):
+                progress = dict(session_live.get("draft_progress") or {})
+                session_live["status"] = "error"
+                session_live["paused_error"] = {
+                    "stage": "bootstrap",
+                    "error": str(e),
+                }
+                progress["stage"] = "bootstrap_error"
+                session_live["draft_progress"] = progress
+                session_live["updated_at"] = time.time()
+                _save_longform_sessions()
+    finally:
+        for image_path in list(analytics_image_paths or []):
+            try:
+                Path(image_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 @app.post("/api/longform/session/bootstrap")
 async def create_longform_session_bootstrap(
     template: str = Form(...),
@@ -13237,49 +13414,80 @@ async def create_longform_session_bootstrap(
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
         raise HTTPException(403, "Long-form owner beta is restricted")
+    normalized_template = _normalize_longform_template(template)
+    normalized_format_preset = str(format_preset or "explainer").strip().lower()
+    if normalized_format_preset not in {"recap", "explainer", "documentary", "story_channel"}:
+        normalized_format_preset = "explainer"
+    normalized_language = _normalize_longform_language(language)
+    normalized_target_minutes = _normalize_longform_target_minutes(target_minutes)
+    normalized_whisper_mode = _normalize_longform_whisper_mode(whisper_mode)
+    normalized_source_url = _normalize_external_source_url(str(source_url or "").strip())
+    if str(source_url or "").strip() and not normalized_source_url:
+        raise HTTPException(400, "Source URL is invalid")
+    auto_pipeline_requested = bool(_bool_from_any(auto_pipeline, False))
     upload_dir = TEMP_DIR / "longform_bootstrap"
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved_image_paths: list[str] = []
-    try:
-        for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
-            filename = str(getattr(analytics_image, "filename", "") or "").strip()
-            if not filename:
-                continue
-            ext = Path(filename).suffix.lower()
-            if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
-                ext = ".png"
-            saved_path = upload_dir / f"lf_bootstrap_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
-            with open(saved_path, "wb") as fh:
-                while chunk := await analytics_image.read(1024 * 1024):
-                    fh.write(chunk)
-            if saved_path.exists() and saved_path.stat().st_size > 0:
-                saved_image_paths.append(str(saved_path))
-        session_public = await _create_longform_session_internal(
-            user=user,
-            template=template,
+    for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
+        filename = str(getattr(analytics_image, "filename", "") or "").strip()
+        if not filename:
+            continue
+        ext = Path(filename).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+            ext = ".png"
+        saved_path = upload_dir / f"lf_bootstrap_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
+        with open(saved_path, "wb") as fh:
+            while chunk := await analytics_image.read(1024 * 1024):
+                fh.write(chunk)
+        if saved_path.exists() and saved_path.stat().st_size > 0:
+            saved_image_paths.append(str(saved_path))
+
+    placeholder_session = _create_longform_bootstrap_placeholder_session(
+        user=user,
+        template=normalized_template,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        format_preset=normalized_format_preset,
+        source_url=normalized_source_url,
+        analytics_notes=analytics_notes,
+        strategy_notes=strategy_notes,
+        transcript_text=transcript_text,
+        target_minutes=normalized_target_minutes,
+        language=normalized_language,
+        animation_enabled=animation_enabled,
+        sfx_enabled=sfx_enabled,
+        whisper_mode=normalized_whisper_mode,
+        auto_pipeline=bool(auto_pipeline_requested and _is_admin_user(user)),
+        analytics_asset_count=len(saved_image_paths),
+    )
+    async with _longform_sessions_lock:
+        _longform_sessions[placeholder_session["session_id"]] = placeholder_session
+        _save_longform_sessions()
+
+    asyncio.create_task(
+        _bootstrap_longform_session_background(
+            session_id=str(placeholder_session["session_id"]),
+            user=dict(user),
+            template=normalized_template,
             topic=topic,
             input_title=input_title,
             input_description=input_description,
-            format_preset=format_preset,
-            source_url=source_url,
+            format_preset=normalized_format_preset,
+            source_url=normalized_source_url,
             analytics_notes=analytics_notes,
             strategy_notes=strategy_notes,
             transcript_text=transcript_text,
-            analytics_image_paths=saved_image_paths,
-            target_minutes=target_minutes,
-            language=language,
+            analytics_image_paths=list(saved_image_paths),
+            target_minutes=normalized_target_minutes,
+            language=normalized_language,
             animation_enabled=animation_enabled,
             sfx_enabled=sfx_enabled,
-            whisper_mode=whisper_mode,
-            auto_pipeline_requested=auto_pipeline,
+            whisper_mode=normalized_whisper_mode,
+            auto_pipeline_requested=auto_pipeline_requested,
         )
-        return {"session": session_public}
-    finally:
-        for image_path in saved_image_paths:
-            try:
-                Path(image_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+    )
+    return {"session": _longform_public_session(placeholder_session)}
 
 
 @app.get("/api/longform/session/{session_id}/status")

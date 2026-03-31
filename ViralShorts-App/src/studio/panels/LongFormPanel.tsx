@@ -138,6 +138,7 @@ const MARKETING_DOCTRINE_POINTS = [
 ];
 
 const STATUS_LABELS: Record<string, string> = {
+    bootstrapping: 'Analyzing Source + Building Brief',
     awaiting_previous_approval: 'Waiting For Prior Chapter Approval',
     draft_generating: 'Generating Draft Chapters',
     draft_generating_images: 'Script Locked, Generating Images',
@@ -536,6 +537,11 @@ export default function LongFormPanel() {
                 <p className="text-xs text-violet-100/80 mt-1">
                     End-to-end faceless pipeline: topic to chapters, chapter review/approve, finalize render, then package export. Owner autopilot can now use source URL, transcript, and analytics screenshots together.
                 </p>
+                {lfSession?.status === 'bootstrapping' ? (
+                    <p className="text-xs text-violet-100/70 mt-2">
+                        Source analysis is running in the background. Studio will keep polling this session and begin chapter generation automatically when the brief is ready.
+                    </p>
+                ) : null}
             </div>
 
             <div className="grid grid-cols-2 gap-2 p-1 rounded-xl border border-white/[0.06] bg-white/[0.02]">
