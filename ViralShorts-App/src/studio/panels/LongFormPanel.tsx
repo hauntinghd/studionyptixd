@@ -447,7 +447,10 @@ export default function LongFormPanel() {
                 ? `Format preset: ${PRESET_LABELS[formatPreset]}. ${inputDescription.trim()}`.trim()
                 : '';
             const useBootstrapRoute = Boolean(
-                transcriptText.trim()
+                sourceUrl.trim()
+                || youtubeChannelId.trim()
+                || analyticsNotes.trim()
+                || transcriptText.trim()
                 || analyticsImages.length > 0
                 || (ownerOverride && autoPipeline)
             );

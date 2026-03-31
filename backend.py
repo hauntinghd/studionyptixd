@@ -13419,12 +13419,18 @@ def _longform_session_analysis_complete(session: dict) -> bool:
     if not _longform_session_requires_source_analysis(s):
         return True
     metadata_pack = dict(s.get("metadata_pack") or {})
-    source_video = dict(metadata_pack.get("source_video") or {})
     source_analysis = dict(metadata_pack.get("source_analysis") or {})
-    youtube_channel = dict(metadata_pack.get("youtube_channel") or {})
-    source_context = str(metadata_pack.get("source_context", "") or "").strip()
     analytics_summary = str(metadata_pack.get("analytics_evidence_summary", "") or "").strip()
-    return bool(source_context or analytics_summary or source_analysis or source_video or youtube_channel)
+    has_primary_analysis = bool(
+        str(source_analysis.get("what_worked", "") or "").strip()
+        or str(source_analysis.get("what_hurt", "") or "").strip()
+        or [str(v).strip() for v in list(source_analysis.get("strongest_signals") or []) if str(v).strip()]
+        or [str(v).strip() for v in list(source_analysis.get("weak_points") or []) if str(v).strip()]
+        or [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
+        or [str(v).strip() for v in list(source_analysis.get("packaging_findings") or []) if str(v).strip()]
+        or [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
+    )
+    return bool(has_primary_analysis or analytics_summary)
 
 
 def _longform_chapter_scene_targets(target_minutes: float) -> tuple[int, float]:
