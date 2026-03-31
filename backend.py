@@ -1442,10 +1442,12 @@ def _title_stays_in_same_arena(candidate: str, source_title: str, topic: str = "
     source = str(source_title or "").strip()
     if not cand or not source:
         return True
+    if _title_is_too_close_to_source(cand, source):
+        return False
     cand_tokens = set(_packaging_tokens(cand, max_items=12))
     ref_tokens = set(_packaging_tokens(source + " " + str(topic or ""), max_items=16))
     if cand.lower().startswith("top ") and source.lower().startswith("top "):
-        return True
+        return len(cand_tokens & ref_tokens) >= 1
     return len(cand_tokens & ref_tokens) >= 2
 
 
@@ -1472,6 +1474,9 @@ def _same_arena_subject(source_bundle: dict, topic: str = "") -> str:
         subject = topic_text
     else:
         subject = str((source_bundle or {}).get("title", "") or "").strip()
+    focus_hint = _same_arena_focus_entity(source_bundle, topic=topic_text)
+    if focus_hint:
+        return focus_hint
     if not subject:
         tags = [str(tag).strip() for tag in list((source_bundle or {}).get("tags") or []) if str(tag).strip()]
         subject = tags[0] if tags else "the core subject"
@@ -1488,6 +1493,95 @@ def _same_arena_subject(source_bundle: dict, topic: str = "") -> str:
     return subject or "the core subject"
 
 
+def _title_signature_tokens(text: str) -> list[str]:
+    cleaned = re.sub(r"^\s*top\s+\d+\b", "", str(text or "").lower())
+    cleaned = re.sub(r"\b(full|complete|ultimate)\s+breakdown\b", "", cleaned)
+    cleaned = re.sub(r"[^a-z0-9\s']", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return _packaging_tokens(cleaned, max_items=18)
+
+
+def _title_is_too_close_to_source(candidate: str, source_title: str) -> bool:
+    cand = str(candidate or "").strip()
+    source = str(source_title or "").strip()
+    if not cand or not source:
+        return False
+    cand_lower = re.sub(r"\s+", " ", cand.lower())
+    source_lower = re.sub(r"\s+", " ", source.lower())
+    if cand_lower == source_lower:
+        return True
+    cand_tokens = _title_signature_tokens(cand)
+    source_tokens = _title_signature_tokens(source)
+    if not cand_tokens or not source_tokens:
+        return False
+    if cand_tokens == source_tokens:
+        return True
+    shared = len(set(cand_tokens) & set(source_tokens))
+    overlap = shared / max(len(set(source_tokens)), 1)
+    if cand_lower.startswith("top ") and source_lower.startswith("top ") and overlap >= 0.50:
+        return True
+    if overlap >= 0.78:
+        return True
+    if shared >= 4 and len(source_tokens) <= 5:
+        return True
+    return False
+
+
+def _clean_same_arena_phrase(text: str, max_words: int = 8) -> str:
+    phrase = str(text or "").strip()
+    if not phrase:
+        return ""
+    phrase = re.sub(r"\s*\|\s*.*$", "", phrase)
+    phrase = re.sub(r"^\s*top\s+\d+\s+", "", phrase, flags=re.IGNORECASE)
+    phrase = re.sub(r"^\s*(how|why)\s+", "", phrase, flags=re.IGNORECASE)
+    phrase = re.sub(r"^\s*what\s+(?:really\s+)?happened\s+to\s+", "", phrase, flags=re.IGNORECASE)
+    phrase = re.sub(r"^\s*(the\s+truth\s+about|inside|the\s+story\s+of)\s+", "", phrase, flags=re.IGNORECASE)
+    phrase = re.sub(
+        r"\b(disturbing|shocking|hidden|dangerous|crazy|insane|darkest|biggest|worst|ultimate|complete|full)\b",
+        "",
+        phrase,
+        flags=re.IGNORECASE,
+    )
+    phrase = re.sub(
+        r"\b(secrets?|facts?|truths?|lessons?|reasons?|ways?|mistakes?|patterns?|blind\s+spots?)\b",
+        "",
+        phrase,
+        flags=re.IGNORECASE,
+    )
+    phrase = re.sub(
+        r"\b(hides?\s+from\s+you|hide\s+from\s+you|keeps?\s+from\s+you|keep\s+from\s+you|you\s+never\s+notice|most\s+people\s+never\s+notice)\b",
+        "",
+        phrase,
+        flags=re.IGNORECASE,
+    )
+    phrase = re.sub(r"\s+", " ", phrase).strip(" -,:")
+    words = phrase.split()
+    if len(words) > max_words:
+        phrase = " ".join(words[:max_words]).strip()
+    return phrase
+
+
+def _same_arena_focus_entity(source_bundle: dict, topic: str = "") -> str:
+    topic_text = str(topic or "").strip()
+    title = topic_text or str((source_bundle or {}).get("title", "") or "").strip()
+    patterns = [
+        r"^\s*top\s+\d+\s+(?:[a-z' -]{0,24})?(?:secrets?|facts?|truths?|mistakes?|patterns?|blind\s+spots?)\s+(.+?)\s+(?:hide|hides|keep|keeps)\s+from\s+you\b",
+        r"^\s*top\s+\d+\s+(?:[a-z' -]{0,24})?(?:secrets?|facts?|truths?|mistakes?|patterns?|blind\s+spots?)\s+(.+)$",
+        r"^\s*(.+?)\s+(?:hide|hides)\s+from\s+you\b",
+        r"^\s*(?:why|how)\s+(.+?)\s+(?:quietly|actually|really|works|became|is|are|keeps?)\b",
+        r"^\s*what\s+(?:really\s+)?happened\s+to\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, title, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _clean_same_arena_phrase(match.group(1), max_words=6)
+        if candidate and 1 <= len(candidate.split()) <= 6:
+            return candidate
+    fallback = _clean_same_arena_phrase(title or topic_text, max_words=6)
+    return fallback
+
+
 def _same_arena_title_variants(
     source_bundle: dict,
     topic: str = "",
@@ -1496,15 +1590,22 @@ def _same_arena_title_variants(
 ) -> list[str]:
     source_title = str((source_bundle or {}).get("title", "") or "").strip()
     subject = _same_arena_subject(source_bundle, topic=topic)
+    focus = _same_arena_focus_entity(source_bundle, topic=topic) or subject
     pattern, top_number = _source_title_pattern(source_title)
     variants: list[str] = []
     if pattern == "top_list":
-        count = top_number or 8
-        variants.extend([
-            f"Top {count} {subject} That Quietly Control the Outcome",
-            f"Top {count} {subject} Most People Never Notice",
-            f"Top {count} {subject} That Explain What Really Happens",
-        ])
+        if re.search(r"\b(brain|mind|memory|attention)\b", focus, flags=re.IGNORECASE):
+            variants.extend([
+                "The Brain Blind Spots Quietly Rewriting Your Decisions",
+                "Why Your Brain Hides the Signals That Matter Most",
+                "The Mental Shortcuts Quietly Running More Than You Think",
+            ])
+        else:
+            variants.extend([
+                f"The Hidden System Behind {focus}",
+                f"Why {focus} Keeps Misleading People",
+                f"What {focus} Reveals About How This Really Works",
+            ])
     elif pattern == "why":
         variants.extend([
             f"Why {subject} Quietly Drives Everything",
@@ -1537,7 +1638,10 @@ def _same_arena_title_variants(
         ])
     if str(format_preset or "").strip().lower() == "documentary":
         variants.append(f"How {subject} Actually Shapes Power")
-    return _dedupe_clip_list(variants, max_items=max_items, max_chars=140)
+    filtered = [v for v in variants if not _title_is_too_close_to_source(v, source_title)]
+    if not filtered:
+        filtered = variants
+    return _dedupe_clip_list(filtered, max_items=max_items, max_chars=140)
 
 
 def _same_arena_description_variants(
@@ -1667,17 +1771,19 @@ def _merge_source_analysis(primary: dict | None, fallback: dict | None) -> dict:
 def _same_arena_follow_up_topic(source_bundle: dict, format_preset: str = "documentary") -> str:
     source_title = str((source_bundle or {}).get("title", "") or "").strip()
     subject = _same_arena_subject(source_bundle)
+    focus = _same_arena_focus_entity(source_bundle) or subject
     pattern, top_number = _source_title_pattern(source_title)
     if pattern == "top_list":
-        count = top_number or 8
-        return f"A stronger Top {count} documentary follow-up about {subject}"
+        if re.search(r"\b(brain|mind|memory|attention)\b", focus, flags=re.IGNORECASE):
+            return "The hidden blind spots inside your brain"
+        return f"The hidden system behind {focus}"
     if pattern in {"why", "how"}:
-        return f"A sharper documentary follow-up explaining {subject}"
+        return f"How {focus} quietly shapes the outcome"
     if pattern in {"what_happened", "investigation"}:
-        return f"A follow-up documentary in the same arena as {subject}"
+        return f"The hidden chain of events behind {focus}"
     if str(format_preset or "").strip().lower() == "documentary":
-        return f"A premium faceless documentary about {subject}"
-    return subject
+        return f"The hidden system behind {focus}"
+    return focus
 
 
 def _heuristic_clone_analysis(topic: str, video_description: str, transcript_hint: str = "", source_notes: str = "") -> dict:
@@ -5438,7 +5544,8 @@ async def _build_source_performance_analysis(
         "Output strict JSON with keys: what_worked, what_hurt, hook_learnings, click_drivers, "
         "dropoff_risks, improvement_moves, title_angles, thumbnail_angles, description_angles. "
         "Keep every field practical and specific for building a better follow-up video. "
-        "Stay in the same topic arena as the source title and preserve the same viewer promise category instead of drifting sideways."
+        "Stay in the same topic arena as the source title and preserve the same viewer promise category instead of drifting sideways. "
+        "Title angles must not recycle the exact source title, the same numbered-list wording, or the same opening phrase."
     )
     user_prompt = (
         f"New target topic: {topic}\n"
@@ -5481,7 +5588,8 @@ async def _derive_longform_seed_from_source(
         "A user has a source video URL but does not want to hand-write the next topic, title, or description. "
         "Create a sharper follow-up brief on the same general subject, but improve the angle, hook clarity, and packaging. "
         "Do not drift into a different topic arena. Stay in the same documentary or explainer lane as the source. "
-        "Do not copy the source title verbatim. Output strict JSON with keys: topic, title, description."
+        "Do not copy the source title verbatim. Do not reuse the same lead phrase or the same Top-N phrasing if the source used it. "
+        "The new title must feel adjacent but genuinely new. Output strict JSON with keys: topic, title, description."
     )
     user_prompt = (
         f"Format preset: {format_preset}\n"
@@ -5499,6 +5607,10 @@ async def _derive_longform_seed_from_source(
         derived_topic = ""
         derived_title = ""
         derived_description = ""
+    if "follow-up" in derived_topic.lower() or "same arena" in derived_topic.lower():
+        derived_topic = ""
+    if derived_title and _title_is_too_close_to_source(derived_title, source_title):
+        derived_title = ""
     fallback_topic = derived_topic or _same_arena_follow_up_topic(source_bundle, format_preset=format_preset) or source_title or "Follow-up video breakdown"
     if derived_title and not _title_stays_in_same_arena(derived_title, source_title, fallback_topic):
         derived_title = ""
@@ -12607,11 +12719,8 @@ def _longform_fallback_chapter(
     normalized = _longform_enforce_tone_on_scenes(normalized, tone=tone, template=template)
     out = {
         "index": int(chapter_index),
-        "title": f"Chapter {chapter_index + 1} - {topic[:64].strip() or 'Main Segment'}",
-        "summary": (
-            f"Fallback draft for chapter {chapter_index + 1} of {chapter_count}. "
-            "Review and regenerate if needed."
-        ),
+        "title": f"Chapter {chapter_index + 1}",
+        "summary": "Auto-built chapter draft ready for review.",
         "tone": str(tone or "neutral"),
         "target_sec": round(float(len(normalized) * 5.0), 2),
         "scenes": normalized,
@@ -12633,6 +12742,52 @@ def _longform_preview_filename(session_id: str, chapter_index: int, scene_index:
 
 def _longform_preview_url(filename: str) -> str:
     return f"/api/longform/preview/{filename}"
+
+
+def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
+    if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        candidates = ["flux_2_pro", "grok_imagine"] if FAL_AI_KEY else ["grok_imagine"]
+    else:
+        candidates = ["grok_imagine"]
+    deduped: list[str] = []
+    for candidate in candidates:
+        normalized = _normalize_creative_image_model_id(candidate, template=template)
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped or ["grok_imagine"]
+
+
+async def _longform_generate_scene_image(
+    prompt: str,
+    output_path: str,
+    resolution: str,
+    negative_prompt: str,
+    template: str,
+    format_preset: str = "",
+    reference_image_url: str = "",
+    reference_lock_mode: str = "strict",
+    best_of_enabled: bool = False,
+    salvage_enabled: bool = False,
+) -> dict:
+    errors: list[str] = []
+    for model_id in _longform_hosted_image_model_candidates(template, format_preset):
+        try:
+            return await generate_scene_image(
+                prompt,
+                output_path,
+                resolution=resolution,
+                negative_prompt=negative_prompt,
+                template=template,
+                reference_image_url=reference_image_url,
+                reference_lock_mode=reference_lock_mode,
+                best_of_enabled=best_of_enabled,
+                salvage_enabled=salvage_enabled,
+                selected_model_id=model_id,
+            )
+        except Exception as e:
+            errors.append(f"{model_id}: {e}")
+    detail = " | ".join(errors[-2:]) if errors else "no hosted image models were available"
+    raise RuntimeError(f"Long-form hosted image generation failed: {detail}")
 
 
 async def _longform_attach_scene_previews(
@@ -12744,12 +12899,13 @@ async def _longform_attach_scene_previews(
         filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
         output_path = str(LONGFORM_PREVIEW_DIR / filename)
         try:
-            img_result = await generate_scene_image(
+            img_result = await _longform_generate_scene_image(
                 prompt,
                 output_path,
                 resolution=preview_resolution,
                 negative_prompt=neg_prompt,
                 template=template,
+                format_preset=format_preset,
                 reference_image_url=reference_image_url,
                 reference_lock_mode="inspired",
                 best_of_enabled=False,
@@ -13143,12 +13299,13 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             image_error = ""
             for attempt in range(1, LONGFORM_MAX_SCENE_RETRIES + 1):
                 try:
-                    img_result = await generate_scene_image(
+                    img_result = await _longform_generate_scene_image(
                         full_prompt,
                         img_path,
                         resolution=resolution,
                         negative_prompt=neg_prompt,
                         template=template,
+                        format_preset=str(session.get("format_preset", "") or ""),
                         reference_image_url=reference_image_url,
                         reference_lock_mode="strict",
                         best_of_enabled=False,
@@ -13475,16 +13632,32 @@ async def _create_longform_session_internal(
         for i in range(chapter_count)
     ]
 
+    source_title = str(source_bundle.get("title", "") or "").strip()
     title_variants = []
     for t in [
-        _longform_title_variant(input_title, topic),
-        f"{input_title} | Full Breakdown",
-        f"{topic} - Complete Breakdown",
         *list(source_analysis.get("title_angles") or []),
+        *_same_arena_title_variants(
+            source_bundle or {"title": input_title or topic},
+            topic=topic or input_title,
+            format_preset=format_preset,
+            max_items=5,
+        ),
+        _longform_title_variant(input_title, topic),
     ]:
         tt = str(t or "").strip()
-        if tt and tt not in title_variants:
+        if not tt:
+            continue
+        if source_title and _title_is_too_close_to_source(tt, source_title):
+            continue
+        if tt not in title_variants:
             title_variants.append(tt)
+    if not title_variants:
+        title_variants = _same_arena_title_variants(
+            source_bundle or {"title": topic or input_title},
+            topic=topic or input_title,
+            format_preset=format_preset,
+            max_items=3,
+        )
 
     description_variants = []
     for d in [
@@ -16798,7 +16971,7 @@ async def run_clone_pipeline(
                 transcript_hint = await transcribe_audio_with_grok(audio_path) or transcript_hint
                 Path(audio_path).unlink(missing_ok=True)
         if not effective_topic:
-            effective_topic = "A sharper follow-up in the same arena as the source video"
+            effective_topic = _same_arena_follow_up_topic(source_bundle or {"title": ""}, format_preset="documentary") or "A sharper documentary topic"
         jobs[job_id]["topic"] = effective_topic
 
         analysis = await analyze_viral_video(effective_topic, video_context, transcript_hint, analytics_notes)
