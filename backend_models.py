@@ -101,6 +101,7 @@ class ThumbnailGenerateRequest(BaseModel):
     style_reference_id: str = ""
     sketch_image_id: str = ""
     screenshot_description: str = ""
+    style_preset: str = ""
 
 
 class LongFormSessionCreateRequest(BaseModel):

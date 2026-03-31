@@ -16,10 +16,29 @@ interface TrainingStatus {
     last_train: number;
 }
 
+const THUMBNAIL_STYLE_PRESETS = [
+    {
+        id: 'red_machine',
+        title: 'Red Machine',
+        desc: 'Black void, red 3D focal object, white label blocks.',
+    },
+    {
+        id: 'runner_void',
+        title: 'Runner Void',
+        desc: 'Isolated red hero, floating icon, minimal high-contrast stage.',
+    },
+    {
+        id: 'map_strike',
+        title: 'Map Strike',
+        desc: 'Gray map base, bold red territory/object highlight, tactical inset.',
+    },
+] as const;
+
 export default function ThumbnailPanel() {
     const { session } = useContext(AuthContext);
     const [subTab, setSubTab] = useState<'generate' | 'library'>('generate');
     const [mode, setMode] = useState<'describe' | 'style_transfer' | 'screenshot_analysis'>('describe');
+    const [stylePreset, setStylePreset] = useState<string>('red_machine');
     const [description, setDescription] = useState('');
     const [styleDesc, setStyleDesc] = useState('');
     const [selectedStyleRef, setSelectedStyleRef] = useState<string>('');
@@ -192,6 +211,7 @@ export default function ThumbnailPanel() {
 
         try {
             const body: any = { mode, description };
+            body.style_preset = stylePreset;
             if (mode === 'style_transfer') {
                 body.style_reference_id = selectedStyleRef;
                 body.screenshot_description = styleDesc;
@@ -377,6 +397,27 @@ export default function ThumbnailPanel() {
                                 <div className="text-[10px] text-gray-500 mt-0.5">{m.desc}</div>
                             </button>
                         ))}
+                    </div>
+
+                    <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Quick Style Presets</p>
+                        <div className="grid md:grid-cols-3 gap-3">
+                            {THUMBNAIL_STYLE_PRESETS.map((preset) => (
+                                <button
+                                    key={preset.id}
+                                    type="button"
+                                    onClick={() => setStylePreset(preset.id)}
+                                    className={`rounded-xl border p-4 text-left transition-all ${
+                                        stylePreset === preset.id
+                                            ? 'border-violet-500 bg-violet-500/10'
+                                            : 'border-white/[0.06] bg-black/20 hover:border-white/20'
+                                    }`}
+                                >
+                                    <div className="text-sm font-semibold text-white">{preset.title}</div>
+                                    <div className="mt-1 text-xs text-gray-400">{preset.desc}</div>
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
                     {mode === 'describe' && (

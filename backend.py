@@ -13,11 +13,12 @@ import logging
 import io
 import calendar
 import zipfile
+import html as html_lib
 import httpx
 import jwt
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse, unquote
+from urllib.parse import quote, urlparse, unquote, parse_qs
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -202,10 +203,11 @@ except Exception:
     paramiko = None
 
 try:
-    from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageStat
+    from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageStat
 except Exception:
     Image = None
     ImageChops = None
+    ImageDraw = None
     ImageEnhance = None
     ImageFilter = None
     ImageStat = None
@@ -1060,17 +1062,45 @@ LONGFORM_HORROR_VISUAL_DIRECTIVE = (
     "Horror tone lock: psychological dread, ominous atmosphere, eerie shadows, moody low-key lighting, drifting fog/mist, "
     "and unsettling cinematic realism. Keep it grounded and tense. No gore, no comedy, no bright cheerful styling."
 )
+LONGFORM_3D_DOC_VISUAL_DIRECTIVE = (
+    "3D documentary style lock: premium stylized 3D explainer/documentary render, not live-action photography. "
+    "Use designed environments, polished CGI materials, clean focal hierarchy, motion-design readability, engineered composition, "
+    "and camera setups that feel like a premium YouTube business/documentary video. Avoid gritty street-photo realism, random warehouses, "
+    "candid live-action film stills, or generic moody humans unless the beat absolutely requires a person."
+)
 
 
 def _longform_is_horror_tone(tone: str) -> bool:
     return str(tone or "").strip().lower() == "horror"
 
 
-def _longform_tone_locked_visual_description(visual_description: str, tone: str, template: str) -> str:
+def _longform_prefers_3d_documentary_visuals(template: str, format_preset: str = "") -> bool:
+    if str(template or "").strip().lower() != "story":
+        return False
+    return str(format_preset or "").strip().lower() in {"explainer", "documentary", "recap"}
+
+
+def _longform_default_art_style(template: str, format_preset: str = "") -> str:
+    if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        return "documentary_3d"
+    if str(template or "").strip().lower() == "story" and str(format_preset or "").strip().lower() == "story_channel":
+        return "unreal_cinematic"
+    return "auto"
+
+
+def _longform_tone_locked_visual_description(
+    visual_description: str,
+    tone: str,
+    template: str,
+    format_preset: str = "",
+) -> str:
     base = str(visual_description or "").strip()
+    lower = base.lower()
+    if _longform_prefers_3d_documentary_visuals(template, format_preset) and "3d documentary style lock:" not in lower:
+        base = (base + " " + LONGFORM_3D_DOC_VISUAL_DIRECTIVE).strip()
+        lower = base.lower()
     if not _longform_is_horror_tone(tone):
         return base
-    lower = base.lower()
     if "horror tone lock:" in lower:
         return base
     # Keep skeleton identity strict while forcing horror-compatible environment and grade.
@@ -1083,7 +1113,12 @@ def _longform_tone_locked_visual_description(visual_description: str, tone: str,
     return (base + " " + LONGFORM_HORROR_VISUAL_DIRECTIVE + skeleton_horror_hint).strip()
 
 
-def _longform_enforce_tone_on_scenes(scenes: list[dict], tone: str, template: str) -> list[dict]:
+def _longform_enforce_tone_on_scenes(
+    scenes: list[dict],
+    tone: str,
+    template: str,
+    format_preset: str = "",
+) -> list[dict]:
     out: list[dict] = []
     for raw_scene in list(scenes or []):
         scene = dict(raw_scene or {})
@@ -1091,6 +1126,7 @@ def _longform_enforce_tone_on_scenes(scenes: list[dict], tone: str, template: st
             str(scene.get("visual_description", "") or ""),
             tone=tone,
             template=template,
+            format_preset=format_preset,
         )
         out.append(scene)
     return out
@@ -4119,6 +4155,248 @@ async def _xai_json_completion_multimodal(
     return json.loads(content[start:end])
 
 
+FAL_IMAGE_UNDERSTAND_URL = "https://fal.run/fal-ai/bagel/understand"
+
+
+def _extract_json_object_from_text(content: str, source_name: str = "model response") -> dict:
+    text = str(content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError(f"No JSON found in {source_name}")
+    return json.loads(text[start:end])
+
+
+def _dedupe_clip_list(values: list[str], max_items: int = 8, max_chars: int = 180) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in list(values or []):
+        value = _clip_text(str(raw or "").strip(), max_chars)
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+async def _fal_image_understanding_json(
+    prompt: str,
+    image_path: str,
+    timeout_sec: int = 120,
+) -> dict:
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    image_url = await _upload_image_to_fal(image_path)
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "image_url": image_url,
+        "prompt": str(prompt or "").strip(),
+    }
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        resp = await client.post(FAL_IMAGE_UNDERSTAND_URL, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError("fal.ai image understanding failed (" + str(resp.status_code) + "): " + resp.text[:300])
+        data = resp.json()
+    content = str((data or {}).get("text", "") or "").strip()
+    if not content:
+        raise ValueError("fal.ai image understanding returned no text")
+    return _extract_json_object_from_text(content, "fal.ai image understanding response")
+
+
+async def _fal_image_understanding_text(
+    prompt: str,
+    image_path: str,
+    timeout_sec: int = 120,
+) -> str:
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    image_url = await _upload_image_to_fal(image_path)
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "image_url": image_url,
+        "prompt": str(prompt or "").strip(),
+    }
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        resp = await client.post(FAL_IMAGE_UNDERSTAND_URL, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError("fal.ai image understanding failed (" + str(resp.status_code) + "): " + resp.text[:300])
+        data = resp.json()
+    content = str((data or {}).get("text", "") or "").strip()
+    if not content:
+        raise ValueError("fal.ai image understanding returned no text")
+    stripped = re.sub(r"(?is)<think>.*?(?:</think>|$)", "", content).strip()
+    return stripped or content
+
+
+def _duration_text_to_seconds(value: str) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    parts = [p for p in text.split(":") if p.strip()]
+    if not parts:
+        return 0
+    try:
+        nums = [int(float(part)) for part in parts]
+    except Exception:
+        return 0
+    if len(nums) == 3:
+        return (nums[0] * 3600) + (nums[1] * 60) + nums[2]
+    if len(nums) == 2:
+        return (nums[0] * 60) + nums[1]
+    return nums[0]
+
+
+def _extract_numeric_metric(source: str, patterns: tuple[str, ...]) -> float | None:
+    text = str(source or "")
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw = str(match.group(1) or "").replace(",", "").strip()
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return None
+
+
+def _extract_duration_metric(source: str, patterns: tuple[str, ...]) -> int:
+    text = str(source or "")
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        seconds = _duration_text_to_seconds(str(match.group(1) or ""))
+        if seconds > 0:
+            return seconds
+    return 0
+
+
+def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict | None = None) -> dict:
+    text = str(extracted_text or "").strip()
+    compact = re.sub(r"\s+", " ", text).strip()
+    if not compact:
+        return {
+            "analytics_summary": "",
+            "strongest_signals": [],
+            "weak_points": [],
+            "retention_findings": [],
+            "packaging_findings": [],
+            "improvement_moves": [],
+        }
+
+    strongest_signals: list[str] = []
+    weak_points: list[str] = []
+    retention_findings: list[str] = []
+    packaging_findings: list[str] = []
+    improvement_moves: list[str] = []
+    summary_parts: list[str] = []
+
+    ctr = _extract_numeric_metric(compact, (
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:impressions\s+)?click[- ]through rate",
+        r"(?:impressions\s+)?click[- ]through rate[^0-9]*(\d+(?:\.\d+)?)\s*%",
+        r"\bctr[^0-9]*(\d+(?:\.\d+)?)\s*%",
+    ))
+    avg_viewed_pct = _extract_numeric_metric(compact, (
+        r"(\d+(?:\.\d+)?)\s*%\s*viewed",
+        r"average percentage viewed[^0-9]*(\d+(?:\.\d+)?)\s*%",
+    ))
+    impressions = _extract_numeric_metric(compact, (
+        r"(\d[\d,\.]*)\s+impressions\b",
+    ))
+    views = _extract_numeric_metric(compact, (
+        r"(\d[\d,\.]*)\s+views\b",
+    ))
+    avg_view_duration_sec = _extract_duration_metric(compact, (
+        r"average view duration[^0-9]*([0-9:]{3,8})",
+        r"\bavd[^0-9]*([0-9:]{3,8})",
+    ))
+    visible_early_drop = re.search(r"\b(first\s+\d{1,3}\s+seconds?|drop(?:s|off)?\s+off\s+in\s+the\s+first\s+\d{1,3}\s+seconds?|dropped\s+off\s+in\s+the\s+first\s+\d{1,3}\s+seconds?)\b", compact, flags=re.IGNORECASE)
+    browse_features = bool(re.search(r"\bbrowse features\b", compact, flags=re.IGNORECASE))
+
+    if views:
+        summary_parts.append(f"Visible analytics mention roughly {int(views):,} views.")
+    if impressions:
+        summary_parts.append(f"Visible analytics mention roughly {int(impressions):,} impressions.")
+    if ctr is not None:
+        packaging_findings.append(f"Visible CTR is about {ctr:.1f}%.")
+        if ctr >= 4.0:
+            strongest_signals.append(f"CTR around {ctr:.1f}% suggests the topic/title/thumbnail package is at least getting initial clicks.")
+        elif ctr < 3.0:
+            weak_points.append(f"CTR around {ctr:.1f}% is soft, so the thumbnail/title package needs a stronger curiosity gap.")
+            improvement_moves.append("Rebuild the title/thumbnail around one dominant promise, one focal visual, and clearer stakes.")
+    if avg_viewed_pct is not None:
+        retention_findings.append(f"Average percentage viewed is around {avg_viewed_pct:.1f}%.")
+        if avg_viewed_pct < 35.0:
+            weak_points.append(f"Average percentage viewed near {avg_viewed_pct:.1f}% points to retention as the main bottleneck.")
+            improvement_moves.append("Compress the opening and front-load the payoff so the viewer gets the core promise within the first 20 to 30 seconds.")
+    if avg_view_duration_sec > 0:
+        retention_findings.append(f"Average view duration is about {avg_view_duration_sec // 60}:{avg_view_duration_sec % 60:02d}.")
+        video_duration_sec = int(float((source_bundle or {}).get("duration_sec", 0) or 0))
+        if video_duration_sec > 0 and avg_view_duration_sec < max(45, int(video_duration_sec * 0.35)):
+            weak_points.append("View duration is noticeably below the video length, so the structure needs faster progression and more payoff density.")
+    if browse_features:
+        strongest_signals.append("Browse Features appears in the analytics, which means the package earned home-surface distribution.")
+        packaging_findings.append("The source reached Browse Features, so topic selection and packaging were strong enough to win distribution.")
+    if visible_early_drop:
+        retention_findings.append("The screenshot explicitly mentions an early drop-off in the opening section.")
+        improvement_moves.append("Rewrite the intro so the first line names the payoff immediately instead of warming up too slowly.")
+
+    if not summary_parts:
+        summary_parts.append(_clip_text(compact, 220))
+
+    return {
+        "analytics_summary": " ".join(_dedupe_clip_list(summary_parts, max_items=3, max_chars=220)),
+        "strongest_signals": _dedupe_clip_list(strongest_signals, max_items=6),
+        "weak_points": _dedupe_clip_list(weak_points, max_items=6),
+        "retention_findings": _dedupe_clip_list(retention_findings, max_items=6),
+        "packaging_findings": _dedupe_clip_list(packaging_findings, max_items=6),
+        "improvement_moves": _dedupe_clip_list(improvement_moves, max_items=8),
+    }
+
+
+def _build_analytics_contact_sheet(image_paths: list[str], output_path: str, cols: int = 2, cell_size: tuple[int, int] = (1280, 720)) -> str:
+    valid_paths = [Path(p) for p in list(image_paths or []) if Path(str(p)).exists()]
+    if not valid_paths:
+        return ""
+    cols = max(1, min(2, int(cols or 2)))
+    rows = max(1, int((len(valid_paths) + cols - 1) / cols))
+    margin = 24
+    label_h = 54
+    cell_w, cell_h = cell_size
+    sheet = Image.new("RGB", ((cell_w * cols) + (margin * (cols + 1)), (cell_h * rows) + (margin * (rows + 1)) + (label_h * rows)), color=(12, 14, 18))
+    draw = ImageDraw.Draw(sheet)
+    for idx, path in enumerate(valid_paths):
+        row = idx // cols
+        col = idx % cols
+        x = margin + col * (cell_w + margin)
+        y = margin + row * (cell_h + label_h + margin)
+        with Image.open(path) as img:
+            frame = img.convert("RGB")
+            frame.thumbnail((cell_w, cell_h))
+            offset_x = x + max(0, int((cell_w - frame.width) / 2))
+            offset_y = y + max(0, int((cell_h - frame.height) / 2))
+            sheet.paste(frame, (offset_x, offset_y))
+        draw.rectangle((x, y + cell_h + 6, x + cell_w, y + cell_h + label_h - 6), outline=(52, 61, 77), width=1)
+        draw.text((x + 18, y + cell_h + 16), f"Analytics screenshot {idx + 1}", fill=(230, 234, 240))
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
 CATALYST_MARKETING_DOCTRINE = [
     "Be active in the Daily Marketing Channel.",
     "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
@@ -4221,6 +4499,197 @@ def _pick_subtitle_candidate(info: dict, language: str = "en") -> tuple[str, str
     return "", ""
 
 
+def _source_url_video_id(source_url: str) -> str:
+    raw = str(source_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    host = str(parsed.netloc or "").lower()
+    if "youtu.be" in host:
+        return str(parsed.path or "").strip("/").split("/", 1)[0]
+    if "youtube.com" in host or "youtube-nocookie.com" in host:
+        query = parse_qs(str(parsed.query or ""))
+        values = query.get("v") or []
+        if values:
+            return str(values[0] or "").strip()
+        parts = [part for part in str(parsed.path or "").split("/") if part]
+        if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            return str(parts[1]).strip()
+    return ""
+
+
+def _extract_html_meta_content(html_text: str, key: str, attr_names: tuple[str, ...] = ("property", "name", "itemprop")) -> str:
+    source = str(html_text or "")
+    if not source:
+        return ""
+    key_l = key.lower()
+    for attr in attr_names:
+        pattern = (
+            r"<meta[^>]+"
+            + attr
+            + r"\s*=\s*['\"]"
+            + re.escape(key_l)
+            + r"['\"][^>]+content\s*=\s*['\"]([^'\"]+)['\"][^>]*>"
+        )
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if match:
+            return html_lib.unescape(match.group(1)).strip()
+        pattern_rev = (
+            r"<meta[^>]+content\s*=\s*['\"]([^'\"]+)['\"][^>]+"
+            + attr
+            + r"\s*=\s*['\"]"
+            + re.escape(key_l)
+            + r"['\"][^>]*>"
+        )
+        match = re.search(pattern_rev, source, flags=re.IGNORECASE)
+        if match:
+            return html_lib.unescape(match.group(1)).strip()
+    return ""
+
+
+def _extract_html_link_href(html_text: str, rel_value: str) -> str:
+    source = str(html_text or "")
+    if not source:
+        return ""
+    pattern = (
+        r"<link[^>]+rel\s*=\s*['\"]"
+        + re.escape(str(rel_value or "").strip().lower())
+        + r"['\"][^>]+href\s*=\s*['\"]([^'\"]+)['\"][^>]*>"
+    )
+    match = re.search(pattern, source, flags=re.IGNORECASE)
+    if match:
+        return html_lib.unescape(match.group(1)).strip()
+    pattern_rev = (
+        r"<link[^>]+href\s*=\s*['\"]([^'\"]+)['\"][^>]+rel\s*=\s*['\"]"
+        + re.escape(str(rel_value or "").strip().lower())
+        + r"['\"][^>]*>"
+    )
+    match = re.search(pattern_rev, source, flags=re.IGNORECASE)
+    if match:
+        return html_lib.unescape(match.group(1)).strip()
+    return ""
+
+
+def _parse_youtube_duration_from_html(html_text: str) -> int:
+    source = str(html_text or "")
+    if not source:
+        return 0
+    for pattern in (
+        r'"lengthSeconds":"(\d+)"',
+        r'"approxDurationMs":"(\d+)"',
+        r'"duration":"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?"',
+    ):
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        if len(match.groups()) == 1:
+            value = int(match.group(1) or 0)
+            if "DurationMs" in pattern:
+                return int(round(value / 1000.0))
+            return value
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        seconds = int(match.group(3) or 0)
+        total = (hours * 3600) + (minutes * 60) + seconds
+        if total > 0:
+            return total
+    return 0
+
+
+async def _fetch_public_video_bundle_fallback(source_url: str) -> dict:
+    normalized_url = _normalize_external_source_url(source_url)
+    if not normalized_url:
+        return {}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        )
+    }
+    html_text = ""
+    final_url = normalized_url
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+        try:
+            resp = await client.get(normalized_url)
+            if resp.status_code == 200:
+                html_text = resp.text
+                final_url = str(resp.url)
+        except Exception:
+            html_text = ""
+        title = ""
+        author_name = ""
+        thumbnail_url = ""
+        try:
+            oembed_url = "https://www.youtube.com/oembed?url=" + quote(final_url or normalized_url, safe="") + "&format=json"
+            oembed_resp = await client.get(oembed_url)
+            if oembed_resp.status_code == 200:
+                oembed = oembed_resp.json()
+                title = str(oembed.get("title", "") or "").strip()
+                author_name = str(oembed.get("author_name", "") or "").strip()
+                thumbnail_url = str(oembed.get("thumbnail_url", "") or "").strip()
+        except Exception:
+            pass
+
+    if not html_text and not title and not author_name and not thumbnail_url:
+        return {}
+
+    scraped_title = (
+        _extract_html_meta_content(html_text, "og:title")
+        or _extract_html_meta_content(html_text, "twitter:title")
+        or title
+    )
+    scraped_description = (
+        _extract_html_meta_content(html_text, "og:description")
+        or _extract_html_meta_content(html_text, "description")
+    )
+    scraped_thumbnail = (
+        _extract_html_meta_content(html_text, "og:image")
+        or _extract_html_meta_content(html_text, "twitter:image")
+        or thumbnail_url
+    )
+    scraped_channel = (
+        _extract_html_meta_content(html_text, "author")
+        or _extract_html_meta_content(html_text, "og:video:tag")
+        or author_name
+    )
+    canonical_url = _extract_html_link_href(html_text, "canonical") or final_url or normalized_url
+    duration_sec = _parse_youtube_duration_from_html(html_text)
+    tags: list[str] = []
+    view_count = 0
+    like_count = 0
+    comment_count = 0
+    public_summary_parts = [
+        f"Title: {scraped_title}" if scraped_title else "",
+        f"Channel: {scraped_channel}" if scraped_channel else "",
+        f"Duration: {duration_sec}s" if duration_sec > 0 else "",
+        f"Description: {_clip_text(scraped_description, 240)}" if scraped_description else "",
+        "Metadata extracted from public page fallback because direct video metadata was blocked." if html_text else "",
+    ]
+    return {
+        "source_url": normalized_url,
+        "canonical_url": canonical_url,
+        "platform": "youtube_public_fallback" if _source_url_video_id(normalized_url) else "web_public_fallback",
+        "title": scraped_title,
+        "description": scraped_description,
+        "channel": scraped_channel,
+        "channel_url": "",
+        "thumbnail_url": scraped_thumbnail,
+        "duration_sec": duration_sec,
+        "view_count": view_count,
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "upload_date": "",
+        "tags": tags,
+        "categories": [],
+        "chapters": [],
+        "transcript_excerpt": "",
+        "public_summary": " | ".join(part for part in public_summary_parts if part),
+    }
+
+
 def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed")
@@ -4240,6 +4709,11 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
     if not normalized_url:
         return {}
     if yt_dlp is None:
+        fallback_bundle = await _fetch_public_video_bundle_fallback(normalized_url)
+        if fallback_bundle:
+            fallback_bundle = dict(fallback_bundle)
+            fallback_bundle["error"] = "yt_dlp_unavailable"
+            return fallback_bundle
         return {
             "source_url": normalized_url,
             "error": "yt_dlp_unavailable",
@@ -4248,6 +4722,17 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
     try:
         info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, normalized_url)
     except Exception as e:
+        fallback_bundle = await _fetch_public_video_bundle_fallback(normalized_url)
+        if fallback_bundle:
+            fallback_bundle = dict(fallback_bundle)
+            fallback_bundle["error"] = str(e)
+            fallback_bundle["public_summary"] = " | ".join(
+                part for part in [
+                    str(fallback_bundle.get("public_summary", "") or "").strip(),
+                    "yt-dlp fallback used after metadata extraction was blocked.",
+                ] if part
+            )
+            return fallback_bundle
         return {
             "source_url": normalized_url,
             "error": str(e),
@@ -4446,24 +4931,82 @@ async def _summarize_longform_operator_evidence(
         "Screenshots may include retention graphs, CTR, AVD, impressions, browse/source data, and other YouTube analytics. "
         "Turn them into concise operator guidance for the next version."
     )
+    per_image_results: list[dict] = []
+    per_image_errors: list[str] = []
+    temp_contact_sheets: list[Path] = []
+    image_prompt = (
+        "Read this YouTube analytics screenshot carefully. Extract only what is visibly present. "
+        "Return plain text with short lines. Include visible metrics, percentages, labels, graph captions, traffic sources, "
+        "retention timestamps, CTR, average view duration, views, impressions, average percentage viewed, and any warnings or notes. "
+        "Do not infer hidden analytics, do not invent numbers, and do not speculate beyond what is visible.\n\n"
+        + user_prompt
+    )
+    analysis_paths: list[str] = []
+    raw_paths = image_paths[:24]
+    if len(raw_paths) > 4:
+        for batch_index, start in enumerate(range(0, len(raw_paths), 4)):
+            batch = raw_paths[start:start + 4]
+            sheet_path = TEMP_DIR / "longform_bootstrap" / f"analytics_sheet_{int(time.time() * 1000)}_{batch_index}.png"
+            try:
+                built = _build_analytics_contact_sheet(batch, str(sheet_path))
+                if built:
+                    temp_contact_sheets.append(Path(built))
+                    analysis_paths.append(str(built))
+            except Exception:
+                analysis_paths.extend(batch)
+    else:
+        analysis_paths = raw_paths
+
     try:
-        return await _xai_json_completion_multimodal(
-            system_prompt,
-            user_prompt,
-            image_paths=image_paths,
-            temperature=0.2,
-            timeout_sec=120,
-            model="grok-4",
-        )
-    except Exception as e:
-        return {
-            "analytics_summary": _clip_text(f"Manual evidence supplied but multimodal summary failed: {e}", 220),
-            "strongest_signals": [],
-            "weak_points": [],
-            "retention_findings": [],
-            "packaging_findings": [],
-            "improvement_moves": [],
-        }
+        for image_path in analysis_paths:
+            try:
+                raw_text = await _fal_image_understanding_text(image_prompt, image_path, timeout_sec=120)
+                result = _summarize_longform_analytics_text(raw_text, source_bundle=source_bundle)
+                per_image_results.append(result)
+            except Exception as e:
+                per_image_errors.append(str(e))
+    finally:
+        for temp_path in temp_contact_sheets:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    summary_parts: list[str] = []
+    strongest_signals: list[str] = []
+    weak_points: list[str] = []
+    retention_findings: list[str] = []
+    packaging_findings: list[str] = []
+    improvement_moves: list[str] = []
+
+    for result in per_image_results:
+        summary = _clip_text(str(result.get("analytics_summary", "") or "").strip(), 220)
+        if summary:
+            summary_parts.append(summary)
+        strongest_signals.extend(str(v).strip() for v in list(result.get("strongest_signals") or []) if str(v).strip())
+        weak_points.extend(str(v).strip() for v in list(result.get("weak_points") or []) if str(v).strip())
+        retention_findings.extend(str(v).strip() for v in list(result.get("retention_findings") or []) if str(v).strip())
+        packaging_findings.extend(str(v).strip() for v in list(result.get("packaging_findings") or []) if str(v).strip())
+        improvement_moves.extend(str(v).strip() for v in list(result.get("improvement_moves") or []) if str(v).strip())
+
+    if transcript_text:
+        summary_parts.append("Manual transcript supplied to preserve the source explanation beats while rewriting the next version.")
+        improvement_moves.append("Use the transcript for factual continuity, but rewrite the first 20 to 30 seconds for a faster promise and payoff.")
+        retention_findings.append("Manual transcript is available, so the next draft can keep the strongest information while tightening the opening rhythm.")
+
+    if per_image_errors and not per_image_results:
+        summary_parts.append("fal.ai screenshot analysis failed on the supplied analytics images.")
+        improvement_moves.append(_clip_text(per_image_errors[0], 220))
+
+    analytics_summary = " ".join(_dedupe_clip_list(summary_parts, max_items=4, max_chars=240))
+    return {
+        "analytics_summary": analytics_summary,
+        "strongest_signals": _dedupe_clip_list(strongest_signals, max_items=8),
+        "weak_points": _dedupe_clip_list(weak_points, max_items=8),
+        "retention_findings": _dedupe_clip_list(retention_findings, max_items=8),
+        "packaging_findings": _dedupe_clip_list(packaging_findings, max_items=8),
+        "improvement_moves": _dedupe_clip_list(improvement_moves, max_items=10),
+    }
 
 
 def _render_source_context(source_bundle: dict, source_analysis: dict, analytics_notes: str = "") -> str:
@@ -4641,6 +5184,13 @@ async def _generate_longform_chapter(
         "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
         "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler."
     )
+    if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        system_prompt += (
+            " Visual default for this format: premium stylized 3D documentary/business-explainer imagery. "
+            "Every visual_description should bias toward designed 3D sets, clean object-centric storytelling, readable motion-design composition, "
+            "polished CGI materials, bold focal hierarchy, and premium YouTube documentary energy. "
+            "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that."
+        )
     if template == "skeleton":
         system_prompt += (
             " Skeleton identity is hard-locked: same skull geometry, same eye size/spacing, same bone finish, "
@@ -4686,13 +5236,19 @@ async def _generate_longform_chapter(
     raw_scenes = chapter_data.get("scenes", [])
     scenes = _normalize_longform_scenes_for_render(raw_scenes)
     scenes = _scale_scene_durations_to_target(scenes, chapter_target_sec)
-    scenes = _longform_enforce_tone_on_scenes(scenes, tone=tone, template=template)
+    scenes = _longform_enforce_tone_on_scenes(
+        scenes,
+        tone=tone,
+        template=template,
+        format_preset=format_preset,
+    )
     chapter_total_sec = round(float(len(scenes) * 5.0), 2)
     out = {
         "index": int(chapter_index),
         "title": str(chapter_data.get("chapter_title", f"Chapter {chapter_index + 1}") or f"Chapter {chapter_index + 1}"),
         "summary": str(chapter_data.get("chapter_summary", "") or ""),
         "tone": str(tone),
+        "format_preset": format_preset,
         "target_sec": chapter_total_sec,
         "scenes": scenes,
         "status": "pending_review",
@@ -11075,7 +11631,13 @@ def _longform_preview_url(filename: str) -> str:
     return f"/api/longform/preview/{filename}"
 
 
-async def _longform_attach_scene_previews(session_id: str, template: str, chapter: dict, resolution: str = "720p_landscape") -> dict:
+async def _longform_attach_scene_previews(
+    session_id: str,
+    template: str,
+    chapter: dict,
+    resolution: str = "720p_landscape",
+    format_preset: str = "",
+) -> dict:
     out = dict(chapter or {})
     chapter_index = int(out.get("index", 0) or 0)
     scenes = _normalize_longform_scenes_for_render(list(out.get("scenes") or []))
@@ -11086,6 +11648,12 @@ async def _longform_attach_scene_previews(session_id: str, template: str, chapte
         return out
 
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+    if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        neg_prompt = (
+            neg_prompt
+            + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
+            + "photographic actor portrait, handheld live-action frame"
+        )
     skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
     # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
     reference_image_url = ""
@@ -11117,6 +11685,7 @@ async def _longform_attach_scene_previews(session_id: str, template: str, chapte
             str(scene.get("visual_description", "") or ""),
             tone=chapter_tone,
             template=template,
+            format_preset=format_preset,
         )
         scene["image_url"] = ""
         scene["image_status"] = "pending_script_lock"
@@ -11155,6 +11724,7 @@ async def _longform_attach_scene_previews(session_id: str, template: str, chapte
             str(scene.get("visual_description", "") or ""),
             tone=chapter_tone,
             template=template,
+            format_preset=format_preset,
         )
         scene["visual_description"] = visual_desc
 
@@ -11165,7 +11735,7 @@ async def _longform_attach_scene_previews(session_id: str, template: str, chapte
             skeleton_anchor=skeleton_anchor,
             reference_dna={},
             reference_lock_mode="strict",
-            art_style="auto",
+            art_style=_longform_default_art_style(template, format_preset),
         )
         filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
         output_path = str(LONGFORM_PREVIEW_DIR / filename)
@@ -11305,6 +11875,7 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
             template=template,
             chapter=chapter,
             resolution=resolution,
+            format_preset=str(session.get("format_preset", "") or ""),
         )
         auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
         chapter["status"] = "approved" if auto_pipeline else "pending_review"
@@ -11516,6 +12087,12 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         jobs[job_id]["total_scenes"] = len(scenes)
         jobs[job_id]["generation_mode"] = "video" if animation_enabled else "image"
         neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
+        if _longform_prefers_3d_documentary_visuals(template, str(session.get("format_preset", "") or "")):
+            neg_prompt = (
+                neg_prompt
+                + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
+                + "photographic actor portrait, handheld live-action frame"
+            )
         if render_horror_audio:
             neg_prompt = (
                 neg_prompt
@@ -11525,6 +12102,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         scene_prompts: list[str] = []
         skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
         reference_image_url = _normalize_reference_with_default(template, "")
+        longform_art_style = _longform_default_art_style(template, str(session.get("format_preset", "") or ""))
         total_steps = len(scenes) * (2 if animation_enabled else 1)
         gen_ts = str(int(time.time() * 1000))
 
@@ -11538,6 +12116,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 str(scene.get("visual_description", "") or ""),
                 tone=chapter_tone,
                 template=template,
+                format_preset=str(session.get("format_preset", "") or ""),
             )
             scene["visual_description"] = locked_visual
             full_prompt = _build_scene_prompt_with_reference(
@@ -11547,7 +12126,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 skeleton_anchor=skeleton_anchor,
                 reference_dna={},
                 reference_lock_mode="strict",
-                art_style="auto",
+                art_style=longform_art_style,
             )
             scene_prompts.append(locked_visual)
 
@@ -11654,6 +12233,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                     str(scene.get("visual_description", "") or ""),
                     tone=chapter_tone,
                     template=template,
+                    format_preset=str(session.get("format_preset", "") or ""),
                 ) + whisper_hint
                 dur = float(scene.get("duration_sec", 6) or 6)
                 sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
@@ -12323,6 +12903,7 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         template=str(session_copy.get("template", "story") or "story"),
         chapter=regenerated,
         resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
+        format_preset=str(session_copy.get("format_preset", "") or ""),
     )
     auto_pipeline = _bool_from_any(session_copy.get("auto_pipeline"), False)
     regenerated["status"] = "approved" if auto_pipeline else "pending_review"
@@ -12398,6 +12979,7 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         template=str(session_copy.get("template", "story") or "story"),
         chapter=regenerated,
         resolution=str(session_copy.get("resolution", "720p_landscape") or "720p_landscape"),
+        format_preset=str(session_copy.get("format_preset", "") or ""),
     )
     auto_pipeline = _bool_from_any(session_copy.get("auto_pipeline"), False)
     regenerated["status"] = "approved" if (_bool_from_any(req.force_accept, False) or auto_pipeline) else "pending_review"
@@ -17143,7 +17725,24 @@ Output MUST be valid JSON:
 }"""
 
 
+THUMBNAIL_STYLE_PRESET_HINTS = {
+    "red_machine": (
+        "Style preset: black void or ultra-clean dark stage, one dominant red 3D subject/object, hard contrast, minimal composition, "
+        "white block-label typography, glossy stylized 3D materials, and immediate thumbnail readability."
+    ),
+    "runner_void": (
+        "Style preset: isolated hero on black background, strong red subject treatment, floating symbolic object, clean negative space, "
+        "bright red/white typography blocks, crisp 3D lighting, and dramatic minimalism."
+    ),
+    "map_strike": (
+        "Style preset: grayscale map or city-plan base with aggressive red highlighted territory/object, tactical infographic framing, "
+        "clean high-contrast overlays, circular portrait inset if relevant, and bold documentary-news thumbnail clarity."
+    ),
+}
+
+
 async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
+    style_preset_hint = THUMBNAIL_STYLE_PRESET_HINTS.get(str(req.style_preset or "").strip().lower(), "")
     if req.mode == "style_transfer":
         system_prompt = THUMBNAIL_STYLE_TRANSFER_PROMPT
         user_msg = f"STYLE REFERENCE: {req.description}\n\nNEW THUMBNAIL CONTENT: {req.screenshot_description or req.description}"
@@ -17153,6 +17752,8 @@ async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
     else:
         system_prompt = THUMBNAIL_ANALYSIS_PROMPT
         user_msg = f"Create a viral YouTube thumbnail for: {req.description}"
+    if style_preset_hint:
+        user_msg += f"\n\nPREFERRED STYLE DIRECTION: {style_preset_hint}"
 
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(

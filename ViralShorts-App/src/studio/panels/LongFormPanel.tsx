@@ -507,6 +507,9 @@ export default function LongFormPanel() {
     const draftProgress = lfSession?.draft_progress;
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
+    const titleVariants = Array.isArray(lfSession?.metadata_pack?.title_variants) ? lfSession?.metadata_pack?.title_variants as string[] : [];
+    const descriptionVariants = Array.isArray(lfSession?.metadata_pack?.description_variants) ? lfSession?.metadata_pack?.description_variants as string[] : [];
+    const thumbnailPrompts = Array.isArray(lfSession?.metadata_pack?.thumbnail_prompts) ? lfSession?.metadata_pack?.thumbnail_prompts as string[] : [];
     const resolveSceneImageUrl = useCallback((raw: string) => {
         const u = String(raw || '').trim();
         if (!u) return '';
@@ -904,6 +907,40 @@ export default function LongFormPanel() {
                                                 <ul className="mt-2 space-y-1 text-sm text-gray-300">
                                                     {sourceAnalysis.packaging_findings.slice(0, 5).map((item: string, idx: number) => (
                                                         <li key={`packaging-${idx}`}>- {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                                {(titleVariants.length > 0 || descriptionVariants.length > 0 || thumbnailPrompts.length > 0) ? (
+                                    <div className="grid gap-3 lg:grid-cols-3">
+                                        {titleVariants.length > 0 ? (
+                                            <div className="rounded-lg border border-violet-400/20 bg-violet-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-300">Title Variants</p>
+                                                <ul className="mt-2 space-y-2 text-sm text-gray-300">
+                                                    {titleVariants.slice(0, 3).map((item, idx) => (
+                                                        <li key={`title-${idx}`}>{idx + 1}. {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                        {descriptionVariants.length > 0 ? (
+                                            <div className="rounded-lg border border-emerald-400/20 bg-emerald-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">Description Variants</p>
+                                                <ul className="mt-2 space-y-2 text-sm text-gray-300">
+                                                    {descriptionVariants.slice(0, 3).map((item, idx) => (
+                                                        <li key={`description-${idx}`}>{idx + 1}. {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                        {thumbnailPrompts.length > 0 ? (
+                                            <div className="rounded-lg border border-amber-400/20 bg-amber-500/5 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">Thumbnail Angles</p>
+                                                <ul className="mt-2 space-y-2 text-sm text-gray-300">
+                                                    {thumbnailPrompts.slice(0, 3).map((item, idx) => (
+                                                        <li key={`thumb-${idx}`}>{idx + 1}. {item}</li>
                                                     ))}
                                                 </ul>
                                             </div>
