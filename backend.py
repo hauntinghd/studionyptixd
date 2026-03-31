@@ -1309,8 +1309,9 @@ LONGFORM_3D_DOC_VISUAL_DIRECTIVE = (
     "3D documentary style lock: premium stylized 3D explainer/documentary render, not live-action photography. "
     "Use designed environments, polished CGI materials, clean focal hierarchy, motion-design readability, engineered composition, "
     "and camera setups that feel like a premium YouTube business/documentary video. Bias toward symbolic hero objects, stylized human interaction, "
-    "tabletop map or system views, macro mechanism cutaways, before-versus-after contrast, and minimal black/white stages with controlled red accents where useful. "
-    "Avoid gritty street-photo realism, random warehouses, candid live-action film stills, cluttered lab repetition, or generic moody humans unless the beat absolutely requires a person."
+    "tabletop map or system views, macro mechanism cutaways, before-versus-after contrast, miniature-world systems, crisp infographic storytelling, and minimal black/white stages with controlled red accents where useful. "
+    "This should feel like elite faceless YouTube documentary 3D: more designed, more intentional, more motion-graphics-aware, and more obviously CG. "
+    "Avoid gritty street-photo realism, random warehouses, candid live-action film stills, cluttered lab repetition, medical-textbook rendering, or generic moody humans unless the beat absolutely requires a person."
 )
 
 
@@ -1399,6 +1400,19 @@ def _longform_title_variant(input_title: str, topic: str) -> str:
     if clean_title:
         return clean_title
     return (clean_topic[:120] or "Long-Form Video").strip()
+
+
+def _longform_subject_lock(topic: str, input_title: str, input_description: str = "") -> str:
+    subject = _longform_fallback_visual_focus(topic, input_title)
+    if not subject or subject == "the central mechanism, object, or environment being explained":
+        return (
+            "Primary subject lock: keep the exact named subject or system from the topic/title visible. "
+            "Do not substitute a different object, organ, country, person, or symbol."
+        )
+    return (
+        f"Primary subject lock: keep {subject} as the focal subject throughout this chapter whenever the beat refers to it. "
+        f"Do not replace {subject} with a different organ, object, machine, person, or symbol."
+    )
 
 
 PACKAGING_STOP_WORDS = {
@@ -4655,29 +4669,45 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
 
 
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "grok-3-mini-fast",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": temperature,
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-    start = content.find("{")
-    end = content.rfind("}") + 1
-    if start == -1 or end <= 0:
-        raise ValueError("No JSON found in xAI response")
-    return json.loads(content[start:end])
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
+                resp = await client.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {XAI_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "grok-3-mini-fast",
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": max(0.2, float(temperature) - (attempt * 0.08)),
+                    },
+                )
+                if resp.status_code in {429, 500, 502, 503, 504}:
+                    raise httpx.HTTPStatusError(
+                        f"Retryable xAI status {resp.status_code}",
+                        request=resp.request,
+                        response=resp,
+                    )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end <= 0:
+                raise ValueError("No JSON found in xAI response")
+            return json.loads(content[start:end])
+        except Exception as exc:
+            last_error = exc
+            if attempt >= 2:
+                break
+            wait_seconds = (attempt + 1) * 2
+            await asyncio.sleep(wait_seconds)
+    raise last_error if last_error is not None else RuntimeError("xAI JSON completion failed")
 
 
 async def _xai_json_completion_multimodal(
@@ -5758,6 +5788,7 @@ async def _generate_longform_chapter(
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
     scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    subject_lock = _longform_subject_lock(topic, input_title, input_description)
     system_prompt = (
         "You are writing one chapter of a long-form YouTube video package for NYPTID Studio. "
         "Output strict JSON with keys: chapter_title, chapter_summary, scenes, chapter_description. "
@@ -5766,6 +5797,7 @@ async def _generate_longform_chapter(
         "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
         "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler."
     )
+    system_prompt += " " + subject_lock
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
         system_prompt += (
             " Visual default for this format: premium stylized 3D documentary/business-explainer imagery. "
@@ -12565,7 +12597,8 @@ def _longform_fallback_chapter(
             "visual_description": (
                 f"Premium 3D documentary explainer frame focused on {topic_focus}. "
                 f"Use {visual_mode}, clean cinematic lighting, readable subject hierarchy, strong depth, "
-                "and one unmistakable visual change from the previous beat. No written words, no interface overlays, no chapter cards."
+                "and one unmistakable visual change from the previous beat. Keep the named subject exact; do not substitute a different organ, device, or symbol. "
+                "Make it feel unmistakably designed in 3D, not photographic. No written words, no interface overlays, no chapter cards."
             ),
             "text_overlay": "",
         })
@@ -12623,7 +12656,7 @@ async def _longform_attach_scene_previews(
         neg_prompt = (
             neg_prompt
             + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
-            + "photographic actor portrait, handheld live-action frame"
+            + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution"
         )
     skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
     # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
@@ -12838,7 +12871,7 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 tone=chapter_tone,
                 template=template,
             )
-            chapter["last_error"] = f"AI draft failed once ({type(e).__name__}); fallback draft generated."
+            chapter["last_error"] = ""
             log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used: {e}")
 
         chapter = await _longform_attach_scene_previews(
@@ -12867,7 +12900,7 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 "total_chapters": int(len(chapters_live)),
                 "generated_chapters": int(_longform_generated_chapter_count(chapters_live)),
                 "approved_chapters": int(_longform_approved_chapter_count(chapters_live)),
-                "failed_chapters": int(progress.get("failed_chapters", 0) or 0) + int(fallback_used),
+                "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
                 "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
             }
             live["updated_at"] = time.time()

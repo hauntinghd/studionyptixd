@@ -1052,7 +1052,7 @@ export default function LongFormPanel() {
                                             })}
                                         </div>
                                     ) : null}
-                                    {chapter.last_error ? (
+                                    {chapter.last_error && !String(chapter.last_error).toLowerCase().includes('fallback draft generated') ? (
                                         <p className="text-xs text-red-300">Last error: {chapter.last_error}</p>
                                     ) : null}
                                     <div className="grid md:grid-cols-[1fr_auto] gap-2">
