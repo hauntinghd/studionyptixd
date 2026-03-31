@@ -904,6 +904,249 @@ def _estimate_job_cost_usd(job_state: dict) -> float:
     return round(total_scenes * per_scene, 3)
 
 
+DEFAULT_CREATIVE_IMAGE_MODEL_ID = "studio_default"
+DEFAULT_CREATIVE_VIDEO_MODEL_ID = "kling21_standard"
+
+CREATIVE_IMAGE_MODEL_PROFILES = [
+    {
+        "id": "studio_default",
+        "label": "Studio Default",
+        "provider": "nyptid_hybrid",
+        "tier": "basic",
+        "summary": "Best continuity for NYPTID templates. Uses Studio's tuned hybrid lane automatically.",
+        "speed": "Balanced",
+        "credit_cost_per_image": 0,
+        "estimated_unit_usd": 0.02,
+        "billing_unit": "image",
+        "fal_endpoint_id": "",
+        "enabled": True,
+        "supports_reference_conditioning": True,
+    },
+    {
+        "id": "grok_imagine",
+        "label": "Grok Imagine",
+        "provider": "fal",
+        "tier": "basic",
+        "summary": "Fast default image lane through fal.ai.",
+        "speed": "Fast",
+        "credit_cost_per_image": 0,
+        "estimated_unit_usd": 0.02,
+        "billing_unit": "image",
+        "fal_endpoint_id": "xai/grok-imagine-image",
+        "enabled": bool(FAL_AI_KEY or XAI_API_KEY),
+        "supports_reference_conditioning": True,
+    },
+    {
+        "id": "imagen4_fast",
+        "label": "Imagen 4 Fast",
+        "provider": "fal",
+        "tier": "basic",
+        "summary": "Google's faster image model. Good for quick scene passes.",
+        "speed": "Very Fast",
+        "credit_cost_per_image": 0,
+        "estimated_unit_usd": 0.02,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/imagen4/preview/fast",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "imagen4_ultra",
+        "label": "Imagen 4 Ultra",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Google's highest-quality text-to-image lane.",
+        "speed": "Medium",
+        "credit_cost_per_image": 4,
+        "estimated_unit_usd": 0.06,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/imagen4/preview/ultra",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "recraft_v4",
+        "label": "Recraft V4",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Design-first image generation with cleaner composition and ad-style polish.",
+        "speed": "Medium",
+        "credit_cost_per_image": 4,
+        "estimated_unit_usd": 0.04,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/recraft/v4/text-to-image",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "seedream45",
+        "label": "Seedream 4.5",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "High-end prompt adherence with polished commercial image quality.",
+        "speed": "Medium",
+        "credit_cost_per_image": 4,
+        "estimated_unit_usd": 0.04,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "flux_2_pro",
+        "label": "FLUX 2 Pro",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "High-fidelity prompt rendering with strong cinematic framing.",
+        "speed": "Medium",
+        "credit_cost_per_image": 4,
+        "estimated_unit_usd": 0.03,
+        "billing_unit": "processed_megapixels",
+        "fal_endpoint_id": "fal-ai/flux-2-pro",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "nano_banana_pro",
+        "label": "Nano Banana Pro",
+        "provider": "fal",
+        "tier": "elite",
+        "summary": "Premium reasoning-based image generation with strong text and product composition.",
+        "speed": "Medium",
+        "credit_cost_per_image": 5,
+        "estimated_unit_usd": 0.15,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/nano-banana-pro",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
+        "id": "recraft_v4_pro",
+        "label": "Recraft V4 Pro",
+        "provider": "fal",
+        "tier": "elite",
+        "summary": "Designer-grade image generation for top-end ad and thumbnail style work.",
+        "speed": "Slow",
+        "credit_cost_per_image": 5,
+        "estimated_unit_usd": 0.25,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/recraft/v4/pro/text-to-image",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+]
+CREATIVE_IMAGE_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_IMAGE_MODEL_PROFILES}
+
+CREATIVE_VIDEO_MODEL_PROFILES = [
+    {
+        "id": "kling21_standard",
+        "label": "Kling 2.1 Standard",
+        "provider": "fal",
+        "tier": "basic",
+        "summary": "Default animation lane for Studio renders.",
+        "speed": "Balanced",
+        "credit_multiplier": 1,
+        "estimated_unit_usd": 0.056,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/kling-video/v2.1/standard/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "kling21_pro",
+        "label": "Kling 2.1 Pro",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Sharper motion and stronger camera handling than the standard lane.",
+        "speed": "Balanced",
+        "credit_multiplier": 4,
+        "estimated_unit_usd": 0.098,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/kling-video/v2.1/pro/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "veo3_fast",
+        "label": "Veo 3 Fast",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Premium cinematic motion with heavier wallet burn.",
+        "speed": "Slow",
+        "credit_multiplier": 4,
+        "estimated_unit_usd": 0.10,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/veo3/fast/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "kling21_master",
+        "label": "Kling 2.1 Master",
+        "provider": "fal",
+        "tier": "elite",
+        "summary": "Highest-cost Kling lane for top-end shot quality.",
+        "speed": "Slow",
+        "credit_multiplier": 5,
+        "estimated_unit_usd": 0.28,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/kling-video/v2.1/master/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+]
+CREATIVE_VIDEO_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_VIDEO_MODEL_PROFILES}
+
+
+def _creative_model_catalog_copy(entries: list[dict]) -> list[dict]:
+    return [dict(entry) for entry in entries]
+
+
+def _normalize_creative_image_model_id(value: str | None, template: str = "") -> str:
+    requested = str(value or "").strip().lower()
+    if requested in CREATIVE_IMAGE_MODEL_MAP and bool(CREATIVE_IMAGE_MODEL_MAP[requested].get("enabled", False)):
+        return requested
+    for candidate in (
+        DEFAULT_CREATIVE_IMAGE_MODEL_ID,
+        "grok_imagine",
+        "imagen4_fast",
+    ):
+        profile = CREATIVE_IMAGE_MODEL_MAP.get(candidate)
+        if profile and bool(profile.get("enabled", False)):
+            return candidate
+    return DEFAULT_CREATIVE_IMAGE_MODEL_ID
+
+
+def _normalize_creative_video_model_id(value: str | None) -> str:
+    requested = str(value or "").strip().lower()
+    if requested in CREATIVE_VIDEO_MODEL_MAP and bool(CREATIVE_VIDEO_MODEL_MAP[requested].get("enabled", False)):
+        return requested
+    for candidate in (
+        DEFAULT_CREATIVE_VIDEO_MODEL_ID,
+        "kling21_standard",
+    ):
+        profile = CREATIVE_VIDEO_MODEL_MAP.get(candidate)
+        if profile and bool(profile.get("enabled", False)):
+            return candidate
+    return DEFAULT_CREATIVE_VIDEO_MODEL_ID
+
+
+def _creative_image_model_profile(value: str | None, template: str = "") -> dict:
+    model_id = _normalize_creative_image_model_id(value, template=template)
+    return dict(CREATIVE_IMAGE_MODEL_MAP.get(model_id) or CREATIVE_IMAGE_MODEL_MAP[DEFAULT_CREATIVE_IMAGE_MODEL_ID])
+
+
+def _creative_video_model_profile(value: str | None) -> dict:
+    model_id = _normalize_creative_video_model_id(value)
+    return dict(CREATIVE_VIDEO_MODEL_MAP.get(model_id) or CREATIVE_VIDEO_MODEL_MAP[DEFAULT_CREATIVE_VIDEO_MODEL_ID])
+
+
+def _creative_image_credit_cost(value: str | None, template: str = "") -> int:
+    profile = _creative_image_model_profile(value, template=template)
+    return max(0, int(profile.get("credit_cost_per_image", 0) or 0))
+
+
+def _creative_video_credit_multiplier(value: str | None) -> int:
+    profile = _creative_video_model_profile(value)
+    return max(1, int(profile.get("credit_multiplier", 1) or 1))
+
+
 def _record_kpi_for_job(job_id: str, job_state: dict) -> None:
     if not isinstance(job_state, dict):
         return
@@ -6853,6 +7096,125 @@ async def _download_comfyui_file(file_info: dict, output_path: str):
     raise RuntimeError(f"ComfyUI file download failed for {filename}: {last_error}")
 
 
+def _fal_aspect_ratio_for_resolution(resolution: str) -> str:
+    raw = str(resolution or "").strip().lower()
+    return "16:9" if "landscape" in raw else "9:16"
+
+
+def _fal_image_size_for_creative_model(resolution: str) -> str:
+    raw = str(resolution or "").strip().lower()
+    if "landscape" in raw:
+        return "landscape_16_9"
+    return "portrait_16_9"
+
+
+def _creative_model_prompt(prompt: str, negative_prompt: str = "") -> str:
+    prompt_text = str(prompt or "").strip()
+    negative_text = str(negative_prompt or "").strip()
+    if not negative_text:
+        return prompt_text
+    return f"{prompt_text}\n\nAvoid: {negative_text}"
+
+
+async def _write_fal_image_result_to_path(image_value: str, output_path: str) -> str | None:
+    raw = str(image_value or "").strip()
+    if not raw:
+        raise RuntimeError("fal image result did not contain a usable image value")
+    if raw.startswith("data:image/"):
+        payload = raw.split(",", 1)[1] if "," in raw else ""
+        if not payload:
+            raise RuntimeError("fal image data URI was empty")
+        Path(output_path).write_bytes(base64.b64decode(payload))
+        return None
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        img_resp = await client.get(raw)
+        if img_resp.status_code != 200:
+            raise RuntimeError(f"Failed to download fal image ({img_resp.status_code})")
+        Path(output_path).write_bytes(img_resp.content)
+    return raw
+
+
+def _fal_image_model_url(endpoint_id: str) -> str:
+    return "https://fal.run/" + endpoint_id.strip("/")
+
+
+def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) -> dict:
+    payload: dict[str, object] = {
+        "prompt": prompt,
+        "sync_mode": True,
+    }
+    aspect_ratio = _fal_aspect_ratio_for_resolution(resolution)
+    image_size = _fal_image_size_for_creative_model(resolution)
+    if model_id in {"imagen4_fast", "imagen4_ultra"}:
+        payload["aspect_ratio"] = aspect_ratio
+        payload["output_format"] = "png"
+    elif model_id == "flux_2_pro":
+        payload["image_size"] = image_size
+        payload["output_format"] = "png"
+    elif model_id == "seedream45":
+        payload["image_size"] = image_size
+        payload["output_format"] = "png"
+    elif model_id in {"recraft_v4", "recraft_v4_pro"}:
+        payload["style"] = "realistic_image"
+    elif model_id == "nano_banana_pro":
+        payload["output_format"] = "png"
+    return payload
+
+
+async def _generate_image_fal_selected_model(
+    model_id: str,
+    prompt: str,
+    output_path: str,
+    resolution: str = "720p",
+    negative_prompt: str = "",
+    reference_image_url: str = "",
+) -> dict:
+    profile = _creative_image_model_profile(model_id)
+    endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
+    if not endpoint_id:
+        raise RuntimeError(f"Image model '{model_id}' has no fal endpoint configured")
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+
+    payload = _build_fal_image_model_payload(
+        str(profile.get("id", "") or model_id),
+        _creative_model_prompt(prompt, negative_prompt=negative_prompt),
+        resolution,
+    )
+    if str(profile.get("id", "") or "") == "grok_imagine" and reference_image_url:
+        payload["image_url"] = reference_image_url
+
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(_fal_image_model_url(endpoint_id), headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"{profile.get('label', model_id)} via fal.ai failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        data = resp.json()
+    images = data.get("images", []) if isinstance(data, dict) else []
+    if not images:
+        raise RuntimeError(f"{profile.get('label', model_id)} returned no images")
+    first = images[0] or {}
+    image_value = str(first.get("url") or first.get("data") or "").strip()
+    cdn_url = await _write_fal_image_result_to_path(image_value, output_path)
+    log.info(
+        f"Fal selected image saved via {profile.get('label', model_id)}: {output_path} "
+        f"({Path(output_path).stat().st_size / 1024:.0f} KB)"
+    )
+    gen_id = await _save_training_candidate(prompt, output_path, source=f"fal_{model_id}")
+    return {
+        "local_path": output_path,
+        "cdn_url": cdn_url,
+        "generation_id": gen_id,
+        "provider": model_id,
+        "provider_label": str(profile.get("label", model_id) or model_id),
+    }
+
+
 GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 FAL_FLUX_SCHNELL_URL = "https://fal.run/fal-ai/flux/schnell"
 
@@ -8024,6 +8386,7 @@ async def generate_scene_image(
     salvage_enabled: bool = True,
     interactive_fast: bool = False,
     prompt_passthrough: bool = False,
+    selected_model_id: str = "",
 ) -> dict:
     """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
     For other templates: Grok Imagine > SDXL.
@@ -8119,6 +8482,57 @@ async def generate_scene_image(
             + (outfit_lock + " " if outfit_lock else "")
             + "Glass-shell visibility must be obvious (not faint): medium-opacity translucent shell around the skeleton form."
         ).strip()
+
+    explicit_image_model_requested = bool(str(selected_model_id or "").strip())
+    explicit_image_model_id = _normalize_creative_image_model_id(selected_model_id, template=template)
+    if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
+        profile = _creative_image_model_profile(explicit_image_model_id, template=template)
+        effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
+        if explicit_image_model_id == "grok_imagine":
+            result = await generate_image_grok(
+                effective_prompt,
+                output_path,
+                resolution=resolution,
+                reference_image_url=reference_image_url,
+                reference_lock_mode=lock_mode,
+            )
+        else:
+            result = await _generate_image_fal_selected_model(
+                explicit_image_model_id,
+                prompt,
+                output_path,
+                resolution=resolution,
+                negative_prompt=negative_prompt,
+                reference_image_url=reference_image_url,
+            )
+        await _enforce_1080_image(output_path)
+        _ensure_generated_image_valid(output_path)
+        qa = _score_generated_image_quality(output_path, prompt=effective_prompt, template=template)
+        qa_gate_ok, qa_gate_min = _image_quality_gate(
+            qa,
+            template=template,
+            lock_mode=lock_mode,
+            has_reference=has_reference,
+            prompt=effective_prompt,
+        )
+        result["provider"] = explicit_image_model_id
+        result["provider_label"] = str(profile.get("label", explicit_image_model_id) or explicit_image_model_id)
+        result["qa_score"] = qa.get("score", 0.0)
+        result["qa_ok"] = bool(qa_gate_ok)
+        result["qa_min_score"] = qa_gate_min
+        result["qa_notes"] = list(qa.get("notes", []) or [])
+        if template == "skeleton" and not qa_gate_ok:
+            if interactive_fast:
+                notes = _interactive_soft_accept_notes(result["qa_notes"])
+                if not _skeleton_notes_are_severe(notes):
+                    result["qa_ok"] = False
+                    result["qa_notes"] = notes
+                    return result
+            raise RuntimeError(
+                f"{profile.get('label', explicit_image_model_id)} failed skeleton QA gate "
+                f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
+            )
+        return result
     if template == "skeleton" and interactive_fast and not has_reference:
         try:
             lora_available = await check_skeleton_lora_available()
@@ -9117,6 +9531,118 @@ FAL_STATUS_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-t
 FAL_UPLOAD_URL = "https://fal.run/fal-ai/fal-file-storage/upload"
 
 
+def _fal_queue_urls(endpoint_id: str) -> tuple[str, str]:
+    base = "https://queue.fal.run/" + endpoint_id.strip("/")
+    return base, base + "/requests"
+
+
+def _build_fal_video_payload(
+    profile: dict,
+    prompt: str,
+    image_url: str,
+    duration_sec: float,
+    aspect_ratio: str,
+) -> dict:
+    model_id = str(profile.get("id", "") or "").strip().lower()
+    payload: dict[str, object] = {
+        "prompt": prompt,
+        "image_url": image_url,
+        "aspect_ratio": aspect_ratio,
+    }
+    if model_id.startswith("kling21_"):
+        payload["duration"] = str(10 if float(duration_sec) >= 7.5 else 5)
+        payload["negative_prompt"] = "blur, distort, low quality, watermark, text overlay, UI elements"
+        payload["cfg_scale"] = 0.5
+    elif model_id == "veo3_fast":
+        payload["generate_audio"] = False
+    return payload
+
+
+async def animate_image_fal_queue_model(
+    endpoint_id: str,
+    image_path: str,
+    prompt: str,
+    output_clip_path: str,
+    *,
+    duration_sec: float = 5,
+    aspect_ratio: str = "9:16",
+    image_cdn_url: str = None,
+    profile: dict | None = None,
+) -> str:
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    if image_cdn_url:
+        image_url = image_cdn_url
+    else:
+        image_url = await _upload_image_to_fal(image_path)
+
+    active_profile = dict(profile or {})
+    submit_url, requests_base = _fal_queue_urls(endpoint_id)
+    headers = {
+        "Authorization": "Key " + FAL_AI_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = _build_fal_video_payload(active_profile, prompt, image_url, duration_sec, aspect_ratio)
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(submit_url, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"{active_profile.get('label', endpoint_id)} submit failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        submit_data = resp.json()
+
+    request_id = submit_data.get("request_id")
+    if not request_id:
+        direct_video_url = str(((submit_data.get("video", {}) or {}).get("url", "")) or "")
+        if direct_video_url:
+            await _download_url_to_file(direct_video_url, output_clip_path)
+            return output_clip_path
+        raise RuntimeError(f"No request_id from {endpoint_id}: " + json.dumps(submit_data)[:300])
+
+    status_url = submit_data.get("status_url", requests_base + "/" + request_id + "/status")
+    result_url = submit_data.get("response_url", requests_base + "/" + request_id)
+    max_wait = 900
+    poll_interval = 5
+    elapsed = 0
+    while elapsed < max_wait:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        async with httpx.AsyncClient(timeout=45) as client:
+            st_resp = await client.get(status_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+            if st_resp.status_code == 202:
+                continue
+            if st_resp.status_code != 200:
+                log.warning(f"{endpoint_id} status poll HTTP {st_resp.status_code}: {st_resp.text[:200]}")
+                continue
+            st_data = st_resp.json()
+            status = str(st_data.get("status", "") or "")
+            if status == "COMPLETED":
+                break
+            if status in {"FAILED", "CANCELLED"}:
+                raise RuntimeError(f"{active_profile.get('label', endpoint_id)} generation failed: " + json.dumps(st_data)[:300])
+        if poll_interval < 15:
+            poll_interval = min(poll_interval + 2, 15)
+    else:
+        raise TimeoutError(f"{active_profile.get('label', endpoint_id)} timed out after {max_wait}s")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        res_resp = await client.get(result_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+        if res_resp.status_code != 200:
+            fallback_result_url = status_url[:-7] if str(status_url).endswith("/status") else ""
+            if fallback_result_url:
+                res_resp = await client.get(fallback_result_url, headers={"Authorization": "Key " + FAL_AI_KEY})
+        if res_resp.status_code != 200:
+            raise RuntimeError(f"{active_profile.get('label', endpoint_id)} result fetch failed: {res_resp.status_code}")
+        result_data = res_resp.json()
+
+    video_url = str(((result_data.get("video", {}) or {}).get("url", "")) or "")
+    if not video_url:
+        raise RuntimeError(f"No video URL in {endpoint_id} result: " + json.dumps(result_data)[:300])
+    await _download_url_to_file(video_url, output_clip_path)
+    return output_clip_path
+
+
 async def _upload_image_to_fal(image_path: str) -> str:
     """Upload a local image to fal.ai CDN and return a public URL for it."""
     if not FAL_AI_KEY:
@@ -9389,7 +9915,18 @@ async def animate_image_runway_video(image_path: str, prompt: str, output_clip_p
     raise TimeoutError("Runway video timed out")
 
 
-async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scene_idx: int, job_ts: str, duration_sec: float = 5, num_frames: int = 81, image_cdn_url: str = None, prefer_wan: bool = False) -> dict:
+async def animate_scene(
+    image_path: str,
+    prompt: str,
+    output_dir_path: str,
+    scene_idx: int,
+    job_ts: str,
+    duration_sec: float = 5,
+    num_frames: int = 81,
+    image_cdn_url: str = None,
+    prefer_wan: bool = False,
+    video_model_id: str = "",
+) -> dict:
     """Animate a scene image, preferring local Wan 2.2 for skeleton flows when requested."""
     provider_errors = []
     try:
@@ -9398,6 +9935,39 @@ async def animate_scene(image_path: str, prompt: str, output_dir_path: str, scen
         requested_duration = 5.0
     # FalAI Kling I2V accepts only 5s or 10s durations.
     kling_duration = 10 if requested_duration >= 7.5 else 5
+
+    explicit_video_model_requested = bool(str(video_model_id or "").strip())
+    normalized_video_model_id = _normalize_creative_video_model_id(video_model_id)
+    if explicit_video_model_requested:
+        profile = _creative_video_model_profile(normalized_video_model_id)
+        endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
+        if endpoint_id:
+            explicit_clip_path = str(Path(output_dir_path) / (normalized_video_model_id + "_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
+            try:
+                if normalized_video_model_id == "kling21_standard":
+                    await animate_image_kling(
+                        image_path,
+                        prompt,
+                        explicit_clip_path,
+                        duration=str(kling_duration),
+                        aspect_ratio="9:16",
+                        image_cdn_url=image_cdn_url,
+                    )
+                else:
+                    await animate_image_fal_queue_model(
+                        endpoint_id,
+                        image_path,
+                        prompt,
+                        explicit_clip_path,
+                        duration_sec=requested_duration,
+                        aspect_ratio="9:16",
+                        image_cdn_url=image_cdn_url,
+                        profile=profile,
+                    )
+                return {"type": "fal_clip", "path": explicit_clip_path, "provider_label": str(profile.get("label", normalized_video_model_id) or normalized_video_model_id)}
+            except Exception as e:
+                provider_errors.append(normalized_video_model_id + ": " + str(e))
+                raise RuntimeError("Selected video model failed: " + str(e)) from e
 
     if prefer_wan:
         try:
@@ -13122,6 +13692,12 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
+    _ensure_template_allowed(req.template, user)
+    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
+    mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
+    art_style = _normalize_art_style(req.art_style, template=req.template)
+    image_model_id = _normalize_creative_image_model_id(getattr(req, "image_model_id", ""), template=req.template)
+    video_model_id = _normalize_creative_video_model_id(getattr(req, "video_model_id", ""))
     user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = user.get("email", "") in ADMIN_EMAILS
     billing_active = _billing_active_for_user(user)
@@ -13134,10 +13710,6 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     )
     if not can_run:
         raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
-    _ensure_template_allowed(req.template, user)
-    quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
-    mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
-    art_style = _normalize_art_style(req.art_style, template=req.template)
     cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", True))
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     default_reference_url = _default_reference_for_template(req.template)
@@ -13223,6 +13795,8 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "quality_mode": quality_mode,
             "mint_mode": mint_mode,
             "art_style": art_style,
+            "image_model_id": image_model_id,
+            "video_model_id": video_model_id,
             "cinematic_boost": cinematic_boost,
             "transition_style": transition_style,
             "micro_escalation_mode": micro_escalation_mode,
@@ -13256,6 +13830,8 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "art_style": art_style,
+        "image_model_id": image_model_id,
+        "video_model_id": video_model_id,
         "cinematic_boost": cinematic_boost,
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
@@ -13281,6 +13857,8 @@ async def creative_create_session(body: dict, request: Request = None):
     quality_mode = _normalize_skeleton_quality_mode(body.get("quality_mode"), template=template)
     mint_mode = _normalize_mint_mode(body.get("mint_mode"), template=template)
     art_style = _normalize_art_style(body.get("art_style"), template=template)
+    image_model_id = _normalize_creative_image_model_id(body.get("image_model_id"), template=template)
+    video_model_id = _normalize_creative_video_model_id(body.get("video_model_id"))
     transition_style = _normalize_transition_style(body.get("transition_style", "smooth"))
     micro_escalation_mode = _normalize_micro_escalation_mode(body.get("micro_escalation_mode"), template=template)
     cinematic_boost = _normalize_cinematic_boost(body.get("cinematic_boost", True))
@@ -13320,6 +13898,8 @@ async def creative_create_session(body: dict, request: Request = None):
             "quality_mode": quality_mode,
             "mint_mode": mint_mode,
             "art_style": art_style,
+            "image_model_id": image_model_id,
+            "video_model_id": video_model_id,
             "cinematic_boost": cinematic_boost,
             "transition_style": transition_style,
             "micro_escalation_mode": micro_escalation_mode,
@@ -13348,6 +13928,8 @@ async def creative_create_session(body: dict, request: Request = None):
         "resolution": resolution,
         "language": body.get("language", "en"),
         "art_style": art_style,
+        "image_model_id": image_model_id,
+        "video_model_id": video_model_id,
         "cinematic_boost": cinematic_boost,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
@@ -13365,6 +13947,8 @@ async def creative_create_session(body: dict, request: Request = None):
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "art_style": art_style,
+        "image_model_id": image_model_id,
+        "video_model_id": video_model_id,
         "cinematic_boost": cinematic_boost,
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
@@ -13483,6 +14067,8 @@ async def creative_session_status(session_id: str, request: Request = None):
         "quality_mode": _normalize_skeleton_quality_mode(session.get("quality_mode"), template=session.get("template", "")),
         "mint_mode": _normalize_mint_mode(session.get("mint_mode"), template=session.get("template", "")),
         "art_style": _normalize_art_style(session.get("art_style", "auto"), template=session.get("template", "")),
+        "image_model_id": _normalize_creative_image_model_id(session.get("image_model_id"), template=session.get("template", "")),
+        "video_model_id": _normalize_creative_video_model_id(session.get("video_model_id")),
         "cinematic_boost": _normalize_cinematic_boost(session.get("cinematic_boost", False)),
         "transition_style": _normalize_transition_style(session.get("transition_style", "smooth")),
         "micro_escalation_mode": _normalize_micro_escalation_mode(session.get("micro_escalation_mode"), template=session.get("template", "")),
@@ -13541,18 +14127,6 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
-    user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
-    is_admin = user.get("email", "") in ADMIN_EMAILS
-    billing_active = _billing_active_for_user(user)
-    can_run, _source, _state = await _reserve_generation_credit(
-        user,
-        user_plan if not is_admin else "pro",
-        billing_active,
-        is_admin=is_admin,
-        usage_kind="non_animated",
-    )
-    if not can_run:
-        raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
     session = _get_creative_session(req.session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
@@ -13583,11 +14157,38 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     session["art_style"] = art_style
     _ensure_reference_public_url(req.session_id, session)
     user_plan, plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = user.get("email", "") in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
     resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
     neg_prompt = str(getattr(req, "negative_prompt", "") or "").strip()
     raw_prompt = str(req.prompt or "").strip()
     if not raw_prompt:
         raise HTTPException(400, "Scene prompt is required")
+    image_model_id = _normalize_creative_image_model_id(
+        getattr(req, "image_model_id", "") or session.get("image_model_id"),
+        template=template,
+    )
+    image_model_profile = _creative_image_model_profile(image_model_id, template=template)
+    image_credit_cost = _creative_image_credit_cost(image_model_id, template=template)
+    usage_kind = "animated" if image_credit_cost > 0 else "non_animated"
+    credits_needed = max(1, image_credit_cost) if image_credit_cost > 0 else 1
+    can_run, credit_source, credit_state = await _reserve_generation_credit(
+        user,
+        user_plan if not is_admin else "pro",
+        billing_active,
+        is_admin=is_admin,
+        usage_kind=usage_kind,
+        credits_needed=credits_needed,
+    )
+    if not can_run:
+        if usage_kind == "non_animated":
+            raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
+        available_credits = int(credit_state.get("credits_total_remaining", 0) or 0)
+        required_credits = int(credit_state.get("credits_needed", credits_needed) or credits_needed)
+        raise HTTPException(
+            402,
+            f"{image_model_profile.get('label', 'Selected image model')} needs {required_credits} Catalyst credits per image, but only {available_credits} are available.",
+        )
     prompt_passthrough = _creative_prompt_passthrough_enabled(session)
     scene_reference = _resolve_reference_for_scene(session, template, req.scene_index)
     prompt_requests_damage_or_fatigue = bool(
@@ -13660,8 +14261,15 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
             salvage_enabled=(template == "story"),
             interactive_fast=True,
             prompt_passthrough=prompt_passthrough,
+            selected_model_id=image_model_id,
         )
     except Exception as e:
+        await _refund_generation_credit(
+            str(user.get("id", "") or ""),
+            credit_source,
+            month_key=str(credit_state.get("month_key", "") or ""),
+            credits=credits_needed,
+        )
         err_text = str(e or "").strip()
         err_l = err_text.lower()
         if "hidream is the only configured image provider" in err_l:
@@ -13796,6 +14404,8 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "cdn_url": img_result.get("cdn_url"),
         "prompt": constrained_prompt,
         "generation_id": gen_id,
+        "image_model_id": image_model_id,
+        "image_model_label": str(image_model_profile.get("label", image_model_id) or image_model_id),
         "qa_score": float(img_result.get("qa_score", 0.0) or 0.0),
         "qa_ok": bool(img_result.get("qa_ok", False)),
         "qa_notes": img_result.get("qa_notes", []),
@@ -13809,6 +14419,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     session["mint_mode"] = mint_mode
     session["art_style"] = art_style
     session["cinematic_boost"] = cinematic_boost
+    session["image_model_id"] = image_model_id
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -13816,6 +14427,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "scene_count": len(session["scenes"]),
         "scenes": session.get("scenes", []),
         "narration": session.get("narration", ""),
+        "image_model_id": image_model_id,
     })
 
     return {
@@ -13823,6 +14435,10 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
         "image_data": f"data:image/png;base64,{img_b64}",
         "prompt_used": constrained_prompt,
         "generation_id": gen_id,
+        "image_model_id": image_model_id,
+        "image_model_label": str(image_model_profile.get("label", image_model_id) or image_model_id),
+        "credit_cost": image_credit_cost,
+        "billing_source": "owner_override" if is_admin else (credit_source if image_credit_cost > 0 else "non_animated_free"),
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
         "qa_score": float(img_result.get("qa_score", 0.0) or 0.0),
@@ -13916,6 +14532,9 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         voice_speed = 1.0
         pacing_mode = "standard"
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
+    image_model_id = _normalize_creative_image_model_id(req.image_model_id or session.get("image_model_id"), template=session.get("template", req.template))
+    video_model_id = _normalize_creative_video_model_id(req.video_model_id or session.get("video_model_id"))
+    video_model_profile = _creative_video_model_profile(video_model_id)
     animation_enabled = _bool_from_any(
         req.animation_enabled,
         _bool_from_any(session.get("animation_enabled"), _bool_from_any(req.story_animation_enabled, _bool_from_any(session.get("story_animation_enabled"), True))),
@@ -13935,6 +14554,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         session["reference_lock_mode"] = reference_lock_mode
         session["animation_enabled"] = animation_enabled
         session["story_animation_enabled"] = story_animation_enabled
+        session["image_model_id"] = image_model_id
+        session["video_model_id"] = video_model_id
         _save_creative_sessions_to_disk()
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
@@ -13942,8 +14563,17 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     user_plan, plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = user.get("email", "") in ADMIN_EMAILS
     billing_active = _billing_active_for_user(user)
+    resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
+    total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
+    if total_duration > float(plan_limits.get("max_duration_sec", 60)):
+        raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
+    # The 12-scene cap was for legacy WAN-heavy skeleton renders.
+    # With Runway as primary, allow longer skeleton projects.
+    if (not RUNWAY_API_KEY) and session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
+        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes when Runway is unavailable.")
+
     usage_kind = "animated" if animation_enabled else "non_animated"
-    credits_required = max(1, len(session.get("scenes", []))) if animation_enabled else 1
+    credits_required = max(1, len(session.get("scenes", [])) * _creative_video_credit_multiplier(video_model_id)) if animation_enabled else 1
     can_render, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
@@ -13959,16 +14589,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         required_credits = int(credit_state.get("credits_needed", credits_required) or credits_required)
         raise HTTPException(
             402,
-            f"This render needs {required_credits} animation credits, but only {available_credits} are available. Buy more credits or switch to slideshow.",
+            f"{video_model_profile.get('label', 'Selected video model')} needs {required_credits} Catalyst credits for this render, but only {available_credits} are available. Buy more credits or switch to slideshow.",
         )
-    resolution = _normalize_output_resolution(session.get("resolution", req.resolution), priority_allowed=bool(plan_limits.get("priority", False)))
-    total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
-    if total_duration > float(plan_limits.get("max_duration_sec", 60)):
-        raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
-    # The 12-scene cap was for legacy WAN-heavy skeleton renders.
-    # With Runway as primary, allow longer skeleton projects.
-    if (not RUNWAY_API_KEY) and session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
-        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes when Runway is unavailable.")
 
     job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -13986,7 +14608,10 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "story_animation_enabled": story_animation_enabled,
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
-            "art_style": art_style,
+        "art_style": art_style,
+        "image_model_id": image_model_id,
+        "video_model_id": video_model_id,
+        "video_model_label": str(video_model_profile.get("label", video_model_id) or video_model_id),
         "transition_style": transition_style,
         "micro_escalation_mode": micro_escalation_mode,
         "voice_id": voice_id,
@@ -14014,6 +14639,8 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "story_animation_enabled": story_animation_enabled,
+        "image_model_id": image_model_id,
+        "video_model_id": video_model_id,
     })
 
     for si_data in session.get("scene_images", {}).values():
@@ -14067,6 +14694,8 @@ async def _run_creative_pipeline(
         voice_speed = _normalize_voice_speed(session.get("voice_speed", 1.0), default=1.0)
         pacing_mode = _normalize_pacing_mode(session.get("pacing_mode", "standard"))
         subtitles_enabled = _bool_from_any(session.get("subtitles_enabled"), True)
+        image_model_id = _normalize_creative_image_model_id(session.get("image_model_id"), template=template)
+        video_model_id = _normalize_creative_video_model_id(session.get("video_model_id"))
         scenes = _normalize_scenes_for_render(session["scenes"])
         prompt_passthrough = _creative_prompt_passthrough_enabled(session)
         if not prompt_passthrough:
@@ -14147,6 +14776,7 @@ async def _run_creative_pipeline(
                     reference_image_url=_resolve_reference_for_scene(session, template, i),
                     reference_lock_mode=reference_lock_mode,
                     prompt_passthrough=prompt_passthrough,
+                    selected_model_id=image_model_id,
                 )
                 if template == "skeleton" and not _skeleton_default_identity_locked(session) and not (session.get("reference_image_url") or session.get("skeleton_reference_image")) and i == 0:
                     skeleton_seed = _file_to_data_image_url(img_path)
@@ -14159,8 +14789,9 @@ async def _run_creative_pipeline(
                     if rolled:
                         session["rolling_reference_image_url"] = rolled
                 cdn_url = img_result.get("cdn_url")
-                log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh")
-                _job_record_scene_event(job_id, i, len(scenes), "image_ready", "generated")
+                image_engine = str(img_result.get("provider_label", "") or "generated")
+                log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated fresh via {image_engine}")
+                _job_record_scene_event(job_id, i, len(scenes), "image_ready", image_engine)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
 
@@ -14174,15 +14805,18 @@ async def _run_creative_pipeline(
                         img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
                         duration_sec=scene.get("duration_sec", 5), image_cdn_url=cdn_url,
                         prefer_wan=(template == "skeleton"),
+                        video_model_id=video_model_id,
                     )
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
+                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip", "fal_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    if anim_result["type"] == "runway_clip":
+                    if anim_result["type"] == "fal_clip":
+                        engine = str(anim_result.get("provider_label", "Fal Video") or "Fal Video")
+                    elif anim_result["type"] == "runway_clip":
                         engine = "Runway"
                     elif anim_result["type"] == "grok_clip":
                         engine = "Grok Imagine Video"
@@ -14734,6 +15368,16 @@ async def public_config():
             "micro_escalation_supported": True,
             "micro_escalation_max_source_scenes": MICRO_ESCALATION_MAX_SOURCE_SCENES,
             "micro_escalation_max_output_clips": MICRO_ESCALATION_MAX_OUTPUT_CLIPS,
+        },
+        "creative_model_catalog": {
+            "default_image_model_id": DEFAULT_CREATIVE_IMAGE_MODEL_ID,
+            "default_video_model_id": DEFAULT_CREATIVE_VIDEO_MODEL_ID,
+            "premium_image_credit_multiplier": 4,
+            "elite_image_credit_multiplier": 5,
+            "premium_video_credit_multiplier": 4,
+            "elite_video_credit_multiplier": 5,
+            "image_models": _creative_model_catalog_copy(CREATIVE_IMAGE_MODEL_PROFILES),
+            "video_models": _creative_model_catalog_copy(CREATIVE_VIDEO_MODEL_PROFILES),
         },
         "billing_model": {
             "hybrid_enabled": True,

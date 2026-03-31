@@ -20,6 +20,8 @@ class GenerateRequest(BaseModel):
     story_animation_enabled: bool = True
     reference_image_url: str = ""
     reference_lock_mode: str = "strict"
+    image_model_id: str = ""
+    video_model_id: str = ""
     scenes: list = []
 
 
@@ -37,6 +39,7 @@ class SceneImageRequest(BaseModel):
     reference_lock_mode: str = "strict"
     art_style: str = "auto"
     cinematic_boost: bool = False
+    image_model_id: str = ""
 
 
 class FinalizeRequest(BaseModel):
@@ -59,6 +62,8 @@ class FinalizeRequest(BaseModel):
     art_style: str = "auto"
     cinematic_boost: bool = False
     subtitles_enabled: bool = True
+    image_model_id: str = ""
+    video_model_id: str = ""
 
 
 class CheckoutRequest(BaseModel):

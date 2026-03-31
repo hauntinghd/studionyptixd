@@ -39,6 +39,8 @@ interface CreatePanelPersistedState {
     storyVoiceSpeed?: number;
     storyPacingMode?: 'standard' | 'fast' | 'very_fast';
     artStyle?: string;
+    imageModelId?: string;
+    videoModelId?: string;
     cinematicBoostEnabled?: boolean;
     createSubTab?: 'builder' | 'projects';
     workspaceStage?: 'script' | 'scenes' | 'finale';
@@ -76,8 +78,24 @@ interface ProjectRow {
     voice_speed?: number;
     pacing_mode?: 'standard' | 'fast' | 'very_fast';
     art_style?: string;
+    image_model_id?: string;
+    video_model_id?: string;
     cinematic_boost?: boolean;
     error?: string;
+}
+
+interface CreativeModelProfile {
+    id: string;
+    label: string;
+    provider: string;
+    tier: 'basic' | 'premium' | 'elite';
+    summary: string;
+    speed: string;
+    enabled: boolean;
+    estimated_unit_usd?: number;
+    billing_unit?: string;
+    credit_cost_per_image?: number;
+    credit_multiplier?: number;
 }
 
 function SceneImageLoadingCard({ template }: { template: string }) {
@@ -119,6 +137,23 @@ const soundReferenceOptions = [
     { id: 'dark_tension', label: 'Dark Tension', desc: 'Low suspense bed with punchy accents.' },
     { id: 'social_hook', label: 'Social Hook', desc: 'Fast short-form pacing with crisp emphasis hits.' },
 ];
+const fallbackImageModelCatalog: CreativeModelProfile[] = [
+    { id: 'studio_default', label: 'Studio Default', provider: 'nyptid_hybrid', tier: 'basic', summary: "NYPTID's tuned hybrid lane for the best continuity.", speed: 'Balanced', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
+    { id: 'grok_imagine', label: 'Grok Imagine', provider: 'fal', tier: 'basic', summary: 'Fast default image lane through fal.ai.', speed: 'Fast', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
+    { id: 'imagen4_fast', label: 'Imagen 4 Fast', provider: 'fal', tier: 'basic', summary: "Google's faster image lane for quick scene passes.", speed: 'Very Fast', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
+    { id: 'imagen4_ultra', label: 'Imagen 4 Ultra', provider: 'fal', tier: 'premium', summary: "Google's highest-quality text-to-image lane.", speed: 'Medium', enabled: true, estimated_unit_usd: 0.06, billing_unit: 'image', credit_cost_per_image: 4 },
+    { id: 'recraft_v4', label: 'Recraft V4', provider: 'fal', tier: 'premium', summary: 'Design-first image generation with cleaner composition and ad polish.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.04, billing_unit: 'image', credit_cost_per_image: 4 },
+    { id: 'seedream45', label: 'Seedream 4.5', provider: 'fal', tier: 'premium', summary: 'High-end prompt adherence with polished commercial quality.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.04, billing_unit: 'image', credit_cost_per_image: 4 },
+    { id: 'flux_2_pro', label: 'FLUX 2 Pro', provider: 'fal', tier: 'premium', summary: 'High-fidelity prompt rendering with strong cinematic framing.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.03, billing_unit: 'processed_megapixels', credit_cost_per_image: 4 },
+    { id: 'nano_banana_pro', label: 'Nano Banana Pro', provider: 'fal', tier: 'elite', summary: 'Premium reasoning-based image generation with strong composition.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.15, billing_unit: 'image', credit_cost_per_image: 5 },
+    { id: 'recraft_v4_pro', label: 'Recraft V4 Pro', provider: 'fal', tier: 'elite', summary: 'Designer-grade generation for top-end ad and thumbnail style work.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.25, billing_unit: 'image', credit_cost_per_image: 5 },
+];
+const fallbackVideoModelCatalog: CreativeModelProfile[] = [
+    { id: 'kling21_standard', label: 'Kling 2.1 Standard', provider: 'fal', tier: 'basic', summary: 'Default animation lane for Studio renders.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.056, billing_unit: 'second', credit_multiplier: 1 },
+    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 4 },
+    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 4 },
+    { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Highest-cost Kling lane for top-end shot quality.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
+];
 
 export default function CreatePanel() {
     const { session, role, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
@@ -150,6 +185,12 @@ export default function CreatePanel() {
     const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
     const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
     const [artStyle, setArtStyle] = useState('auto');
+    const [imageModelCatalog, setImageModelCatalog] = useState<CreativeModelProfile[]>(fallbackImageModelCatalog);
+    const [videoModelCatalog, setVideoModelCatalog] = useState<CreativeModelProfile[]>(fallbackVideoModelCatalog);
+    const [imageModelId, setImageModelId] = useState('studio_default');
+    const [videoModelId, setVideoModelId] = useState('kling21_standard');
+    const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
+    const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
     const [cinematicBoostEnabled, setCinematicBoostEnabled] = useState(true);
     const [storyVoices, setStoryVoices] = useState<any[]>([]);
     const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
@@ -184,6 +225,7 @@ export default function CreatePanel() {
     const [subscriptionCheckoutPlan, setSubscriptionCheckoutPlan] = useState<string | null>(null);
     const [subscriptionPromptError, setSubscriptionPromptError] = useState<string | null>(null);
     const [animationCreditPromptRequired, setAnimationCreditPromptRequired] = useState<number | null>(null);
+    const [animationCreditPromptMode, setAnimationCreditPromptMode] = useState<'video' | 'image'>('video');
     const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
     const restoreDoneRef = useRef(false);
     const hydratedSceneImagesSessionRef = useRef<string | null>(null);
@@ -191,6 +233,14 @@ export default function CreatePanel() {
     const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
     const pendingChatStoryTemplateStorageKey = session ? `nyptid_pending_chatstory_${session.user.id}` : "nyptid_pending_chatstory_guest";
     const activePromptEditorScene = scenePromptEditorIndex !== null ? creativeScenes[scenePromptEditorIndex] : null;
+    const selectedImageModel = useMemo(
+        () => imageModelCatalog.find((model) => model.id === imageModelId) || fallbackImageModelCatalog.find((model) => model.id === imageModelId) || fallbackImageModelCatalog[0],
+        [imageModelCatalog, imageModelId]
+    );
+    const selectedVideoModel = useMemo(
+        () => videoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog[0],
+        [videoModelCatalog, videoModelId]
+    );
 
     useEffect(() => {
         (async () => {
@@ -202,6 +252,42 @@ export default function CreatePanel() {
                 }
             } catch { /* silent */ }
         })();
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/config`);
+                if (!res.ok) return;
+                const { data } = await readJsonResponse<any>(res);
+                const catalog = data?.creative_model_catalog;
+                if (!catalog || cancelled) return;
+                if (Array.isArray(catalog.image_models) && catalog.image_models.length > 0) {
+                    setImageModelCatalog(catalog.image_models as CreativeModelProfile[]);
+                }
+                if (Array.isArray(catalog.video_models) && catalog.video_models.length > 0) {
+                    setVideoModelCatalog(catalog.video_models as CreativeModelProfile[]);
+                }
+                if (typeof catalog.default_image_model_id === 'string' && catalog.default_image_model_id.trim()) {
+                    setImageModelId((prev) => {
+                        const trimmed = String(prev || "").trim();
+                        const known = Array.isArray(catalog.image_models) && catalog.image_models.some((model: any) => String(model?.id || "") === trimmed);
+                        return known ? trimmed : catalog.default_image_model_id;
+                    });
+                }
+                if (typeof catalog.default_video_model_id === 'string' && catalog.default_video_model_id.trim()) {
+                    setVideoModelId((prev) => {
+                        const trimmed = String(prev || "").trim();
+                        const known = Array.isArray(catalog.video_models) && catalog.video_models.some((model: any) => String(model?.id || "") === trimmed);
+                        return known ? trimmed : catalog.default_video_model_id;
+                    });
+                }
+            } catch {
+                // fallback catalogs stay active
+            }
+        })();
+        return () => { cancelled = true; };
     }, []);
 
     // 1080p is now enabled by default; backend still enforces plan/env caps.
@@ -568,6 +654,12 @@ export default function CreatePanel() {
             if (typeof saved.artStyle === 'string' && saved.artStyle) {
                 setArtStyle(saved.artStyle);
             }
+            if (typeof saved.imageModelId === 'string' && saved.imageModelId) {
+                setImageModelId(saved.imageModelId);
+            }
+            if (typeof saved.videoModelId === 'string' && saved.videoModelId) {
+                setVideoModelId(saved.videoModelId);
+            }
             if (typeof saved.cinematicBoostEnabled === 'boolean') {
                 setCinematicBoostEnabled(Boolean(saved.cinematicBoostEnabled) || cinematicBoostAlwaysOn);
             }
@@ -640,6 +732,8 @@ export default function CreatePanel() {
             storyVoiceSpeed,
             storyPacingMode,
             artStyle,
+            imageModelId,
+            videoModelId,
             cinematicBoostEnabled: effectiveCinematicBoostEnabled,
             createSubTab,
             workspaceStage,
@@ -678,6 +772,8 @@ export default function CreatePanel() {
         storyVoiceSpeed,
         storyPacingMode,
         artStyle,
+        imageModelId,
+        videoModelId,
         effectiveCinematicBoostEnabled,
         createSubTab,
         workspaceStage,
@@ -702,7 +798,7 @@ export default function CreatePanel() {
         },
         {
             title: "3) Animation Credit Gate",
-            text: "If animation credits cover the project, you can stay animated. If not, Studio will prompt you to buy credits or continue with slideshow.",
+            text: "If Catalyst credits cover the project, you can stay animated. If not, Studio will prompt you to buy credits or continue with slideshow.",
         },
         {
             title: "4) Generate Flow",
@@ -806,6 +902,12 @@ export default function CreatePanel() {
                 }
                 if (typeof data?.art_style === 'string' && data.art_style) {
                     setArtStyle(data.art_style);
+                }
+                if (typeof data?.image_model_id === 'string' && data.image_model_id) {
+                    setImageModelId(data.image_model_id);
+                }
+                if (typeof data?.video_model_id === 'string' && data.video_model_id) {
+                    setVideoModelId(data.video_model_id);
                 }
                 if (data?.has_reference_image && !creativeReferenceImage) {
                     setCreativeReferenceStatus('ready');
@@ -983,6 +1085,8 @@ export default function CreatePanel() {
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    image_model_id: imageModelId,
+                    video_model_id: videoModelId,
                     animation_enabled: effectiveAnimationEnabled,
                     voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
                     voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
@@ -1079,6 +1183,8 @@ export default function CreatePanel() {
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    image_model_id: imageModelId,
+                    video_model_id: videoModelId,
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
@@ -1098,6 +1204,12 @@ export default function CreatePanel() {
                 throw new Error("Invalid Script to Short response");
             }
             setSessionId(data.session_id);
+            if (typeof data.image_model_id === 'string' && data.image_model_id) {
+                setImageModelId(data.image_model_id);
+            }
+            if (typeof data.video_model_id === 'string' && data.video_model_id) {
+                setVideoModelId(data.video_model_id);
+            }
             if (creativeReferenceImage) {
                 const uploadForm = new FormData();
                 uploadForm.append("session_id", data.session_id);
@@ -1162,6 +1274,8 @@ export default function CreatePanel() {
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    image_model_id: imageModelId,
+                    video_model_id: videoModelId,
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
@@ -1178,6 +1292,12 @@ export default function CreatePanel() {
             const { data } = await readJsonResponse<any>(res);
             if (!data || typeof data !== "object") throw new Error("Invalid creative session response");
             setSessionId(data.session_id);
+            if (typeof data.image_model_id === 'string' && data.image_model_id) {
+                setImageModelId(data.image_model_id);
+            }
+            if (typeof data.video_model_id === 'string' && data.video_model_id) {
+                setVideoModelId(data.video_model_id);
+            }
 
             if (creativeReferenceImage) {
                 const uploadForm = new FormData();
@@ -1239,6 +1359,11 @@ export default function CreatePanel() {
         if (sceneIndex >= currentScenes.length || !currentScenes[sceneIndex]) return;
         const scene = currentScenes[sceneIndex];
         if (!scene.visual_description.trim()) return;
+        const imageCreditCost = Math.max(0, Number(selectedImageModel.credit_cost_per_image || 0));
+        if (!isAdmin && imageCreditCost > 0 && imageCreditCost > animationCreditsAvailable) {
+            openAnimationCreditPrompt(imageCreditCost, 'image');
+            return;
+        }
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
@@ -1258,6 +1383,7 @@ export default function CreatePanel() {
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    image_model_id: imageModelId,
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
@@ -1309,6 +1435,14 @@ export default function CreatePanel() {
         const pendingTargets = allTargets.filter(({ scene }) => !scene.imageData);
         const targets = pendingTargets.length > 0 ? pendingTargets : allTargets;
         if (targets.length === 0) return;
+        const imageCreditCost = Math.max(0, Number(selectedImageModel.credit_cost_per_image || 0));
+        if (!isAdmin && imageCreditCost > 0) {
+            const requiredCredits = Math.max(1, targets.length * imageCreditCost);
+            if (requiredCredits > animationCreditsAvailable) {
+                openAnimationCreditPrompt(requiredCredits, 'image');
+                return;
+            }
+        }
         setBulkImageGenRunning(true);
         setBulkImageGenTotal(targets.length);
         setBulkImageGenDone(0);
@@ -1407,6 +1541,23 @@ export default function CreatePanel() {
         return "";
     };
 
+    const formatModelSpendLabel = (model: CreativeModelProfile, mode: 'image' | 'video') => {
+        if (mode === 'image') {
+            const cost = Number(model.credit_cost_per_image || 0);
+            if (cost <= 0) return 'Basic lane · no Catalyst credit burn';
+            return `${cost} Catalyst credits per image`;
+        }
+        const multiplier = Math.max(1, Number(model.credit_multiplier || 1));
+        if (multiplier <= 1) return 'Basic lane · 1 Catalyst credit per animated scene';
+        return `${multiplier}x lane · ${multiplier} Catalyst credits per animated scene`;
+    };
+
+    const formatModelTierLabel = (model: CreativeModelProfile) => {
+        if (model.tier === 'elite') return 'Elite Lane';
+        if (model.tier === 'premium') return 'Premium Lane';
+        return 'Basic Lane';
+    };
+
     const handleFinalize = async () => {
         setFinalizeError(null);
         if (!sessionId) {
@@ -1439,6 +1590,8 @@ export default function CreatePanel() {
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
+                    image_model_id: imageModelId,
+                    video_model_id: videoModelId,
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
@@ -1561,15 +1714,16 @@ export default function CreatePanel() {
         }
     };
 
-    const openAnimationCreditPrompt = (requiredCredits: number) => {
+    const openAnimationCreditPrompt = (requiredCredits: number, mode: 'video' | 'image' = 'video') => {
         setAnimationCreditPromptRequired(Math.max(1, requiredCredits));
+        setAnimationCreditPromptMode(mode);
         setAnimationCreditPromptError(null);
     };
 
     const handleAnimationTopupCheckout = async (requiredCredits: number) => {
         const recommendedPack = topupPacks.find((pack) => pack.credits >= requiredCredits) || topupPacks[topupPacks.length - 1];
         if (!recommendedPack) {
-            setAnimationCreditPromptError('No animation credit packs are configured yet.');
+            setAnimationCreditPromptError('No Catalyst credit packs are configured yet.');
             return;
         }
         setAnimationCreditPromptError(null);
@@ -1756,14 +1910,176 @@ export default function CreatePanel() {
         </div>
     ) : null;
 
+    const imageModelPickerModal = imageModelPickerOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
+            <div className="w-full max-w-6xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Image Generation Model</p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">Choose the image lane for this workspace</h3>
+                        <p className="mt-2 text-sm text-gray-400">
+                            Basic lanes stay in the normal Studio burn. Premium and elite lanes consume Catalyst credits first from included credits, then from the credit wallet.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setImageModelPickerOpen(false)}
+                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        title="Close image model picker"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+                <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+                    Available now: {animationCreditsAvailable} Catalyst credits across included credits + credit wallet.
+                </div>
+                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {imageModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                        const active = selectedImageModel.id === model.id;
+                        return (
+                            <button
+                                key={model.id}
+                                type="button"
+                                onClick={() => {
+                                    setImageModelId(model.id);
+                                    setImageModelPickerOpen(false);
+                                }}
+                                className={`rounded-[24px] border p-5 text-left transition ${
+                                    active
+                                        ? 'border-cyan-400 bg-cyan-500/10'
+                                        : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
+                                }`}
+                            >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-lg font-semibold text-white">{model.label}</span>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                            model.tier === 'elite'
+                                                ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                : model.tier === 'premium'
+                                                    ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                                    : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                        }`}>
+                                            {formatModelTierLabel(model)}
+                                        </span>
+                                        {active ? (
+                                            <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                                Selected
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                </div>
+                                <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
+                                <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
+                                    <span>{model.provider === 'fal' ? 'fal.ai' : 'NYPTID Hybrid'}</span>
+                                    <span>{model.speed}</span>
+                                </div>
+                                <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
+                                    <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'image')}</p>
+                                    <p className="mt-1 text-xs text-gray-400">Use premium lanes when you want higher-end prompt fidelity and composition.</p>
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
+    const videoModelPickerModal = videoModelPickerOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
+            <div className="w-full max-w-5xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Video Generation Model</p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">Choose the animation lane for final render</h3>
+                        <p className="mt-2 text-sm text-gray-400">
+                            Kling 2.1 Standard stays on the basic lane. Premium and elite video lanes multiply Catalyst credit burn per animated scene.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setVideoModelPickerOpen(false)}
+                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        title="Close video model picker"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+                <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+                    Available now: {animationCreditsAvailable} Catalyst credits across included credits + credit wallet.
+                </div>
+                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    {videoModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                        const active = selectedVideoModel.id === model.id;
+                        return (
+                            <button
+                                key={model.id}
+                                type="button"
+                                onClick={() => {
+                                    setVideoModelId(model.id);
+                                    setVideoModelPickerOpen(false);
+                                }}
+                                className={`rounded-[24px] border p-5 text-left transition ${
+                                    active
+                                        ? 'border-cyan-400 bg-cyan-500/10'
+                                        : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
+                                }`}
+                            >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-lg font-semibold text-white">{model.label}</span>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                            model.tier === 'elite'
+                                                ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                : model.tier === 'premium'
+                                                    ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                                    : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                        }`}>
+                                            {formatModelTierLabel(model)}
+                                        </span>
+                                        {active ? (
+                                            <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                                Selected
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                </div>
+                                <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
+                                <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
+                                    <span>{model.provider === 'fal' ? 'fal.ai' : model.provider}</span>
+                                    <span>{model.speed}</span>
+                                </div>
+                                <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
+                                    <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'video')}</p>
+                                    <p className="mt-1 text-xs text-gray-400">Use premium animation lanes when shot quality matters more than credit efficiency.</p>
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
     const animationCreditPromptModal = animationCreditPromptRequired !== null ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
             <div className="w-full max-w-2xl rounded-[32px] border border-cyan-500/20 bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
                 <div className="flex items-start justify-between gap-4">
                     <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Animation Credits Needed</p>
-                        <h3 className="mt-2 text-2xl font-bold text-white">This render needs {animationCreditPromptRequired} animation credit{animationCreditPromptRequired === 1 ? '' : 's'}</h3>
-                        <p className="mt-2 text-sm text-gray-400">You currently have {animationCreditsAvailable} available. Buy more credits with PayPal or continue in slideshow mode right now.</p>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">
+                            {animationCreditPromptMode === 'image' ? 'Premium Image Lane' : 'Catalyst Credits Needed'}
+                        </p>
+                        <h3 className="mt-2 text-2xl font-bold text-white">
+                            {animationCreditPromptMode === 'image'
+                                ? `This image run needs ${animationCreditPromptRequired} Catalyst credit${animationCreditPromptRequired === 1 ? '' : 's'}`
+                                : `This render needs ${animationCreditPromptRequired} Catalyst credit${animationCreditPromptRequired === 1 ? '' : 's'}`}
+                        </h3>
+                        <p className="mt-2 text-sm text-gray-400">
+                            {animationCreditPromptMode === 'image'
+                                ? `You currently have ${animationCreditsAvailable} available across included credits and your credit wallet. Buy more with PayPal or switch back to a basic image lane.`
+                                : `You currently have ${animationCreditsAvailable} available across included credits and your credit wallet. Buy more credits with PayPal or continue in slideshow mode right now.`}
+                        </p>
                     </div>
                     <button
                         type="button"
@@ -1786,13 +2102,20 @@ export default function CreatePanel() {
                     <button
                         type="button"
                         onClick={() => {
-                            setAnimateOutputEnabled(false);
+                            if (animationCreditPromptMode === 'image') {
+                                const basicImageLane = imageModelCatalog.find((model) => model.id === 'studio_default')
+                                    || imageModelCatalog.find((model) => model.tier === 'basic')
+                                    || fallbackImageModelCatalog[0];
+                                setImageModelId(basicImageLane.id);
+                            } else {
+                                setAnimateOutputEnabled(false);
+                            }
                             setAnimationCreditPromptRequired(null);
                             setAnimationCreditPromptError(null);
                         }}
                         className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm font-semibold text-gray-200 transition hover:bg-white/[0.06]"
                     >
-                        Continue with Slideshow
+                        {animationCreditPromptMode === 'image' ? 'Switch to Basic Image Lane' : 'Continue with Slideshow'}
                     </button>
                 </div>
                 {animationCreditPromptError && (
@@ -1843,6 +2166,12 @@ export default function CreatePanel() {
                 setArtStyle(p.art_style);
             } else {
                 setArtStyle('auto');
+            }
+            if (typeof p.image_model_id === 'string' && p.image_model_id) {
+                setImageModelId(p.image_model_id);
+            }
+            if (typeof p.video_model_id === 'string' && p.video_model_id) {
+                setVideoModelId(p.video_model_id);
             }
             setCinematicBoostEnabled(Boolean(p.cinematic_boost) || cinematicBoostAlwaysOn);
             if (p.mode === 'creative' || p.mode === 'script_to_short') {
@@ -1895,7 +2224,16 @@ export default function CreatePanel() {
     const promptSceneCount = promptScenes.length;
     const imageReadyCount = promptScenes.filter((s) => !!s.imageData).length;
     const allPromptedImagesReady = promptSceneCount > 0 && imageReadyCount === promptSceneCount;
-    const animationCreditsRequired = Math.max(1, promptSceneCount || creativeScenes.length || 1);
+    const selectedImageCreditCost = Math.max(0, Number(selectedImageModel.credit_cost_per_image || 0));
+    const selectedVideoCreditMultiplier = Math.max(1, Number(selectedVideoModel.credit_multiplier || 1));
+    const pendingImageTargets = promptScenes.filter((scene) => !scene.imageData);
+    const batchImageCreditsRequired = selectedImageCreditCost > 0 && pendingImageTargets.length > 0
+        ? pendingImageTargets.length * selectedImageCreditCost
+        : 0;
+    const animationCreditsRequired = effectiveAnimationEnabled
+        ? Math.max(1, (promptSceneCount || creativeScenes.length || 1) * selectedVideoCreditMultiplier)
+        : 0;
+    const imageCreditsShort = !isAdmin && batchImageCreditsRequired > animationCreditsAvailable;
     const animationCreditsShort = !isAdmin && effectiveAnimationEnabled && animationCreditsRequired > animationCreditsAvailable;
     const showGenerateScenes = creativeMode === 'creative' || creativeMode === 'script_to_short';
     const canAdvanceToScenes = hasNarration && !sceneBuildLoading;
@@ -1955,11 +2293,104 @@ export default function CreatePanel() {
                 </div>
                 {animationCreditsShort && (
                     <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                        This project currently needs {animationCreditsRequired} animation credit{animationCreditsRequired === 1 ? '' : 's'}, but your account only has {animationCreditsAvailable}. Switch to slideshow or buy more credits before final render.
+                        This render currently needs {animationCreditsRequired} Catalyst credit{animationCreditsRequired === 1 ? '' : 's'} on {selectedVideoModel.label}, but your account only has {animationCreditsAvailable}. Switch to slideshow, choose a basic video lane, or top up before final render.
+                    </div>
+                )}
+                {workspaceStage === 'scenes' && imageCreditsShort && (
+                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                        Your selected image lane ({selectedImageModel.label}) needs {batchImageCreditsRequired} Catalyst credits to generate the remaining scene images, but only {animationCreditsAvailable} are available. Switch to a basic image lane or top up before batch generation.
                     </div>
                 )}
 
                 {renderWorkspaceStageTabs()}
+
+                {workspaceStage === 'scenes' && (
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
+                        <button
+                            type="button"
+                            onClick={() => setImageModelPickerOpen(true)}
+                            className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
+                        >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Generation Model</p>
+                                    <h3 className="mt-2 text-lg font-semibold text-white">{selectedImageModel.label}</h3>
+                                    <p className="mt-2 text-sm text-gray-400">{selectedImageModel.summary}</p>
+                                </div>
+                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                    selectedImageModel.tier === 'elite'
+                                        ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                        : selectedImageModel.tier === 'premium'
+                                            ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                            : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                }`}>
+                                    {formatModelTierLabel(selectedImageModel)}
+                                </span>
+                            </div>
+                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-300">
+                                <span>{formatModelSpendLabel(selectedImageModel, 'image')}</span>
+                                <span>{selectedImageModel.speed}</span>
+                            </div>
+                            <p className="mt-4 text-xs text-gray-500">Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.</p>
+                        </button>
+                        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Catalyst Spend Snapshot</p>
+                            <p className="mt-2 text-lg font-semibold text-white">
+                                {selectedImageCreditCost > 0
+                                    ? `${selectedImageCreditCost} credits per image on ${selectedImageModel.label}`
+                                    : `${selectedImageModel.label} stays on the basic image lane`}
+                            </p>
+                            <p className="mt-2 text-sm text-gray-400">
+                                Available now: {animationCreditsAvailable} combined credits across included monthly usage and the wallet.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {workspaceStage === 'finale' && (
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
+                        <button
+                            type="button"
+                            onClick={() => setVideoModelPickerOpen(true)}
+                            className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
+                        >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Video Generation Model</p>
+                                    <h3 className="mt-2 text-lg font-semibold text-white">{selectedVideoModel.label}</h3>
+                                    <p className="mt-2 text-sm text-gray-400">{selectedVideoModel.summary}</p>
+                                </div>
+                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                    selectedVideoModel.tier === 'elite'
+                                        ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                        : selectedVideoModel.tier === 'premium'
+                                            ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                            : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                }`}>
+                                    {formatModelTierLabel(selectedVideoModel)}
+                                </span>
+                            </div>
+                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-300">
+                                <span>{formatModelSpendLabel(selectedVideoModel, 'video')}</span>
+                                <span>{selectedVideoModel.speed}</span>
+                            </div>
+                            <p className="mt-4 text-xs text-gray-500">Kling 2.1 Standard stays on the base animation lane. Premium video lanes multiply Catalyst credit burn by scene count.</p>
+                        </button>
+                        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Render Spend Snapshot</p>
+                            <p className="mt-2 text-lg font-semibold text-white">
+                                {effectiveAnimationEnabled
+                                    ? `${animationCreditsRequired} total Catalyst credits on ${selectedVideoModel.label}`
+                                    : 'Slideshow mode keeps animation credit burn at zero'}
+                            </p>
+                            <p className="mt-2 text-sm text-gray-400">
+                                {effectiveAnimationEnabled
+                                    ? `${Math.max(1, promptSceneCount || creativeScenes.length || 1)} animated scene${Math.max(1, promptSceneCount || creativeScenes.length || 1) === 1 ? '' : 's'} × ${selectedVideoCreditMultiplier}x multiplier.`
+                                    : 'Switch animation back on if you want motion render instead of a slideshow export.'}
+                            </p>
+                        </div>
+                    </div>
+                )}
 
                 {workspaceStage === 'scenes' && showGenerateScenes && (
                     <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
@@ -2344,7 +2775,7 @@ export default function CreatePanel() {
                     <button
                         onClick={() => {
                             if (animationCreditsShort) {
-                                openAnimationCreditPrompt(animationCreditsRequired);
+                                openAnimationCreditPrompt(animationCreditsRequired, 'video');
                                 return;
                             }
                             void handleFinalize();
@@ -2444,6 +2875,8 @@ export default function CreatePanel() {
                 {quickStartCard}
                 {templateChooserModal}
                 {subscriptionPromptModal}
+                {imageModelPickerModal}
+                {videoModelPickerModal}
                 {animationCreditPromptModal}
             </div>
         );
@@ -2811,7 +3244,7 @@ export default function CreatePanel() {
                     </div>
                     {animationCreditExhausted && (
                         <p className="text-[11px] text-amber-300 mt-2">
-                            Animation credits are not available yet. Click the toggle to buy credits with PayPal or stay in slideshow mode.
+                            Catalyst animation credits are not available yet. Click the toggle to buy credits with PayPal or stay in slideshow mode.
                         </p>
                     )}
                 </div>
@@ -3001,6 +3434,8 @@ export default function CreatePanel() {
                 {quickStartCard}
                 {templateChooserModal}
                 {subscriptionPromptModal}
+                {imageModelPickerModal}
+                {videoModelPickerModal}
                 {animationCreditPromptModal}
 
                 {activePromptEditorScene && scenePromptEditorIndex !== null && (
