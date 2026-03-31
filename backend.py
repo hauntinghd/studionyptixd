@@ -1308,8 +1308,9 @@ LONGFORM_HORROR_VISUAL_DIRECTIVE = (
 LONGFORM_3D_DOC_VISUAL_DIRECTIVE = (
     "3D documentary style lock: premium stylized 3D explainer/documentary render, not live-action photography. "
     "Use designed environments, polished CGI materials, clean focal hierarchy, motion-design readability, engineered composition, "
-    "and camera setups that feel like a premium YouTube business/documentary video. Avoid gritty street-photo realism, random warehouses, "
-    "candid live-action film stills, or generic moody humans unless the beat absolutely requires a person."
+    "and camera setups that feel like a premium YouTube business/documentary video. Bias toward symbolic hero objects, stylized human interaction, "
+    "tabletop map or system views, macro mechanism cutaways, before-versus-after contrast, and minimal black/white stages with controlled red accents where useful. "
+    "Avoid gritty street-photo realism, random warehouses, candid live-action film stills, cluttered lab repetition, or generic moody humans unless the beat absolutely requires a person."
 )
 
 
@@ -1398,6 +1399,328 @@ def _longform_title_variant(input_title: str, topic: str) -> str:
     if clean_title:
         return clean_title
     return (clean_topic[:120] or "Long-Form Video").strip()
+
+
+PACKAGING_STOP_WORDS = {
+    "the", "and", "that", "with", "from", "your", "this", "into", "when", "then", "they", "them",
+    "their", "have", "will", "over", "because", "under", "after", "before", "while", "where", "about",
+    "called", "actually", "really", "complete", "full", "breakdown", "explained", "video", "channel",
+    "follow", "followup", "follow-up", "hidden", "hides", "from", "you", "how", "why", "what", "does",
+    "make", "made", "that", "these", "those", "more", "than", "into", "inside", "secret", "secrets",
+}
+
+
+def _packaging_tokens(text: str, max_items: int = 12) -> list[str]:
+    tokens: list[str] = []
+    for raw in re.findall(r"[A-Za-z0-9']+", str(text or "").lower()):
+        token = raw.strip("'")
+        if len(token) < 3 or token in PACKAGING_STOP_WORDS:
+            continue
+        if token not in tokens:
+            tokens.append(token)
+        if len(tokens) >= max_items:
+            break
+    return tokens
+
+
+def _title_stays_in_same_arena(candidate: str, source_title: str, topic: str = "") -> bool:
+    cand = str(candidate or "").strip()
+    source = str(source_title or "").strip()
+    if not cand or not source:
+        return True
+    cand_tokens = set(_packaging_tokens(cand, max_items=12))
+    ref_tokens = set(_packaging_tokens(source + " " + str(topic or ""), max_items=16))
+    if cand.lower().startswith("top ") and source.lower().startswith("top "):
+        return True
+    return len(cand_tokens & ref_tokens) >= 2
+
+
+def _source_title_pattern(source_title: str) -> tuple[str, int]:
+    title = str(source_title or "").strip()
+    lower = title.lower()
+    top_match = re.match(r"^\s*top\s+(\d+)\b", lower)
+    if top_match:
+        return ("top_list", int(top_match.group(1)))
+    if lower.startswith("why "):
+        return ("why", 0)
+    if lower.startswith("how "):
+        return ("how", 0)
+    if lower.startswith("what happened") or lower.startswith("what really happened"):
+        return ("what_happened", 0)
+    if any(token in lower for token in ["killed", "war", "leader", "assassin", "empire", "crime", "iran"]):
+        return ("investigation", 0)
+    return ("documentary", 0)
+
+
+def _same_arena_subject(source_bundle: dict, topic: str = "") -> str:
+    topic_text = str(topic or "").strip()
+    if topic_text:
+        subject = topic_text
+    else:
+        subject = str((source_bundle or {}).get("title", "") or "").strip()
+    if not subject:
+        tags = [str(tag).strip() for tag in list((source_bundle or {}).get("tags") or []) if str(tag).strip()]
+        subject = tags[0] if tags else "the core subject"
+    subject = re.sub(r"^\s*top\s+\d+\s+", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"^\s*(how|why)\s+", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"^\s*what\s+(?:really\s+)?happened\s+to\s+", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"^\s*(the\s+truth\s+about|inside|the\s+story\s+of)\s+", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"\s*\|\s*.*$", "", subject)
+    subject = re.sub(r"\s*[-:]\s*(complete|full)\s+breakdown\s*$", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"\s+", " ", subject).strip(" -,:")
+    words = subject.split()
+    if len(words) > 10:
+        subject = " ".join(words[:10]).strip()
+    return subject or "the core subject"
+
+
+def _same_arena_title_variants(
+    source_bundle: dict,
+    topic: str = "",
+    format_preset: str = "documentary",
+    max_items: int = 3,
+) -> list[str]:
+    source_title = str((source_bundle or {}).get("title", "") or "").strip()
+    subject = _same_arena_subject(source_bundle, topic=topic)
+    pattern, top_number = _source_title_pattern(source_title)
+    variants: list[str] = []
+    if pattern == "top_list":
+        count = top_number or 8
+        variants.extend([
+            f"Top {count} {subject} That Quietly Control the Outcome",
+            f"Top {count} {subject} Most People Never Notice",
+            f"Top {count} {subject} That Explain What Really Happens",
+        ])
+    elif pattern == "why":
+        variants.extend([
+            f"Why {subject} Quietly Drives Everything",
+            f"Why {subject} Is More Dangerous Than It Looks",
+            f"Why {subject} Keeps Repeating the Same Pattern",
+        ])
+    elif pattern == "how":
+        variants.extend([
+            f"How {subject} Actually Works",
+            f"How {subject} Quietly Shapes the Outcome",
+            f"How {subject} Became This Powerful",
+        ])
+    elif pattern == "what_happened":
+        variants.extend([
+            f"What Really Happened to {subject}",
+            f"The Hidden Story Behind {subject}",
+            f"How {subject} Ended Up Here",
+        ])
+    elif pattern == "investigation":
+        variants.extend([
+            f"How {subject} Was Really Pulled Off",
+            f"The Real Story Behind {subject}",
+            f"What {subject} Changed Next",
+        ])
+    else:
+        variants.extend([
+            f"The Hidden System Behind {subject}",
+            f"How {subject} Quietly Runs the Game",
+            f"The Truth About {subject}",
+        ])
+    if str(format_preset or "").strip().lower() == "documentary":
+        variants.append(f"How {subject} Actually Shapes Power")
+    return _dedupe_clip_list(variants, max_items=max_items, max_chars=140)
+
+
+def _same_arena_description_variants(
+    source_bundle: dict,
+    topic: str = "",
+    source_analysis: dict | None = None,
+    max_items: int = 3,
+) -> list[str]:
+    subject = _same_arena_subject(source_bundle, topic=topic)
+    improvement_moves = [str(v).strip() for v in list((source_analysis or {}).get("improvement_moves") or []) if str(v).strip()]
+    move = improvement_moves[0] if improvement_moves else "Open faster, tighten the payoff, and keep every scene pushing one concrete reveal."
+    base_lines = [
+        f"A sharper follow-up on {subject} with a clearer opening promise, stronger escalation, and cleaner documentary packaging.",
+        f"Catalyst rebuilds this angle around {subject} with a faster first 30 seconds, better visual variety, and a more satisfying payoff.",
+        f"Built as a premium faceless documentary package around {subject}. Improvement focus: {move}",
+    ]
+    return _dedupe_clip_list(base_lines, max_items=max_items, max_chars=220)
+
+
+def _same_arena_thumbnail_angles(
+    source_bundle: dict,
+    topic: str = "",
+    format_preset: str = "documentary",
+    max_items: int = 3,
+) -> list[str]:
+    subject = _same_arena_subject(source_bundle, topic=topic)
+    normalized_format = str(format_preset or "").strip().lower()
+    if normalized_format == "documentary":
+        angles = [
+            f"{subject} shown as one dominant 3D hero object in a dark void, hard contrast, one red accent element, minimal background clutter, 16:9 documentary thumbnail",
+            f"{subject} translated into a clean tabletop system or map composition with one red highlighted zone, white-gray environment, strong hierarchy, 16:9",
+            f"One stylized 3D human subject interacting with an oversized symbol of {subject}, black background, strong rim light, red accent, premium documentary clarity",
+        ]
+    else:
+        angles = [
+            f"One dominant visual symbol for {subject}, clear hierarchy, no clutter, 16:9",
+            f"Human-versus-system composition built around {subject}, strong contrast, 16:9",
+            f"Minimal graphic scene centered on {subject} with one aggressive focal cue, 16:9",
+        ]
+    return _dedupe_clip_list(angles, max_items=max_items, max_chars=220)
+
+
+def _heuristic_source_performance_analysis(
+    source_bundle: dict,
+    analytics_notes: str = "",
+    topic: str = "",
+    input_title: str = "",
+    input_description: str = "",
+    format_preset: str = "documentary",
+) -> dict:
+    source_title = str((source_bundle or {}).get("title", "") or "").strip()
+    channel = str((source_bundle or {}).get("channel", "") or "").strip()
+    public_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 260)
+    transcript_excerpt = _clip_text(str((source_bundle or {}).get("transcript_excerpt", "") or "").strip(), 220)
+    what_worked_parts = []
+    if source_title:
+        what_worked_parts.append(f"Source title already frames a strong curiosity gap: {source_title}.")
+    if channel:
+        what_worked_parts.append(f"Channel context: {channel}.")
+    if public_summary:
+        what_worked_parts.append(public_summary)
+    what_hurt = _clip_text(analytics_notes, 240) or "No private analytics notes were supplied, so improvement focus should stay on the hook, thumbnail clarity, and first-minute pacing."
+    hook_learnings = [
+        "Keep the first beat readable in under three seconds.",
+        "Use one dominant promise, not three competing ideas in the opening.",
+    ]
+    if transcript_excerpt:
+        hook_learnings.append("Preserve the strongest spoken explanation beat from the source transcript, but compress the ramp-up.")
+    click_drivers = [
+        "Stay in the same subject arena as the source instead of drifting into a different niche.",
+        "Use one strong visual symbol or conflict in the package.",
+    ]
+    dropoff_risks = [
+        "Starting with setup before the payoff is visible.",
+        "Repeating the same visual environment too many times in a row.",
+    ]
+    improvement_moves = [
+        "Make the first 20 to 30 seconds payoff-oriented instead of scene-setting.",
+        "Push more visual variation: hero object, macro mechanism, human interaction, map/system view, and before-versus-after contrasts.",
+        "Keep the title in the same arena as the source, but tighten the promise and raise the stakes.",
+    ]
+    if analytics_notes:
+        improvement_moves.append("Reflect the supplied analytics notes directly in the opening hook, pace, and thumbnail choice.")
+    if input_description:
+        improvement_moves.append("Preserve the requested documentary format while keeping the emotional charge high.")
+    return {
+        "what_worked": _clip_text(" ".join(what_worked_parts), 240),
+        "what_hurt": what_hurt,
+        "hook_learnings": _dedupe_clip_list(hook_learnings, max_items=5, max_chars=180),
+        "click_drivers": _dedupe_clip_list(click_drivers, max_items=5, max_chars=180),
+        "dropoff_risks": _dedupe_clip_list(dropoff_risks, max_items=5, max_chars=180),
+        "improvement_moves": _dedupe_clip_list(improvement_moves, max_items=6, max_chars=200),
+        "title_angles": _same_arena_title_variants(source_bundle, topic=topic or input_title, format_preset=format_preset),
+        "thumbnail_angles": _same_arena_thumbnail_angles(source_bundle, topic=topic or input_title, format_preset=format_preset),
+        "description_angles": _same_arena_description_variants(source_bundle, topic=topic or input_title, source_analysis={"improvement_moves": improvement_moves}),
+    }
+
+
+def _merge_source_analysis(primary: dict | None, fallback: dict | None) -> dict:
+    primary = dict(primary or {})
+    fallback = dict(fallback or {})
+    merged: dict = {}
+    for key in ("what_worked", "what_hurt", "analytics_summary"):
+        merged[key] = _clip_text(str(primary.get(key) or fallback.get(key) or "").strip(), 240)
+    for key, max_chars in {
+        "hook_learnings": 180,
+        "click_drivers": 180,
+        "dropoff_risks": 180,
+        "improvement_moves": 200,
+        "title_angles": 140,
+        "thumbnail_angles": 220,
+        "description_angles": 220,
+        "strongest_signals": 180,
+        "weak_points": 180,
+        "retention_findings": 180,
+        "packaging_findings": 180,
+    }.items():
+        merged[key] = _dedupe_clip_list(
+            [str(v).strip() for v in list(primary.get(key) or []) if str(v).strip()]
+            + [str(v).strip() for v in list(fallback.get(key) or []) if str(v).strip()],
+            max_items=8,
+            max_chars=max_chars,
+        )
+    return merged
+
+
+def _same_arena_follow_up_topic(source_bundle: dict, format_preset: str = "documentary") -> str:
+    source_title = str((source_bundle or {}).get("title", "") or "").strip()
+    subject = _same_arena_subject(source_bundle)
+    pattern, top_number = _source_title_pattern(source_title)
+    if pattern == "top_list":
+        count = top_number or 8
+        return f"A stronger Top {count} documentary follow-up about {subject}"
+    if pattern in {"why", "how"}:
+        return f"A sharper documentary follow-up explaining {subject}"
+    if pattern in {"what_happened", "investigation"}:
+        return f"A follow-up documentary in the same arena as {subject}"
+    if str(format_preset or "").strip().lower() == "documentary":
+        return f"A premium faceless documentary about {subject}"
+    return subject
+
+
+def _heuristic_clone_analysis(topic: str, video_description: str, transcript_hint: str = "", source_notes: str = "") -> dict:
+    source_title_match = re.search(r"Title:\s*([^|]+)", str(video_description or ""), flags=re.IGNORECASE)
+    source_title = str(source_title_match.group(1) if source_title_match else "").strip()
+    duration_match = re.search(r"Duration:\s*(\d+)s", str(video_description or ""), flags=re.IGNORECASE)
+    duration_sec = int(duration_match.group(1)) if duration_match else 0
+    lower_source = f"{source_title} {video_description} {source_notes}".lower()
+    if any(token in lower_source for token in ["aita", "tifu", "reddit", "my sister", "my brother", "boyfriend", "girlfriend"]):
+        detected_template = "reddit"
+    elif re.match(r"^\s*top\s+\d+\b", source_title.lower()):
+        detected_template = "top5"
+    elif any(token in lower_source for token in ["roman", "empire", "iran", "war", "battle", "leader", "killed", "assassin"]):
+        detected_template = "history"
+    elif re.search(r"\b(vs\.?|versus)\b", source_title, flags=re.IGNORECASE):
+        detected_template = "skeleton"
+    else:
+        detected_template = "story"
+    pacing = "fast" if duration_sec <= 90 or detected_template in {"top5", "skeleton"} else "medium"
+    avg_scene_duration = 3.5 if pacing == "fast" else 5.0
+    scene_count = max(8, min(14, int(round((duration_sec or 45) / avg_scene_duration))))
+    if detected_template == "history":
+        tone = "authoritative documentary"
+        tricks = ["open on consequence first", "use escalating evidence reveals", "anchor each beat to one big visual symbol"]
+    elif detected_template == "top5":
+        tone = "fast shocking countdown"
+        tricks = ["numbered reveals", "higher stakes every beat", "one clean surprise per scene"]
+    elif detected_template == "reddit":
+        tone = "personal dramatic confession"
+        tricks = ["conflict escalation", "reaction beats", "social-proof tension"]
+    elif detected_template == "skeleton":
+        tone = "aggressive comparison explainer"
+        tricks = ["size contrast", "money comparison", "one-word impact captions"]
+    else:
+        tone = "cinematic documentary explainer"
+        tricks = ["strong first reveal", "symbolic visual escalation", "tight payoff wording"]
+    effective_topic = str(topic or "").strip() or _same_arena_follow_up_topic({"title": source_title}, format_preset="documentary")
+    return {
+        "detected_template": detected_template,
+        "viral_analysis": {
+            "hook_type": "numbered shock list" if detected_template == "top5" else ("comparison claim" if detected_template == "skeleton" else "documentary promise"),
+            "pacing": pacing,
+            "avg_scene_duration": avg_scene_duration,
+            "scene_count": scene_count,
+            "tone": tone,
+            "retention_tricks": tricks,
+            "what_made_it_viral": _clip_text(
+                f"The source packaging works because it stays in one clear arena, makes the promise legible fast, and keeps escalating with one dominant idea per beat. {transcript_hint}",
+                220,
+            ),
+            "follow_up_topic": effective_topic,
+        },
+        "optimized_prompt": _clip_text(
+            f"Rebuild the source arena around {effective_topic}. Keep the same hook category, pacing pressure, and payoff style, but make the first three beats cleaner and more specific.",
+            280,
+        ),
+    }
 
 
 REFERENCE_LOCK_MODES = {"strict", "inspired"}
@@ -5070,12 +5393,22 @@ async def _build_source_performance_analysis(
 ) -> dict:
     if not source_bundle and not analytics_notes:
         return {}
+    format_preset = "documentary" if re.search(r"\b(documentary|explainer|breakdown|analysis)\b", f"{topic} {input_title} {input_description}", flags=re.IGNORECASE) else "explainer"
+    heuristic = _heuristic_source_performance_analysis(
+        source_bundle=source_bundle,
+        analytics_notes=analytics_notes,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        format_preset=format_preset,
+    )
     system_prompt = (
         "You are a YouTube growth strategist for NYPTID Studio. "
         "Analyze a source video using public metadata plus optional operator notes. "
         "Output strict JSON with keys: what_worked, what_hurt, hook_learnings, click_drivers, "
         "dropoff_risks, improvement_moves, title_angles, thumbnail_angles, description_angles. "
-        "Keep every field practical and specific for building a better follow-up video."
+        "Keep every field practical and specific for building a better follow-up video. "
+        "Stay in the same topic arena as the source title and preserve the same viewer promise category instead of drifting sideways."
     )
     user_prompt = (
         f"New target topic: {topic}\n"
@@ -5087,19 +5420,14 @@ async def _build_source_performance_analysis(
         f"{_marketing_doctrine_text(strategy_notes)}"
     )
     try:
-        return await _xai_json_completion(system_prompt, user_prompt, temperature=0.35, timeout_sec=60)
+        raw = await _xai_json_completion(system_prompt, user_prompt, temperature=0.35, timeout_sec=60)
+        return _merge_source_analysis(raw, heuristic)
     except Exception as e:
-        return {
-            "what_worked": _clip_text((source_bundle or {}).get("public_summary", ""), 220),
-            "what_hurt": _clip_text(analytics_notes, 220),
-            "hook_learnings": [],
-            "click_drivers": [],
-            "dropoff_risks": [],
-            "improvement_moves": [_clip_text(str(e), 220)],
-            "title_angles": [],
-            "thumbnail_angles": [],
-            "description_angles": [],
-        }
+        fallback = dict(heuristic)
+        improvement_moves = [str(v).strip() for v in list(fallback.get("improvement_moves") or []) if str(v).strip()]
+        improvement_moves.append(_clip_text(str(e), 220))
+        fallback["improvement_moves"] = _dedupe_clip_list(improvement_moves, max_items=8, max_chars=200)
+        return fallback
 
 
 async def _derive_longform_seed_from_source(
@@ -5113,13 +5441,16 @@ async def _derive_longform_seed_from_source(
     source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 140)
     source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 420)
     improvement_moves = source_analysis.get("improvement_moves") or []
-    title_angles = [str(x).strip() for x in list(source_analysis.get("title_angles") or []) if str(x).strip()]
-    description_angles = [str(x).strip() for x in list(source_analysis.get("description_angles") or []) if str(x).strip()]
+    heuristic_titles = _same_arena_title_variants(source_bundle, topic="", format_preset=format_preset)
+    heuristic_descriptions = _same_arena_description_variants(source_bundle, topic="", source_analysis=source_analysis)
+    title_angles = [str(x).strip() for x in list(source_analysis.get("title_angles") or []) if str(x).strip()] or heuristic_titles
+    description_angles = [str(x).strip() for x in list(source_analysis.get("description_angles") or []) if str(x).strip()] or heuristic_descriptions
     primary_move = _clip_text(str(improvement_moves[0] if improvement_moves else ""), 180)
     system_prompt = (
         "You are a faceless YouTube strategist for NYPTID Studio. "
         "A user has a source video URL but does not want to hand-write the next topic, title, or description. "
         "Create a sharper follow-up brief on the same general subject, but improve the angle, hook clarity, and packaging. "
+        "Do not drift into a different topic arena. Stay in the same documentary or explainer lane as the source. "
         "Do not copy the source title verbatim. Output strict JSON with keys: topic, title, description."
     )
     user_prompt = (
@@ -5138,7 +5469,9 @@ async def _derive_longform_seed_from_source(
         derived_topic = ""
         derived_title = ""
         derived_description = ""
-    fallback_topic = derived_topic or source_title or "Follow-up video breakdown"
+    fallback_topic = derived_topic or _same_arena_follow_up_topic(source_bundle, format_preset=format_preset) or source_title or "Follow-up video breakdown"
+    if derived_title and not _title_stays_in_same_arena(derived_title, source_title, fallback_topic):
+        derived_title = ""
     fallback_title = derived_title or (title_angles[0] if title_angles else source_title or "New follow-up video")
     fallback_description = derived_description or (
         description_angles[0]
@@ -5438,7 +5771,9 @@ async def _generate_longform_chapter(
             " Visual default for this format: premium stylized 3D documentary/business-explainer imagery. "
             "Every visual_description should bias toward designed 3D sets, clean object-centric storytelling, readable motion-design composition, "
             "polished CGI materials, bold focal hierarchy, and premium YouTube documentary energy. "
-            "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that."
+            "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that. "
+            "Scene variation rule: rotate between symbolic hero objects, macro mechanism cutaways, stylized human interaction, map or system views, before-versus-after contrasts, and consequence-driven environments. "
+            "Do not repeat the same floating object in the same room across the whole chapter."
         )
     if template == "skeleton":
         system_prompt += (
@@ -12202,29 +12537,35 @@ def _longform_fallback_chapter(
 ) -> dict:
     scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
     topic_focus = _longform_fallback_visual_focus(topic, input_title)
-    shot_cues = [
-        "wide establishing composition with one dominant focal subject",
-        "medium hero composition with clean foreground-background separation",
-        "close detail shot with one mechanism clearly visible",
-        "over-shoulder explanatory framing with readable depth",
-        "low-angle dramatic composition with one strong silhouette",
-        "center-weighted lab-style composition with floating detail elements",
+    visual_modes = [
+        "isolated hero-object stage composition with one dominant subject",
+        "macro mechanism cutaway with one clearly visible internal process",
+        "stylized human interaction shot with one person reacting to the core subject",
+        "tabletop map or system-view composition with one zone clearly emphasized",
+        "before-versus-after comparison frame with strong contrast between two states",
+        "clean process-diagram environment with one visible cause and one visible effect",
+    ]
+    narration_modes = [
+        "Open with the clearest reveal first so the audience immediately understands why this beat matters.",
+        "Show the mechanism or hidden driver that pushes the idea forward.",
+        "Translate the explanation into a consequence the viewer can feel or picture instantly.",
+        "Raise the stakes by showing how the system expands, spreads, or takes control.",
+        "Introduce a contrast, reversal, or clash that sharpens the point instead of repeating it.",
+        "Land the beat with a concrete payoff that makes the next reveal feel bigger.",
     ]
     scenes: list[dict] = []
     for i in range(scene_goal):
         beat = i + 1
-        shot_cue = shot_cues[i % len(shot_cues)]
+        visual_mode = visual_modes[i % len(visual_modes)]
+        narration_mode = narration_modes[i % len(narration_modes)]
         scenes.append({
             "scene_num": beat,
             "duration_sec": 5.0,
-            "narration": (
-                "This beat pushes the explanation forward with one concrete reveal, "
-                "clear progression, and higher stakes."
-            ),
+            "narration": narration_mode,
             "visual_description": (
                 f"Premium 3D documentary explainer frame focused on {topic_focus}. "
-                f"Show one distinct visual beat with {shot_cue}, clean cinematic lighting, readable subject hierarchy, "
-                "strong depth, and no written words or interface elements."
+                f"Use {visual_mode}, clean cinematic lighting, readable subject hierarchy, strong depth, "
+                "and one unmistakable visual change from the previous beat. No written words, no interface overlays, no chapter cards."
             ),
             "text_overlay": "",
         })
@@ -16229,38 +16570,64 @@ async def transcribe_audio_with_grok(audio_path: str) -> str:
 
 
 async def analyze_viral_video(topic: str, video_description: str, transcript_hint: str = "", source_notes: str = "") -> dict:
+    heuristic = _heuristic_clone_analysis(topic, video_description, transcript_hint, source_notes)
     user_parts = []
     user_parts.append("Source viral video context: " + video_description)
     if transcript_hint:
         user_parts.append("Audio/timing info from source: " + transcript_hint)
     if source_notes:
         user_parts.append("Operator notes / analytics hints: " + source_notes)
-    user_parts.append("New topic to apply the viral formula to: " + topic)
+    user_parts.append("New topic to apply the viral formula to: " + (topic or str((heuristic.get("viral_analysis") or {}).get("follow_up_topic", "") or "")))
     user_msg = "\n\n".join(user_parts)
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "grok-3-mini-fast",
-                "messages": [
-                    {"role": "system", "content": CLONE_ANALYSIS_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                "temperature": 0.6,
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON in clone analysis response")
-        return json.loads(content[start:end])
+    if not XAI_API_KEY:
+        return heuristic
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-3-mini-fast",
+                    "messages": [
+                        {"role": "system", "content": CLONE_ANALYSIS_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.6,
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end == 0:
+                raise ValueError("No JSON in clone analysis response")
+            raw = json.loads(content[start:end])
+    except Exception:
+        return heuristic
+    merged = dict(heuristic)
+    merged["detected_template"] = str(raw.get("detected_template", "") or merged.get("detected_template", "story"))
+    merged_viral = dict(merged.get("viral_analysis") or {})
+    raw_viral = dict(raw.get("viral_analysis") or {})
+    for key in ("hook_type", "pacing", "tone", "what_made_it_viral", "follow_up_topic"):
+        if str(raw_viral.get(key, "") or "").strip():
+            merged_viral[key] = str(raw_viral.get(key) or "").strip()
+    for key in ("avg_scene_duration", "scene_count"):
+        if raw_viral.get(key) is not None:
+            merged_viral[key] = raw_viral.get(key)
+    merged_viral["retention_tricks"] = _dedupe_clip_list(
+        [str(v).strip() for v in list(raw_viral.get("retention_tricks") or []) if str(v).strip()]
+        + [str(v).strip() for v in list(merged_viral.get("retention_tricks") or []) if str(v).strip()],
+        max_items=6,
+        max_chars=120,
+    )
+    merged["viral_analysis"] = merged_viral
+    optimized_prompt = _clip_text(str(raw.get("optimized_prompt", "") or "").strip(), 280)
+    if optimized_prompt:
+        merged["optimized_prompt"] = optimized_prompt
+    return merged
 
 
 async def extract_video_metadata(file_path: str) -> dict:
@@ -16301,6 +16668,9 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
     tone = viral_analysis.get("tone", "energetic and punchy")
     tricks = viral_analysis.get("retention_tricks", [])
     what_viral = viral_analysis.get("what_made_it_viral", "")
+    optimized_prompt = _clip_text(str(viral_analysis.get("optimized_prompt", "") or "").strip(), 280)
+    follow_up_topic = _clip_text(str(viral_analysis.get("follow_up_topic", "") or "").strip(), 180)
+    effective_topic = _clip_text(str(topic or "").strip(), 180) or follow_up_topic or optimized_prompt or "A sharper follow-up on the source angle"
 
     clone_override = (
         "\n\nCRITICAL CLONE INSTRUCTIONS -- you MUST follow these EXACTLY:\n"
@@ -16316,6 +16686,7 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
         "'buckle up'. Write EXACTLY like the source video's style -- punchy, direct, zero filler. "
         "Every single word must earn its place. If the source was a skeleton comparing things, "
         "YOU compare things the same way. Match the structure beat-for-beat.\n"
+        "\nKeep the new script in the same topic arena as the source. Do not wander into an adjacent niche."
         "\nNarration must be SHORT and PUNCHY -- 1-2 sentences max per scene. "
         "No yapping. No fluff. Every sentence is a hook or a fact bomb."
     )
@@ -16333,7 +16704,7 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
                 "model": "grok-3-mini-fast",
                 "messages": [
                     {"role": "system", "content": full_prompt},
-                    {"role": "user", "content": "Clone this viral formula onto new topic: " + topic},
+                    {"role": "user", "content": "Clone this viral formula onto new topic: " + effective_topic},
                 ],
                 "temperature": 0.7,
             },
@@ -16357,9 +16728,10 @@ async def run_clone_pipeline(
 ):
     try:
         _job_set_stage(job_id, "analyzing", 5)
-        log.info(f"[{job_id}] Clone: analyzing viral video for topic '{topic}'")
+        effective_topic = str(topic or "").strip()
+        log.info(f"[{job_id}] Clone: analyzing viral video for topic '{effective_topic or '[source-derived]'}'")
 
-        video_context = topic
+        video_context = effective_topic
         transcript_hint = ""
         meta = {}
         source_bundle = {}
@@ -16375,8 +16747,10 @@ async def run_clone_pipeline(
                     "thumbnail_url": str(source_bundle.get("thumbnail_url", "") or ""),
                     "public_summary": str(source_bundle.get("public_summary", "") or ""),
                 }
-                video_context = str(source_bundle.get("public_summary", "") or topic)
+                video_context = str(source_bundle.get("public_summary", "") or effective_topic)
                 transcript_hint = str(source_bundle.get("transcript_excerpt", "") or "")
+                if not effective_topic:
+                    effective_topic = _same_arena_follow_up_topic(source_bundle, format_preset="documentary")
         if video_path:
             meta = await extract_video_metadata(video_path) or {}
             if meta:
@@ -16390,13 +16764,23 @@ async def run_clone_pipeline(
             if audio_path:
                 transcript_hint = await transcribe_audio_with_grok(audio_path) or transcript_hint
                 Path(audio_path).unlink(missing_ok=True)
+        if not effective_topic:
+            effective_topic = "A sharper follow-up in the same arena as the source video"
+        jobs[job_id]["topic"] = effective_topic
 
-        analysis = await analyze_viral_video(topic, video_context, transcript_hint, analytics_notes)
+        analysis = await analyze_viral_video(effective_topic, video_context, transcript_hint, analytics_notes)
         detected_template = analysis.get("detected_template", "random")
         viral_info = analysis.get("viral_analysis", {})
+        optimized_prompt = str(analysis.get("optimized_prompt", "") or "").strip()
+        derived_follow_up_topic = str(viral_info.get("follow_up_topic", "") or "").strip()
+        if derived_follow_up_topic and not str(topic or "").strip():
+            effective_topic = derived_follow_up_topic
+            jobs[job_id]["topic"] = effective_topic
 
         jobs[job_id]["template"] = detected_template
         jobs[job_id]["viral_analysis"] = viral_info
+        if optimized_prompt:
+            jobs[job_id]["optimized_prompt"] = optimized_prompt
         jobs[job_id]["progress"] = 12
         log.info(f"[{job_id}] Clone analysis: template={detected_template}, hook={viral_info.get('hook_type', '?')}, scenes={viral_info.get('scene_count', '?')}")
 
@@ -16404,7 +16788,10 @@ async def run_clone_pipeline(
             Path(video_path).unlink(missing_ok=True)
 
         _job_set_stage(job_id, "generating_script", 15)
-        script_data = await generate_clone_script(detected_template, topic, viral_info)
+        script_payload = dict(viral_info or {})
+        if optimized_prompt:
+            script_payload["optimized_prompt"] = optimized_prompt
+        script_data = await generate_clone_script(detected_template, effective_topic, script_payload)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         clone_quality_mode = _normalize_skeleton_quality_mode("cinematic", template=detected_template)
         clone_mint_mode = _normalize_mint_mode(True, template=detected_template)
@@ -16555,7 +16942,7 @@ async def run_clone_pipeline(
         jobs[job_id]["output_file"] = output_filename
         jobs[job_id]["resolution"] = resolution
         jobs[job_id]["metadata"] = {
-            "title": script_data.get("title", topic),
+            "title": script_data.get("title", effective_topic),
             "description": script_data.get("description", ""),
             "tags": script_data.get("tags", []),
         }
@@ -16573,7 +16960,7 @@ async def run_clone_pipeline(
 
 @app.post("/api/clone")
 async def clone_video(
-    topic: str = Form(...),
+    topic: str = Form(""),
     resolution: str = Form("720p"),
     source_url: str = Form(""),
     analytics_notes: str = Form(""),
@@ -16591,6 +16978,9 @@ async def clone_video(
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
 
     res = _normalize_output_resolution(resolution, priority_allowed=False)
+    normalized_source_url = _normalize_external_source_url(source_url)
+    if not str(topic or "").strip() and not normalized_source_url and not (file and file.filename):
+        raise HTTPException(400, "Provide a new topic, a source URL, or an uploaded source video.")
 
     video_path = None
     if file and file.filename:
@@ -16605,7 +16995,7 @@ async def clone_video(
         "progress": 0,
         "template": "analyzing...",
         "topic": topic,
-        "source_url": _normalize_external_source_url(source_url),
+        "source_url": normalized_source_url,
         "lane": "clone",
         "mode": "clone_rebuild",
         "resolution": res,
@@ -16620,7 +17010,7 @@ async def clone_video(
             job_id,
             "starter",
             run_clone_pipeline,
-            (job_id, topic, video_path, source_url, analytics_notes, res),
+            (job_id, topic, video_path, normalized_source_url, analytics_notes, res),
         )
     except QueueFullError as e:
         jobs[job_id]["status"] = "error"

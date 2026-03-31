@@ -46,13 +46,13 @@ export default function ClonePanel() {
     }, [jobId]);
 
     const handleClone = async () => {
-        if (!topic) return;
+        if (!topic.trim() && !viralUrl.trim() && !viralFile) return;
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
 
         const formData = new FormData();
-        formData.append("topic", topic);
+        formData.append("topic", topic.trim());
         formData.append("resolution", canUse1080p ? resolution : '720p');
         if (viralUrl.trim()) formData.append("source_url", viralUrl.trim());
         if (analyticsNotes.trim()) formData.append("analytics_notes", analyticsNotes.trim());
@@ -93,7 +93,7 @@ export default function ClonePanel() {
                         value={topic}
                         onChange={(e) => setTopic(e.target.value)}
                         disabled={loading || !canClone}
-                        placeholder="e.g., Why F1 drivers earn more than NFL players"
+                        placeholder="Optional if Source Video URL is filled. Example: Why F1 drivers earn more than NFL players"
                         className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
                         onKeyDown={(e) => e.key === 'Enter' && !loading && canClone && handleClone()}
                     />
@@ -138,9 +138,12 @@ export default function ClonePanel() {
                                 value={viralUrl}
                                 onChange={e => setViralUrl(e.target.value)}
                                 disabled={!canClone || loading}
-                                placeholder="https://tiktok.com/... or youtube.com/shorts/..."
+                                placeholder="https://youtube.com/... or another source video URL"
                                 className="w-full bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 text-white placeholder:text-gray-600 text-xs focus:outline-none focus:ring-2 focus:ring-violet-500/50 disabled:opacity-50"
                             />
+                            <p className="mt-2 text-[11px] text-cyan-300/80">
+                                If you leave New Topic blank, Catalyst now derives the follow-up angle from the source video and rebuilds it in the same arena.
+                            </p>
                             <textarea
                                 value={analyticsNotes}
                                 onChange={e => setAnalyticsNotes(e.target.value)}
@@ -170,12 +173,12 @@ export default function ClonePanel() {
                     </button>
                 </div>
 
-                <button onClick={handleClone} disabled={loading || !topic || !canClone}
+                <button onClick={handleClone} disabled={loading || (!topic.trim() && !viralUrl.trim() && !viralFile) || !canClone}
                     className="w-full py-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-violet-600/20 active:scale-[0.99]">
                     {loading ? (
                         <><Loader2 className="w-5 h-5 animate-spin" /> Analyzing &amp; Generating...</>
                     ) : (
-                        <><Wand2 className="w-5 h-5" /> Clone Viral Formula</>
+                        <><Wand2 className="w-5 h-5" /> {topic.trim() ? 'Clone Viral Formula' : 'Clone Source Arena'}</>
                     )}
                 </button>
 

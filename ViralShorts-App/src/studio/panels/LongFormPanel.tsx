@@ -119,6 +119,13 @@ type LongFormSessionSummary = {
 
 type LongFormPreset = 'recap' | 'explainer' | 'documentary' | 'story_channel';
 
+const PRESET_LABELS: Record<LongFormPreset, string> = {
+    recap: 'Recap',
+    explainer: 'Explainer',
+    documentary: 'Documentary',
+    story_channel: 'Story Channel',
+};
+
 const MARKETING_DOCTRINE_POINTS = [
     "Be active in the Daily Marketing Channel.",
     "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
@@ -160,8 +167,8 @@ function chapterStatusClass(status: string): string {
 export default function LongFormPanel() {
     const { session, ownerOverride } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
-    const [template, setTemplate] = useState<'story' | 'skeleton'>('story');
-    const [formatPreset, setFormatPreset] = useState<LongFormPreset>('explainer');
+    const template = 'story' as const;
+    const [formatPreset, setFormatPreset] = useState<LongFormPreset>('documentary');
     const [topic, setTopic] = useState('');
     const [inputTitle, setInputTitle] = useState('');
     const [inputDescription, setInputDescription] = useState('');
@@ -355,14 +362,8 @@ export default function LongFormPanel() {
         setSessionIdInput('');
         persistSessionId('');
         try {
-            const presetLabelMap: Record<LongFormPreset, string> = {
-                recap: 'Recap',
-                explainer: 'Explainer',
-                documentary: 'Documentary',
-                story_channel: 'Story Channel',
-            };
             const formattedDescription = inputDescription.trim()
-                ? `Format preset: ${presetLabelMap[formatPreset]}. ${inputDescription.trim()}`.trim()
+                ? `Format preset: ${PRESET_LABELS[formatPreset]}. ${inputDescription.trim()}`.trim()
                 : '';
             const useBootstrapRoute = Boolean(
                 transcriptText.trim()
@@ -576,14 +577,6 @@ export default function LongFormPanel() {
                 </h3>
                 <div className="grid md:grid-cols-2 gap-3">
                     <label className="text-sm text-gray-300">
-                        Template
-                        <select value={template} onChange={(e) => setTemplate(e.target.value as 'story' | 'skeleton')}
-                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
-                            <option value="story">Cinematic</option>
-                            <option value="skeleton">Skeleton AI</option>
-                        </select>
-                    </label>
-                    <label className="text-sm text-gray-300">
                         Content Format
                         <select value={formatPreset} onChange={(e) => setFormatPreset(e.target.value as LongFormPreset)}
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
@@ -593,6 +586,15 @@ export default function LongFormPanel() {
                             <option value="story_channel">Story Channel</option>
                         </select>
                     </label>
+                    <div className="text-sm text-gray-300">
+                        Visual Engine
+                        <div className="mt-1 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-sm text-cyan-100">
+                            Catalyst Documentary 3D
+                        </div>
+                        <p className="mt-2 text-xs text-cyan-300/80">
+                            Long Form now uses the documentary 3D engine directly. Content Format is the real creative driver.
+                        </p>
+                    </div>
                     <label className="text-sm text-gray-300">
                         Target Minutes
                         <input
@@ -1170,7 +1172,7 @@ export default function LongFormPanel() {
                                                 <p className="text-sm font-semibold text-white">{title}</p>
                                                 <p className="text-xs text-gray-500">{project.session_id}</p>
                                                 <p className="text-xs text-gray-400">
-                                                    {project.template} - {STATUS_LABELS[project.status] || project.status} - {approved}/{total} chapters approved
+                                                    {PRESET_LABELS[(project.format_preset as LongFormPreset) || 'documentary']} - {STATUS_LABELS[project.status] || project.status} - {approved}/{total} chapters approved
                                                 </p>
                                                 {project.auto_pipeline ? (
                                                     <p className="text-xs text-cyan-300">Owner autopilot enabled</p>
