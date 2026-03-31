@@ -1827,6 +1827,113 @@ def _same_arena_thumbnail_angles(
     return _dedupe_clip_list(angles, max_items=max_items, max_chars=220)
 
 
+def _longform_build_publish_package_candidates(
+    *,
+    template: str,
+    format_preset: str,
+    topic: str,
+    input_title: str,
+    input_description: str,
+    source_bundle: dict | None = None,
+    source_analysis: dict | None = None,
+    channel_context: dict | None = None,
+) -> dict:
+    source_bundle = dict(source_bundle or {})
+    source_analysis = dict(source_analysis or {})
+    channel_context = dict(channel_context or {})
+    source_title = str(source_bundle.get("title", "") or "").strip()
+    effective_topic = str(topic or input_title or source_title or "Follow-up video breakdown").strip()
+    channel_title_memory = [
+        str(v).strip()
+        for v in [
+            *list(channel_context.get("recent_upload_titles") or []),
+            *list(channel_context.get("top_video_titles") or []),
+        ]
+        if str(v).strip()
+    ]
+
+    title_variants: list[str] = []
+    for candidate in [
+        *list(source_analysis.get("title_angles") or []),
+        *_same_arena_title_variants(
+            source_bundle or {"title": effective_topic},
+            topic=effective_topic,
+            format_preset=format_preset,
+            max_items=6,
+        ),
+        _longform_title_variant(input_title or effective_topic, effective_topic),
+    ]:
+        value = str(candidate or "").strip()
+        if not value:
+            continue
+        if source_title and _title_is_too_close_to_source(value, source_title):
+            continue
+        if _title_is_too_close_to_any(value, channel_title_memory):
+            continue
+        if value not in title_variants:
+            title_variants.append(value)
+    if not title_variants:
+        rescue_subject = _same_arena_subject(source_bundle, topic=effective_topic) or effective_topic
+        for candidate in [
+            f"The Hidden System Behind {rescue_subject}",
+            f"Why {rescue_subject} Quietly Rewrites More Than You Think",
+            f"How {rescue_subject} Actually Shapes the Outcome",
+        ]:
+            value = str(candidate or "").strip()
+            if value and not _title_is_too_close_to_any(value, [source_title, *channel_title_memory]) and value not in title_variants:
+                title_variants.append(value)
+
+    description_variants: list[str] = []
+    for candidate in [
+        input_description,
+        *list(source_analysis.get("description_angles") or []),
+        *_same_arena_description_variants(
+            source_bundle or {"title": effective_topic},
+            topic=effective_topic,
+            source_analysis=source_analysis,
+            max_items=4,
+        ),
+    ]:
+        value = _clip_text(str(candidate or "").strip(), 420)
+        if value and value not in description_variants:
+            description_variants.append(value)
+
+    thumbnail_prompts: list[str] = []
+    for candidate in [
+        *list(source_analysis.get("thumbnail_angles") or []),
+        *_same_arena_thumbnail_angles(
+            source_bundle or {"title": effective_topic},
+            topic=effective_topic,
+            format_preset=format_preset,
+            max_items=4,
+        ),
+        f"{effective_topic} premium faceless documentary thumbnail, one dominant 3D subject, strong contrast, 16:9",
+    ]:
+        value = str(candidate or "").strip()
+        if value and value not in thumbnail_prompts:
+            thumbnail_prompts.append(value)
+
+    tags: list[str] = []
+    for candidate in [
+        template,
+        format_preset,
+        "nyptid",
+        "longform",
+        effective_topic[:32].replace(" ", "_").lower(),
+        *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:10] if str(tag).strip()],
+    ]:
+        value = str(candidate or "").strip()
+        if value and value not in tags:
+            tags.append(value)
+
+    return {
+        "title_variants": title_variants[:3],
+        "description_variants": description_variants[:3],
+        "thumbnail_prompts": thumbnail_prompts[:3],
+        "tags": tags[:16],
+    }
+
+
 def _heuristic_source_performance_analysis(
     source_bundle: dict,
     analytics_notes: str = "",
@@ -14282,20 +14389,73 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             "tags": list(((session_snapshot.get("metadata_pack") or {}).get("tags") or [])),
             "chapters": chapter_markers,
         }
+        metadata_pack_snapshot = dict(session_snapshot.get("metadata_pack") or {})
+        publish_candidates = _longform_build_publish_package_candidates(
+            template=template,
+            format_preset=format_preset,
+            topic=topic,
+            input_title=input_title,
+            input_description=str(session_snapshot.get("input_description", "") or ""),
+            source_bundle=dict(metadata_pack_snapshot.get("source_video") or {}),
+            source_analysis=dict(metadata_pack_snapshot.get("source_analysis") or {}),
+            channel_context=dict(metadata_pack_snapshot.get("youtube_channel") or {}),
+        )
+        package_title_variants = list(publish_candidates.get("title_variants") or [])
+        package_description_variants = list(publish_candidates.get("description_variants") or [])
+        package_thumbnail_prompts = list(publish_candidates.get("thumbnail_prompts") or [])
+        package_tags = list(publish_candidates.get("tags") or [])
+        selected_title = str((package_title_variants or [input_title or topic or "Untitled"])[0] or "").strip()
+        selected_description = str((package_description_variants or [str(session_snapshot.get("input_description", "") or "")])[0] or "").strip()
+        selected_tags = list(package_tags[:16])
+        thumbnail_prompt_selected = str((package_thumbnail_prompts or [f"{selected_title} premium faceless documentary thumbnail, 16:9"])[0] or "").strip()
+        package_thumbnail_file = ""
+        package_thumbnail_url = ""
+        package_thumbnail_error = ""
+        if PIKZELS_API_KEY and thumbnail_prompt_selected:
+            try:
+                thumbnail_user = {"id": str(session_snapshot.get("user_id", "") or "")}
+                thumbnail_output_name = f"{job_id}_longform_package.png"
+                thumbnail_output_path = str(_thumbnail_output_dir_for_user(thumbnail_user) / thumbnail_output_name)
+                thumbnail_render = await _generate_thumbnail_image(
+                    prompt=f"{thumbnail_prompt_selected}. Packaging hook: {selected_title}.",
+                    negative_prompt=NEGATIVE_PROMPT,
+                    output_path=thumbnail_output_path,
+                    user=thumbnail_user,
+                    mode="describe",
+                )
+                await _enforce_thumbnail_1080(thumbnail_output_path)
+                package_thumbnail_file = thumbnail_output_name
+                package_thumbnail_url = f"/api/thumbnails/generated/{thumbnail_output_name}"
+                jobs[job_id]["thumbnail_provider"] = "pikzels"
+                jobs[job_id]["thumbnail_request_id"] = str(thumbnail_render.get("request_id", "") or "")
+            except Exception as e:
+                package_thumbnail_error = str(e)[:240]
         _job_diag_finalize(job_id)
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
             if isinstance(session_live, dict):
                 session_live["status"] = "complete"
                 session_live["paused_error"] = None
-                package_tags = list(((session_live.get("metadata_pack") or {}).get("tags") or []))
+                live_metadata_pack = dict(session_live.get("metadata_pack") or {})
+                live_metadata_pack["title_variants"] = list(package_title_variants)
+                live_metadata_pack["description_variants"] = list(package_description_variants)
+                live_metadata_pack["thumbnail_prompts"] = list(package_thumbnail_prompts)
+                live_metadata_pack["tags"] = list(package_tags)
+                session_live["metadata_pack"] = live_metadata_pack
                 session_live["package"] = {
                     "output_file": output_filename,
                     "chapters": chapter_markers,
-                    "title_variants": list(((session_live.get("metadata_pack") or {}).get("title_variants") or [])),
-                    "description_variants": list(((session_live.get("metadata_pack") or {}).get("description_variants") or [])),
-                    "thumbnail_prompts": list(((session_live.get("metadata_pack") or {}).get("thumbnail_prompts") or [])),
-                    "tags": package_tags,
+                    "title_variants": list(package_title_variants),
+                    "description_variants": list(package_description_variants),
+                    "thumbnail_prompts": list(package_thumbnail_prompts),
+                    "tags": list(package_tags),
+                    "selected_title": selected_title,
+                    "selected_description": selected_description,
+                    "selected_tags": list(selected_tags),
+                    "thumbnail_prompt": thumbnail_prompt_selected,
+                    "thumbnail_file": package_thumbnail_file,
+                    "thumbnail_url": package_thumbnail_url,
+                    "thumbnail_error": package_thumbnail_error,
                 }
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()
@@ -14468,78 +14628,22 @@ async def _create_longform_session_internal(
         for i in range(chapter_count)
     ]
 
-    source_title = str(source_bundle.get("title", "") or "").strip()
-    channel_title_memory = [
-        str(v).strip()
-        for v in [
-            *list((channel_context or {}).get("recent_upload_titles") or []),
-            *list((channel_context or {}).get("top_video_titles") or []),
-        ]
-        if str(v).strip()
-    ]
-    title_variants = []
-    for t in [
-        *list(source_analysis.get("title_angles") or []),
-        *_same_arena_title_variants(
-            source_bundle or {"title": input_title or topic},
-            topic=topic or input_title,
-            format_preset=format_preset,
-            max_items=5,
-        ),
-        _longform_title_variant(input_title, topic),
-    ]:
-        tt = str(t or "").strip()
-        if not tt:
-            continue
-        if source_title and _title_is_too_close_to_source(tt, source_title):
-            continue
-        if _title_is_too_close_to_any(tt, channel_title_memory):
-            continue
-        if tt not in title_variants:
-            title_variants.append(tt)
-    if not title_variants:
-        title_variants = [
-            tt for tt in _same_arena_title_variants(
-            source_bundle or {"title": topic or input_title},
-            topic=topic or input_title,
-            format_preset=format_preset,
-            max_items=3,
-        ) if not _title_is_too_close_to_any(tt, [source_title, *channel_title_memory])]
-
-    description_variants = []
-    for d in [
-        input_description,
-        (input_description + " Built with NYPTID Studio."),
-        ("Built in NYPTID Studio: " + input_description),
-        *list(source_analysis.get("description_angles") or []),
-    ]:
-        dd = str(d or "").strip()
-        if dd and dd not in description_variants:
-            description_variants.append(dd)
-
-    thumbnail_prompts: list[str] = []
-    for prompt in [
-        *list(source_analysis.get("thumbnail_angles") or []),
-        f"{input_title} cinematic hero frame, high contrast, readable face/subject, YouTube thumbnail style",
-        f"{topic} dramatic split-moment scene, premium documentary look, 16:9 thumbnail",
-        f"{topic} faceless YouTube thumbnail, strong contrast, one clear emotional focal point, 16:9",
-    ]:
-        candidate = str(prompt or "").strip()
-        if candidate and candidate not in thumbnail_prompts:
-            thumbnail_prompts.append(candidate)
+    publish_candidates = _longform_build_publish_package_candidates(
+        template=template,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+        input_description=input_description,
+        source_bundle=source_bundle,
+        source_analysis=source_analysis,
+        channel_context=channel_context,
+    )
 
     metadata_pack = {
-        "title_variants": title_variants[:3],
-        "description_variants": description_variants[:3],
-        "thumbnail_prompts": thumbnail_prompts[:3],
-        "tags": [
-            template,
-            format_preset,
-            "nyptid",
-            "longform",
-            topic[:32].replace(" ", "_").lower(),
-            *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:6] if str(tag).strip()],
-        ],
+        "title_variants": list(publish_candidates.get("title_variants") or []),
+        "description_variants": list(publish_candidates.get("description_variants") or []),
+        "thumbnail_prompts": list(publish_candidates.get("thumbnail_prompts") or []),
+        "tags": list(publish_candidates.get("tags") or []),
         "source_video": source_bundle,
         "source_analysis": source_analysis,
         "youtube_channel": channel_context,

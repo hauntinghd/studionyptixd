@@ -113,6 +113,13 @@ type LongFormSession = {
         description_variants?: string[];
         thumbnail_prompts?: string[];
         tags?: string[];
+        selected_title?: string;
+        selected_description?: string;
+        selected_tags?: string[];
+        thumbnail_prompt?: string;
+        thumbnail_file?: string;
+        thumbnail_url?: string;
+        thumbnail_error?: string;
     };
 };
 
@@ -603,12 +610,17 @@ export default function LongFormPanel() {
     const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
     const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
     const publishTags = hasPublishPackage && Array.isArray(lfSession?.package?.tags) ? lfSession?.package?.tags as string[] : [];
+    const selectedTitle = hasPublishPackage ? String(lfSession?.package?.selected_title || titleVariants[0] || '') : '';
+    const selectedDescription = hasPublishPackage ? String(lfSession?.package?.selected_description || descriptionVariants[0] || '') : '';
+    const selectedTags = hasPublishPackage && Array.isArray(lfSession?.package?.selected_tags) ? lfSession?.package?.selected_tags as string[] : publishTags;
     const resolveSceneImageUrl = useCallback((raw: string) => {
         const u = String(raw || '').trim();
         if (!u) return '';
         if (u.startsWith('http://') || u.startsWith('https://')) return u;
         return `${API}${u}`;
     }, []);
+    const packageThumbnailUrl = hasPublishPackage ? resolveSceneImageUrl(String(lfSession?.package?.thumbnail_url || '')) : '';
+    const packageThumbnailError = hasPublishPackage ? String(lfSession?.package?.thumbnail_error || '') : '';
     const formatTimestamp = useCallback((value: number) => {
         const ts = Number(value || 0);
         if (ts <= 0) return 'Unknown';
@@ -1250,6 +1262,45 @@ export default function LongFormPanel() {
                     {hasPublishPackage ? (
                         <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5">
                             <h3 className="font-semibold text-white mb-3">Publish Package</h3>
+                            <div className="grid gap-4 lg:grid-cols-[320px,1fr] mb-4">
+                                <div className="rounded-xl border border-white/[0.08] bg-black/20 p-3 space-y-3">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-300">Selected Thumbnail</p>
+                                    {packageThumbnailUrl ? (
+                                        <img
+                                            src={packageThumbnailUrl}
+                                            alt="Generated publish thumbnail"
+                                            className="w-full aspect-video object-cover rounded-lg border border-white/[0.08]"
+                                        />
+                                    ) : (
+                                        <div className="w-full aspect-video rounded-lg border border-dashed border-white/[0.12] bg-black/20 flex items-center justify-center text-xs text-gray-500">
+                                            Thumbnail not generated yet
+                                        </div>
+                                    )}
+                                    {packageThumbnailError ? (
+                                        <p className="text-xs text-amber-300">{packageThumbnailError}</p>
+                                    ) : null}
+                                </div>
+                                <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4 space-y-3">
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-300">Selected Title</p>
+                                        <p className="mt-2 text-base font-semibold text-white">{selectedTitle || 'Pending title selection'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">Selected Description</p>
+                                        <p className="mt-2 text-sm text-gray-300">{selectedDescription || 'Pending description selection'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-300">Selected Tags</p>
+                                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-sky-100">
+                                            {selectedTags.map((tag, idx) => (
+                                                <span key={`selected-tag-${idx}`} className="rounded-full border border-sky-400/25 bg-sky-500/10 px-2 py-1">
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div className="grid md:grid-cols-4 gap-4 text-xs text-gray-300">
                                 <div>
                                     <p className="text-gray-500 mb-1">Title Variants</p>
