@@ -13402,6 +13402,31 @@ def _longform_session_summary(session: dict) -> dict:
     }
 
 
+def _longform_session_requires_source_analysis(session: dict) -> bool:
+    s = dict(session or {})
+    metadata_pack = dict(s.get("metadata_pack") or {})
+    return bool(
+        str(s.get("source_url", "") or "").strip()
+        or str(s.get("youtube_channel_id", "") or "").strip()
+        or str(s.get("analytics_notes", "") or "").strip()
+        or str(s.get("transcript_text", "") or "").strip()
+        or int(metadata_pack.get("analytics_asset_count", 0) or 0) > 0
+    )
+
+
+def _longform_session_analysis_complete(session: dict) -> bool:
+    s = dict(session or {})
+    if not _longform_session_requires_source_analysis(s):
+        return True
+    metadata_pack = dict(s.get("metadata_pack") or {})
+    source_video = dict(metadata_pack.get("source_video") or {})
+    source_analysis = dict(metadata_pack.get("source_analysis") or {})
+    youtube_channel = dict(metadata_pack.get("youtube_channel") or {})
+    source_context = str(metadata_pack.get("source_context", "") or "").strip()
+    analytics_summary = str(metadata_pack.get("analytics_evidence_summary", "") or "").strip()
+    return bool(source_context or analytics_summary or source_analysis or source_video or youtube_channel)
+
+
 def _longform_chapter_scene_targets(target_minutes: float) -> tuple[int, float]:
     chapter_count = _longform_chapter_count_for_minutes(target_minutes)
     chapter_target_sec = max(35.0, float(target_minutes) * 60.0 / max(chapter_count, 1))
@@ -13885,6 +13910,14 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
         if not isinstance(live, dict):
             return
         if str(live.get("status", "") or "") == "bootstrapping":
+            return
+        if not _longform_session_analysis_complete(live):
+            progress = dict(live.get("draft_progress") or {})
+            progress["stage"] = "analyzing_source"
+            live["draft_progress"] = progress
+            live["status"] = "bootstrapping"
+            live["updated_at"] = time.time()
+            _save_longform_sessions()
             return
         chapters = list(live.get("chapters") or [])
         if not chapters:
