@@ -9070,6 +9070,174 @@ def _normalize_longform_scenes_for_render(scenes: list) -> list:
     return normalized
 
 
+def _catalyst_scene_execution_profile(
+    *,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    scene_index: int = 0,
+    total_scenes: int = 0,
+) -> dict:
+    edit_blueprint = dict(edit_blueprint or {})
+    chapter_blueprint = dict(chapter_blueprint or {})
+    hook_strategy = dict(edit_blueprint.get("hook_strategy") or {})
+    pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
+    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    total = max(1, int(total_scenes or 1))
+    idx = max(0, int(scene_index or 0))
+    opening_span = 2 if total >= 6 else 1
+    closing_span = 2 if total >= 5 else 1
+    interrupt_every = max(2, int(round(float(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12) / 5.0)))
+    is_opening = idx < opening_span
+    is_closer = idx >= max(0, total - closing_span)
+    is_interrupt = idx > 0 and (idx + 1) % interrupt_every == 0
+    scene_role = "build"
+    if is_opening:
+        scene_role = "hook"
+    elif is_closer:
+        scene_role = "payoff"
+    elif is_interrupt:
+        scene_role = "pattern_interrupt"
+    motion_cues = _dedupe_preserve_order([
+        str(chapter_blueprint.get("motion_note", "") or ""),
+        *list(motion_strategy.get("camera_language") or [])[:3],
+        *list(motion_strategy.get("motion_graphics") or [])[:3],
+        *list(motion_strategy.get("visual_rules") or [])[:2],
+        "Introduce a visible contrast reset in this beat." if is_interrupt else "",
+        "Land the visual claim immediately before widening context." if is_opening else "",
+        "Resolve the idea with a clear payoff image and controlled pull-back." if is_closer else "",
+    ], max_items=8, max_chars=180)
+    sound_cues = _dedupe_preserve_order([
+        str(chapter_blueprint.get("sound_note", "") or ""),
+        *list(sound_strategy.get("mix_notes") or [])[:3],
+        *list(sound_strategy.get("silence_rules") or [])[:2],
+        *list(sound_strategy.get("voice_direction") or [])[:2],
+        "Use the silence pocket right before the reveal lands." if is_interrupt or is_closer else "",
+        "Front-load one decisive sting before the explanation starts." if is_opening else "",
+    ], max_items=8, max_chars=180)
+    retention_cues = _dedupe_preserve_order([
+        str(chapter_blueprint.get("retention_goal", "") or ""),
+        str(chapter_blueprint.get("improvement_focus", "") or ""),
+        str(hook_strategy.get("promise", "") or "") if is_opening else "",
+        str(hook_strategy.get("first_30s_mission", "") or "") if is_opening else "",
+        str(hook_strategy.get("open_loop", "") or ""),
+        "Reset attention with a new contrast or consequence right now." if is_interrupt else "",
+        "Make the payoff concrete enough that the next chapter feels inevitable." if is_closer else "",
+    ], max_items=8, max_chars=180)
+    return {
+        "scene_role": scene_role,
+        "is_opening": is_opening,
+        "is_closer": is_closer,
+        "is_interrupt": is_interrupt,
+        "motion_cues": motion_cues,
+        "sound_cues": sound_cues,
+        "retention_cues": retention_cues,
+        "music_profile": str(sound_strategy.get("music_profile", "") or ""),
+        "sfx_profile": str(sound_strategy.get("sfx_profile", "") or ""),
+        "transition_style": str(
+            motion_strategy.get("transition_style", "")
+            or pacing_strategy.get("transition_style", "")
+            or "smooth"
+        ),
+        "pattern_interrupt_interval_sec": int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12),
+        "voice_direction": _dedupe_preserve_order(list(sound_strategy.get("voice_direction") or []), max_items=6, max_chars=180),
+    }
+
+
+def _build_longform_scene_execution_prompt(
+    *,
+    scene: dict,
+    template: str,
+    format_preset: str,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    scene_index: int = 0,
+    total_scenes: int = 0,
+    skeleton_anchor: str = "",
+    art_style: str = "auto",
+) -> str:
+    scene = dict(scene or {})
+    visual_description = str(scene.get("visual_description", "") or "").strip()
+    motion_direction = str(scene.get("motion_direction", "") or "").strip()
+    engagement_purpose = str(scene.get("engagement_purpose", "") or "").strip()
+    execution = _catalyst_scene_execution_profile(
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        scene_index=scene_index,
+        total_scenes=total_scenes,
+    )
+    visual_delta = " ".join(part for part in [
+        visual_description,
+        f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
+        f"Motion execution: {'; '.join(execution.get('motion_cues') or [])}." if execution.get("motion_cues") else "",
+        f"Retention objective: {'; '.join(execution.get('retention_cues') or [])}." if execution.get("retention_cues") else "",
+        f"Scene-specific motion beat: {motion_direction}." if motion_direction else "",
+        f"Engagement beat: {engagement_purpose}." if engagement_purpose else "",
+        "Pattern interrupt required in composition, scale, or contrast." if execution.get("is_interrupt") else "",
+        "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
+        "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
+        "No text overlays, no chapter cards, no labels, no UI panels, no watermarks.",
+    ] if part).strip()
+    return _build_scene_prompt_with_reference(
+        template=template,
+        visual_description=visual_delta,
+        quality_mode="cinematic",
+        skeleton_anchor=skeleton_anchor,
+        reference_dna={},
+        reference_lock_mode="strict",
+        art_style=art_style,
+    )
+
+
+def _build_longform_scene_motion_prompt(
+    *,
+    scene: dict,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    scene_index: int = 0,
+    total_scenes: int = 0,
+) -> str:
+    scene = dict(scene or {})
+    execution = _catalyst_scene_execution_profile(
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        scene_index=scene_index,
+        total_scenes=total_scenes,
+    )
+    parts = _dedupe_preserve_order([
+        str(scene.get("visual_description", "") or ""),
+        str(scene.get("motion_direction", "") or ""),
+        *list(execution.get("motion_cues") or [])[:4],
+        "Start with a stronger push-in and immediate reveal." if execution.get("is_opening") else "",
+        "Use a visible pattern interrupt and contrast reset mid-shot." if execution.get("is_interrupt") else "",
+        "Finish with a more deliberate pull-back or consequence hold." if execution.get("is_closer") else "",
+    ], max_items=8, max_chars=180)
+    return " ".join(parts).strip()
+
+
+def _build_longform_scene_sfx_brief(
+    *,
+    scene: dict,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    scene_index: int = 0,
+    total_scenes: int = 0,
+) -> str:
+    scene = dict(scene or {})
+    execution = _catalyst_scene_execution_profile(
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        scene_index=scene_index,
+        total_scenes=total_scenes,
+    )
+    return " ".join(part for part in [
+        str(scene.get("visual_description", "") or "").strip(),
+        f"SFX direction: {str(scene.get('sfx_direction', '') or '').strip()}." if str(scene.get("sfx_direction", "") or "").strip() else "",
+        f"Engagement purpose: {str(scene.get('engagement_purpose', '') or '').strip()}." if str(scene.get("engagement_purpose", "") or "").strip() else "",
+        f"Sound execution: {'; '.join(execution.get('sound_cues') or [])}." if execution.get("sound_cues") else "",
+    ] if part).strip()
+
+
 def _scale_scene_durations_to_target(scenes: list, target_sec: float) -> list:
     # Hard lock pacing to 5s per scene for deterministic sync.
     scaled = []
@@ -9471,11 +9639,9 @@ def _transition_duration_for_style(style: str) -> float:
 
 
 def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
-    if template not in {"skeleton", "story", "motivation"}:
-        return False
     if value is None:
-        return True
-    return _bool_from_any(value, True)
+        return template in {"skeleton", "story", "motivation"}
+    return _bool_from_any(value, template in {"skeleton", "story", "motivation"})
 
 
 def _normalize_cinematic_boost(value) -> bool:
@@ -9526,6 +9692,8 @@ async def _build_micro_escalation_clips(
     source_clips: list[Path],
     source_durations: list[float],
     job_ts: str,
+    scene_payloads: list[dict] | None = None,
+    pattern_interrupt_interval_sec: int = 12,
 ) -> tuple[list[Path], list[float]]:
     """Split 5s scene clips into shorter editorial beats without extra generation calls."""
     if len(source_clips) > MICRO_ESCALATION_MAX_SOURCE_SCENES:
@@ -9537,6 +9705,14 @@ async def _build_micro_escalation_clips(
         clip_path = str(clip)
         base_dur = source_durations[i] if i < len(source_durations) else _probe_video_duration_seconds(clip_path)
         base_dur = max(0.5, float(base_dur or 5.0))
+        scene_payload = dict(scene_payloads[i] or {}) if scene_payloads and i < len(scene_payloads) else {}
+        purpose = str(scene_payload.get("engagement_purpose", "") or "").lower()
+        motion_direction = str(scene_payload.get("motion_direction", "") or "").lower()
+        interrupt_every = max(2, int(round(float(pattern_interrupt_interval_sec or 12) / 5.0)))
+        is_opening = i < 2
+        is_interrupt = i > 0 and (i + 1) % interrupt_every == 0
+        is_payoff = i >= max(0, len(source_clips) - 2)
+        strong_interrupt = any(token in purpose or token in motion_direction for token in ["interrupt", "contrast", "reveal", "payoff", "hook"])
         if base_dur < 3.2:
             micro_clips.append(clip)
             micro_durations.append(base_dur)
@@ -9546,6 +9722,10 @@ async def _build_micro_escalation_clips(
         boundaries = [0.0, round(base_dur * 0.34, 3), round(base_dur * 0.68, 3), base_dur]
         if base_dur < 4.8:
             boundaries = [0.0, round(base_dur * 0.52, 3), base_dur]
+        if is_opening or is_interrupt or strong_interrupt:
+            boundaries = [0.0, round(base_dur * 0.26, 3), round(base_dur * 0.58, 3), base_dur]
+        elif is_payoff:
+            boundaries = [0.0, round(base_dur * 0.44, 3), base_dur]
 
         for b in range(len(boundaries) - 1):
             if len(micro_clips) >= MICRO_ESCALATION_MAX_OUTPUT_CLIPS:
@@ -9554,7 +9734,13 @@ async def _build_micro_escalation_clips(
             seg_dur = max(0.42, boundaries[b + 1] - boundaries[b])
             out = TEMP_DIR / f"micro_{job_ts}_{i}_{b}.mp4"
             vf = "eq=contrast=1.02:saturation=1.03"
-            if b == 1:
+            if is_opening and b == 0:
+                vf = "setpts=0.88*PTS,eq=contrast=1.10:saturation=1.08"
+            elif (is_interrupt or strong_interrupt) and b == 1:
+                vf = "setpts=0.90*PTS,eq=contrast=1.12:saturation=1.10"
+            elif is_payoff and b == len(boundaries) - 2:
+                vf = "setpts=0.98*PTS,eq=contrast=1.06:saturation=1.06"
+            elif b == 1:
                 vf = "setpts=0.92*PTS,eq=contrast=1.08:saturation=1.06"
             elif b >= 2:
                 vf = "setpts=0.97*PTS,eq=contrast=1.05:saturation=1.1"
@@ -9627,7 +9813,11 @@ async def _quintuple_check_scene_sfx(
             continue
 
         retry_out = str(TEMP_DIR / (f"{job_id}_sfx_retry_{i}.mp3" if job_id else f"sfx_retry_{i}_{int(time.time()*1000)}.mp3"))
-        desc = scene.get("visual_description", "")
+        desc = " ".join(part for part in [
+            str(scene.get("visual_description", "") or "").strip(),
+            f"SFX direction: {str(scene.get('sfx_direction', '') or '').strip()}." if str(scene.get("sfx_direction", "") or "").strip() else "",
+            f"Engagement purpose: {str(scene.get('engagement_purpose', '') or '').strip()}." if str(scene.get("engagement_purpose", "") or "").strip() else "",
+        ] if part).strip()
         retry = await generate_scene_sfx(desc, expected, retry_out, template=template, scene_index=i, total_scenes=len(scenes))
         retry_ok = bool(retry and Path(retry).exists() and Path(retry).stat().st_size > 0)
         retry_dur = _probe_audio_duration_seconds(retry) if retry_ok else 0.0
@@ -14291,7 +14481,168 @@ async def _generate_spooky_bgm_track(total_duration_sec: float, output_path: str
     return ""
 
 
-async def _mix_ambience_tracks(sfx_track: str, bgm_track: str, output_path: str) -> str:
+async def _generate_catalyst_bgm_track(
+    total_duration_sec: float,
+    output_path: str,
+    music_profile: str = "",
+    whisper_mode: str = "subtle",
+    format_preset: str = "",
+) -> str:
+    duration = max(6.0, float(total_duration_sec or 0.0))
+    fade_out_start = max(0.0, duration - 2.0)
+    seed_clip = str(TEMP_DIR / f"bgm_seed_{int(time.time() * 1000)}.mp3")
+    profile = str(music_profile or "").strip().lower()
+    whisper_hint = "subtle whisper texture" if whisper_mode == "cinematic" else ("barely-there dark air" if whisper_mode == "subtle" else "clean no-whisper texture")
+    prompt_map = {
+        "cinematic_dark_tension": "Instrumental cinematic dark-tension music bed, ominous pulse, restrained trailer swell, no vocals, no speech, built to sit under narration.",
+        "documentary_tension": "Instrumental premium documentary tension music bed, polished pulse, executive trailer texture, subtle low-end movement, no vocals, no speech, built for YouTube narration.",
+        "kinetic_recap_bed": "Instrumental high-pressure recap music bed, rhythmic pulse, sharp energy, trailer percussion texture, no vocals, no speech, built to stay under narration.",
+        "story_pulse_bed": "Instrumental cinematic story-channel bed, emotional pulse, controlled tension, light trailer texture, no vocals, no speech, built under narration.",
+        "precision_explainer_bed": "Instrumental precision explainer music bed, clean pulse, polished documentary texture, restrained movement, no vocals, no speech, built under narration.",
+    }
+    bgm_prompt = prompt_map.get(profile) or prompt_map.get("documentary_tension")
+    bgm_prompt = f"{bgm_prompt} {whisper_hint}. Format: {format_preset or 'documentary'}."
+    try:
+        if ELEVENLABS_API_KEY:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    "https://api.elevenlabs.io/v1/sound-generation",
+                    headers={
+                        "xi-api-key": ELEVENLABS_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "text": bgm_prompt,
+                        "duration_seconds": 22.0,
+                        "prompt_influence": 0.64,
+                    },
+                )
+            if resp.status_code in (200, 201):
+                with open(seed_clip, "wb") as f:
+                    f.write(resp.content)
+                if _audio_track_exists(seed_clip):
+                    cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-stream_loop",
+                        "-1",
+                        "-i",
+                        seed_clip,
+                        "-t",
+                        str(duration),
+                        "-af",
+                        f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out_start}:d=2.0,apad=pad_dur=0.8",
+                        "-ar",
+                        "44100",
+                        "-ac",
+                        "1",
+                        output_path,
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.communicate()
+                    if proc.returncode == 0 and _audio_track_exists(output_path):
+                        return output_path
+        low_freq = 62 if "dark" in profile else (74 if "recap" in profile else 68)
+        high_freq = 95 if "story" in profile else (112 if "recap" in profile else 88)
+        noise_amp = "0.030" if "recap" in profile else ("0.022" if "story" in profile else "0.026")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={low_freq}:sample_rate=44100:duration={duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={high_freq}:sample_rate=44100:duration={duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anoisesrc=color=pink:amplitude={noise_amp}:sample_rate=44100:duration={duration}",
+            "-filter_complex",
+            (
+                "[0:a]volume=0.15[a0];"
+                "[1:a]volume=0.08,lowpass=f=1200[a1];"
+                "[2:a]highpass=f=120,lowpass=f=4200,volume=0.07[a2];"
+                f"[a0][a1][a2]amix=inputs=3:duration=longest:normalize=0,"
+                f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out_start}:d=2.0,apad=pad_dur=0.8[aout]"
+            ),
+            "-map",
+            "[aout]",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            output_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and _audio_track_exists(output_path):
+            return output_path
+    except Exception as e:
+        log.warning(f"Catalyst BGM generation failed (non-fatal): {e}")
+    finally:
+        Path(seed_clip).unlink(missing_ok=True)
+    return ""
+
+
+def _catalyst_audio_mix_profile(
+    edit_blueprint: dict | None = None,
+    *,
+    format_preset: str = "",
+    render_horror_audio: bool = False,
+) -> dict:
+    edit_blueprint = dict(edit_blueprint or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
+    music_profile = str(sound_strategy.get("music_profile", "") or "").strip().lower()
+    mix_notes = " ".join(str(v).strip().lower() for v in list(sound_strategy.get("mix_notes") or []) if str(v).strip())
+    pattern_interrupt = int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12)
+    voice_speed = 1.0
+    if pattern_interrupt <= 9:
+        voice_speed = 1.08
+    elif pattern_interrupt <= 11:
+        voice_speed = 1.05
+    elif format_preset in {"documentary", "explainer", "recap"}:
+        voice_speed = 1.03
+    ambience_gain = 0.18
+    bgm_gain = 0.55
+    sfx_gain = 1.0
+    if music_profile in {"documentary_tension", "precision_explainer_bed"}:
+        ambience_gain = 0.15
+        bgm_gain = 0.42
+    elif music_profile in {"kinetic_recap_bed"}:
+        ambience_gain = 0.22
+        bgm_gain = 0.35
+    elif music_profile in {"story_pulse_bed"}:
+        ambience_gain = 0.17
+        bgm_gain = 0.46
+    if "silence" in mix_notes:
+        ambience_gain = max(0.12, ambience_gain - 0.03)
+    return {
+        "voice_speed": max(0.92, min(1.16, voice_speed)),
+        "voice_gain": 1.0,
+        "ambience_gain": ambience_gain,
+        "bgm_gain": bgm_gain,
+        "sfx_gain": sfx_gain,
+        "bgm_required": bool(render_horror_audio or format_preset in {"documentary", "explainer", "recap", "story_channel"}),
+        "music_profile": music_profile or ("cinematic_dark_tension" if render_horror_audio else "documentary_tension"),
+    }
+
+
+async def _mix_ambience_tracks(
+    sfx_track: str,
+    bgm_track: str,
+    output_path: str,
+    *,
+    sfx_gain: float = 1.0,
+    bgm_gain: float = 0.55,
+) -> str:
     """Mix scene SFX and background music into one ambience track."""
     has_sfx = _audio_track_exists(sfx_track)
     has_bgm = _audio_track_exists(bgm_track)
@@ -14308,8 +14659,8 @@ async def _mix_ambience_tracks(sfx_track: str, bgm_track: str, output_path: str)
             bgm_track,
             "-filter_complex",
             (
-                "[0:a]volume=1.0[sfx];"
-                "[1:a]volume=0.55,highpass=f=40,lowpass=f=6500[bgm];"
+                f"[0:a]volume={max(0.1, float(sfx_gain or 1.0)):.3f}[sfx];"
+                f"[1:a]volume={max(0.05, float(bgm_gain or 0.55)):.3f},highpass=f=40,lowpass=f=6500[bgm];"
                 "[sfx][bgm]amix=inputs=2:duration=longest:dropout_transition=2,"
                 "alimiter=limit=0.93,apad=pad_dur=0.8[aout]"
             ),
@@ -14483,7 +14834,7 @@ async def _composite_video_on_runpod(
             merge_cmd = (
                 f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' -i '{remote_sfx}' "
                 f"-vf \"ass={remote_sub}\" "
-                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];"
+                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.16[sfx];"
                 f"[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]\" "
                 f"-map 0:v -map \"[aout]\" -c:v libx264 -preset fast -pix_fmt yuv420p "
                 f"-c:a aac -b:a 192k -shortest '{remote_output}'"
@@ -14497,7 +14848,7 @@ async def _composite_video_on_runpod(
         elif remote_sfx:
             merge_cmd = (
                 f"ffmpeg -y -i '{remote_merged}' -i '{remote_audio}' -i '{remote_sfx}' "
-                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];"
+                f"-filter_complex \"[1:a]volume=1.0[voice];[2:a]volume=0.16[sfx];"
                 f"[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]\" "
                 f"-map 0:v -map \"[aout]\" -c:v libx264 -preset fast -pix_fmt yuv420p "
                 f"-c:a aac -b:a 192k -shortest '{remote_output}'"
@@ -14553,6 +14904,11 @@ async def composite_video(
     bgm_track: str = "",
     transition_style: str = "smooth",
     micro_escalation_mode: bool = False,
+    pattern_interrupt_interval_sec: int = 12,
+    voice_gain: float = 1.0,
+    ambience_gain: float = 0.18,
+    sfx_gain: float = 1.0,
+    bgm_gain: float = 0.55,
 ) -> str:
     """Composite scene clips into final MP4 with optional burned-in captions and SFX.
     scene_assets: list of dicts with keys: image, frames, kling_clip
@@ -14615,7 +14971,13 @@ async def composite_video(
     working_durations = [clip_durations[i] if i < len(clip_durations) else _probe_video_duration_seconds(str(c)) for i, c in enumerate(existing_clips)]
     if micro_escalation_mode:
         try:
-            working_clips, working_durations = await _build_micro_escalation_clips(existing_clips, working_durations, job_ts)
+            working_clips, working_durations = await _build_micro_escalation_clips(
+                existing_clips,
+                working_durations,
+                job_ts,
+                scene_payloads=scenes,
+                pattern_interrupt_interval_sec=pattern_interrupt_interval_sec,
+            )
             log.info(f"Micro-escalation enabled: {len(existing_clips)} base clips -> {len(working_clips)} beat clips")
         except Exception as e:
             log.warning(f"Micro-escalation build failed, falling back to base clips: {e}")
@@ -14630,7 +14992,13 @@ async def composite_video(
     ambience_track = ""
     if sfx_track or _audio_track_exists(bgm_track):
         ambience_path = str(TEMP_DIR / ("ambience_full_" + job_ts + ".mp3"))
-        ambience_track = await _mix_ambience_tracks(sfx_track, bgm_track, ambience_path)
+        ambience_track = await _mix_ambience_tracks(
+            sfx_track,
+            bgm_track,
+            ambience_path,
+            sfx_gain=sfx_gain,
+            bgm_gain=bgm_gain,
+        )
 
     if RUNPOD_COMPOSITOR_ENABLED:
         try:
@@ -14719,7 +15087,7 @@ async def composite_video(
                 "-i", audio_path,
                 "-i", ambience_track,
                 "-vf", f"ass={sub_abs}",
-                "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
+                "-filter_complex", f"[1:a]volume={max(0.6, float(voice_gain or 1.0)):.3f}[voice];[2:a]volume={max(0.08, float(ambience_gain or 0.18)):.3f}[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
@@ -14746,7 +15114,7 @@ async def composite_video(
                 "-i", str(merged_video),
                 "-i", audio_path,
                 "-i", ambience_track,
-                "-filter_complex", "[1:a]volume=1.0[voice];[2:a]volume=0.18[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
+                "-filter_complex", f"[1:a]volume={max(0.6, float(voice_gain or 1.0)):.3f}[voice];[2:a]volume={max(0.08, float(ambience_gain or 0.18)):.3f}[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
@@ -16137,6 +16505,8 @@ async def _longform_attach_scene_previews(
     chapter: dict,
     resolution: str = "720p_landscape",
     format_preset: str = "",
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
 ) -> dict:
     out = dict(chapter or {})
     chapter_index = int(out.get("index", 0) or 0)
@@ -16228,13 +16598,15 @@ async def _longform_attach_scene_previews(
         )
         scene["visual_description"] = visual_desc
 
-        prompt = _build_scene_prompt_with_reference(
+        prompt = _build_longform_scene_execution_prompt(
+            scene=scene,
             template=template,
-            visual_description=visual_desc,
-            quality_mode="cinematic",
+            format_preset=format_preset,
+            edit_blueprint=edit_blueprint,
+            chapter_blueprint=chapter_blueprint,
+            scene_index=scene_idx,
+            total_scenes=len(scripted_scenes),
             skeleton_anchor=skeleton_anchor,
-            reference_dna={},
-            reference_lock_mode="strict",
             art_style=_longform_default_art_style(template, format_preset),
         )
         filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
@@ -16391,6 +16763,8 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 chapter=chapter,
                 resolution=resolution,
                 format_preset=str(session.get("format_preset", "") or ""),
+                edit_blueprint=edit_blueprint,
+                chapter_blueprint=chapter_blueprint,
             )
             auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
             chapter["status"] = "approved" if auto_pipeline else "pending_review"
@@ -16560,6 +16934,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         format_preset = str(session_snapshot.get("format_preset", "explainer") or "explainer").strip().lower()
         edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
         channel_memory_snapshot = dict(session_snapshot.get("channel_memory") or {})
+        sound_mix_profile = _catalyst_audio_mix_profile(
+            edit_blueprint,
+            format_preset=format_preset,
+            render_horror_audio=False,
+        )
         session_tone = _longform_detect_tone(template, topic, input_title, input_description)
         chapter_tones = {
             int((chapter or {}).get("index", idx) or idx): str((chapter or {}).get("tone", session_tone) or session_tone)
@@ -16567,6 +16946,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         }
         render_horror_audio = _longform_is_horror_tone(session_tone) or any(
             _longform_is_horror_tone(tone) for tone in chapter_tones.values()
+        )
+        sound_mix_profile = _catalyst_audio_mix_profile(
+            edit_blueprint,
+            format_preset=format_preset,
+            render_horror_audio=render_horror_audio,
         )
         transition_style = _normalize_transition_style(
             str(
@@ -16612,6 +16996,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             for scene in chapter_scenes:
                 scene_copy = dict(scene or {})
                 scene_copy["_chapter_index"] = chapter_idx
+                scene_copy["_chapter_blueprint"] = _catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_idx)
                 scenes.append(scene_copy)
                 cursor_sec += float(scene_copy.get("duration_sec", 6) or 6)
             chapter_markers.append({
@@ -16659,13 +17044,16 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 format_preset=format_preset,
             )
             scene["visual_description"] = locked_visual
-            full_prompt = _build_scene_prompt_with_reference(
+            chapter_blueprint = dict(scene.get("_chapter_blueprint") or {})
+            full_prompt = _build_longform_scene_execution_prompt(
+                scene=scene,
                 template=template,
-                visual_description=locked_visual,
-                quality_mode="cinematic",
+                format_preset=format_preset,
+                edit_blueprint=edit_blueprint,
+                chapter_blueprint=chapter_blueprint,
+                scene_index=i,
+                total_scenes=len(scenes),
                 skeleton_anchor=skeleton_anchor,
-                reference_dna={},
-                reference_lock_mode="strict",
                 art_style=longform_art_style,
             )
             scene_prompts.append(locked_visual)
@@ -16722,7 +17110,13 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 for _attempt in range(1, LONGFORM_MAX_SCENE_RETRIES + 1):
                     try:
                         clip_path = str(TEMP_DIR / f"{job_id}_lf_clip_{i}.mp4")
-                        motion_prompt = locked_visual + " " + TEMPLATE_KLING_MOTION.get(template, "Cinematic motion.")
+                        motion_prompt = _build_longform_scene_motion_prompt(
+                            scene=scene,
+                            edit_blueprint=edit_blueprint,
+                            chapter_blueprint=chapter_blueprint,
+                            scene_index=i,
+                            total_scenes=len(scenes),
+                        ) + " " + TEMPLATE_KLING_MOTION.get(template, "Cinematic motion.")
                         out_clip = await animate_image_kling(
                             image_path=img_path,
                             prompt=motion_prompt,
@@ -16750,7 +17144,13 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         _job_set_stage(job_id, "generating_voice", 70)
         full_narration = " ".join(str((s or {}).get("narration", "") or "") for s in scenes)
         audio_path = str(TEMP_DIR / f"{job_id}_lf_voice.mp3")
-        vo_result = await generate_voiceover(full_narration, audio_path, template=template, language=language)
+        vo_result = await generate_voiceover(
+            full_narration,
+            audio_path,
+            template=template,
+            language=language,
+            override_speed=float(sound_mix_profile.get("voice_speed", 1.0) or 1.0),
+        )
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
 
@@ -16770,11 +17170,20 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             for i, scene in enumerate(scenes):
                 sfx_out = str(TEMP_DIR / f"{job_id}_lf_sfx_{i}.mp3")
                 chapter_tone = str(chapter_tones.get(int(scene.get("_chapter_index", 0) or 0), session_tone) or session_tone)
-                desc = _longform_tone_locked_visual_description(
-                    str(scene.get("visual_description", "") or ""),
-                    tone=chapter_tone,
-                    template=template,
-                    format_preset=format_preset,
+                desc = _build_longform_scene_sfx_brief(
+                    scene={
+                        **dict(scene or {}),
+                        "visual_description": _longform_tone_locked_visual_description(
+                            str(scene.get("visual_description", "") or ""),
+                            tone=chapter_tone,
+                            template=template,
+                            format_preset=format_preset,
+                        )
+                    },
+                    edit_blueprint=edit_blueprint,
+                    chapter_blueprint=dict(scene.get("_chapter_blueprint") or {}),
+                    scene_index=i,
+                    total_scenes=len(scenes),
                 ) + whisper_hint
                 dur = float(scene.get("duration_sec", 6) or 6)
                 sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
@@ -16782,10 +17191,19 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
 
         bgm_track = ""
-        if render_horror_audio:
+        if bool(sound_mix_profile.get("bgm_required")):
             bgm_path = str(TEMP_DIR / f"{job_id}_lf_horror_bgm.mp3")
             total_duration = sum(float((s or {}).get("duration_sec", 5.0) or 5.0) for s in scenes) + 1.0
-            bgm_track = await _generate_spooky_bgm_track(total_duration, bgm_path, whisper_mode=whisper_mode)
+            if render_horror_audio:
+                bgm_track = await _generate_spooky_bgm_track(total_duration, bgm_path, whisper_mode=whisper_mode)
+            else:
+                bgm_track = await _generate_catalyst_bgm_track(
+                    total_duration,
+                    bgm_path,
+                    music_profile=str(sound_mix_profile.get("music_profile", "") or ""),
+                    whisper_mode=whisper_mode,
+                    format_preset=format_preset,
+                )
 
         _job_set_stage(job_id, "compositing", 84)
         output_filename = f"longform_{template}_{job_id}.mp4"
@@ -16802,6 +17220,13 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             bgm_track=bgm_track,
             transition_style=transition_style,
             micro_escalation_mode=micro_escalation_mode,
+            pattern_interrupt_interval_sec=int(
+                edit_blueprint.get("pacing_strategy", {}).get("pattern_interrupt_interval_sec", 12) or 12
+            ),
+            voice_gain=float(sound_mix_profile.get("voice_gain", 1.0) or 1.0),
+            ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
+            sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
+            bgm_gain=float(sound_mix_profile.get("bgm_gain", 0.55) or 0.55),
         )
 
         for sfx in sfx_paths:
