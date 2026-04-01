@@ -52,6 +52,9 @@ type ConnectedYouTubeChannel = {
     thumbnail_url?: string;
     subscriber_count?: number;
     video_count?: number;
+    last_outcome_sync_at?: number;
+    last_outcome_sync_count?: number;
+    last_outcome_sync_error?: string;
     analytics_snapshot?: {
         channel_summary?: string;
         title_pattern_hints?: string[];
@@ -243,6 +246,7 @@ export default function LongFormPanel() {
     const [youtubeLoading, setYoutubeLoading] = useState(false);
     const [youtubeError, setYoutubeError] = useState('');
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
+    const [youtubeOutcomeSyncing, setYoutubeOutcomeSyncing] = useState(false);
     const [sessionIdInput, setSessionIdInput] = useState('');
     const [projectSessions, setProjectSessions] = useState<LongFormSessionSummary[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
@@ -403,6 +407,34 @@ export default function LongFormPanel() {
             if (!silent) setRefreshing(false);
         }
     }, [apiCall, lfSession?.session_id, persistSessionId]);
+
+    const syncConnectedChannelOutcomes = useCallback(async (sessionScoped = false) => {
+        if (!session || !youtubeChannelId.trim()) return;
+        setYoutubeOutcomeSyncing(true);
+        setYoutubeError('');
+        try {
+            const payload = await apiCall(`/api/youtube/channels/${youtubeChannelId}/sync-outcomes`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    session_id: sessionScoped ? String(lfSession?.session_id || '').trim() : '',
+                    candidate_limit: 18,
+                    refresh_existing: false,
+                }),
+            });
+            const syncedSession = (payload as any).session as LongFormSession | undefined;
+            if (syncedSession && String(syncedSession.session_id || '').trim()) {
+                setLfSession(syncedSession);
+                setSessionIdInput(String(syncedSession.session_id || '').trim());
+            } else if (lfSession?.session_id && sessionScoped) {
+                await refreshStatus(lfSession.session_id, true);
+            }
+            await loadYouTubeChannels(true);
+        } catch (e: any) {
+            setYoutubeError(e?.message || 'Failed to sync published channel outcomes');
+        } finally {
+            setYoutubeOutcomeSyncing(false);
+        }
+    }, [apiCall, lfSession?.session_id, loadYouTubeChannels, refreshStatus, session, youtubeChannelId]);
 
     const loadProjects = useCallback(async () => {
         if (!session) return;
@@ -904,6 +936,14 @@ export default function LongFormPanel() {
                                 >
                                     {youtubeLoading ? 'Refreshing...' : 'Refresh Channels'}
                                 </button>
+                                <button
+                                    type="button"
+                                    onClick={() => void syncConnectedChannelOutcomes(false)}
+                                    disabled={!canUseDeepAnalysis || !youtubeChannelId || youtubeOutcomeSyncing}
+                                    className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
+                                >
+                                    {youtubeOutcomeSyncing ? 'Syncing Outcomes...' : 'Sync Outcomes'}
+                                </button>
                             </div>
                         </div>
                         <p className="mt-2 text-xs text-cyan-300/80">
@@ -924,6 +964,11 @@ export default function LongFormPanel() {
                                             {current.last_sync_error ? (
                                                 <p className="mt-2 text-amber-300">Last sync note: {current.last_sync_error}</p>
                                             ) : null}
+                                            <div className="mt-2 grid gap-2 md:grid-cols-3 text-[11px] text-cyan-100/80">
+                                                <div>Outcome syncs: {Number(current.last_outcome_sync_count || 0)}</div>
+                                                <div>Last outcome sync: {current.last_outcome_sync_at ? new Date(Number(current.last_outcome_sync_at) * 1000).toLocaleString() : 'never'}</div>
+                                                <div>Outcome sync note: {String(current.last_outcome_sync_error || 'clean')}</div>
+                                            </div>
                                         </>
                                     );
                                 })()}
@@ -1672,15 +1717,22 @@ export default function LongFormPanel() {
 
                             <div className="flex flex-wrap gap-3">
                                 <button
+                                    onClick={() => void syncConnectedChannelOutcomes(true)}
+                                    disabled={outcomeSaving || outcomeAutoSaving || youtubeOutcomeSyncing || !youtubeChannelId}
+                                    className="px-4 py-2 rounded-lg border border-amber-400/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-100 text-sm font-medium disabled:opacity-50 transition"
+                                >
+                                    {youtubeOutcomeSyncing ? 'Syncing Published Outcome...' : 'Sync Current Session From Channel'}
+                                </button>
+                                <button
                                     onClick={autoPullOutcome}
-                                    disabled={outcomeSaving || outcomeAutoSaving}
+                                    disabled={outcomeSaving || outcomeAutoSaving || youtubeOutcomeSyncing}
                                     className="px-4 py-2 rounded-lg border border-cyan-400/30 bg-black/20 hover:bg-cyan-500/10 text-cyan-100 text-sm font-medium disabled:opacity-50 transition"
                                 >
                                     {outcomeAutoSaving ? 'Auto-Pulling Channel Outcome...' : 'Auto-Pull From Connected Channel'}
                                 </button>
                                 <button
                                     onClick={submitOutcome}
-                                    disabled={outcomeSaving || outcomeAutoSaving}
+                                    disabled={outcomeSaving || outcomeAutoSaving || youtubeOutcomeSyncing}
                                     className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium disabled:opacity-50 transition"
                                 >
                                     {outcomeSaving ? 'Updating Catalyst Memory...' : 'Ingest Outcome Into Catalyst'}

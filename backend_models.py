@@ -190,3 +190,9 @@ class CatalystAutoOutcomeHarvestRequest(BaseModel):
     video_id: str = ""
     candidate_limit: int = 12
     auto_fetch_channel_metrics: bool = True
+
+
+class CatalystChannelOutcomeSyncRequest(BaseModel):
+    session_id: str = ""
+    candidate_limit: int = 18
+    refresh_existing: bool = False

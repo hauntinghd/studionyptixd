@@ -182,6 +182,7 @@ from backend_models import (
     YouTubeChannelSelectRequest,
     CatalystOutcomeIngestRequest,
     CatalystAutoOutcomeHarvestRequest,
+    CatalystChannelOutcomeSyncRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -501,6 +502,7 @@ _longform_sessions_lock = asyncio.Lock()
 _longform_analysis_semaphore = asyncio.Semaphore(1)
 _longform_draft_semaphore = asyncio.Semaphore(1)
 _longform_render_semaphore = asyncio.Semaphore(1)
+_longform_outcome_sync_semaphore = asyncio.Semaphore(1)
 CATALYST_LEARNING_RECORDS_FILE = TEMP_DIR / "catalyst_learning_records.json"
 CATALYST_CHANNEL_MEMORY_FILE = TEMP_DIR / "catalyst_channel_memory.json"
 CATALYST_REFERENCE_MEMORY_FILE = Path(__file__).resolve().parent / "ops" / "catalyst_documentary_reference_memory.json"
@@ -1189,6 +1191,8 @@ def _catalyst_title_novelty_score(title: str, source_title: str = "", recent_tit
         score -= 48
     elif recent and _title_is_too_close_to_any(value, recent):
         score -= 34
+    if _title_reuses_opening_pattern(value, source_value, recent):
+        score -= 22
     words = re.findall(r"[A-Za-z0-9']+", value)
     if len(words) < 4:
         score -= 10
@@ -1536,6 +1540,9 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "view_count": int(data.get("view_count", 0) or 0),
         "linked_at": float(data.get("linked_at", 0.0) or 0.0),
         "last_synced_at": float(data.get("last_synced_at", 0.0) or 0.0),
+        "last_outcome_sync_at": float(data.get("last_outcome_sync_at", 0.0) or 0.0),
+        "last_outcome_sync_count": int(data.get("last_outcome_sync_count", 0) or 0),
+        "last_outcome_sync_error": str(data.get("last_outcome_sync_error", "") or ""),
         "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
         "analytics_snapshot": {
             "channel_summary": str(analytics_snapshot.get("channel_summary", "") or ""),
@@ -2418,6 +2425,38 @@ def _title_is_too_close_to_any(candidate: str, existing_titles: list[str]) -> bo
     return False
 
 
+def _title_opening_signature(text: str, max_tokens: int = 3) -> str:
+    cleaned = str(text or "").strip().lower()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^\s*top\s+\d+\b", "toplist", cleaned)
+    cleaned = re.sub(r"^\s*what\s+(?:really\s+)?happened(?:\s+to)?\b", "whathappened", cleaned)
+    tokens = _title_signature_tokens(cleaned)
+    if not tokens:
+        return ""
+    return " ".join(tokens[: max(1, int(max_tokens or 3))]).strip()
+
+
+def _title_reuses_opening_pattern(candidate: str, source_title: str = "", recent_titles: list[str] | None = None) -> bool:
+    cand = str(candidate or "").strip()
+    if not cand:
+        return False
+    cand_sig = _title_opening_signature(cand)
+    cand_pattern, _ = _source_title_pattern(cand)
+    cand_focus = _clean_same_arena_phrase(_same_arena_focus_entity({"title": cand}), max_words=4).lower()
+    compare_titles = [str(source_title or "").strip(), *[str(v).strip() for v in list(recent_titles or []) if str(v).strip()]]
+    for existing in compare_titles:
+        if not existing:
+            continue
+        if cand_sig and cand_sig == _title_opening_signature(existing):
+            return True
+        existing_pattern, _ = _source_title_pattern(existing)
+        existing_focus = _clean_same_arena_phrase(_same_arena_focus_entity({"title": existing}), max_words=4).lower()
+        if cand_pattern == "top_list" and existing_pattern == "top_list" and cand_focus and cand_focus == existing_focus:
+            return True
+    return False
+
+
 def _clean_same_arena_phrase(text: str, max_words: int = 8) -> str:
     phrase = str(text or "").strip()
     if not phrase:
@@ -2625,6 +2664,8 @@ def _longform_build_publish_package_candidates(
             continue
         if _title_is_too_close_to_any(value, channel_title_memory):
             continue
+        if _title_reuses_opening_pattern(value, source_title, channel_title_memory):
+            continue
         if value not in title_variants:
             title_variants.append(value)
     if not title_variants:
@@ -2635,7 +2676,12 @@ def _longform_build_publish_package_candidates(
             f"How {rescue_subject} Actually Shapes the Outcome",
         ]:
             value = str(candidate or "").strip()
-            if value and not _title_is_too_close_to_any(value, [source_title, *channel_title_memory]) and value not in title_variants:
+            if (
+                value
+                and not _title_is_too_close_to_any(value, [source_title, *channel_title_memory])
+                and not _title_reuses_opening_pattern(value, source_title, channel_title_memory)
+                and value not in title_variants
+            ):
                 title_variants.append(value)
 
     description_variants: list[str] = []
@@ -3579,6 +3625,172 @@ async def _persist_catalyst_outcome_for_session(
         _save_longform_sessions()
         session_live = dict(session_live)
     return outcome_record, session_live
+
+
+def _longform_session_publish_ready_for_outcome(session: dict) -> bool:
+    s = dict(session or {})
+    if not str(s.get("youtube_channel_id", "") or "").strip():
+        return False
+    if str(s.get("status", "") or "").strip().lower() in {"bootstrapping", "draft_generating", "rendering"}:
+        return False
+    package = dict(s.get("package") or {})
+    return bool(
+        str(package.get("selected_title", "") or "").strip()
+        or str(s.get("input_title", "") or "").strip()
+    )
+
+
+def _longform_session_needs_outcome_refresh(session: dict, refresh_existing: bool = False) -> bool:
+    if refresh_existing:
+        return True
+    s = dict(session or {})
+    latest = dict(s.get("latest_outcome") or {})
+    if not latest:
+        return True
+    package = dict(s.get("package") or {})
+    selected_title = str(package.get("selected_title", "") or s.get("input_title", "") or "").strip()
+    latest_title = str(latest.get("title_used", "") or "").strip()
+    if selected_title and latest_title and not _title_is_too_close_to_source(selected_title, latest_title):
+        return True
+    created_at = float(latest.get("created_at", 0.0) or 0.0)
+    if created_at <= 0:
+        return True
+    age_hours = max(0.0, (time.time() - created_at) / 3600.0)
+    latest_metrics = dict(latest.get("metrics") or {})
+    views = int(latest_metrics.get("views", 0) or 0)
+    if age_hours >= 24 and views < 10000:
+        return True
+    if age_hours >= 6 and views < 1000:
+        return True
+    return False
+
+
+async def _harvest_catalyst_outcomes_for_channel(
+    *,
+    user_id: str,
+    channel_id: str,
+    session_id: str = "",
+    candidate_limit: int = 18,
+    refresh_existing: bool = False,
+) -> dict:
+    user_key = str(user_id or "").strip()
+    channel_key = str(channel_id or "").strip()
+    session_filter = str(session_id or "").strip()
+    if not user_key or not channel_key:
+        raise HTTPException(400, "user_id and channel_id required")
+    candidate_limit = max(6, min(25, int(candidate_limit or 18)))
+
+    async with _longform_outcome_sync_semaphore:
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
+        if not record:
+            raise HTTPException(404, "Connected YouTube channel not found")
+
+        access_token, refreshed = await _youtube_ensure_access_token(record)
+        recent_candidates = await _youtube_fetch_channel_search(access_token, channel_key, order="date", max_results=candidate_limit)
+        popular_candidates = await _youtube_fetch_channel_search(access_token, channel_key, order="viewCount", max_results=candidate_limit)
+        deduped_candidates: list[dict] = []
+        seen_video_ids: set[str] = set()
+        for raw in [*list(recent_candidates or []), *list(popular_candidates or [])]:
+            candidate = dict(raw or {})
+            video_id = str(candidate.get("video_id", "") or "").strip()
+            if not video_id or video_id in seen_video_ids:
+                continue
+            deduped_candidates.append(candidate)
+            seen_video_ids.add(video_id)
+
+        async with _longform_sessions_lock:
+            _load_longform_sessions()
+            sessions = [
+                dict(value or {})
+                for value in _longform_sessions.values()
+                if str((value or {}).get("user_id", "") or "").strip() == user_key
+                and str((value or {}).get("youtube_channel_id", "") or "").strip() == channel_key
+                and (not session_filter or str((value or {}).get("session_id", "") or "").strip() == session_filter)
+            ]
+
+        sessions.sort(key=lambda row: float(row.get("updated_at", 0.0) or 0.0), reverse=True)
+        synced_sessions: list[dict] = []
+        matched_video_ids: list[str] = []
+        used_video_ids: set[str] = set()
+        scanned_sessions = 0
+        sync_error = ""
+
+        for session_snapshot in sessions:
+            if not _longform_session_publish_ready_for_outcome(session_snapshot):
+                continue
+            if not _longform_session_needs_outcome_refresh(session_snapshot, refresh_existing=refresh_existing):
+                continue
+            scanned_sessions += 1
+            available_candidates = [
+                dict(candidate or {})
+                for candidate in deduped_candidates
+                if str((candidate or {}).get("video_id", "") or "").strip() not in used_video_ids
+            ]
+            matched_video = _match_published_video_to_longform_session(session_snapshot, available_candidates)
+            if not matched_video:
+                continue
+            video_id = str(matched_video.get("video_id", "") or "").strip()
+            analytics_metrics = {}
+            if video_id:
+                try:
+                    analytics_metrics = await _youtube_fetch_video_analytics(access_token, channel_key, video_id)
+                except Exception as exc:
+                    sync_error = _clip_text(str(exc), 220)
+                    analytics_metrics = {}
+            auto_req = _build_auto_outcome_request(
+                session_snapshot=session_snapshot,
+                video_meta=matched_video,
+                analytics_metrics=analytics_metrics,
+            )
+            outcome_record, session_live = await _persist_catalyst_outcome_for_session(
+                session_id=str(session_snapshot.get("session_id", "") or ""),
+                user_id=user_key,
+                session=session_snapshot,
+                req=auto_req,
+                video_meta=matched_video,
+                analytics_metrics=analytics_metrics,
+            )
+            if video_id:
+                used_video_ids.add(video_id)
+                matched_video_ids.append(video_id)
+            synced_sessions.append({
+                "session_id": str(session_live.get("session_id", "") or ""),
+                "title_used": str(outcome_record.get("title_used", "") or ""),
+                "video_id": video_id,
+                "video_url": str(outcome_record.get("video_url", "") or ""),
+                "views": int((dict(outcome_record.get("metrics") or {})).get("views", 0) or 0),
+                "reference_overall_score": round(float((dict((dict(outcome_record.get("reference_comparison") or {})).get("scores") or {})).get("overall", 0.0) or 0.0), 2),
+            })
+
+        refreshed["last_outcome_sync_at"] = time.time()
+        refreshed["last_outcome_sync_count"] = len(synced_sessions)
+        refreshed["last_outcome_sync_error"] = sync_error
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            bucket = _youtube_bucket_for_user(user_key)
+            bucket["channels"][channel_key] = refreshed
+            _save_youtube_connections()
+
+    current_session_public = {}
+    if session_filter:
+        async with _longform_sessions_lock:
+            _load_longform_sessions()
+            session_live = _longform_sessions.get(session_filter)
+            if isinstance(session_live, dict) and str(session_live.get("user_id", "") or "").strip() == user_key:
+                current_session_public = _longform_public_session(session_live)
+
+    return {
+        "ok": True,
+        "channel": _youtube_connection_public_view(refreshed),
+        "synced_sessions": synced_sessions,
+        "synced_count": len(synced_sessions),
+        "scanned_sessions": scanned_sessions,
+        "candidate_videos": len(deduped_candidates),
+        "matched_video_ids": matched_video_ids,
+        "session": current_session_public,
+    }
 
 
 def _build_catalyst_outcome_record(
@@ -8359,12 +8571,21 @@ async def _derive_longform_seed_from_source(
         derived_description = ""
     if "follow-up" in derived_topic.lower() or "same arena" in derived_topic.lower():
         derived_topic = ""
-    if derived_title and (_title_is_too_close_to_source(derived_title, source_title) or _title_is_too_close_to_any(derived_title, channel_title_memory)):
+    if derived_title and (
+        _title_is_too_close_to_source(derived_title, source_title)
+        or _title_is_too_close_to_any(derived_title, channel_title_memory)
+        or _title_reuses_opening_pattern(derived_title, source_title, channel_title_memory)
+    ):
         derived_title = ""
     fallback_topic = derived_topic or _same_arena_follow_up_topic(source_bundle, format_preset=format_preset) or source_title or "Follow-up video breakdown"
     if derived_title and not _title_stays_in_same_arena(derived_title, source_title, fallback_topic):
         derived_title = ""
-    filtered_title_angles = [tt for tt in title_angles if not _title_is_too_close_to_any(tt, [source_title, *channel_title_memory])]
+    filtered_title_angles = [
+        tt
+        for tt in title_angles
+        if not _title_is_too_close_to_any(tt, [source_title, *channel_title_memory])
+        and not _title_reuses_opening_pattern(tt, source_title, channel_title_memory)
+    ]
     fallback_title = derived_title or ((filtered_title_angles or title_angles or [source_title or "New follow-up video"])[0])
     fallback_description = derived_description or (
         description_angles[0]
@@ -19685,6 +19906,26 @@ async def sync_connected_youtube_channel(channel_id: str, request: Request):
     if not channel_public:
         raise HTTPException(404, "Connected YouTube channel not found")
     return {"ok": True, "channel": channel_public}
+
+
+@app.post("/api/youtube/channels/{channel_id}/sync-outcomes")
+async def sync_connected_youtube_channel_outcomes(
+    channel_id: str,
+    req: CatalystChannelOutcomeSyncRequest,
+    request: Request,
+):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    return await _harvest_catalyst_outcomes_for_channel(
+        user_id=str(user.get("id", "") or ""),
+        channel_id=channel_id,
+        session_id=str((req or {}).session_id or "").strip(),
+        candidate_limit=int((req or {}).candidate_limit or 18),
+        refresh_existing=bool((req or {}).refresh_existing),
+    )
 
 
 @app.delete("/api/youtube/channels/{channel_id}")
