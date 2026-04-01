@@ -660,8 +660,13 @@ export default function LongFormPanel() {
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
     const connectedYouTubeChannel = (lfSession?.metadata_pack?.youtube_channel || {}) as Record<string, any>;
-    const channelMemory = (lfSession?.channel_memory || {}) as Record<string, any>;
-    const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
+  const channelMemory = (lfSession?.channel_memory || {}) as Record<string, any>;
+  const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
+  const referenceComparison = (latestOutcome?.reference_comparison || {}) as Record<string, any>;
+  const referenceScores = (referenceComparison?.scores || {}) as Record<string, any>;
+  const referenceChannels = Array.isArray(referenceComparison?.benchmark_channels)
+    ? referenceComparison.benchmark_channels.filter((value: any) => String(value || '').trim())
+    : [];
     const titleVariants = hasPublishPackage && Array.isArray(lfSession?.package?.title_variants) ? lfSession?.package?.title_variants as string[] : [];
     const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
     const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
@@ -1661,6 +1666,80 @@ export default function LongFormPanel() {
                                         <div>Weight: {Number(latestOutcome.weight || 0).toFixed(2)}</div>
                                         <div>CTR: {Number(latestOutcome.metrics?.impression_click_through_rate || 0).toFixed(2)}%</div>
                                         <div>Avg Viewed: {Number(latestOutcome.metrics?.average_percentage_viewed || 0).toFixed(2)}%</div>
+                                    </div>
+                                </div>
+                            ) : null}
+
+                            {Object.keys(referenceComparison).length ? (
+                                <div className="rounded-xl border border-amber-400/20 bg-amber-500/5 p-4 space-y-4">
+                                    <div className="flex flex-wrap items-start justify-between gap-3">
+                                        <div>
+                                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">Catalyst Reference Delta</p>
+                                            <p className="mt-1 text-sm text-gray-300">
+                                                {String(referenceComparison.reference_summary || 'Measured against the documentary reference playbook to drive the next run.')}
+                                            </p>
+                                        </div>
+                                        <div className="rounded-lg border border-amber-400/20 bg-black/20 px-3 py-2 text-xs text-amber-100/90 space-y-1">
+                                            <div>Tier: {String(referenceComparison.tier || 'n/a')}</div>
+                                            <div>Overall: {Number(referenceScores.overall || 0).toFixed(0)}/100</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid gap-3 md:grid-cols-6 text-xs text-gray-300">
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Hook</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.hook || 0).toFixed(0)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Pacing</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.pacing || 0).toFixed(0)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Visuals</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.visuals || 0).toFixed(0)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Sound</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.sound || 0).toFixed(0)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Packaging</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.packaging || 0).toFixed(0)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                            <div className="text-gray-500">Title Novelty</div>
+                                            <div className="mt-1 text-lg font-semibold text-white">{Number(referenceScores.title_novelty || 0).toFixed(0)}</div>
+                                        </div>
+                                    </div>
+
+                                    {referenceChannels.length ? (
+                                        <div className="text-xs text-gray-400">
+                                            Best matching reference channels: {referenceChannels.join(', ')}
+                                        </div>
+                                    ) : null}
+
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                        {[
+                                            ['Hook rewrites', referenceComparison.hook_rewrites],
+                                            ['Pacing rewrites', referenceComparison.pacing_rewrites],
+                                            ['Visual rewrites', referenceComparison.visual_rewrites],
+                                            ['Sound rewrites', referenceComparison.sound_rewrites],
+                                            ['Packaging rewrites', referenceComparison.packaging_rewrites],
+                                            ['Next-run moves', referenceComparison.next_run_moves],
+                                        ].map(([label, values]) => {
+                                            const rows = Array.isArray(values) ? values.filter((value: any) => String(value || '').trim()) : [];
+                                            if (!rows.length) return null;
+                                            return (
+                                                <div key={String(label)} className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">{label}</p>
+                                                    <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                        {rows.slice(0, 4).map((value: any, idx: number) => (
+                                                            <li key={`${label}-${idx}`}>- {String(value)}</li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             ) : null}

@@ -1,0 +1,107 @@
+[
+  {
+    "slug": "fern",
+    "query": "Fern youtube documentary",
+    "expected_channel_title": "fern",
+    "niche": "science history general documentary",
+    "style_notes": "High-contrast 3D-infographic documentary visuals, black staging, symbolic hero objects, clean motion graphics, and clarity-first spectacle."
+  },
+  {
+    "slug": "magnatesmedia",
+    "query": "MagnatesMedia youtube documentary",
+    "expected_channel_title": "MagnatesMedia",
+    "niche": "business history geopolitics documentary",
+    "style_notes": "Bold business-history documentary framing, premium CG cutaways, strong red accents, map and mechanism visuals, and high-stakes pacing."
+  },
+  {
+    "slug": "zane_hoyer",
+    "query": "Zane Hoyer youtube documentary",
+    "expected_channel_title": "Zane Hoyer",
+    "niche": "business documentary explainer",
+    "style_notes": "Clean faceless business documentary pacing, polished 3D objects, studio-grade motion design, and fast clarity."
+  },
+  {
+    "slug": "jake_tran",
+    "query": "Jake Tran documentary channel",
+    "expected_channel_title": "Jake Tran",
+    "niche": "business geopolitics controversy documentary",
+    "style_notes": "Dark high-stakes documentary tone, moody premium visuals, threat-heavy storytelling, and aggressive curiosity packaging."
+  },
+  {
+    "slug": "lemmino",
+    "query": "LEMMiNO youtube documentary",
+    "expected_channel_title": "LEMMiNO",
+    "niche": "mystery history science documentary",
+    "style_notes": "Elite research documentary pacing, restrained motion graphics, strong map and data polish, and surgical narrative escalation."
+  },
+  {
+    "slug": "johnny_harris",
+    "query": "Johnny Harris youtube documentary",
+    "expected_channel_title": "Johnny Harris",
+    "niche": "geopolitics history documentary",
+    "style_notes": "Map-driven editorial documentary style, persuasive visual journalism, on-screen annotation grammar, and narrative clarity."
+  },
+  {
+    "slug": "reallifelore",
+    "query": "RealLifeLore youtube documentary",
+    "expected_channel_title": "RealLifeLore",
+    "niche": "geopolitics history science documentary",
+    "style_notes": "Macro-question packaging, scale-based explainers, map-driven systems thinking, and escalating documentary reveals."
+  },
+  {
+    "slug": "wendover",
+    "query": "Wendover Productions documentary",
+    "expected_channel_title": "Wendover Productions",
+    "niche": "business infrastructure logistics documentary",
+    "style_notes": "Systems-business explainer pacing, infrastructure graphics, precision edit grammar, and strong information hierarchy."
+  },
+  {
+    "slug": "polymatter",
+    "query": "Polymatter documentary",
+    "expected_channel_title": "Polymatter",
+    "niche": "business geopolitics documentary",
+    "style_notes": "Minimalist corporate and geopolitical explainers, sleek motion design, simplified infographics, and highly controlled composition."
+  },
+  {
+    "slug": "james_jani",
+    "query": "James Jani documentary",
+    "expected_channel_title": "James Jani",
+    "niche": "psychology business documentary",
+    "style_notes": "Psychology-business documentary mood, deeper emotional narration, premium dark visual language, and tension-led structure."
+  },
+  {
+    "slug": "coldfusion",
+    "query": "ColdFusion documentary",
+    "expected_channel_title": "ColdFusion",
+    "niche": "technology business documentary",
+    "style_notes": "Technology-business documentary pacing, futuristic editorial look, polished B-roll logic, and broad mainstream clarity."
+  },
+  {
+    "slug": "moon",
+    "query": "Moon youtube documentary",
+    "expected_channel_title": "Moon",
+    "niche": "internet culture documentary",
+    "style_notes": "Internet-culture documentary pacing, fast-moving exposition, dramatic escalation, and watchable tension-first structure."
+  },
+  {
+    "slug": "aperture",
+    "query": "Aperture psychology documentary",
+    "expected_channel_title": "Aperture",
+    "niche": "psychology philosophy documentary",
+    "style_notes": "Dark minimal philosophy and psychology visuals, introspective tension, cinematic sound space, and controlled pacing."
+  },
+  {
+    "slug": "hoog",
+    "query": "Hoog youtube documentary",
+    "expected_channel_title": "Hoog",
+    "niche": "science culture documentary",
+    "style_notes": "Cinematic visual-essay framing with strong 3D VFX, stylized spectacle, and premium science-story visuals."
+  },
+  {
+    "slug": "neo",
+    "query": "neo documentary youtube",
+    "expected_channel_title": "neo",
+    "niche": "geopolitics news documentary",
+    "style_notes": "Clean visual journalism, restrained motion graphics, map and system explainers, and story-first editorial structure."
+  }
+]
