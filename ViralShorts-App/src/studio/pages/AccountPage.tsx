@@ -25,10 +25,10 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
     const laneEntries = useMemo(() => {
         const entries = [
             ['Create', Boolean(studioLaneAccess.create || ownerOverride)],
-            ['Thumbnails', Boolean(studioLaneAccess.thumbnails || ownerOverride)],
-            ['Clone', Boolean(studioLaneAccess.clone || ownerOverride)],
-            ['Long Form', Boolean(studioLaneAccess.longform || ownerOverride)],
             ['Chat Story', Boolean(studioLaneAccess.chatstory || ownerOverride)],
+            ['Thumbnails (beta)', Boolean(studioLaneAccess.thumbnails || ownerOverride)],
+            ['Clone (beta)', Boolean(studioLaneAccess.clone || ownerOverride)],
+            ['Long Form (beta)', Boolean(studioLaneAccess.longform || ownerOverride)],
             ['AutoClipper', Boolean(studioLaneAccess.autoclipper || ownerOverride)],
         ] as const;
         return entries;
@@ -124,7 +124,7 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                     <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                         <h2 className="text-xl font-bold text-white">Lane Access</h2>
                         <p className="mt-2 text-sm text-gray-400">
-                            Studio now uses one normalized access model: membership, wallet, included credits, and lane-level access. Tool-specific subscriptions have been removed from the account surface.
+                            Studio now uses one normalized access model: membership, wallet, included credits, and lane-level access. Public plans are short-form only right now while the heavier lanes stay in beta.
                         </p>
 
                         <div className="mt-6 grid gap-3 sm:grid-cols-2">

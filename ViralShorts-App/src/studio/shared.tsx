@@ -728,7 +728,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 redirectTo,
             },
         });
-        return error ? error.message : null;
+        if (!error) return null;
+        const message = String(error.message || '').trim();
+        if (message.toLowerCase().includes('provider is not enabled')) {
+            return 'Google sign-in is not fully enabled on the hosted auth project yet. Keep email fallback available until the Supabase Google provider is turned on.';
+        }
+        return message || 'Google sign-in failed';
     }, [supabase]);
 
     const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {

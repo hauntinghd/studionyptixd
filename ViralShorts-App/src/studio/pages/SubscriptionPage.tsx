@@ -52,8 +52,8 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                 subtitle:
                     planId === 'free'
                         ? 'Enough included credits for two short-form animated renders.'
-                        : planId === 'starter'
-                            ? 'Best for solo operators getting started with Catalyst.'
+                    : planId === 'starter'
+                        ? 'Best for solo operators getting started with Catalyst.'
                             : planId === 'creator'
                                 ? 'More monthly headroom for active creators.'
                                 : 'Highest public monthly headroom for teams and daily operators.',
@@ -62,8 +62,8 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                     `${Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60))} minute max jobs`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output`,
                     planId === 'free'
-                        ? 'Create, Thumbnails, Clone, and Long Form included'
-                        : 'Create, Thumbnails, Clone, Long Form, and Chat Story',
+                        ? 'Short-form Create workflow included'
+                        : 'Short-form Create workflow + Chat Story',
                 ],
             };
         });
@@ -130,7 +130,7 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                         </div>
                         <h1 className="mt-3 text-3xl font-bold text-white">Free, Starter, Creator, and Pro</h1>
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            Free gets users into Catalyst. The three monthly plans add more included credits and unlock Chat Story, while wallet top-ups stay separate on the billing page.
+                            Free gets users into Catalyst short-form. The three monthly plans add more included credits and unlock Chat Story, while wallet top-ups stay separate on the billing page.
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
@@ -227,9 +227,10 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                             <h2 className="text-lg font-semibold text-white">How billing works</h2>
                             <div className="mt-4 space-y-3 text-sm text-gray-300">
                                 <p>1. Every signed-in account starts on Free.</p>
-                                <p>2. Paid plans add more included credits and unlock Chat Story.</p>
-                                <p>3. Top-up packs live on the billing page and stack on top of any plan.</p>
-                                <p>4. If a monthly plan expires, wallet credits stay on the account.</p>
+                                <p>2. Free and paid plans are currently for short-form only.</p>
+                                <p>3. Paid plans add more included credits and unlock Chat Story.</p>
+                                <p>4. Top-up packs live on the billing page and stack on top of any plan.</p>
+                                <p>5. If a monthly plan expires, wallet credits stay on the account.</p>
                             </div>
                         </section>
                     </aside>

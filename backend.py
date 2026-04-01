@@ -4482,9 +4482,9 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     )
     return {
         "create": public_live,
-        "thumbnails": public_live,
-        "clone": public_live,
-        "longform": public_live,
+        "thumbnails": is_admin,
+        "clone": is_admin,
+        "longform": is_admin,
         "chatstory": chatstory_live,
         "autoclipper": is_admin,
         "demo": is_admin,

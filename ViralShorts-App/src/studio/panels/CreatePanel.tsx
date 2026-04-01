@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/StudioWidgets';
@@ -1910,9 +1910,26 @@ export default function CreatePanel() {
         </div>
     ) : null;
 
+    useEffect(() => {
+        if (typeof document === 'undefined') return;
+        if (!imageModelPickerOpen && !videoModelPickerOpen) return;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => {
+            document.body.style.overflow = previousOverflow;
+        };
+    }, [imageModelPickerOpen, videoModelPickerOpen]);
+
+    const handleModelPickerWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+        event.stopPropagation();
+    }, []);
+
     const imageModelPickerModal = imageModelPickerOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
-            <div className="w-full max-w-6xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/72 px-4 py-8">
+            <div
+                onWheelCapture={handleModelPickerWheel}
+                className="w-full max-w-6xl max-h-[88vh] overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50"
+            >
                 <div className="flex items-start justify-between gap-4">
                     <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Image Generation Model</p>
@@ -1933,62 +1950,67 @@ export default function CreatePanel() {
                 <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
                     Available now: {animationCreditsAvailable} Catalyst credits across included credits + credit wallet.
                 </div>
-                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {imageModelCatalog.filter((model) => model.enabled !== false).map((model) => {
-                        const active = selectedImageModel.id === model.id;
-                        return (
-                            <button
-                                key={model.id}
-                                type="button"
-                                onClick={() => {
-                                    setImageModelId(model.id);
-                                    setImageModelPickerOpen(false);
-                                }}
-                                className={`rounded-[24px] border p-5 text-left transition ${
-                                    active
-                                        ? 'border-cyan-400 bg-cyan-500/10'
-                                        : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
-                                }`}
-                            >
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-lg font-semibold text-white">{model.label}</span>
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
-                                            model.tier === 'elite'
-                                                ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
-                                                : model.tier === 'premium'
-                                                    ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
-                                                    : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                                        }`}>
-                                            {formatModelTierLabel(model)}
-                                        </span>
-                                        {active ? (
-                                            <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
-                                                Selected
+                <div onWheelCapture={handleModelPickerWheel} className="mt-6 max-h-[58vh] overflow-y-auto overscroll-contain pr-1">
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                        {imageModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                            const active = selectedImageModel.id === model.id;
+                            return (
+                                <button
+                                    key={model.id}
+                                    type="button"
+                                    onClick={() => {
+                                        setImageModelId(model.id);
+                                        setImageModelPickerOpen(false);
+                                    }}
+                                    className={`rounded-[24px] border p-5 text-left transition ${
+                                        active
+                                            ? 'border-cyan-400 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
+                                    }`}
+                                >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className="text-lg font-semibold text-white">{model.label}</span>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                                model.tier === 'elite'
+                                                    ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                    : model.tier === 'premium'
+                                                        ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                                        : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                            }`}>
+                                                {formatModelTierLabel(model)}
                                             </span>
-                                        ) : null}
+                                            {active ? (
+                                                <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                                    Selected
+                                                </span>
+                                            ) : null}
+                                        </div>
                                     </div>
-                                </div>
-                                <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
-                                <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
-                                    <span>{model.provider === 'fal' ? 'fal.ai' : 'NYPTID Hybrid'}</span>
-                                    <span>{model.speed}</span>
-                                </div>
-                                <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
-                                    <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'image')}</p>
-                                    <p className="mt-1 text-xs text-gray-400">Use premium lanes when you want higher-end prompt fidelity and composition.</p>
-                                </div>
-                            </button>
-                        );
-                    })}
+                                    <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
+                                    <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
+                                        <span>{model.provider === 'fal' ? 'fal.ai' : 'NYPTID Hybrid'}</span>
+                                        <span>{model.speed}</span>
+                                    </div>
+                                    <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
+                                        <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'image')}</p>
+                                        <p className="mt-1 text-xs text-gray-400">Use premium lanes when you want higher-end prompt fidelity and composition.</p>
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
                 </div>
             </div>
         </div>
     ) : null;
 
     const videoModelPickerModal = videoModelPickerOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
-            <div className="w-full max-w-5xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/72 px-4 py-8">
+            <div
+                onWheelCapture={handleModelPickerWheel}
+                className="w-full max-w-5xl max-h-[88vh] overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50"
+            >
                 <div className="flex items-start justify-between gap-4">
                     <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Video Generation Model</p>
@@ -2009,54 +2031,56 @@ export default function CreatePanel() {
                 <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
                     Available now: {animationCreditsAvailable} Catalyst credits across included credits + credit wallet.
                 </div>
-                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    {videoModelCatalog.filter((model) => model.enabled !== false).map((model) => {
-                        const active = selectedVideoModel.id === model.id;
-                        return (
-                            <button
-                                key={model.id}
-                                type="button"
-                                onClick={() => {
-                                    setVideoModelId(model.id);
-                                    setVideoModelPickerOpen(false);
-                                }}
-                                className={`rounded-[24px] border p-5 text-left transition ${
-                                    active
-                                        ? 'border-cyan-400 bg-cyan-500/10'
-                                        : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
-                                }`}
-                            >
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-lg font-semibold text-white">{model.label}</span>
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
-                                            model.tier === 'elite'
-                                                ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
-                                                : model.tier === 'premium'
-                                                    ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
-                                                    : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                                        }`}>
-                                            {formatModelTierLabel(model)}
-                                        </span>
-                                        {active ? (
-                                            <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
-                                                Selected
+                <div onWheelCapture={handleModelPickerWheel} className="mt-6 max-h-[58vh] overflow-y-auto overscroll-contain pr-1">
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        {videoModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                            const active = selectedVideoModel.id === model.id;
+                            return (
+                                <button
+                                    key={model.id}
+                                    type="button"
+                                    onClick={() => {
+                                        setVideoModelId(model.id);
+                                        setVideoModelPickerOpen(false);
+                                    }}
+                                    className={`rounded-[24px] border p-5 text-left transition ${
+                                        active
+                                            ? 'border-cyan-400 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.03] hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]'
+                                    }`}
+                                >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className="text-lg font-semibold text-white">{model.label}</span>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                                model.tier === 'elite'
+                                                    ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                    : model.tier === 'premium'
+                                                        ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                                        : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                            }`}>
+                                                {formatModelTierLabel(model)}
                                             </span>
-                                        ) : null}
+                                            {active ? (
+                                                <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                                    Selected
+                                                </span>
+                                            ) : null}
+                                        </div>
                                     </div>
-                                </div>
-                                <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
-                                <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
-                                    <span>{model.provider === 'fal' ? 'fal.ai' : model.provider}</span>
-                                    <span>{model.speed}</span>
-                                </div>
-                                <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
-                                    <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'video')}</p>
-                                    <p className="mt-1 text-xs text-gray-400">Use premium animation lanes when shot quality matters more than credit efficiency.</p>
-                                </div>
-                            </button>
-                        );
-                    })}
+                                    <p className="mt-3 text-sm leading-relaxed text-gray-300">{model.summary}</p>
+                                    <div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400">
+                                        <span>{model.provider === 'fal' ? 'fal.ai' : model.provider}</span>
+                                        <span>{model.speed}</span>
+                                    </div>
+                                    <div className="mt-5 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
+                                        <p className="text-lg font-semibold text-white">{formatModelSpendLabel(model, 'video')}</p>
+                                        <p className="mt-1 text-xs text-gray-400">Use premium animation lanes when shot quality matters more than credit efficiency.</p>
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
                 </div>
             </div>
         </div>

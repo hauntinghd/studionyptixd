@@ -91,14 +91,17 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         id: 'clone',
         label: 'Clone',
         icon: Copy,
+        comingSoon: !ownerOverride,
     }, {
         id: 'longform',
         label: 'Long Form',
         icon: Film,
+        comingSoon: !ownerOverride,
     }, {
         id: 'thumbnails',
         label: 'Thumbnails',
         icon: Image,
+        comingSoon: !ownerOverride,
     }, {
         id: 'demo',
         label: 'Product Demo',
@@ -232,7 +235,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         <p className="mt-3 max-w-3xl text-sm text-gray-400">
                                             {ownerOverride
                                                 ? 'Owner preview is active on this account. Every Studio lane is open here while public accounts only see the launch surface.'
-                                                : 'Catalyst is the shared engine behind Create, Thumbnails, Clone, and Long Form. AutoClipper stays visible as coming soon until the clipping lane is truly ready.'}
+                                                : 'Public Studio is short-form first right now. Create is live, Chat Story stays on paid monthly plans, and Clone, Thumbnails, and Long Form stay marked coming soon while they are still being worked on.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">

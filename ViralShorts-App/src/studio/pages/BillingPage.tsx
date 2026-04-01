@@ -65,19 +65,19 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 priceLabel: planId === 'free' ? '$0' : `$${price.toFixed(price % 1 === 0 ? 0 : 2)}/mo`,
                 description:
                     planId === 'free'
-                        ? 'Try the live Studio lanes and get enough included credits for two short-form animated renders.'
+                        ? 'Try the short-form Studio workflow and get enough included credits for two animated renders.'
                         : planId === 'starter'
-                            ? 'Best for solo operators shipping consistent shorts and testing Long Form without overcommitting.'
+                            ? 'Best for solo operators shipping consistent short-form content without overcommitting.'
                             : planId === 'creator'
-                                ? 'More monthly headroom for active creators running shorts, thumbnails, cloning, and Long Form together.'
-                                : 'Highest public headroom for daily operators and teams running Catalyst hard.',
+                                ? 'More monthly headroom for active creators publishing shorts every week.'
+                                : 'Highest short-form headroom for daily operators and teams.',
                 features: [
                     `${animatedCredits} included animation credits${planId === 'free' ? '' : ' per month'}`,
                     `${durationMinutes} minute max job length`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output cap`,
                     planId === 'free'
-                        ? 'Create, Thumbnails, Clone, and Long Form lanes included'
-                        : 'Create, Thumbnails, Clone, Long Form, and Chat Story unlocked',
+                        ? 'Short-form Create workflow included'
+                        : 'Short-form Create workflow + Chat Story',
                 ],
             };
         });
@@ -165,7 +165,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         </div>
                         <h1 className="mt-3 text-3xl font-bold text-white">Free plan, 3 monthly plans, and top-up packs</h1>
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            Studio now exposes one clean public billing model: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
+                            Studio now sells one clean short-form offer: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
                         </p>
                     </div>
                     <button
@@ -178,16 +178,16 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     </button>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-[1.25fr,0.75fr]">
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr),minmax(320px,0.75fr)]">
                     <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                         <div className="mb-5">
                             <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Public Plans</p>
                             <h2 className="mt-2 text-2xl font-bold text-white">Choose the plan that fits your run rate</h2>
                             <p className="mt-2 text-sm text-gray-400">
-                                Free gives two short-form animated renders. Paid plans add more monthly credits and unlock Chat Story. Wallet credits always stack on top.
+                                Free gives two short-form animated renders. Paid plans add more monthly credits and unlock Chat Story. Clone, Thumbnails, and Long Form stay out of the public billing promise while they are still being worked on.
                             </p>
                         </div>
-                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
                             {publicPlans.map((planCard) => {
                                 const isCurrent = normalizedCurrentPlan === planCard.id;
                                 const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
@@ -284,6 +284,15 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <p className="mt-4 text-sm text-gray-400">Select a top-up pack below.</p>
                             )}
                         </section>
+                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+                            <h2 className="text-lg font-semibold text-white">What plans actually unlock</h2>
+                            <div className="mt-4 space-y-3 text-sm text-gray-300">
+                                <p>1. Free and paid plans are for short-form only.</p>
+                                <p>2. Paid monthly plans add more included credits and unlock Chat Story.</p>
+                                <p>3. Clone, Thumbnails, and Long Form stay outside the public plan promise while they are still in beta.</p>
+                                <p>4. Wallet packs stack on top for heavier animation usage.</p>
+                            </div>
+                        </section>
                     </aside>
                 </div>
 
@@ -291,7 +300,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="mb-5">
                         <h2 className="text-lg font-semibold text-white">Top-up packs</h2>
                         <p className="mt-1 text-sm text-gray-400">
-                            Use wallet packs for pay-as-you-go only, or combine them with a monthly plan for hybrid usage.
+                            Use wallet packs for pay-as-you-go short-form usage, or combine them with a monthly plan for hybrid usage.
                         </p>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -33,23 +33,28 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
             icon: <Sparkles className="h-5 w-5" />,
         },
         {
-            title: 'Thumbnails',
-            desc: 'Generate click-driven thumbnails, upload winners into your private library, and refine style references inside Studio.',
-            icon: <Image className="h-5 w-5" />,
-        },
-        {
-            title: 'Clone',
-            desc: 'Break down an existing short, extract its structure, and rebuild the format for a new topic with the same retention logic.',
-            icon: <Copy className="h-5 w-5" />,
-        },
-        {
-            title: 'Long Form',
-            desc: 'Run chapter-based faceless production for recaps, explainers, documentary-style videos, and story channels.',
-            icon: <Film className="h-5 w-5" />,
+            title: 'Chat Story',
+            desc: 'Monthly-plan short-form lane for premium text-message videos with owned voices, uploads, and live preview.',
+            icon: <Workflow className="h-5 w-5" />,
         },
     ];
 
     const roadmapLanes = [
+        {
+            title: 'Thumbnails',
+            desc: 'Still being sharpened as an operator-beta lane. Not part of the public short-form billing promise yet.',
+            icon: <Image className="h-5 w-5" />,
+        },
+        {
+            title: 'Clone',
+            desc: 'Structure-cloning is still being refined, so it stays off the public plan promise for now.',
+            icon: <Copy className="h-5 w-5" />,
+        },
+        {
+            title: 'Long Form',
+            desc: 'Machine-learning and editing work is still underway, so Long Form stays in the private operator lane for now.',
+            icon: <Film className="h-5 w-5" />,
+        },
         {
             title: 'AutoClipper',
             desc: 'Visible in Studio now, but still held back until clipping quality, scoring, and packaging beat the lazy "coming soon" bar.',
@@ -101,7 +106,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 Build faceless YouTube content with one Studio.
                             </h1>
                             <p className="mt-6 max-w-3xl text-lg leading-relaxed text-gray-400">
-                                NYPTID Studio now sells one product. Catalyst powers the short-form builder, thumbnail engine, clone workflow, and long-form lane so operators can stop stitching together separate tools for every part of the channel.
+                                NYPTID Studio now sells one short-form product. Catalyst powers the Create workflow and Chat Story now, while the heavier lanes stay behind the curtain until they are genuinely ready.
                             </p>
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
@@ -122,7 +127,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 </button>
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
-                                <StatCard label="Live Public Lanes" value="4" />
+                                <StatCard label="Live Public Lanes" value="2" />
                                 <StatCard label="Plans" value="Free + 3 Monthly" />
                                 <StatCard label="Checkout" value="PayPal" />
                             </div>
@@ -137,11 +142,11 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 </div>
                             </div>
                             <div className="mt-6 space-y-3">
-                                {[
+                                {[ 
                                     'Create scripts, scenes, and renders without leaving Studio',
-                                    'Store thumbnail references in the same account that owns the channel workflow',
                                     'Use membership and wallet credits together instead of juggling separate subscriptions',
-                                    'Keep future automation lanes inside one account model as Catalyst expands',
+                                    'Keep Chat Story inside the same short-form account model',
+                                    'Expand into the heavier lanes later without changing the billing structure',
                                 ].map((item) => (
                                     <div key={item} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
                                         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
@@ -160,10 +165,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">Live Now</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">Public launch surface</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            The public offer is intentionally tight: Create, Thumbnails, Clone, and Long Form. Product Demo stays internal. Analytics stays owner-only. AutoClipper remains visible but not sellable yet.
+                            The public offer is intentionally tight: Create and Chat Story. Product Demo stays internal. Analytics stays owner-only. Clone, Thumbnails, Long Form, and AutoClipper remain visible in the vision but are not part of the public short-form plan promise yet.
                         </p>
                     </div>
-                    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-2">
                         {liveLanes.map((lane) => (
                             <div key={lane.title} className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10 text-violet-300">
@@ -183,7 +188,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Offer Design</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">One product, two ways to pay</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            Every signed-in account starts on Free. Then there are only three monthly plans and the credit wallet packs for usage spikes.
+                            Every signed-in account starts on Free. Then there are only three monthly plans and the credit wallet packs for short-form usage spikes.
                         </p>
                     </div>
                     <div className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
@@ -197,6 +202,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Free plan starts every signed-in account with two short-form animated renders</li>
                                 <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Starter, Creator, and Pro add more included credits each month</li>
                                 <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Chat Story stays monthly-only on the paid plans</li>
+                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Thumbnails, Clone, and Long Form are not sold in the public plans yet</li>
                             </ul>
                         </div>
                         <div className="rounded-[32px] border border-white/[0.06] bg-white/[0.02] p-6">
