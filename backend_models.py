@@ -146,3 +146,40 @@ class YouTubeOAuthStartRequest(BaseModel):
 
 class YouTubeChannelSelectRequest(BaseModel):
     channel_id: str = ""
+
+
+class CatalystOutcomeIngestRequest(BaseModel):
+    video_url: str = ""
+    video_id: str = ""
+    title_used: str = ""
+    description_used: str = ""
+    thumbnail_prompt: str = ""
+    thumbnail_url: str = ""
+    tags: list[str] = []
+    views: int = 0
+    impressions: int = 0
+    likes: int = 0
+    comments: int = 0
+    estimated_minutes_watched: float = 0.0
+    average_view_duration_sec: float = 0.0
+    average_percentage_viewed: float = 0.0
+    impression_click_through_rate: float = 0.0
+    first_30_sec_retention_pct: float = 0.0
+    first_60_sec_retention_pct: float = 0.0
+    operator_summary: str = ""
+    strongest_signals: list[str] = []
+    weak_points: list[str] = []
+    hook_wins: list[str] = []
+    hook_watchouts: list[str] = []
+    pacing_wins: list[str] = []
+    pacing_watchouts: list[str] = []
+    visual_wins: list[str] = []
+    visual_watchouts: list[str] = []
+    sound_wins: list[str] = []
+    sound_watchouts: list[str] = []
+    packaging_wins: list[str] = []
+    packaging_watchouts: list[str] = []
+    retention_wins: list[str] = []
+    retention_watchouts: list[str] = []
+    next_video_moves: list[str] = []
+    auto_fetch_channel_metrics: bool = True

@@ -180,6 +180,7 @@ from backend_models import (
     LongFormResolveErrorRequest,
     YouTubeOAuthStartRequest,
     YouTubeChannelSelectRequest,
+    CatalystOutcomeIngestRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -751,22 +752,221 @@ def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
     return [token for token, _ in ranked[:max_items]]
 
 
+def _catalyst_metric_average(total: float, count: int, digits: int = 2) -> float:
+    safe_count = max(0, int(count or 0))
+    if safe_count <= 0:
+        return 0.0
+    try:
+        return round(float(total or 0.0) / safe_count, digits)
+    except Exception:
+        return 0.0
+
+
+def _catalyst_weighted_signal_items(
+    signal_map: dict | None,
+    *,
+    max_items: int = 8,
+    max_chars: int = 180,
+) -> list[str]:
+    rows: list[tuple[str, float]] = []
+    for raw_text, raw_weight in dict(signal_map or {}).items():
+        text = _clip_text(str(raw_text or "").strip(), max_chars)
+        if not text:
+            continue
+        try:
+            weight = float(raw_weight or 0.0)
+        except Exception:
+            continue
+        if weight <= 0:
+            continue
+        rows.append((text, weight))
+    rows.sort(key=lambda item: (-item[1], item[0].lower()))
+    return [text for text, _ in rows[:max_items]]
+
+
+def _catalyst_merge_signal_lists(*groups: list[str], max_items: int = 10, max_chars: int = 180) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        merged.extend(str(v or "").strip() for v in list(group or []) if str(v or "").strip())
+    return _dedupe_preserve_order(merged, max_items=max_items, max_chars=max_chars)
+
+
+def _catalyst_merge_weighted_signals(
+    existing_map: dict | None,
+    signals: list[str] | None,
+    weight: float,
+    *,
+    max_items: int = 24,
+    max_chars: int = 180,
+) -> dict[str, float]:
+    display_by_key: dict[str, str] = {}
+    score_by_key: dict[str, float] = {}
+    for raw_text, raw_weight in dict(existing_map or {}).items():
+        text = _clip_text(str(raw_text or "").strip(), max_chars)
+        if not text:
+            continue
+        key = text.lower()
+        try:
+            parsed = float(raw_weight or 0.0)
+        except Exception:
+            parsed = 0.0
+        if parsed <= 0:
+            continue
+        if parsed > score_by_key.get(key, 0.0):
+            score_by_key[key] = parsed
+            display_by_key[key] = text
+    for raw_text in list(signals or []):
+        text = _clip_text(str(raw_text or "").strip(), max_chars)
+        if not text:
+            continue
+        key = text.lower()
+        score_by_key[key] = round(score_by_key.get(key, 0.0) + float(weight or 0.0), 4)
+        display_by_key[key] = text
+    ranked = sorted(score_by_key.items(), key=lambda item: (-item[1], display_by_key.get(item[0], item[0]).lower()))
+    return {
+        display_by_key[key]: round(score, 4)
+        for key, score in ranked[:max_items]
+        if key in display_by_key
+    }
+
+
+def _catalyst_update_weighted_signals(
+    memory: dict,
+    field_name: str,
+    signals: list[str] | None,
+    weight: float,
+    *,
+    max_items: int = 24,
+    max_chars: int = 180,
+) -> None:
+    if not signals:
+        return
+    memory[field_name] = _catalyst_merge_weighted_signals(
+        memory.get(field_name) or {},
+        signals,
+        weight,
+        max_items=max_items,
+        max_chars=max_chars,
+    )
+
+
+def _catalyst_outcome_weight(metrics: dict | None) -> float:
+    data = dict(metrics or {})
+    ctr = max(0.0, float(data.get("impression_click_through_rate", 0.0) or 0.0))
+    avp = max(0.0, float(data.get("average_percentage_viewed", 0.0) or 0.0))
+    first30 = max(0.0, float(data.get("first_30_sec_retention_pct", 0.0) or 0.0))
+    first60 = max(0.0, float(data.get("first_60_sec_retention_pct", 0.0) or 0.0))
+    views = max(0, int(data.get("views", 0) or 0))
+    signals: list[float] = []
+    if ctr > 0:
+        signals.append(min(1.8, ctr / 4.0))
+    if avp > 0:
+        signals.append(min(1.8, avp / 45.0))
+    if first30 > 0:
+        signals.append(min(1.8, first30 / 55.0))
+    if first60 > 0:
+        signals.append(min(1.8, first60 / 45.0))
+    base = 0.85
+    if signals:
+        base += sum(signals) / len(signals)
+    if views >= 100000:
+        base += 1.25
+    elif views >= 10000:
+        base += 0.95
+    elif views >= 1000:
+        base += 0.7
+    elif views >= 300:
+        base += 0.45
+    elif views >= 100:
+        base += 0.25
+    return round(max(0.85, min(5.0, base)), 2)
+
+
 def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
     data = dict(memory or {})
+    outcome_count = int(data.get("outcome_count", 0) or 0)
+    hook_wins = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("hook_wins_map") or {}, max_items=6),
+        list(data.get("hook_learnings") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    pacing_wins = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("pacing_wins_map") or {}, max_items=6),
+        list(data.get("pacing_learnings") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    visual_wins = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("visual_wins_map") or {}, max_items=6),
+        list(data.get("visual_learnings") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    sound_wins = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("sound_wins_map") or {}, max_items=6),
+        list(data.get("sound_learnings") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    packaging_wins = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("packaging_wins_map") or {}, max_items=6),
+        list(data.get("packaging_learnings") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    next_video_moves = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("next_video_moves_map") or {}, max_items=6),
+        list(data.get("next_video_moves") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
+    hook_watchouts = _catalyst_weighted_signal_items(data.get("hook_watchouts_map") or {}, max_items=6)
+    pacing_watchouts = _catalyst_weighted_signal_items(data.get("pacing_watchouts_map") or {}, max_items=6)
+    visual_watchouts = _catalyst_weighted_signal_items(data.get("visual_watchouts_map") or {}, max_items=6)
+    sound_watchouts = _catalyst_weighted_signal_items(data.get("sound_watchouts_map") or {}, max_items=6)
+    packaging_watchouts = _catalyst_weighted_signal_items(data.get("packaging_watchouts_map") or {}, max_items=6)
+    retention_wins = _catalyst_weighted_signal_items(data.get("retention_wins_map") or {}, max_items=6)
+    retention_watchouts = _catalyst_merge_signal_lists(
+        _catalyst_weighted_signal_items(data.get("retention_watchouts_map") or {}, max_items=6),
+        list(data.get("retention_watchouts") or [])[:4],
+        max_items=10,
+        max_chars=180,
+    )
     return {
         "key": str(data.get("key", "") or ""),
         "channel_id": str(data.get("channel_id", "") or ""),
         "format_preset": str(data.get("format_preset", "") or ""),
         "run_count": int(data.get("run_count", 0) or 0),
+        "outcome_count": outcome_count,
         "summary": str(data.get("summary", "") or ""),
         "proven_keywords": list(data.get("proven_keywords") or []),
-        "hook_learnings": list(data.get("hook_learnings") or []),
-        "pacing_learnings": list(data.get("pacing_learnings") or []),
-        "visual_learnings": list(data.get("visual_learnings") or []),
-        "sound_learnings": list(data.get("sound_learnings") or []),
-        "packaging_learnings": list(data.get("packaging_learnings") or []),
-        "retention_watchouts": list(data.get("retention_watchouts") or []),
-        "next_video_moves": list(data.get("next_video_moves") or []),
+        "hook_learnings": hook_wins,
+        "pacing_learnings": pacing_wins,
+        "visual_learnings": visual_wins,
+        "sound_learnings": sound_wins,
+        "packaging_learnings": packaging_wins,
+        "retention_watchouts": retention_watchouts,
+        "next_video_moves": next_video_moves,
+        "hook_wins": hook_wins,
+        "hook_watchouts": hook_watchouts,
+        "pacing_wins": pacing_wins,
+        "pacing_watchouts": pacing_watchouts,
+        "visual_wins": visual_wins,
+        "visual_watchouts": visual_watchouts,
+        "sound_wins": sound_wins,
+        "sound_watchouts": sound_watchouts,
+        "packaging_wins": packaging_wins,
+        "packaging_watchouts": packaging_watchouts,
+        "retention_wins": retention_wins,
+        "average_ctr": _catalyst_metric_average(float(data.get("outcome_ctr_sum", 0.0) or 0.0), outcome_count, 2),
+        "average_average_percentage_viewed": _catalyst_metric_average(float(data.get("outcome_avp_sum", 0.0) or 0.0), outcome_count, 2),
+        "average_view_duration_sec": _catalyst_metric_average(float(data.get("outcome_avd_sum", 0.0) or 0.0), outcome_count, 1),
+        "average_first_30_sec_retention_pct": _catalyst_metric_average(float(data.get("outcome_first30_sum", 0.0) or 0.0), outcome_count, 2),
+        "average_first_60_sec_retention_pct": _catalyst_metric_average(float(data.get("outcome_first60_sum", 0.0) or 0.0), outcome_count, 2),
+        "average_views": _catalyst_metric_average(float(data.get("outcome_views_sum", 0.0) or 0.0), outcome_count, 0),
+        "average_impressions": _catalyst_metric_average(float(data.get("outcome_impressions_sum", 0.0) or 0.0), outcome_count, 0),
+        "last_outcome_summary": str(data.get("last_outcome_summary", "") or ""),
         "recent_source_titles": list(data.get("recent_source_titles") or []),
         "recent_selected_titles": list(data.get("recent_selected_titles") or []),
         "preferred_transition_style": str(data.get("preferred_transition_style", "") or ""),
@@ -784,22 +984,42 @@ def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
     parts: list[str] = []
     if public.get("summary"):
         parts.append("Catalyst channel memory summary: " + _clip_text(str(public.get("summary", "")), 320))
+    if int(public.get("outcome_count", 0) or 0) > 0:
+        parts.append(
+            f"Measured outcomes logged: {int(public.get('outcome_count', 0) or 0)}. "
+            f"Avg CTR {float(public.get('average_ctr', 0.0) or 0.0):.2f}%. "
+            f"Avg viewed {float(public.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}%."
+        )
     if public.get("proven_keywords"):
         parts.append("Proven arena keywords: " + ", ".join(list(public.get("proven_keywords") or [])[:8]))
-    if public.get("hook_learnings"):
-        parts.append("Hook learnings: " + "; ".join(list(public.get("hook_learnings") or [])[:4]))
-    if public.get("pacing_learnings"):
-        parts.append("Pacing learnings: " + "; ".join(list(public.get("pacing_learnings") or [])[:4]))
-    if public.get("visual_learnings"):
-        parts.append("Visual learnings: " + "; ".join(list(public.get("visual_learnings") or [])[:4]))
-    if public.get("sound_learnings"):
-        parts.append("Sound learnings: " + "; ".join(list(public.get("sound_learnings") or [])[:4]))
-    if public.get("packaging_learnings"):
-        parts.append("Packaging learnings: " + "; ".join(list(public.get("packaging_learnings") or [])[:4]))
+    if public.get("hook_wins"):
+        parts.append("Weighted hook wins: " + "; ".join(list(public.get("hook_wins") or [])[:4]))
+    if public.get("hook_watchouts"):
+        parts.append("Hook watchouts: " + "; ".join(list(public.get("hook_watchouts") or [])[:4]))
+    if public.get("pacing_wins"):
+        parts.append("Weighted pacing wins: " + "; ".join(list(public.get("pacing_wins") or [])[:4]))
+    if public.get("pacing_watchouts"):
+        parts.append("Pacing watchouts: " + "; ".join(list(public.get("pacing_watchouts") or [])[:4]))
+    if public.get("visual_wins"):
+        parts.append("Visual wins: " + "; ".join(list(public.get("visual_wins") or [])[:4]))
+    if public.get("visual_watchouts"):
+        parts.append("Visual watchouts: " + "; ".join(list(public.get("visual_watchouts") or [])[:4]))
+    if public.get("sound_wins"):
+        parts.append("Sound wins: " + "; ".join(list(public.get("sound_wins") or [])[:4]))
+    if public.get("sound_watchouts"):
+        parts.append("Sound watchouts: " + "; ".join(list(public.get("sound_watchouts") or [])[:4]))
+    if public.get("packaging_wins"):
+        parts.append("Packaging wins: " + "; ".join(list(public.get("packaging_wins") or [])[:4]))
+    if public.get("packaging_watchouts"):
+        parts.append("Packaging watchouts: " + "; ".join(list(public.get("packaging_watchouts") or [])[:4]))
+    if public.get("retention_wins"):
+        parts.append("Retention wins: " + "; ".join(list(public.get("retention_wins") or [])[:4]))
     if public.get("retention_watchouts"):
         parts.append("Retention watchouts: " + "; ".join(list(public.get("retention_watchouts") or [])[:4]))
     if public.get("next_video_moves"):
         parts.append("Next-video moves: " + "; ".join(list(public.get("next_video_moves") or [])[:4]))
+    if public.get("last_outcome_summary"):
+        parts.append("Latest measured outcome: " + _clip_text(str(public.get("last_outcome_summary", "")), 220))
     return "\n".join(part for part in parts if part)
 
 
@@ -2183,6 +2403,20 @@ def _heuristic_catalyst_edit_blueprint(
     primary_move = _clip_text(improvement_moves[0] if improvement_moves else "Tighten the promise and reach the first reveal faster.", 180)
     hook_warning = _clip_text(retention_findings[0] if retention_findings else "The opening needs a stronger promise before any explanation.", 180)
     packaging_warning = _clip_text(packaging_findings[0] if packaging_findings else "Use one dominant promise and one dominant visual symbol.", 180)
+    outcome_ctr = float(memory_view.get("average_ctr", 0.0) or 0.0)
+    outcome_avp = float(memory_view.get("average_average_percentage_viewed", 0.0) or 0.0)
+    hook_wins = list(memory_view.get("hook_wins") or [])
+    hook_watchouts = list(memory_view.get("hook_watchouts") or [])
+    pacing_wins = list(memory_view.get("pacing_wins") or [])
+    pacing_watchouts = list(memory_view.get("pacing_watchouts") or [])
+    visual_wins = list(memory_view.get("visual_wins") or [])
+    visual_watchouts = list(memory_view.get("visual_watchouts") or [])
+    sound_wins = list(memory_view.get("sound_wins") or [])
+    sound_watchouts = list(memory_view.get("sound_watchouts") or [])
+    packaging_wins = list(memory_view.get("packaging_wins") or [])
+    packaging_watchouts = list(memory_view.get("packaging_watchouts") or [])
+    retention_wins = list(memory_view.get("retention_wins") or [])
+    weighted_next_moves = list(memory_view.get("next_video_moves") or [])
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),
@@ -2190,9 +2424,9 @@ def _heuristic_catalyst_edit_blueprint(
         "analysis_required_before_generation": True,
         "hook_strategy": {
             "promise": f"Open on the strongest hidden consequence around {subject}, not generic setup.",
-            "open_loop": primary_move,
+            "open_loop": _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180),
             "shock_device": "Use one unsettling or counterintuitive reveal within the first 15 seconds.",
-            "first_30s_mission": hook_warning,
+            "first_30s_mission": _clip_text(hook_watchouts[0] if hook_watchouts else hook_warning, 180),
         },
         "pacing_strategy": {
             "scene_duration_sec": 5.0,
@@ -2204,9 +2438,11 @@ def _heuristic_catalyst_edit_blueprint(
             "micro_escalation_mode": bool(format_preset in {"documentary", "explainer", "recap"}),
             "pacing_rules": _dedupe_preserve_order([
                 primary_move,
+                *pacing_wins[:2],
                 "Do not spend more than two scenes on the same visual idea.",
                 "Every chapter needs at least one contrast or reversal beat.",
                 "Escalate the consequences before the viewer settles into the pattern.",
+                *pacing_watchouts[:2],
                 *retention_findings[:3],
             ], max_items=6, max_chars=180),
         },
@@ -2216,12 +2452,13 @@ def _heuristic_catalyst_edit_blueprint(
                 "macro cutaways that reveal the hidden mechanism",
                 "miniature-world system sweeps for context",
                 "sharp pattern interrupts when the point changes",
-                *list(memory_view.get("visual_learnings") or [])[:2],
+                *visual_wins[:2],
             ], max_items=6, max_chars=160),
             "motion_graphics": _dedupe_preserve_order([
                 "clean HUD-style overlays only when they clarify the beat",
                 "diagram callouts that explain one mechanism at a time",
                 "before-versus-after or myth-versus-reality comparisons",
+                *packaging_wins[:1],
                 packaging_warning,
             ], max_items=6, max_chars=180),
             "transition_style": transition_style,
@@ -2229,7 +2466,8 @@ def _heuristic_catalyst_edit_blueprint(
                 "Stay obviously 3D and intentionally designed, not live-action.",
                 "Keep one dominant subject per frame and one dominant lighting cue.",
                 "Use contrast and scale shifts to reset attention.",
-                *list(memory_view.get("retention_watchouts") or [])[:2],
+                *visual_watchouts[:2],
+                *list(memory_view.get("retention_watchouts") or [])[:1],
             ], max_items=6, max_chars=180),
         },
         "sound_strategy": {
@@ -2239,7 +2477,8 @@ def _heuristic_catalyst_edit_blueprint(
                 "Use trailer-grade impacts only on real reveals, not every scene.",
                 "Keep the ambience bed present but under narration.",
                 "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
-                *list(memory_view.get("sound_learnings") or [])[:2],
+                *sound_wins[:2],
+                *sound_watchouts[:1],
             ], max_items=6, max_chars=160),
             "silence_rules": _dedupe_preserve_order([
                 "Drop the bed briefly before the biggest reveal in each chapter.",
@@ -2252,19 +2491,23 @@ def _heuristic_catalyst_edit_blueprint(
             ], max_items=4, max_chars=160),
         },
         "retention_targets": {
-            "main_bottleneck": hook_warning,
-            "main_opportunity": primary_move,
-            "packaging_opportunity": packaging_warning,
+            "main_bottleneck": _clip_text(hook_watchouts[0] if hook_watchouts else hook_warning, 220),
+            "main_opportunity": _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 220),
+            "packaging_opportunity": _clip_text(packaging_watchouts[0] if packaging_watchouts else packaging_warning, 220),
             "channel_title_hints": title_hints[:4],
             "memory_keywords": list(memory_view.get("proven_keywords") or [])[:8],
+            "measured_ctr_context": f"Measured channel average CTR: {outcome_ctr:.2f}%." if outcome_ctr > 0 else "",
+            "measured_retention_context": f"Measured average viewed: {outcome_avp:.2f}%." if outcome_avp > 0 else "",
         },
         "scoring_rubric": _dedupe_preserve_order([
             "First 15 seconds must promise a concrete payoff.",
             "Every scene must visualize the exact narration beat, not a generic metaphor.",
             "Every chapter needs at least one escalation and one pattern interrupt.",
             "Packaging must stay in the same arena while avoiding title repetition.",
-            *list(memory_view.get("hook_learnings") or [])[:2],
-            *list(memory_view.get("packaging_learnings") or [])[:2],
+            *hook_wins[:2],
+            *packaging_wins[:1],
+            *retention_wins[:1],
+            *list(memory_view.get("retention_watchouts") or [])[:1],
         ], max_items=8, max_chars=180),
         "chapter_blueprints": chapter_blueprints,
     }
@@ -2562,12 +2805,242 @@ def _update_catalyst_channel_memory(
     updated["packaging_learnings"] = _dedupe_preserve_order([*list(learning_record.get("packaging_adjustments") or []), *list(source_analysis.get("packaging_findings") or [])[:2], *list(updated.get("packaging_learnings") or [])], max_items=10, max_chars=180)
     updated["retention_watchouts"] = _dedupe_preserve_order([*list(learning_record.get("mistakes_to_avoid") or []), *list(source_analysis.get("retention_findings") or [])[:2], *list(updated.get("retention_watchouts") or [])], max_items=10, max_chars=180)
     updated["next_video_moves"] = _dedupe_preserve_order([*list(learning_record.get("next_video_moves") or []), *list(updated.get("next_video_moves") or [])], max_items=10, max_chars=180)
+    _catalyst_update_weighted_signals(updated, "hook_wins_map", list(learning_record.get("wins_to_keep") or [])[:2] + list(learning_record.get("hook_adjustments") or []), 0.35)
+    _catalyst_update_weighted_signals(updated, "hook_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:2], 0.35)
+    _catalyst_update_weighted_signals(updated, "pacing_wins_map", list(learning_record.get("pacing_adjustments") or []), 0.35)
+    _catalyst_update_weighted_signals(updated, "visual_wins_map", list(learning_record.get("visual_adjustments") or []), 0.35)
+    _catalyst_update_weighted_signals(updated, "sound_wins_map", list(learning_record.get("sound_adjustments") or []), 0.35)
+    _catalyst_update_weighted_signals(updated, "packaging_wins_map", list(learning_record.get("packaging_adjustments") or [])[:3], 0.35)
+    _catalyst_update_weighted_signals(updated, "retention_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:4], 0.35)
+    _catalyst_update_weighted_signals(updated, "next_video_moves_map", list(learning_record.get("next_video_moves") or []), 0.35)
+    public = _catalyst_channel_memory_public_view(updated)
     updated["summary"] = _clip_text(
         "Catalyst has "
         + f"{run_count} run{'s' if run_count != 1 else ''} on this channel lane. "
         + ("Keep " + ", ".join(list(updated.get("proven_keywords") or [])[:6]) + ". " if list(updated.get("proven_keywords") or []) else "")
-        + ("Best hook lesson: " + str((list(updated.get("hook_learnings") or []) or [""])[0]) + ". " if list(updated.get("hook_learnings") or []) else "")
-        + ("Current retention watchout: " + str((list(updated.get("retention_watchouts") or []) or [""])[0]) + "." if list(updated.get("retention_watchouts") or []) else ""),
+        + ("Best hook lesson: " + str((list(public.get("hook_wins") or []) or [""])[0]) + ". " if list(public.get("hook_wins") or []) else "")
+        + ("Current retention watchout: " + str((list(public.get("retention_watchouts") or []) or [""])[0]) + "." if list(public.get("retention_watchouts") or []) else ""),
+        320,
+    )
+    return updated
+
+
+async def _youtube_fetch_video_analytics(access_token: str, channel_id: str, video_id: str) -> dict:
+    vid = str(video_id or "").strip()
+    cid = str(channel_id or "").strip()
+    if not vid or not cid:
+        return {}
+    payload = {}
+    for metrics in (
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+    ):
+        try:
+            payload = await _youtube_api_get(
+                access_token,
+                "/reports",
+                analytics=True,
+                params={
+                    "ids": f"channel=={cid}",
+                    "startDate": (datetime.now(timezone.utc).date() - timedelta(days=365)).isoformat(),
+                    "endDate": datetime.now(timezone.utc).date().isoformat(),
+                    "metrics": metrics,
+                    "filters": f"video=={vid}",
+                },
+            )
+            break
+        except Exception:
+            payload = {}
+            continue
+    if not isinstance(payload, dict) or not list(payload.get("rows") or []):
+        return {}
+    row = list((payload.get("rows") or [[[]]])[0] or [])
+    headers = [str((col or {}).get("name", "") or "") for col in list(payload.get("columnHeaders") or [])]
+    metrics_map: dict[str, float] = {}
+    for idx, header in enumerate(headers):
+        if idx >= len(row):
+            continue
+        try:
+            metrics_map[header] = float(row[idx] or 0.0)
+        except Exception:
+            continue
+    return {
+        "views": int(metrics_map.get("views", 0.0) or 0.0),
+        "estimated_minutes_watched": round(float(metrics_map.get("estimatedMinutesWatched", 0.0) or 0.0), 2),
+        "average_view_duration_sec": round(float(metrics_map.get("averageViewDuration", 0.0) or 0.0), 2),
+        "average_percentage_viewed": round(float(metrics_map.get("averageViewPercentage", 0.0) or 0.0), 2),
+        "impressions": int(metrics_map.get("impressions", 0.0) or 0.0),
+        "impression_click_through_rate": round(float(metrics_map.get("impressionClickThroughRate", 0.0) or 0.0), 2),
+    }
+
+
+def _build_catalyst_outcome_record(
+    *,
+    session_snapshot: dict,
+    outcome_req: CatalystOutcomeIngestRequest,
+    video_meta: dict | None = None,
+    analytics_metrics: dict | None = None,
+) -> dict:
+    session_snapshot = dict(session_snapshot or {})
+    outcome_req = outcome_req or CatalystOutcomeIngestRequest()
+    package = dict(session_snapshot.get("package") or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    source_analysis = dict(metadata_pack.get("source_analysis") or {})
+    channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    video_meta = dict(video_meta or {})
+    analytics_metrics = dict(analytics_metrics or {})
+    selected_title = str(outcome_req.title_used or package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
+    selected_description = str(outcome_req.description_used or package.get("selected_description", "") or "").strip()
+    selected_tags = _dedupe_preserve_order([
+        *list(outcome_req.tags or []),
+        *list(package.get("selected_tags") or []),
+        *list(package.get("tags") or []),
+        *list(video_meta.get("tags") or []),
+    ], max_items=20, max_chars=64)
+    video_id = str(outcome_req.video_id or video_meta.get("video_id", "") or _source_url_video_id(str(outcome_req.video_url or "").strip()) or "").strip()
+    video_url = str(outcome_req.video_url or "").strip()
+    if not video_url and video_id:
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+    metrics = {
+        "views": int(outcome_req.views or video_meta.get("views", 0) or analytics_metrics.get("views", 0) or 0),
+        "impressions": int(outcome_req.impressions or analytics_metrics.get("impressions", 0) or 0),
+        "likes": int(outcome_req.likes or video_meta.get("likes", 0) or 0),
+        "comments": int(outcome_req.comments or video_meta.get("comments", 0) or 0),
+        "estimated_minutes_watched": round(float(outcome_req.estimated_minutes_watched or analytics_metrics.get("estimated_minutes_watched", 0.0) or 0.0), 2),
+        "average_view_duration_sec": round(float(outcome_req.average_view_duration_sec or analytics_metrics.get("average_view_duration_sec", 0.0) or 0.0), 2),
+        "average_percentage_viewed": round(float(outcome_req.average_percentage_viewed or analytics_metrics.get("average_percentage_viewed", 0.0) or 0.0), 2),
+        "impression_click_through_rate": round(float(outcome_req.impression_click_through_rate or analytics_metrics.get("impression_click_through_rate", 0.0) or 0.0), 2),
+        "first_30_sec_retention_pct": round(float(outcome_req.first_30_sec_retention_pct or 0.0), 2),
+        "first_60_sec_retention_pct": round(float(outcome_req.first_60_sec_retention_pct or 0.0), 2),
+    }
+    weight = _catalyst_outcome_weight(metrics)
+    strongest_signals = _dedupe_preserve_order([
+        *list(outcome_req.strongest_signals or []),
+        *list(source_analysis.get("strongest_signals") or [])[:2],
+    ], max_items=10, max_chars=180)
+    weak_points = _dedupe_preserve_order([
+        *list(outcome_req.weak_points or []),
+        *list(source_analysis.get("weak_points") or [])[:2],
+    ], max_items=10, max_chars=180)
+    next_video_moves = _dedupe_preserve_order([
+        *list(outcome_req.next_video_moves or []),
+        *list(source_analysis.get("improvement_moves") or [])[:3],
+    ], max_items=10, max_chars=180)
+    operator_summary = _clip_text(str(outcome_req.operator_summary or "").strip(), 320)
+    if not operator_summary:
+        summary_bits = [
+            f"Outcome logged for {selected_title}." if selected_title else "Outcome logged for this long-form run.",
+            f"CTR {metrics['impression_click_through_rate']:.2f}%." if metrics["impression_click_through_rate"] > 0 else "",
+            f"Average viewed {metrics['average_percentage_viewed']:.2f}%." if metrics["average_percentage_viewed"] > 0 else "",
+            f"First 30 seconds retention {metrics['first_30_sec_retention_pct']:.2f}%." if metrics["first_30_sec_retention_pct"] > 0 else "",
+            ("Next move: " + next_video_moves[0] + ".") if next_video_moves else "",
+        ]
+        operator_summary = _clip_text(" ".join(bit for bit in summary_bits if bit), 320)
+    return {
+        "session_id": str(session_snapshot.get("session_id", "") or ""),
+        "channel_id": str(session_snapshot.get("youtube_channel_id", "") or channel_context.get("channel_id", "") or ""),
+        "format_preset": str(session_snapshot.get("format_preset", "") or ""),
+        "created_at": time.time(),
+        "video_id": video_id,
+        "video_url": video_url,
+        "title_used": selected_title,
+        "description_used": selected_description,
+        "thumbnail_prompt": _clip_text(str(outcome_req.thumbnail_prompt or package.get("thumbnail_prompt", "") or ""), 240),
+        "thumbnail_url": str(outcome_req.thumbnail_url or package.get("thumbnail_url", "") or "").strip(),
+        "tags": selected_tags,
+        "weight": weight,
+        "metrics": metrics,
+        "operator_summary": operator_summary,
+        "strongest_signals": strongest_signals,
+        "weak_points": weak_points,
+        "hook_wins": _dedupe_preserve_order(list(outcome_req.hook_wins or []), max_items=8, max_chars=180),
+        "hook_watchouts": _dedupe_preserve_order(list(outcome_req.hook_watchouts or []), max_items=8, max_chars=180),
+        "pacing_wins": _dedupe_preserve_order(list(outcome_req.pacing_wins or []), max_items=8, max_chars=180),
+        "pacing_watchouts": _dedupe_preserve_order(list(outcome_req.pacing_watchouts or []), max_items=8, max_chars=180),
+        "visual_wins": _dedupe_preserve_order(list(outcome_req.visual_wins or []), max_items=8, max_chars=180),
+        "visual_watchouts": _dedupe_preserve_order(list(outcome_req.visual_watchouts or []), max_items=8, max_chars=180),
+        "sound_wins": _dedupe_preserve_order(list(outcome_req.sound_wins or []), max_items=8, max_chars=180),
+        "sound_watchouts": _dedupe_preserve_order(list(outcome_req.sound_watchouts or []), max_items=8, max_chars=180),
+        "packaging_wins": _dedupe_preserve_order(list(outcome_req.packaging_wins or []), max_items=8, max_chars=180),
+        "packaging_watchouts": _dedupe_preserve_order(list(outcome_req.packaging_watchouts or []), max_items=8, max_chars=180),
+        "retention_wins": _dedupe_preserve_order(list(outcome_req.retention_wins or []), max_items=8, max_chars=180),
+        "retention_watchouts": _dedupe_preserve_order(list(outcome_req.retention_watchouts or []), max_items=8, max_chars=180),
+        "next_video_moves": next_video_moves,
+    }
+
+
+def _apply_catalyst_outcome_to_channel_memory(
+    *,
+    existing: dict | None,
+    session_snapshot: dict,
+    outcome_record: dict,
+) -> dict:
+    updated = dict(existing or {})
+    session_snapshot = dict(session_snapshot or {})
+    outcome_record = dict(outcome_record or {})
+    metrics = dict(outcome_record.get("metrics") or {})
+    weight = float(outcome_record.get("weight", 1.0) or 1.0)
+    format_preset = str(session_snapshot.get("format_preset", "") or updated.get("format_preset", "") or "documentary")
+    updated["key"] = str(updated.get("key", "") or session_snapshot.get("channel_memory_key", "") or "")
+    updated["channel_id"] = str(updated.get("channel_id", "") or session_snapshot.get("youtube_channel_id", "") or outcome_record.get("channel_id", "") or "")
+    updated["format_preset"] = format_preset
+    updated["run_count"] = max(int(updated.get("run_count", 0) or 0), 1)
+    updated["outcome_count"] = int(updated.get("outcome_count", 0) or 0) + 1
+    updated["last_session_id"] = str(session_snapshot.get("session_id", "") or updated.get("last_session_id", "") or "")
+    updated["updated_at"] = time.time()
+    updated["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+    updated["recent_selected_titles"] = _dedupe_preserve_order(
+        [str(outcome_record.get("title_used", "") or "").strip(), *list(updated.get("recent_selected_titles") or [])],
+        max_items=10,
+        max_chars=160,
+    )
+    updated["proven_keywords"] = _dedupe_preserve_order(
+        [
+            *_extract_catalyst_keywords(
+                str(outcome_record.get("title_used", "") or ""),
+                *list(outcome_record.get("tags") or []),
+            ),
+            *list(updated.get("proven_keywords") or []),
+        ],
+        max_items=14,
+        max_chars=80,
+    )
+    updated["outcome_views_sum"] = float(updated.get("outcome_views_sum", 0.0) or 0.0) + float(metrics.get("views", 0.0) or 0.0)
+    updated["outcome_impressions_sum"] = float(updated.get("outcome_impressions_sum", 0.0) or 0.0) + float(metrics.get("impressions", 0.0) or 0.0)
+    updated["outcome_ctr_sum"] = float(updated.get("outcome_ctr_sum", 0.0) or 0.0) + float(metrics.get("impression_click_through_rate", 0.0) or 0.0)
+    updated["outcome_avp_sum"] = float(updated.get("outcome_avp_sum", 0.0) or 0.0) + float(metrics.get("average_percentage_viewed", 0.0) or 0.0)
+    updated["outcome_avd_sum"] = float(updated.get("outcome_avd_sum", 0.0) or 0.0) + float(metrics.get("average_view_duration_sec", 0.0) or 0.0)
+    updated["outcome_first30_sum"] = float(updated.get("outcome_first30_sum", 0.0) or 0.0) + float(metrics.get("first_30_sec_retention_pct", 0.0) or 0.0)
+    updated["outcome_first60_sum"] = float(updated.get("outcome_first60_sum", 0.0) or 0.0) + float(metrics.get("first_60_sec_retention_pct", 0.0) or 0.0)
+    updated["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(updated.get("hook_learnings") or [])], max_items=10, max_chars=180)
+    updated["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(updated.get("pacing_learnings") or [])], max_items=10, max_chars=180)
+    updated["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(updated.get("visual_learnings") or [])], max_items=10, max_chars=180)
+    updated["sound_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("sound_wins") or []), *list(updated.get("sound_learnings") or [])], max_items=10, max_chars=180)
+    updated["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(updated.get("packaging_learnings") or [])], max_items=10, max_chars=180)
+    updated["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(updated.get("retention_watchouts") or [])], max_items=10, max_chars=180)
+    updated["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(updated.get("next_video_moves") or [])], max_items=10, max_chars=180)
+    _catalyst_update_weighted_signals(updated, "hook_wins_map", list(outcome_record.get("hook_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "hook_watchouts_map", list(outcome_record.get("hook_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "pacing_wins_map", list(outcome_record.get("pacing_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "pacing_watchouts_map", list(outcome_record.get("pacing_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "visual_wins_map", list(outcome_record.get("visual_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "visual_watchouts_map", list(outcome_record.get("visual_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "sound_wins_map", list(outcome_record.get("sound_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "sound_watchouts_map", list(outcome_record.get("sound_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "packaging_wins_map", list(outcome_record.get("packaging_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "packaging_watchouts_map", list(outcome_record.get("packaging_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "retention_wins_map", list(outcome_record.get("retention_wins") or []), weight)
+    _catalyst_update_weighted_signals(updated, "retention_watchouts_map", list(outcome_record.get("retention_watchouts") or []), weight)
+    _catalyst_update_weighted_signals(updated, "next_video_moves_map", list(outcome_record.get("next_video_moves") or []), weight)
+    public = _catalyst_channel_memory_public_view(updated)
+    updated["summary"] = _clip_text(
+        "Catalyst now has "
+        + f"{int(public.get('run_count', 0) or 0)} generated run{'s' if int(public.get('run_count', 0) or 0) != 1 else ''} "
+        + f"and {int(public.get('outcome_count', 0) or 0)} measured outcome{'s' if int(public.get('outcome_count', 0) or 0) != 1 else ''} on this channel lane. "
+        + (f"Avg CTR {float(public.get('average_ctr', 0.0) or 0.0):.2f}%. " if float(public.get("average_ctr", 0.0) or 0.0) > 0 else "")
+        + (f"Avg viewed {float(public.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}%. " if float(public.get("average_average_percentage_viewed", 0.0) or 0.0) > 0 else "")
+        + ("Best hook win: " + str((list(public.get("hook_wins") or []) or [""])[0]) + ". " if list(public.get("hook_wins") or []) else "")
+        + ("Primary watchout: " + str((list(public.get("retention_watchouts") or []) or [""])[0]) + "." if list(public.get("retention_watchouts") or []) else ""),
         320,
     )
     return updated
@@ -6242,6 +6715,8 @@ async def _youtube_fetch_videos(access_token: str, video_ids: list[str]) -> list
             "description": str(snippet.get("description", "") or "").strip(),
             "published_at": str(snippet.get("publishedAt", "") or "").strip(),
             "thumbnail_url": str((((snippet.get("thumbnails") or {}).get("high") or {}).get("url") or "")).strip(),
+            "tags": [str(tag).strip() for tag in list(snippet.get("tags") or []) if str(tag).strip()][:20],
+            "duration_sec": _parse_youtube_iso8601_duration(str((raw.get("contentDetails") or {}).get("duration", "") or "")),
             "views": int(float(stats.get("viewCount", 0) or 0)),
             "likes": int(float(stats.get("likeCount", 0) or 0)),
             "comments": int(float(stats.get("commentCount", 0) or 0)),
@@ -14155,6 +14630,7 @@ def _longform_public_session(session: dict) -> dict:
         "metadata_pack": dict(s.get("metadata_pack") or {}),
         "edit_blueprint": dict(s.get("edit_blueprint") or {}),
         "learning_record": dict(s.get("learning_record") or {}),
+        "latest_outcome": dict(s.get("latest_outcome") or {}),
         "channel_memory": _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
         "chapters": chapters,
         "review_state": _longform_review_state(s),
@@ -15500,6 +15976,7 @@ async def _create_longform_session_internal(
         "metadata_pack": metadata_pack,
         "edit_blueprint": edit_blueprint,
         "learning_record": dict(existing_session.get("learning_record") or {}) if existing_session else {},
+        "latest_outcome": dict(existing_session.get("latest_outcome") or {}) if existing_session else {},
         "channel_memory_key": channel_memory_key,
         "channel_memory": _catalyst_channel_memory_public_view(channel_memory),
         "draft_progress": {
@@ -15649,6 +16126,7 @@ def _create_longform_bootstrap_placeholder_session(
         "metadata_pack": metadata_pack,
         "edit_blueprint": {},
         "learning_record": {},
+        "latest_outcome": {},
         "channel_memory_key": _catalyst_channel_memory_key(str(user.get("id", "") or ""), str(youtube_channel_id or "").strip(), str(format_preset or "explainer").strip().lower() or "explainer"),
         "channel_memory": {},
         "draft_progress": {
@@ -16313,6 +16791,111 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
         raise HTTPException(403, "Long-form owner beta is restricted")
     job_id = await _start_longform_finalize_internal(session_id, user)
     return {"job_id": job_id}
+
+
+@app.post("/api/longform/session/{session_id}/outcome")
+async def longform_ingest_outcome(session_id: str, req: CatalystOutcomeIngestRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    user_id = str(user.get("id", "") or "").strip()
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = dict(_longform_sessions.get(session_id) or {})
+    if not session:
+        raise HTTPException(404, "Long-form session not found")
+    if str(session.get("user_id", "") or "") != user_id:
+        raise HTTPException(403, "Forbidden")
+
+    channel_id = str(session.get("youtube_channel_id", "") or "").strip()
+    normalized_video_url = _normalize_external_source_url(str((req or {}).video_url or "").strip())
+    video_id = str((req or {}).video_id or "").strip() or _source_url_video_id(normalized_video_url)
+    video_meta: dict = {}
+    analytics_metrics: dict = {}
+    if _bool_from_any(getattr(req, "auto_fetch_channel_metrics", True), True) and channel_id and video_id:
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            bucket = _youtube_bucket_for_user(user_id)
+            record = dict((dict(bucket.get("channels") or {})).get(channel_id) or {})
+        if record:
+            try:
+                access_token, refreshed_record = await _youtube_ensure_access_token(record)
+                video_rows = await _youtube_fetch_videos(access_token, [video_id])
+                video_meta = dict(video_rows[0] or {}) if video_rows else {}
+                analytics_metrics = await _youtube_fetch_video_analytics(access_token, channel_id, video_id)
+                async with _youtube_connections_lock:
+                    _load_youtube_connections()
+                    bucket = _youtube_bucket_for_user(user_id)
+                    bucket_channels = dict(bucket.get("channels") or {})
+                    if channel_id in bucket_channels:
+                        bucket_channels[channel_id] = refreshed_record
+                        bucket["channels"] = bucket_channels
+                        _save_youtube_connections()
+            except Exception as e:
+                log.warning(f"[longform:{session_id}] outcome auto-fetch failed: {e}")
+
+    outcome_record = _build_catalyst_outcome_record(
+        session_snapshot=session,
+        outcome_req=req,
+        video_meta=video_meta,
+        analytics_metrics=analytics_metrics,
+    )
+
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        learning_key = str(session.get("session_id", "") or session_id)
+        channel_memory_key = str(
+            session.get("channel_memory_key", "")
+            or _catalyst_channel_memory_key(
+                user_id,
+                channel_id,
+                str(session.get("format_preset", "") or "documentary"),
+            )
+        )
+        existing_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or session.get("channel_memory") or {})
+        updated_channel_memory = _apply_catalyst_outcome_to_channel_memory(
+            existing=existing_memory,
+            session_snapshot=session,
+            outcome_record=outcome_record,
+        )
+        updated_channel_memory["key"] = channel_memory_key
+        _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
+        existing_learning_entry = _catalyst_learning_records.get(learning_key)
+        if isinstance(existing_learning_entry, dict) and ("prepublish" in existing_learning_entry or "outcome_history" in existing_learning_entry):
+            learning_entry = dict(existing_learning_entry)
+        else:
+            learning_entry = {
+                "prepublish": dict(session.get("learning_record") or existing_learning_entry or {}),
+                "outcome_history": [],
+            }
+        history = [dict(item or {}) for item in list(learning_entry.get("outcome_history") or []) if isinstance(item, dict)]
+        history.append(outcome_record)
+        learning_entry["latest_outcome"] = outcome_record
+        learning_entry["outcome_history"] = history[-16:]
+        _catalyst_learning_records[learning_key] = learning_entry
+        _save_catalyst_memory()
+
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session_live = _longform_sessions.get(session_id)
+        if not isinstance(session_live, dict):
+            raise HTTPException(404, "Long-form session not found")
+        metadata_pack = dict(session_live.get("metadata_pack") or {})
+        metadata_pack["catalyst_channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
+        session_live["metadata_pack"] = metadata_pack
+        session_live["latest_outcome"] = outcome_record
+        session_live["channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
+        session_live["updated_at"] = time.time()
+        _save_longform_sessions()
+        session_live = dict(session_live)
+
+    return {
+        "ok": True,
+        "outcome": outcome_record,
+        "session": _longform_public_session(session_live),
+    }
 
 
 @app.post("/api/creative/script")

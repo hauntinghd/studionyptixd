@@ -84,6 +84,10 @@ type LongFormSession = {
     status: string;
     job_id: string;
     paused_error: any;
+    edit_blueprint?: Record<string, any>;
+    learning_record?: Record<string, any>;
+    latest_outcome?: Record<string, any>;
+    channel_memory?: Record<string, any>;
     metadata_pack: {
         title_variants?: string[];
         description_variants?: string[];
@@ -192,6 +196,18 @@ function chapterStatusClass(status: string): string {
     return 'text-gray-300 border-white/[0.16] bg-white/[0.03]';
 }
 
+function joinOutcomeLines(values: any): string {
+    if (!Array.isArray(values)) return '';
+    return values.map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+}
+
+function splitOutcomeLines(value: string): string[] {
+    return String(value || '')
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
 export default function LongFormPanel() {
     const { session, ownerOverride, longformOwnerBeta } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
@@ -230,7 +246,33 @@ export default function LongFormPanel() {
     const [sessionIdInput, setSessionIdInput] = useState('');
     const [projectSessions, setProjectSessions] = useState<LongFormSessionSummary[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
+    const [outcomeVideoUrl, setOutcomeVideoUrl] = useState('');
+    const [outcomeViews, setOutcomeViews] = useState('');
+    const [outcomeImpressions, setOutcomeImpressions] = useState('');
+    const [outcomeAvd, setOutcomeAvd] = useState('');
+    const [outcomeAvp, setOutcomeAvp] = useState('');
+    const [outcomeCtr, setOutcomeCtr] = useState('');
+    const [outcomeFirst30, setOutcomeFirst30] = useState('');
+    const [outcomeFirst60, setOutcomeFirst60] = useState('');
+    const [outcomeSummary, setOutcomeSummary] = useState('');
+    const [outcomeStrongSignals, setOutcomeStrongSignals] = useState('');
+    const [outcomeWeakPoints, setOutcomeWeakPoints] = useState('');
+    const [outcomeHookWins, setOutcomeHookWins] = useState('');
+    const [outcomeHookWatchouts, setOutcomeHookWatchouts] = useState('');
+    const [outcomePacingWins, setOutcomePacingWins] = useState('');
+    const [outcomePacingWatchouts, setOutcomePacingWatchouts] = useState('');
+    const [outcomeVisualWins, setOutcomeVisualWins] = useState('');
+    const [outcomeVisualWatchouts, setOutcomeVisualWatchouts] = useState('');
+    const [outcomeSoundWins, setOutcomeSoundWins] = useState('');
+    const [outcomeSoundWatchouts, setOutcomeSoundWatchouts] = useState('');
+    const [outcomePackagingWins, setOutcomePackagingWins] = useState('');
+    const [outcomePackagingWatchouts, setOutcomePackagingWatchouts] = useState('');
+    const [outcomeRetentionWins, setOutcomeRetentionWins] = useState('');
+    const [outcomeRetentionWatchouts, setOutcomeRetentionWatchouts] = useState('');
+    const [outcomeNextMoves, setOutcomeNextMoves] = useState('');
+    const [outcomeSaving, setOutcomeSaving] = useState(false);
     const restoredSessionUserRef = useRef('');
+    const outcomeSeedRef = useRef('');
 
     const lastSessionStorageKey = useMemo(() => {
         const uid = String(session?.user?.id || 'guest').trim() || 'guest';
@@ -618,6 +660,8 @@ export default function LongFormPanel() {
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
     const connectedYouTubeChannel = (lfSession?.metadata_pack?.youtube_channel || {}) as Record<string, any>;
+    const channelMemory = (lfSession?.channel_memory || {}) as Record<string, any>;
+    const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
     const titleVariants = hasPublishPackage && Array.isArray(lfSession?.package?.title_variants) ? lfSession?.package?.title_variants as string[] : [];
     const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
     const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
@@ -638,6 +682,119 @@ export default function LongFormPanel() {
         if (ts <= 0) return 'Unknown';
         return new Date(ts * 1000).toLocaleString();
     }, []);
+
+    useEffect(() => {
+        const seedKey = `${String(lfSession?.session_id || '')}:${String(latestOutcome?.created_at || 0)}:${outputFile}`;
+        if (!seedKey || outcomeSeedRef.current === seedKey) return;
+        outcomeSeedRef.current = seedKey;
+        setOutcomeVideoUrl(String(latestOutcome?.video_url || ''));
+        setOutcomeViews(latestOutcome?.metrics?.views ? String(latestOutcome.metrics.views) : '');
+        setOutcomeImpressions(latestOutcome?.metrics?.impressions ? String(latestOutcome.metrics.impressions) : '');
+        setOutcomeAvd(latestOutcome?.metrics?.average_view_duration_sec ? String(latestOutcome.metrics.average_view_duration_sec) : '');
+        setOutcomeAvp(latestOutcome?.metrics?.average_percentage_viewed ? String(latestOutcome.metrics.average_percentage_viewed) : '');
+        setOutcomeCtr(latestOutcome?.metrics?.impression_click_through_rate ? String(latestOutcome.metrics.impression_click_through_rate) : '');
+        setOutcomeFirst30(latestOutcome?.metrics?.first_30_sec_retention_pct ? String(latestOutcome.metrics.first_30_sec_retention_pct) : '');
+        setOutcomeFirst60(latestOutcome?.metrics?.first_60_sec_retention_pct ? String(latestOutcome.metrics.first_60_sec_retention_pct) : '');
+        setOutcomeSummary(String(latestOutcome?.operator_summary || ''));
+        setOutcomeStrongSignals(joinOutcomeLines(latestOutcome?.strongest_signals));
+        setOutcomeWeakPoints(joinOutcomeLines(latestOutcome?.weak_points));
+        setOutcomeHookWins(joinOutcomeLines(latestOutcome?.hook_wins));
+        setOutcomeHookWatchouts(joinOutcomeLines(latestOutcome?.hook_watchouts));
+        setOutcomePacingWins(joinOutcomeLines(latestOutcome?.pacing_wins));
+        setOutcomePacingWatchouts(joinOutcomeLines(latestOutcome?.pacing_watchouts));
+        setOutcomeVisualWins(joinOutcomeLines(latestOutcome?.visual_wins));
+        setOutcomeVisualWatchouts(joinOutcomeLines(latestOutcome?.visual_watchouts));
+        setOutcomeSoundWins(joinOutcomeLines(latestOutcome?.sound_wins));
+        setOutcomeSoundWatchouts(joinOutcomeLines(latestOutcome?.sound_watchouts));
+        setOutcomePackagingWins(joinOutcomeLines(latestOutcome?.packaging_wins));
+        setOutcomePackagingWatchouts(joinOutcomeLines(latestOutcome?.packaging_watchouts));
+        setOutcomeRetentionWins(joinOutcomeLines(latestOutcome?.retention_wins));
+        setOutcomeRetentionWatchouts(joinOutcomeLines(latestOutcome?.retention_watchouts));
+        setOutcomeNextMoves(joinOutcomeLines(latestOutcome?.next_video_moves));
+    }, [latestOutcome, lfSession?.session_id, outputFile]);
+
+    const submitOutcome = useCallback(async () => {
+        if (!lfSession?.session_id) return;
+        setOutcomeSaving(true);
+        setError('');
+        try {
+            const toNumber = (value: string) => {
+                const parsed = Number(String(value || '').trim());
+                return Number.isFinite(parsed) ? parsed : 0;
+            };
+            const payload = await apiCall(`/api/longform/session/${lfSession.session_id}/outcome`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    video_url: outcomeVideoUrl.trim(),
+                    title_used: selectedTitle,
+                    description_used: selectedDescription,
+                    thumbnail_prompt: String(lfSession?.package?.thumbnail_prompt || ''),
+                    thumbnail_url: String(lfSession?.package?.thumbnail_url || ''),
+                    tags: selectedTags,
+                    views: Math.round(toNumber(outcomeViews)),
+                    impressions: Math.round(toNumber(outcomeImpressions)),
+                    average_view_duration_sec: toNumber(outcomeAvd),
+                    average_percentage_viewed: toNumber(outcomeAvp),
+                    impression_click_through_rate: toNumber(outcomeCtr),
+                    first_30_sec_retention_pct: toNumber(outcomeFirst30),
+                    first_60_sec_retention_pct: toNumber(outcomeFirst60),
+                    operator_summary: outcomeSummary.trim(),
+                    strongest_signals: splitOutcomeLines(outcomeStrongSignals),
+                    weak_points: splitOutcomeLines(outcomeWeakPoints),
+                    hook_wins: splitOutcomeLines(outcomeHookWins),
+                    hook_watchouts: splitOutcomeLines(outcomeHookWatchouts),
+                    pacing_wins: splitOutcomeLines(outcomePacingWins),
+                    pacing_watchouts: splitOutcomeLines(outcomePacingWatchouts),
+                    visual_wins: splitOutcomeLines(outcomeVisualWins),
+                    visual_watchouts: splitOutcomeLines(outcomeVisualWatchouts),
+                    sound_wins: splitOutcomeLines(outcomeSoundWins),
+                    sound_watchouts: splitOutcomeLines(outcomeSoundWatchouts),
+                    packaging_wins: splitOutcomeLines(outcomePackagingWins),
+                    packaging_watchouts: splitOutcomeLines(outcomePackagingWatchouts),
+                    retention_wins: splitOutcomeLines(outcomeRetentionWins),
+                    retention_watchouts: splitOutcomeLines(outcomeRetentionWatchouts),
+                    next_video_moves: splitOutcomeLines(outcomeNextMoves),
+                    auto_fetch_channel_metrics: true,
+                }),
+            });
+            setLfSession((payload as any).session || null);
+        } catch (e: any) {
+            setError(e?.message || 'Failed to ingest post-publish outcome');
+        } finally {
+            setOutcomeSaving(false);
+        }
+    }, [
+        apiCall,
+        lfSession?.package,
+        lfSession?.session_id,
+        outcomeAvd,
+        outcomeAvp,
+        outcomeCtr,
+        outcomeFirst30,
+        outcomeFirst60,
+        outcomeHookWatchouts,
+        outcomeHookWins,
+        outcomeImpressions,
+        outcomeNextMoves,
+        outcomePackagingWatchouts,
+        outcomePackagingWins,
+        outcomePacingWatchouts,
+        outcomePacingWins,
+        outcomeRetentionWatchouts,
+        outcomeRetentionWins,
+        outcomeSoundWatchouts,
+        outcomeSoundWins,
+        outcomeStrongSignals,
+        outcomeSummary,
+        outcomeVideoUrl,
+        outcomeViews,
+        outcomeVisualWatchouts,
+        outcomeVisualWins,
+        outcomeWeakPoints,
+        selectedDescription,
+        selectedTags,
+        selectedTitle,
+    ]);
 
     return (
         <div className="max-w-5xl mx-auto px-6 pb-10 space-y-6">
@@ -1350,6 +1507,163 @@ export default function LongFormPanel() {
                                     </ul>
                                 </div>
                             </div>
+                        </div>
+                    ) : null}
+
+                    {hasPublishPackage ? (
+                        <div className="rounded-xl border border-cyan-400/20 bg-cyan-500/5 p-5 space-y-4">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <h3 className="font-semibold text-white">Post-Publish Outcome Ingestion</h3>
+                                    <p className="mt-1 text-xs text-cyan-100/80">
+                                        Feed the real result back into Catalyst after the video goes live. If you paste the live YouTube URL, Studio will auto-pull what it can from the connected channel before applying the weighted memory update.
+                                    </p>
+                                </div>
+                                {channelMemory.summary ? (
+                                    <div className="rounded-lg border border-cyan-400/20 bg-black/20 px-3 py-2 text-xs text-cyan-100/90">
+                                        <div>Measured outcomes: {Number(channelMemory.outcome_count || 0)}</div>
+                                        <div>Avg CTR: {Number(channelMemory.average_ctr || 0).toFixed(2)}%</div>
+                                        <div>Avg viewed: {Number(channelMemory.average_average_percentage_viewed || 0).toFixed(2)}%</div>
+                                    </div>
+                                ) : null}
+                            </div>
+
+                            <div className="grid gap-3 md:grid-cols-4">
+                                <label className="text-sm text-gray-300 md:col-span-2">
+                                    Published YouTube URL
+                                    <input
+                                        value={outcomeVideoUrl}
+                                        onChange={(e) => setOutcomeVideoUrl(e.target.value)}
+                                        placeholder="https://www.youtube.com/watch?v=..."
+                                        className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
+                                    />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Views
+                                    <input value={outcomeViews} onChange={(e) => setOutcomeViews(e.target.value)} placeholder="309" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Impressions
+                                    <input value={outcomeImpressions} onChange={(e) => setOutcomeImpressions(e.target.value)} placeholder="5000" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    AVD (sec)
+                                    <input value={outcomeAvd} onChange={(e) => setOutcomeAvd(e.target.value)} placeholder="158" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Avg Viewed %
+                                    <input value={outcomeAvp} onChange={(e) => setOutcomeAvp(e.target.value)} placeholder="30.8" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    CTR %
+                                    <input value={outcomeCtr} onChange={(e) => setOutcomeCtr(e.target.value)} placeholder="1.4" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    First 30s Retention %
+                                    <input value={outcomeFirst30} onChange={(e) => setOutcomeFirst30(e.target.value)} placeholder="72" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    First 60s Retention %
+                                    <input value={outcomeFirst60} onChange={(e) => setOutcomeFirst60(e.target.value)} placeholder="58" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                            </div>
+
+                            <label className="block text-sm text-gray-300">
+                                Operator Summary
+                                <textarea
+                                    value={outcomeSummary}
+                                    onChange={(e) => setOutcomeSummary(e.target.value)}
+                                    rows={3}
+                                    placeholder="What did this video do well? What clearly hurt it? What should Catalyst change on the next run?"
+                                    className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
+                                />
+                            </label>
+
+                            <div className="grid gap-3 md:grid-cols-2">
+                                <label className="text-sm text-gray-300">
+                                    Strongest Signals
+                                    <textarea value={outcomeStrongSignals} onChange={(e) => setOutcomeStrongSignals(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Weak Points
+                                    <textarea value={outcomeWeakPoints} onChange={(e) => setOutcomeWeakPoints(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Hook Wins
+                                    <textarea value={outcomeHookWins} onChange={(e) => setOutcomeHookWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Hook Watchouts
+                                    <textarea value={outcomeHookWatchouts} onChange={(e) => setOutcomeHookWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Pacing Wins
+                                    <textarea value={outcomePacingWins} onChange={(e) => setOutcomePacingWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Pacing Watchouts
+                                    <textarea value={outcomePacingWatchouts} onChange={(e) => setOutcomePacingWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Visual Wins
+                                    <textarea value={outcomeVisualWins} onChange={(e) => setOutcomeVisualWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Visual Watchouts
+                                    <textarea value={outcomeVisualWatchouts} onChange={(e) => setOutcomeVisualWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Sound Wins
+                                    <textarea value={outcomeSoundWins} onChange={(e) => setOutcomeSoundWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Sound Watchouts
+                                    <textarea value={outcomeSoundWatchouts} onChange={(e) => setOutcomeSoundWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Packaging Wins
+                                    <textarea value={outcomePackagingWins} onChange={(e) => setOutcomePackagingWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Packaging Watchouts
+                                    <textarea value={outcomePackagingWatchouts} onChange={(e) => setOutcomePackagingWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Retention Wins
+                                    <textarea value={outcomeRetentionWins} onChange={(e) => setOutcomeRetentionWins(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                                <label className="text-sm text-gray-300">
+                                    Retention Watchouts
+                                    <textarea value={outcomeRetentionWatchouts} onChange={(e) => setOutcomeRetentionWatchouts(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                                </label>
+                            </div>
+
+                            <label className="block text-sm text-gray-300">
+                                Next Video Moves
+                                <textarea value={outcomeNextMoves} onChange={(e) => setOutcomeNextMoves(e.target.value)} rows={4} placeholder="One item per line" className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white" />
+                            </label>
+
+                            <div className="flex flex-wrap gap-3">
+                                <button
+                                    onClick={submitOutcome}
+                                    disabled={outcomeSaving}
+                                    className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium disabled:opacity-50 transition"
+                                >
+                                    {outcomeSaving ? 'Updating Catalyst Memory...' : 'Ingest Outcome Into Catalyst'}
+                                </button>
+                            </div>
+
+                            {latestOutcome?.operator_summary ? (
+                                <div className="rounded-xl border border-cyan-400/20 bg-black/20 p-4 space-y-2">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Latest Outcome Memory</p>
+                                    <p className="text-sm text-gray-300">{String(latestOutcome.operator_summary)}</p>
+                                    <div className="grid gap-3 md:grid-cols-3 text-xs text-gray-300">
+                                        <div>Weight: {Number(latestOutcome.weight || 0).toFixed(2)}</div>
+                                        <div>CTR: {Number(latestOutcome.metrics?.impression_click_through_rate || 0).toFixed(2)}%</div>
+                                        <div>Avg Viewed: {Number(latestOutcome.metrics?.average_percentage_viewed || 0).toFixed(2)}%</div>
+                                    </div>
+                                </div>
+                            ) : null}
                         </div>
                     ) : null}
                 </div>
