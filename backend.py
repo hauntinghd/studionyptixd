@@ -181,6 +181,7 @@ from backend_models import (
     YouTubeOAuthStartRequest,
     YouTubeChannelSelectRequest,
     CatalystOutcomeIngestRequest,
+    CatalystAutoOutcomeHarvestRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -3271,6 +3272,313 @@ async def _youtube_fetch_video_analytics(access_token: str, channel_id: str, vid
         "impressions": int(metrics_map.get("impressions", 0.0) or 0.0),
         "impression_click_through_rate": round(float(metrics_map.get("impressionClickThroughRate", 0.0) or 0.0), 2),
     }
+
+
+def _parse_utc_datetime(raw_value: str) -> datetime | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _catalyst_text_overlap_score(primary: str, secondary: str) -> float:
+    left = str(primary or "").strip().lower()
+    right = str(secondary or "").strip().lower()
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    left_tokens = set(_extract_catalyst_keywords(left, max_items=16))
+    right_tokens = set(_extract_catalyst_keywords(right, max_items=16))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = left_tokens & right_tokens
+    union = left_tokens | right_tokens
+    return round(len(overlap) / max(1, len(union)), 4)
+
+
+def _match_published_video_to_longform_session(session_snapshot: dict, candidates: list[dict]) -> dict:
+    session_snapshot = dict(session_snapshot or {})
+    package = dict(session_snapshot.get("package") or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    source_video = dict(metadata_pack.get("source_video") or {})
+    expected_titles = _dedupe_preserve_order(
+        [
+            str(package.get("selected_title", "") or "").strip(),
+            *[str(v).strip() for v in list(package.get("title_variants") or [])[:3] if str(v).strip()],
+            str(session_snapshot.get("input_title", "") or "").strip(),
+            str(session_snapshot.get("topic", "") or "").strip(),
+        ],
+        max_items=6,
+        max_chars=180,
+    )
+    expected_tags = [str(v).strip().lower() for v in list(package.get("selected_tags") or package.get("tags") or []) if str(v).strip()]
+    source_title = str(source_video.get("title", "") or "").strip()
+    created_at = float(session_snapshot.get("updated_at", 0.0) or session_snapshot.get("created_at", 0.0) or 0.0)
+    best_score = -1.0
+    best_candidate: dict = {}
+    for raw in list(candidates or []):
+        candidate = dict(raw or {})
+        title = str(candidate.get("title", "") or "").strip()
+        if not title:
+            continue
+        title_score = 0.0
+        for idx, target in enumerate(expected_titles):
+            if not target:
+                continue
+            similarity = _catalyst_text_overlap_score(title, target)
+            title_score = max(title_score, similarity * max(45.0, 100.0 - (idx * 12.0)))
+            if title.lower() == target.lower():
+                title_score = max(title_score, 140.0)
+        tag_overlap = 0.0
+        candidate_tags = [str(v).strip().lower() for v in list(candidate.get("tags") or []) if str(v).strip()]
+        if expected_tags and candidate_tags:
+            overlap = len(set(expected_tags) & set(candidate_tags))
+            tag_overlap = overlap * 5.0
+        recency_score = 0.0
+        published_at = _parse_utc_datetime(str(candidate.get("published_at", "") or ""))
+        if created_at > 0 and published_at is not None:
+            delta_days = abs((published_at.timestamp() - created_at) / 86400.0)
+            if delta_days <= 3:
+                recency_score = 24.0
+            elif delta_days <= 7:
+                recency_score = 18.0
+            elif delta_days <= 14:
+                recency_score = 10.0
+            elif delta_days <= 30:
+                recency_score = 4.0
+        score = title_score + tag_overlap + recency_score
+        if source_title and _title_is_too_close_to_source(title, source_title):
+            score -= 16.0
+        score += min(12.0, float(candidate.get("views", 0) or 0) / 50000.0)
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+    return best_candidate if best_score >= 35.0 else {}
+
+
+def _build_auto_outcome_request(
+    *,
+    session_snapshot: dict,
+    video_meta: dict,
+    analytics_metrics: dict | None = None,
+) -> CatalystOutcomeIngestRequest:
+    session_snapshot = dict(session_snapshot or {})
+    video_meta = dict(video_meta or {})
+    analytics_metrics = dict(analytics_metrics or {})
+    package = dict(session_snapshot.get("package") or {})
+    channel_memory = _catalyst_channel_memory_public_view(session_snapshot.get("channel_memory") or {})
+    metrics = {
+        "views": int(video_meta.get("views", 0) or analytics_metrics.get("views", 0) or 0),
+        "impressions": int(analytics_metrics.get("impressions", 0) or 0),
+        "likes": int(video_meta.get("likes", 0) or 0),
+        "comments": int(video_meta.get("comments", 0) or 0),
+        "estimated_minutes_watched": round(float(analytics_metrics.get("estimated_minutes_watched", 0.0) or 0.0), 2),
+        "average_view_duration_sec": round(float(analytics_metrics.get("average_view_duration_sec", 0.0) or 0.0), 2),
+        "average_percentage_viewed": round(float(analytics_metrics.get("average_percentage_viewed", 0.0) or 0.0), 2),
+        "impression_click_through_rate": round(float(analytics_metrics.get("impression_click_through_rate", 0.0) or 0.0), 2),
+        "first_30_sec_retention_pct": round(float(analytics_metrics.get("first_30_sec_retention_pct", 0.0) or 0.0), 2),
+        "first_60_sec_retention_pct": round(float(analytics_metrics.get("first_60_sec_retention_pct", 0.0) or 0.0), 2),
+    }
+    title_used = str(video_meta.get("title", "") or package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
+    source_title = str(((dict(session_snapshot.get("metadata_pack") or {})).get("source_video") or {}).get("title", "") or session_snapshot.get("input_title", "") or "").strip()
+    recent_titles = [
+        *list(channel_memory.get("recent_selected_titles") or []),
+        *list(channel_memory.get("recent_source_titles") or []),
+    ]
+    title_novelty = _catalyst_title_novelty_score(title_used, source_title=source_title, recent_titles=recent_titles)
+    avp = float(metrics.get("average_percentage_viewed", 0.0) or 0.0)
+    ctr = float(metrics.get("impression_click_through_rate", 0.0) or 0.0)
+    avd = float(metrics.get("average_view_duration_sec", 0.0) or 0.0)
+    first30 = float(metrics.get("first_30_sec_retention_pct", 0.0) or 0.0)
+    first60 = float(metrics.get("first_60_sec_retention_pct", 0.0) or 0.0)
+    preview_success = float((dict(session_snapshot.get("learning_record") or {})).get("preview_success_rate", 0.0) or 0.0)
+    target_duration_sec = max(float(video_meta.get("duration_sec", 0.0) or 0.0), float(session_snapshot.get("target_minutes", 0.0) or 0.0) * 60.0)
+    avd_ratio = round((avd / max(target_duration_sec, 1.0)) * 100.0, 2) if target_duration_sec > 0 else 0.0
+
+    strongest_signals = _dedupe_preserve_order([
+        f"CTR around {ctr:.2f}% is showing the package is earning clicks." if ctr >= 4.0 else "",
+        f"Average viewed around {avp:.2f}% suggests the pacing is holding attention." if avp >= 42.0 else "",
+        f"First 30 second retention around {first30:.2f}% shows the hook is landing." if first30 >= 62.0 else "",
+        f"Views have reached roughly {int(metrics['views']):,}, so this run has enough signal to learn from." if int(metrics["views"]) >= 300 else "",
+    ], max_items=8, max_chars=180)
+    weak_points = _dedupe_preserve_order([
+        f"CTR around {ctr:.2f}% is soft, so the title/thumbnail package needs a stronger curiosity gap." if 0 < ctr < 4.0 else "",
+        f"Average viewed around {avp:.2f}% suggests the pacing still loses too many viewers." if 0 < avp < 42.0 else "",
+        f"First 30 second retention around {first30:.2f}% suggests the hook needs a faster payoff." if 0 < first30 < 62.0 else "",
+        f"Title novelty score is only {title_novelty}/100, so the headline is still too close to prior phrasing." if title_novelty < 75 else "",
+    ], max_items=8, max_chars=180)
+    hook_wins = _dedupe_preserve_order([
+        "The opening promise is working; keep starting on the consequence or hidden mechanism." if first30 >= 62.0 else "",
+        "The hook is converting because the title promise gets paid off quickly." if first60 >= 52.0 else "",
+    ], max_items=6, max_chars=180)
+    hook_watchouts = _dedupe_preserve_order([
+        "Shorten the setup and show the concrete payoff earlier in the first 15 to 30 seconds." if 0 < first30 < 62.0 else "",
+        "The hook still needs a harder first-minute escalation." if 0 < first60 < 52.0 else "",
+    ], max_items=6, max_chars=180)
+    pacing_wins = _dedupe_preserve_order([
+        "The pacing is holding viewers well enough to keep the same escalation pattern." if avp >= 42.0 else "",
+        "Average view duration suggests the chapter rhythm is working." if avd_ratio >= 35.0 else "",
+    ], max_items=6, max_chars=180)
+    pacing_watchouts = _dedupe_preserve_order([
+        "Cut dead-air explanation blocks and force a reveal, contrast, or payoff beat every 10 to 15 seconds." if 0 < avp < 42.0 else "",
+        "Compress mid-section explanation and escalate consequences sooner." if 0 < avd_ratio < 35.0 else "",
+    ], max_items=6, max_chars=180)
+    visual_wins = _dedupe_preserve_order([
+        "The visual grammar is supporting retention; keep the same premium 3D documentary direction." if avp >= 42.0 and preview_success >= 80.0 else "",
+        "Scene coverage is strong enough to keep the same proof-style visual system." if preview_success >= 90.0 else "",
+    ], max_items=6, max_chars=180)
+    visual_watchouts = _dedupe_preserve_order([
+        "Increase visual variety and replace repeated hero-object framing with system cutaways or human-versus-system beats." if 0 < avp < 42.0 else "",
+        "Scene-preview reliability needs to stay higher so no proof beat drops out." if 0 < preview_success < 90.0 else "",
+    ], max_items=6, max_chars=180)
+    sound_wins = _dedupe_preserve_order([
+        "Sound design is supporting retention; keep using reveals as the moments for impact punctuation." if first60 >= 52.0 else "",
+        "The narration rhythm is holding through the early beats." if avp >= 42.0 else "",
+    ], max_items=6, max_chars=180)
+    sound_watchouts = _dedupe_preserve_order([
+        "Use more deliberate impact punctuation and silence pockets around the main reveals." if 0 < first60 < 52.0 else "",
+        "The sound bed is probably too flat or too constant for the reveal cadence." if 0 < avp < 40.0 else "",
+    ], max_items=6, max_chars=180)
+    packaging_wins = _dedupe_preserve_order([
+        "The package is working; keep the same arena while changing the angle." if ctr >= 4.0 else "",
+        "The title is distinct enough from prior winners to preserve freshness." if title_novelty >= 80 else "",
+    ], max_items=6, max_chars=180)
+    packaging_watchouts = _dedupe_preserve_order([
+        "Generate a genuinely new headline in the same arena instead of staying too close to prior titles." if title_novelty < 80 else "",
+        "Push one stronger hidden mechanism, conflict, or payoff into the title and thumbnail." if 0 < ctr < 4.0 else "",
+    ], max_items=6, max_chars=180)
+    retention_wins = _dedupe_preserve_order([
+        "Viewer retention is strong enough to keep the same chapter escalation grammar." if avp >= 42.0 else "",
+        "The first 30 seconds are holding; preserve the fast payoff structure." if first30 >= 62.0 else "",
+    ], max_items=6, max_chars=180)
+    retention_watchouts = _dedupe_preserve_order([
+        "The intro still needs a tighter promise and faster proof." if 0 < first30 < 62.0 else "",
+        "Retention is the bottleneck; every next run should remove dead-air explanation and repeat less." if 0 < avp < 42.0 else "",
+    ], max_items=6, max_chars=180)
+    next_video_moves = _dedupe_preserve_order([
+        *list(channel_memory.get("reference_next_video_moves") or [])[:3],
+        *packaging_watchouts[:2],
+        *hook_watchouts[:1],
+        *pacing_watchouts[:1],
+        "Stay in the same arena, but shift the angle so the next headline feels adjacent and genuinely new.",
+    ], max_items=8, max_chars=180)
+    operator_summary = _clip_text(
+        f"Auto-harvested outcome for {title_used or 'this video'}. "
+        + (f"CTR {ctr:.2f}%. " if ctr > 0 else "")
+        + (f"Average viewed {avp:.2f}%. " if avp > 0 else "")
+        + (f"First 30 seconds {first30:.2f}%. " if first30 > 0 else "")
+        + ("Main issue: the package needs a stronger curiosity gap. " if 0 < ctr < 4.0 else "")
+        + ("Main issue: the hook or pacing still loses viewers too early. " if (0 < first30 < 62.0 or 0 < avp < 42.0) else "")
+        + ("Next move: " + next_video_moves[0] + ".") if next_video_moves else "",
+        320,
+    )
+    return CatalystOutcomeIngestRequest(
+        video_url=str(video_meta.get("url", "") or ""),
+        video_id=str(video_meta.get("video_id", "") or ""),
+        title_used=title_used,
+        description_used=str(video_meta.get("description", "") or package.get("selected_description", "") or ""),
+        thumbnail_prompt=str(package.get("thumbnail_prompt", "") or ""),
+        thumbnail_url=str(video_meta.get("thumbnail_url", "") or package.get("thumbnail_url", "") or ""),
+        tags=[str(v).strip() for v in list(video_meta.get("tags") or package.get("selected_tags") or []) if str(v).strip()],
+        views=int(metrics["views"]),
+        impressions=int(metrics["impressions"]),
+        likes=int(metrics["likes"]),
+        comments=int(metrics["comments"]),
+        estimated_minutes_watched=float(metrics["estimated_minutes_watched"]),
+        average_view_duration_sec=float(metrics["average_view_duration_sec"]),
+        average_percentage_viewed=float(metrics["average_percentage_viewed"]),
+        impression_click_through_rate=float(metrics["impression_click_through_rate"]),
+        first_30_sec_retention_pct=float(metrics["first_30_sec_retention_pct"]),
+        first_60_sec_retention_pct=float(metrics["first_60_sec_retention_pct"]),
+        operator_summary=operator_summary,
+        strongest_signals=strongest_signals,
+        weak_points=weak_points,
+        hook_wins=hook_wins,
+        hook_watchouts=hook_watchouts,
+        pacing_wins=pacing_wins,
+        pacing_watchouts=pacing_watchouts,
+        visual_wins=visual_wins,
+        visual_watchouts=visual_watchouts,
+        sound_wins=sound_wins,
+        sound_watchouts=sound_watchouts,
+        packaging_wins=packaging_wins,
+        packaging_watchouts=packaging_watchouts,
+        retention_wins=retention_wins,
+        retention_watchouts=retention_watchouts,
+        next_video_moves=next_video_moves,
+        auto_fetch_channel_metrics=False,
+    )
+
+
+async def _persist_catalyst_outcome_for_session(
+    *,
+    session_id: str,
+    user_id: str,
+    session: dict,
+    req: CatalystOutcomeIngestRequest,
+    video_meta: dict | None = None,
+    analytics_metrics: dict | None = None,
+) -> tuple[dict, dict]:
+    outcome_record = _build_catalyst_outcome_record(
+        session_snapshot=session,
+        outcome_req=req,
+        video_meta=video_meta,
+        analytics_metrics=analytics_metrics,
+    )
+
+    channel_id = str(session.get("youtube_channel_id", "") or "").strip()
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        learning_key = str(session.get("session_id", "") or session_id)
+        channel_memory_key = str(
+            session.get("channel_memory_key", "")
+            or _catalyst_channel_memory_key(
+                user_id,
+                channel_id,
+                str(session.get("format_preset", "") or "documentary"),
+            )
+        )
+        existing_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or session.get("channel_memory") or {})
+        updated_channel_memory = _apply_catalyst_outcome_to_channel_memory(
+            existing=existing_memory,
+            session_snapshot=session,
+            outcome_record=outcome_record,
+        )
+        updated_channel_memory["key"] = channel_memory_key
+        _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
+        existing_learning_entry = _catalyst_learning_records.get(learning_key)
+        if isinstance(existing_learning_entry, dict) and ("prepublish" in existing_learning_entry or "outcome_history" in existing_learning_entry):
+            learning_entry = dict(existing_learning_entry)
+        else:
+            learning_entry = {
+                "prepublish": dict(session.get("learning_record") or existing_learning_entry or {}),
+                "outcome_history": [],
+            }
+        history = [dict(item or {}) for item in list(learning_entry.get("outcome_history") or []) if isinstance(item, dict)]
+        history.append(outcome_record)
+        learning_entry["latest_outcome"] = outcome_record
+        learning_entry["outcome_history"] = history[-16:]
+        _catalyst_learning_records[learning_key] = learning_entry
+        _save_catalyst_memory()
+
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session_live = _longform_sessions.get(session_id)
+        if not isinstance(session_live, dict):
+            raise HTTPException(404, "Long-form session not found")
+        metadata_pack = dict(session_live.get("metadata_pack") or {})
+        metadata_pack["catalyst_channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
+        session_live["metadata_pack"] = metadata_pack
+        session_live["latest_outcome"] = outcome_record
+        session_live["channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
+        session_live["updated_at"] = time.time()
+        _save_longform_sessions()
+        session_live = dict(session_live)
+    return outcome_record, session_live
 
 
 def _build_catalyst_outcome_record(
@@ -17270,63 +17578,109 @@ async def longform_ingest_outcome(session_id: str, req: CatalystOutcomeIngestReq
             except Exception as e:
                 log.warning(f"[longform:{session_id}] outcome auto-fetch failed: {e}")
 
-    outcome_record = _build_catalyst_outcome_record(
-        session_snapshot=session,
-        outcome_req=req,
+    outcome_record, session_live = await _persist_catalyst_outcome_for_session(
+        session_id=session_id,
+        user_id=user_id,
+        session=session,
+        req=req,
         video_meta=video_meta,
         analytics_metrics=analytics_metrics,
     )
 
-    async with _catalyst_memory_lock:
-        _load_catalyst_memory()
-        learning_key = str(session.get("session_id", "") or session_id)
-        channel_memory_key = str(
-            session.get("channel_memory_key", "")
-            or _catalyst_channel_memory_key(
-                user_id,
-                channel_id,
-                str(session.get("format_preset", "") or "documentary"),
-            )
-        )
-        existing_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or session.get("channel_memory") or {})
-        updated_channel_memory = _apply_catalyst_outcome_to_channel_memory(
-            existing=existing_memory,
-            session_snapshot=session,
-            outcome_record=outcome_record,
-        )
-        updated_channel_memory["key"] = channel_memory_key
-        _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
-        existing_learning_entry = _catalyst_learning_records.get(learning_key)
-        if isinstance(existing_learning_entry, dict) and ("prepublish" in existing_learning_entry or "outcome_history" in existing_learning_entry):
-            learning_entry = dict(existing_learning_entry)
-        else:
-            learning_entry = {
-                "prepublish": dict(session.get("learning_record") or existing_learning_entry or {}),
-                "outcome_history": [],
-            }
-        history = [dict(item or {}) for item in list(learning_entry.get("outcome_history") or []) if isinstance(item, dict)]
-        history.append(outcome_record)
-        learning_entry["latest_outcome"] = outcome_record
-        learning_entry["outcome_history"] = history[-16:]
-        _catalyst_learning_records[learning_key] = learning_entry
-        _save_catalyst_memory()
-
-    async with _longform_sessions_lock:
-        _load_longform_sessions()
-        session_live = _longform_sessions.get(session_id)
-        if not isinstance(session_live, dict):
-            raise HTTPException(404, "Long-form session not found")
-        metadata_pack = dict(session_live.get("metadata_pack") or {})
-        metadata_pack["catalyst_channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
-        session_live["metadata_pack"] = metadata_pack
-        session_live["latest_outcome"] = outcome_record
-        session_live["channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
-        session_live["updated_at"] = time.time()
-        _save_longform_sessions()
-        session_live = dict(session_live)
-
     return {
         "ok": True,
+        "outcome": outcome_record,
+        "session": _longform_public_session(session_live),
+    }
+
+
+@app.post("/api/longform/session/{session_id}/outcome/auto")
+async def longform_auto_ingest_outcome(session_id: str, req: CatalystAutoOutcomeHarvestRequest, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    user_id = str(user.get("id", "") or "").strip()
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = dict(_longform_sessions.get(session_id) or {})
+    if not session:
+        raise HTTPException(404, "Long-form session not found")
+    if str(session.get("user_id", "") or "") != user_id:
+        raise HTTPException(403, "Forbidden")
+
+    channel_id = str(session.get("youtube_channel_id", "") or "").strip()
+    if not channel_id:
+        raise HTTPException(400, "Connect a YouTube channel before auto-pulling outcomes")
+
+    normalized_video_url = _normalize_external_source_url(str((req or {}).video_url or "").strip())
+    explicit_video_id = str((req or {}).video_id or "").strip() or _source_url_video_id(normalized_video_url)
+    candidate_limit = max(3, min(25, int(getattr(req, "candidate_limit", 12) or 12)))
+
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        record = dict((dict(bucket.get("channels") or {})).get(channel_id) or {})
+    if not record:
+        raise HTTPException(400, "Connected YouTube channel record was not found")
+
+    matched_video: dict = {}
+    analytics_metrics: dict = {}
+    try:
+        access_token, refreshed_record = await _youtube_ensure_access_token(record)
+        if explicit_video_id:
+            explicit_rows = await _youtube_fetch_videos(access_token, [explicit_video_id])
+            matched_video = dict(explicit_rows[0] or {}) if explicit_rows else {}
+        if not matched_video:
+            recent_candidates = await _youtube_fetch_channel_search(access_token, channel_id, order="date", max_results=candidate_limit)
+            top_candidates = await _youtube_fetch_channel_search(access_token, channel_id, order="viewCount", max_results=max(6, min(25, candidate_limit)))
+            deduped_candidates: dict[str, dict] = {}
+            for row in [*recent_candidates, *top_candidates]:
+                candidate = dict(row or {})
+                video_key = str(candidate.get("video_id", "") or "").strip()
+                if video_key and video_key not in deduped_candidates:
+                    deduped_candidates[video_key] = candidate
+            matched_video = _match_published_video_to_longform_session(session, list(deduped_candidates.values()))
+        if not matched_video:
+            raise HTTPException(404, "Catalyst could not match a published video on the connected channel yet")
+        matched_video["url"] = normalized_video_url or f"https://www.youtube.com/watch?v={str(matched_video.get('video_id', '') or '').strip()}"
+        if _bool_from_any(getattr(req, "auto_fetch_channel_metrics", True), True):
+            analytics_metrics = await _youtube_fetch_video_analytics(
+                access_token,
+                channel_id,
+                str(matched_video.get("video_id", "") or "").strip(),
+            )
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            bucket = _youtube_bucket_for_user(user_id)
+            bucket_channels = dict(bucket.get("channels") or {})
+            if channel_id in bucket_channels:
+                bucket_channels[channel_id] = refreshed_record
+                bucket["channels"] = bucket_channels
+                _save_youtube_connections()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Automatic outcome pull failed: {_clip_text(str(e), 220)}")
+
+    auto_req = _build_auto_outcome_request(
+        session_snapshot=session,
+        video_meta=matched_video,
+        analytics_metrics=analytics_metrics,
+    )
+    outcome_record, session_live = await _persist_catalyst_outcome_for_session(
+        session_id=session_id,
+        user_id=user_id,
+        session=session,
+        req=auto_req,
+        video_meta=matched_video,
+        analytics_metrics=analytics_metrics,
+    )
+    return {
+        "ok": True,
+        "auto": True,
+        "matched_video": matched_video,
         "outcome": outcome_record,
         "session": _longform_public_session(session_live),
     }

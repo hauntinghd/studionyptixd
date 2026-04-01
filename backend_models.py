@@ -183,3 +183,10 @@ class CatalystOutcomeIngestRequest(BaseModel):
     retention_watchouts: list[str] = []
     next_video_moves: list[str] = []
     auto_fetch_channel_metrics: bool = True
+
+
+class CatalystAutoOutcomeHarvestRequest(BaseModel):
+    video_url: str = ""
+    video_id: str = ""
+    candidate_limit: int = 12
+    auto_fetch_channel_metrics: bool = True

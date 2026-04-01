@@ -271,6 +271,7 @@ export default function LongFormPanel() {
     const [outcomeRetentionWatchouts, setOutcomeRetentionWatchouts] = useState('');
     const [outcomeNextMoves, setOutcomeNextMoves] = useState('');
     const [outcomeSaving, setOutcomeSaving] = useState(false);
+    const [outcomeAutoSaving, setOutcomeAutoSaving] = useState(false);
     const restoredSessionUserRef = useRef('');
     const outcomeSeedRef = useRef('');
 
@@ -800,6 +801,27 @@ export default function LongFormPanel() {
         selectedTags,
         selectedTitle,
     ]);
+
+    const autoPullOutcome = useCallback(async () => {
+        if (!lfSession?.session_id) return;
+        setOutcomeAutoSaving(true);
+        setError('');
+        try {
+            const payload = await apiCall(`/api/longform/session/${lfSession.session_id}/outcome/auto`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    video_url: outcomeVideoUrl.trim(),
+                    candidate_limit: 12,
+                    auto_fetch_channel_metrics: true,
+                }),
+            });
+            setLfSession((payload as any).session || null);
+        } catch (e: any) {
+            setError(e?.message || 'Failed to auto-pull post-publish outcome');
+        } finally {
+            setOutcomeAutoSaving(false);
+        }
+    }, [apiCall, lfSession?.session_id, outcomeVideoUrl]);
 
     return (
         <div className="max-w-5xl mx-auto px-6 pb-10 space-y-6">
@@ -1650,8 +1672,15 @@ export default function LongFormPanel() {
 
                             <div className="flex flex-wrap gap-3">
                                 <button
+                                    onClick={autoPullOutcome}
+                                    disabled={outcomeSaving || outcomeAutoSaving}
+                                    className="px-4 py-2 rounded-lg border border-cyan-400/30 bg-black/20 hover:bg-cyan-500/10 text-cyan-100 text-sm font-medium disabled:opacity-50 transition"
+                                >
+                                    {outcomeAutoSaving ? 'Auto-Pulling Channel Outcome...' : 'Auto-Pull From Connected Channel'}
+                                </button>
+                                <button
                                     onClick={submitOutcome}
-                                    disabled={outcomeSaving}
+                                    disabled={outcomeSaving || outcomeAutoSaving}
                                     className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium disabled:opacity-50 transition"
                                 >
                                     {outcomeSaving ? 'Updating Catalyst Memory...' : 'Ingest Outcome Into Catalyst'}
