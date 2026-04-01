@@ -308,6 +308,120 @@ async def _fetch_voice_catalog() -> tuple[list[dict], str, bool, str]:
         return _fallback_voice_catalog(), "fallback", False, warning
 
 
+def _default_elevenlabs_voice_priority() -> list[str]:
+    return [
+        "pNInz6obpgDQGcFmaJgB",  # Adam
+        "EXAVITQu4vr4xnSDxMaL",  # Sarah
+        "onwK4e9ZLuTAKqWW03F9",  # Daniel
+        "XB0fDUnXU5powFXDhCwa",  # Charlotte
+        "FGY2WhTYpPnrIDTdsKH5",  # Laura
+    ]
+
+
+async def _resolve_elevenlabs_voice_candidates(requested_voice_id: str = "") -> tuple[str, list[str], set[str]]:
+    voices, source, provider_ok, warning = await _fetch_voice_catalog()
+    available_ids = {
+        str(voice.get("voice_id", "") or "").strip()
+        for voice in voices
+        if str(voice.get("voice_id", "") or "").strip()
+    }
+    requested = str(requested_voice_id or "").strip()
+    ordered_candidates: list[str] = []
+
+    def add_candidate(voice_id: str):
+        vid = str(voice_id or "").strip()
+        if vid and vid not in ordered_candidates:
+            ordered_candidates.append(vid)
+
+    add_candidate(requested)
+    for default_voice_id in _default_elevenlabs_voice_priority():
+        add_candidate(default_voice_id)
+
+    if provider_ok and available_ids:
+        filtered = [voice_id for voice_id in ordered_candidates if voice_id in available_ids]
+        if not filtered:
+            filtered = list(available_ids)
+        selected_voice_id = filtered[0]
+        if requested and requested not in available_ids:
+            log.warning(
+                "Requested ElevenLabs voice %s is unavailable in live catalog (%s voices, source=%s, warning=%s). "
+                "Falling back to %s.",
+                requested,
+                len(available_ids),
+                source,
+                warning,
+                selected_voice_id,
+            )
+        return selected_voice_id, filtered, available_ids
+
+    selected_voice_id = requested or _default_elevenlabs_voice_priority()[0]
+    return selected_voice_id, ordered_candidates, available_ids
+
+
+def _is_retryable_elevenlabs_voice_error(status_code: int) -> bool:
+    return int(status_code or 0) in {401, 403, 404}
+
+
+EDGE_TTS_DEFAULT_VOICES = {
+    "en": {"female": "en-US-JennyNeural", "male": "en-US-GuyNeural"},
+    "es": {"female": "es-ES-ElviraNeural", "male": "es-ES-AlvaroNeural"},
+    "fr": {"female": "fr-FR-DeniseNeural", "male": "fr-FR-HenriNeural"},
+    "de": {"female": "de-DE-KatjaNeural", "male": "de-DE-ConradNeural"},
+    "it": {"female": "it-IT-ElsaNeural", "male": "it-IT-DiegoNeural"},
+    "pt": {"female": "pt-BR-FranciscaNeural", "male": "pt-BR-AntonioNeural"},
+    "hi": {"female": "hi-IN-SwaraNeural", "male": "hi-IN-MadhurNeural"},
+    "ja": {"female": "ja-JP-NanamiNeural", "male": "ja-JP-KeitaNeural"},
+}
+
+
+def _edge_tts_rate_percent(speed: float) -> str:
+    pct = int(round((float(speed) - 1.0) * 100))
+    pct = max(-50, min(50, pct))
+    return f"{pct:+d}%"
+
+
+def _resolve_edge_tts_voice(language: str = "en", requested_voice_id: str = "", preferred_gender: str = "") -> str:
+    lang_key = str(language or "en").split("-", 1)[0].lower()
+    gender_key = "female" if str(preferred_gender or "").lower().startswith("f") else "male"
+    catalog_by_id = {voice["voice_id"]: voice for voice in DEFAULT_ELEVENLABS_VOICES}
+    requested_meta = catalog_by_id.get(str(requested_voice_id or "").strip(), {})
+    if str(requested_meta.get("gender", "")).lower().startswith("f"):
+        gender_key = "female"
+    elif str(requested_meta.get("gender", "")).lower().startswith("m"):
+        gender_key = "male"
+    voice_map = EDGE_TTS_DEFAULT_VOICES.get(lang_key) or EDGE_TTS_DEFAULT_VOICES["en"]
+    return voice_map.get(gender_key) or EDGE_TTS_DEFAULT_VOICES["en"]["female"]
+
+
+async def _generate_voiceover_with_edge_tts(
+    text: str,
+    output_path: str,
+    *,
+    language: str = "en",
+    requested_voice_id: str = "",
+    preferred_gender: str = "",
+    speed: float = 1.0,
+) -> dict:
+    import edge_tts
+
+    edge_voice = _resolve_edge_tts_voice(
+        language=language,
+        requested_voice_id=requested_voice_id,
+        preferred_gender=preferred_gender,
+    )
+    rate = _edge_tts_rate_percent(speed)
+    communicate = edge_tts.Communicate(text=text, voice=edge_voice, rate=rate)
+    await communicate.save(output_path)
+    if not Path(output_path).exists() or Path(output_path).stat().st_size <= 0:
+        raise RuntimeError("Edge TTS fallback produced no audio output")
+    log.warning(
+        "Using Edge TTS fallback voice %s for requested ElevenLabs voice %s",
+        edge_voice,
+        requested_voice_id or "(default)",
+    )
+    return {"audio_path": output_path, "word_timings": [], "voice_id": edge_voice, "provider": "edge_tts"}
+
+
 async def _voice_provider_snapshot(force_refresh: bool = False) -> dict:
     age_sec = time.time() - float(_voice_catalog_cache.get("ts", 0.0))
     if force_refresh or age_sec > 60.0:
@@ -9444,32 +9558,71 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
     {"word": str, "start": float, "end": float}.
     """
     vs = TEMPLATE_VOICE_SETTINGS.get(template, {})
-    voice_id = override_voice_id if override_voice_id else vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
+    requested_voice_id = override_voice_id if override_voice_id else vs.get("voice_id", "pNInz6obpgDQGcFmaJgB")
     speed = float(override_speed) if override_speed is not None else float(vs.get("speed", 1.0))
     lang_cfg = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"])
     tts_model = lang_cfg["model"]
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
+    voice_settings = {
+        "stability": vs.get("stability", 0.5),
+        "similarity_boost": vs.get("similarity_boost", 0.75),
+        "style": vs.get("style", 0.3),
+        "speed": max(0.8, min(1.35, speed)),
+    }
+    resolved_voice_id, voice_candidates, available_voice_ids = await _resolve_elevenlabs_voice_candidates(
+        requested_voice_id
+    )
+    last_error: Exception | None = None
+    data: dict = {}
+    used_voice_id = resolved_voice_id
 
     async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "model_id": tts_model,
-                "voice_settings": {
-                    "stability": vs.get("stability", 0.5),
-                    "similarity_boost": vs.get("similarity_boost", 0.75),
-                    "style": vs.get("style", 0.3),
-                    "speed": max(0.8, min(1.35, speed)),
+        for candidate_voice_id in voice_candidates:
+            if available_voice_ids and candidate_voice_id not in available_voice_ids:
+                continue
+            used_voice_id = candidate_voice_id
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{candidate_voice_id}/with-timestamps"
+            resp = await client.post(
+                url,
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
                 },
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+                json={
+                    "text": text,
+                    "model_id": tts_model,
+                    "voice_settings": voice_settings,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                break
+            if _is_retryable_elevenlabs_voice_error(resp.status_code):
+                body_preview = (resp.text or "")[:200]
+                log.warning(
+                    "ElevenLabs voice %s rejected timestamped TTS with %s. Retrying fallback voice. Body: %s",
+                    candidate_voice_id,
+                    resp.status_code,
+                    body_preview,
+                )
+                last_error = httpx.HTTPStatusError(
+                    f"Retryable ElevenLabs voice failure ({resp.status_code})",
+                    request=resp.request,
+                    response=resp,
+                )
+                continue
+            resp.raise_for_status()
+        else:
+            if last_error:
+                log.warning("All ElevenLabs timestamp voices failed; falling back to Edge TTS. Last error: %s", last_error)
+                return await _generate_voiceover_with_edge_tts(
+                    text=text,
+                    output_path=output_path,
+                    language=language,
+                    requested_voice_id=requested_voice_id,
+                    preferred_gender=str(vs.get("gender", "")),
+                    speed=speed,
+                )
+            raise HTTPException(502, "ElevenLabs voice generation failed before audio could be generated.")
 
     import base64 as b64mod
     audio_b64 = data.get("audio_base64", "")
@@ -9478,23 +9631,64 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
         with open(output_path, "wb") as f:
             f.write(audio_bytes)
     else:
-        log.warning("No audio_base64 in timestamps response, falling back to standard endpoint")
-        fallback_resp = await httpx.AsyncClient(timeout=120).post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
-            json={"text": text, "model_id": tts_model,
-                  "voice_settings": {"stability": vs.get("stability", 0.5),
-                                     "similarity_boost": vs.get("similarity_boost", 0.75),
-                                     "style": vs.get("style", 0.3)}},
-        )
-        fallback_resp.raise_for_status()
+        log.warning("No audio_base64 in timestamps response for voice %s, falling back to standard endpoint", used_voice_id)
+        fallback_audio: bytes | None = None
+        last_fallback_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=120) as client:
+            for candidate_voice_id in voice_candidates:
+                if available_voice_ids and candidate_voice_id not in available_voice_ids:
+                    continue
+                fallback_resp = await client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{candidate_voice_id}",
+                    headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+                    json={
+                        "text": text,
+                        "model_id": tts_model,
+                        "voice_settings": {
+                            "stability": vs.get("stability", 0.5),
+                            "similarity_boost": vs.get("similarity_boost", 0.75),
+                            "style": vs.get("style", 0.3),
+                        },
+                    },
+                )
+                if fallback_resp.status_code == 200:
+                    fallback_audio = fallback_resp.content
+                    used_voice_id = candidate_voice_id
+                    break
+                if _is_retryable_elevenlabs_voice_error(fallback_resp.status_code):
+                    body_preview = (fallback_resp.text or "")[:200]
+                    log.warning(
+                        "ElevenLabs voice %s rejected fallback TTS with %s. Retrying next voice. Body: %s",
+                        candidate_voice_id,
+                        fallback_resp.status_code,
+                        body_preview,
+                    )
+                    last_fallback_error = httpx.HTTPStatusError(
+                        f"Retryable ElevenLabs fallback voice failure ({fallback_resp.status_code})",
+                        request=fallback_resp.request,
+                        response=fallback_resp,
+                    )
+                    continue
+                fallback_resp.raise_for_status()
+        if fallback_audio is None:
+            if last_fallback_error:
+                log.warning("All ElevenLabs standard fallback voices failed; using Edge TTS instead. Last error: %s", last_fallback_error)
+                return await _generate_voiceover_with_edge_tts(
+                    text=text,
+                    output_path=output_path,
+                    language=language,
+                    requested_voice_id=requested_voice_id,
+                    preferred_gender=str(vs.get("gender", "")),
+                    speed=speed,
+                )
+            raise HTTPException(502, "ElevenLabs fallback voice generation failed before audio could be generated.")
         with open(output_path, "wb") as f:
-            f.write(fallback_resp.content)
-        return {"audio_path": output_path, "word_timings": []}
+            f.write(fallback_audio)
+        return {"audio_path": output_path, "word_timings": [], "voice_id": used_voice_id}
 
     word_timings = _extract_word_timings(text, data.get("alignment", {}))
-    log.info(f"Voiceover generated with {len(word_timings)} word timings: {output_path}")
-    return {"audio_path": output_path, "word_timings": word_timings}
+    log.info(f"Voiceover generated with {len(word_timings)} word timings using voice {used_voice_id}: {output_path}")
+    return {"audio_path": output_path, "word_timings": word_timings, "voice_id": used_voice_id}
 
 
 async def generate_scene_sfx(visual_description: str, duration_sec: float,
@@ -24109,21 +24303,55 @@ async def preview_voice(request: Request):
     if not voice_id:
         raise HTTPException(400, "voice_id required")
     preview_text = body.get("text", "Hey there! This is a quick preview of what I sound like. Pretty cool, right?")
+    _, voice_candidates, available_voice_ids = await _resolve_elevenlabs_voice_candidates(voice_id)
+    preview_audio: bytes | None = None
+    used_voice_id = voice_id
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
-            json={
-                "text": preview_text,
-                "model_id": "eleven_turbo_v2_5",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3},
-            },
-        )
-        if resp.status_code != 200:
+        for candidate_voice_id in voice_candidates:
+            if available_voice_ids and candidate_voice_id not in available_voice_ids:
+                continue
+            resp = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{candidate_voice_id}",
+                headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+                json={
+                    "text": preview_text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3},
+                },
+            )
+            if resp.status_code == 200:
+                preview_audio = resp.content
+                used_voice_id = candidate_voice_id
+                break
+            if _is_retryable_elevenlabs_voice_error(resp.status_code):
+                log.warning(
+                    "ElevenLabs preview voice %s rejected with %s. Retrying next voice.",
+                    candidate_voice_id,
+                    resp.status_code,
+                )
+                continue
             raise HTTPException(resp.status_code, f"ElevenLabs error: {resp.text[:200]}")
+    if preview_audio is None:
+        tmp_preview = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tmp_preview.close()
+        try:
+            preview_result = await _generate_voiceover_with_edge_tts(
+                text=preview_text,
+                output_path=tmp_preview.name,
+                language="en",
+                requested_voice_id=voice_id,
+                speed=1.0,
+            )
+            preview_audio = Path(tmp_preview.name).read_bytes()
+            used_voice_id = str(preview_result.get("voice_id", voice_id))
+        finally:
+            try:
+                os.unlink(tmp_preview.name)
+            except OSError:
+                pass
     from fastapi.responses import Response
-    return Response(content=resp.content, media_type="audio/mpeg",
-                    headers={"Content-Disposition": f"inline; filename=preview_{voice_id}.mp3"})
+    return Response(content=preview_audio, media_type="audio/mpeg",
+                    headers={"Content-Disposition": f"inline; filename=preview_{used_voice_id}.mp3"})
 
 
 @app.post("/api/demo")
