@@ -697,6 +697,13 @@ export default function LongFormPanel() {
   const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
   const referenceComparison = (latestOutcome?.reference_comparison || {}) as Record<string, any>;
   const referenceScores = (referenceComparison?.scores || {}) as Record<string, any>;
+  const rewritePressure = (channelMemory?.rewrite_pressure || {}) as Record<string, any>;
+  const rewriteCategories = Array.isArray(rewritePressure?.categories)
+    ? rewritePressure.categories.filter((value: any) => value && String(value.key || '').trim())
+    : [];
+  const rewritePriorities = Array.isArray(rewritePressure?.next_run_priorities)
+    ? rewritePressure.next_run_priorities.filter((value: any) => String(value || '').trim())
+    : [];
   const referenceChannels = Array.isArray(referenceComparison?.benchmark_channels)
     ? referenceComparison.benchmark_channels.filter((value: any) => String(value || '').trim())
     : [];
@@ -1336,6 +1343,43 @@ export default function LongFormPanel() {
                                                 <ul className="mt-2 space-y-1 text-sm text-gray-300">
                                                     {sourceAnalysis.packaging_findings.slice(0, 5).map((item: string, idx: number) => (
                                                         <li key={`packaging-${idx}`}>- {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                                {rewriteCategories.length > 0 ? (
+                                    <div className="rounded-lg border border-rose-400/20 bg-rose-500/5 p-3 space-y-3">
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-rose-300">Catalyst Rewrite Pressure</p>
+                                                <p className="mt-2 text-sm text-gray-300">
+                                                    {String(rewritePressure.summary || 'Catalyst is ranking which parts of the next run need the hardest correction.')}
+                                                </p>
+                                            </div>
+                                            {rewritePressure.primary_focus ? (
+                                                <div className="rounded-lg border border-rose-400/20 bg-black/20 px-3 py-2 text-xs text-rose-100/90 space-y-1">
+                                                    <div>Primary: {String(rewritePressure.primary_focus)}</div>
+                                                    <div>Secondary: {String(rewritePressure.secondary_focus || 'n/a')}</div>
+                                                </div>
+                                            ) : null}
+                                        </div>
+                                        <div className="grid gap-3 md:grid-cols-5 text-xs text-gray-300">
+                                            {rewriteCategories.slice(0, 5).map((entry: any) => (
+                                                <div key={String(entry.key)} className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                    <div className="text-gray-500">{String(entry.label || entry.key)}</div>
+                                                    <div className="mt-1 text-lg font-semibold text-white">{Number(entry.score || 0).toFixed(0)}</div>
+                                                    <div className="mt-1 uppercase tracking-[0.16em] text-[10px] text-rose-200/80">{String(entry.severity || 'stable')}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {rewritePriorities.length > 0 ? (
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">Next-Run Priorities</p>
+                                                <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                    {rewritePriorities.slice(0, 5).map((item: any, idx: number) => (
+                                                        <li key={`rewrite-priority-${idx}`}>- {String(item)}</li>
                                                     ))}
                                                 </ul>
                                             </div>

@@ -952,7 +952,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
     reference_sound_rewrites = _catalyst_weighted_signal_items(data.get("reference_sound_rewrites_map") or {}, max_items=6)
     reference_packaging_rewrites = _catalyst_weighted_signal_items(data.get("reference_packaging_rewrites_map") or {}, max_items=6)
     reference_next_video_moves = _catalyst_weighted_signal_items(data.get("reference_next_video_moves_map") or {}, max_items=8)
-    return {
+    public = {
         "key": str(data.get("key", "") or ""),
         "channel_id": str(data.get("channel_id", "") or ""),
         "format_preset": str(data.get("format_preset", "") or ""),
@@ -991,6 +991,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
         "average_reference_visual_score": _catalyst_metric_average(float(data.get("reference_visual_score_sum", 0.0) or 0.0), outcome_count, 1),
         "average_reference_sound_score": _catalyst_metric_average(float(data.get("reference_sound_score_sum", 0.0) or 0.0), outcome_count, 1),
         "average_reference_packaging_score": _catalyst_metric_average(float(data.get("reference_packaging_score_sum", 0.0) or 0.0), outcome_count, 1),
+        "average_reference_title_novelty_score": _catalyst_metric_average(float(data.get("reference_title_novelty_score_sum", 0.0) or 0.0), outcome_count, 1),
         "reference_summary": str(data.get("last_reference_summary", "") or ""),
         "reference_tier": str(data.get("reference_tier", "") or ""),
         "reference_benchmark_channels": list(data.get("reference_benchmark_channels") or []),
@@ -1009,6 +1010,8 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
         "last_session_id": str(data.get("last_session_id", "") or ""),
         "updated_at": float(data.get("updated_at", 0) or 0),
     }
+    public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
+    return public
 
 
 def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
@@ -1064,6 +1067,11 @@ def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
         parts.append("Reference-backed packaging rewrites: " + "; ".join(list(public.get("reference_packaging_rewrites") or [])[:3]))
     if public.get("reference_next_video_moves"):
         parts.append("Reference-backed next moves: " + "; ".join(list(public.get("reference_next_video_moves") or [])[:4]))
+    rewrite_pressure = dict(public.get("rewrite_pressure") or {})
+    if rewrite_pressure.get("summary"):
+        parts.append("Rewrite pressure summary: " + _clip_text(str(rewrite_pressure.get("summary", "") or ""), 280))
+    if rewrite_pressure.get("next_run_priorities"):
+        parts.append("Rewrite pressure priorities: " + "; ".join(list(rewrite_pressure.get("next_run_priorities") or [])[:4]))
     if public.get("next_video_moves"):
         parts.append("Next-video moves: " + "; ".join(list(public.get("next_video_moves") or [])[:4]))
     if public.get("last_outcome_summary"):
@@ -1203,6 +1211,137 @@ def _catalyst_title_novelty_score(title: str, source_title: str = "", recent_tit
     if re.match(r"^\s*\d+", value) and re.match(r"^\s*\d+", source_value):
         score -= 8
     return max(20, min(95, int(score)))
+
+
+def _catalyst_pressure_label(score: float) -> str:
+    numeric = float(score or 0.0)
+    if numeric >= 78:
+        return "critical"
+    if numeric >= 60:
+        return "high"
+    if numeric >= 42:
+        return "medium"
+    if numeric >= 24:
+        return "low"
+    return "stable"
+
+
+def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
+    public = dict(memory_public or {})
+    hook_wins = [str(v).strip() for v in list(public.get("hook_wins") or []) if str(v).strip()]
+    hook_watchouts = [str(v).strip() for v in list(public.get("hook_watchouts") or []) if str(v).strip()]
+    pacing_wins = [str(v).strip() for v in list(public.get("pacing_wins") or []) if str(v).strip()]
+    pacing_watchouts = [str(v).strip() for v in list(public.get("pacing_watchouts") or []) if str(v).strip()]
+    visual_wins = [str(v).strip() for v in list(public.get("visual_wins") or []) if str(v).strip()]
+    visual_watchouts = [str(v).strip() for v in list(public.get("visual_watchouts") or []) if str(v).strip()]
+    sound_wins = [str(v).strip() for v in list(public.get("sound_wins") or []) if str(v).strip()]
+    sound_watchouts = [str(v).strip() for v in list(public.get("sound_watchouts") or []) if str(v).strip()]
+    packaging_wins = [str(v).strip() for v in list(public.get("packaging_wins") or []) if str(v).strip()]
+    packaging_watchouts = [str(v).strip() for v in list(public.get("packaging_watchouts") or []) if str(v).strip()]
+    retention_watchouts = [str(v).strip() for v in list(public.get("retention_watchouts") or []) if str(v).strip()]
+    next_moves = [str(v).strip() for v in list(public.get("next_video_moves") or []) if str(v).strip()]
+    reference_hook_rewrites = [str(v).strip() for v in list(public.get("reference_hook_rewrites") or []) if str(v).strip()]
+    reference_pacing_rewrites = [str(v).strip() for v in list(public.get("reference_pacing_rewrites") or []) if str(v).strip()]
+    reference_visual_rewrites = [str(v).strip() for v in list(public.get("reference_visual_rewrites") or []) if str(v).strip()]
+    reference_sound_rewrites = [str(v).strip() for v in list(public.get("reference_sound_rewrites") or []) if str(v).strip()]
+    reference_packaging_rewrites = [str(v).strip() for v in list(public.get("reference_packaging_rewrites") or []) if str(v).strip()]
+
+    avg_ctr = float(public.get("average_ctr", 0.0) or 0.0)
+    avg_avp = float(public.get("average_average_percentage_viewed", 0.0) or 0.0)
+    avg_first30 = float(public.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
+    avg_first60 = float(public.get("average_first_60_sec_retention_pct", 0.0) or 0.0)
+    avg_hook = float(public.get("average_reference_hook_score", 0.0) or 0.0)
+    avg_pacing = float(public.get("average_reference_pacing_score", 0.0) or 0.0)
+    avg_visual = float(public.get("average_reference_visual_score", 0.0) or 0.0)
+    avg_sound = float(public.get("average_reference_sound_score", 0.0) or 0.0)
+    avg_packaging = float(public.get("average_reference_packaging_score", 0.0) or 0.0)
+    avg_title_novelty = float(public.get("average_reference_title_novelty_score", 0.0) or 0.0)
+
+    hook_pressure = 12.0 + max(0.0, (62.0 - avg_first30) * 1.2) + max(0.0, (76.0 - avg_hook) * 0.55) + (len(hook_watchouts) * 7.0) + (min(2, len(retention_watchouts)) * 4.0) - (len(hook_wins) * 4.0)
+    pacing_pressure = 10.0 + max(0.0, (42.0 - avg_avp) * 1.1) + max(0.0, (52.0 - avg_first60) * 0.8) + max(0.0, (76.0 - avg_pacing) * 0.5) + (len(pacing_watchouts) * 7.0) - (len(pacing_wins) * 4.0)
+    visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
+    sound_pressure = 8.0 + max(0.0, (78.0 - avg_sound) * 0.55) + max(0.0, (52.0 - avg_first60) * 0.35) + (len(sound_watchouts) * 7.0) - (len(sound_wins) * 4.0)
+    packaging_pressure = 10.0 + max(0.0, (4.5 - avg_ctr) * 12.0) + max(0.0, (76.0 - avg_packaging) * 0.65) + max(0.0, (82.0 - avg_title_novelty) * 0.35) + (len(packaging_watchouts) * 7.0) - (len(packaging_wins) * 4.0)
+
+    categories = [
+        {
+            "key": "hook",
+            "label": "Hook",
+            "score": max(8, min(100, int(round(hook_pressure)))),
+            "wins": hook_wins[:3],
+            "watchouts": hook_watchouts[:3],
+            "rewrites": reference_hook_rewrites[:3],
+        },
+        {
+            "key": "pacing",
+            "label": "Pacing",
+            "score": max(8, min(100, int(round(pacing_pressure)))),
+            "wins": pacing_wins[:3],
+            "watchouts": pacing_watchouts[:3],
+            "rewrites": reference_pacing_rewrites[:3],
+        },
+        {
+            "key": "visuals",
+            "label": "Visuals",
+            "score": max(8, min(100, int(round(visual_pressure)))),
+            "wins": visual_wins[:3],
+            "watchouts": visual_watchouts[:3],
+            "rewrites": reference_visual_rewrites[:3],
+        },
+        {
+            "key": "sound",
+            "label": "Sound",
+            "score": max(8, min(100, int(round(sound_pressure)))),
+            "wins": sound_wins[:3],
+            "watchouts": sound_watchouts[:3],
+            "rewrites": reference_sound_rewrites[:3],
+        },
+        {
+            "key": "packaging",
+            "label": "Packaging",
+            "score": max(8, min(100, int(round(packaging_pressure)))),
+            "wins": packaging_wins[:3],
+            "watchouts": packaging_watchouts[:3],
+            "rewrites": reference_packaging_rewrites[:3],
+        },
+    ]
+    categories.sort(key=lambda row: int(row.get("score", 0) or 0), reverse=True)
+    for row in categories:
+        row["severity"] = _catalyst_pressure_label(float(row.get("score", 0) or 0.0))
+
+    top = categories[0] if categories else {}
+    secondary = categories[1] if len(categories) > 1 else {}
+    priorities = _dedupe_preserve_order(
+        [
+            *(top.get("rewrites") or []),
+            *(top.get("watchouts") or []),
+            *(secondary.get("rewrites") or []),
+            *(secondary.get("watchouts") or []),
+            *next_moves[:3],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    summary = ""
+    if top:
+        summary = (
+            f"Primary rewrite pressure is {str(top.get('label', 'Hook'))} "
+            f"({int(top.get('score', 0) or 0)}/100, {str(top.get('severity', 'medium'))}). "
+        )
+        if secondary:
+            summary += (
+                f"Secondary pressure is {str(secondary.get('label', 'Packaging'))} "
+                f"({int(secondary.get('score', 0) or 0)}/100, {str(secondary.get('severity', 'medium'))}). "
+            )
+        if priorities:
+            summary += "Next run should prioritize: " + "; ".join(priorities[:3]) + "."
+    return {
+        "summary": _clip_text(summary, 320),
+        "primary_focus": str(top.get("key", "") or ""),
+        "secondary_focus": str(secondary.get("key", "") or ""),
+        "categories": categories,
+        "next_run_priorities": priorities,
+    }
 
 
 def _catalyst_reference_score_tier(score: float) -> str:
@@ -2630,6 +2769,7 @@ def _longform_build_publish_package_candidates(
     source_analysis = dict(source_analysis or {})
     channel_context = dict(channel_context or {})
     channel_memory = _catalyst_channel_memory_public_view(channel_memory)
+    rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
     source_title = str(source_bundle.get("title", "") or "").strip()
     effective_topic = str(topic or input_title or source_title or "Follow-up video breakdown").strip()
     channel_title_memory = [
@@ -2641,14 +2781,26 @@ def _longform_build_publish_package_candidates(
         ]
         if str(v).strip()
     ]
-
-    title_variants: list[str] = []
+    weighted_packaging_rewrites = [str(v).strip() for v in list(channel_memory.get("reference_packaging_rewrites") or []) if str(v).strip()]
+    weighted_next_moves = [str(v).strip() for v in list(channel_memory.get("reference_next_video_moves") or channel_memory.get("next_video_moves") or []) if str(v).strip()]
+    pressure_primary_focus = str(rewrite_pressure.get("primary_focus", "") or "").strip()
+    pressure_subject = _same_arena_subject(source_bundle or {"title": effective_topic}, topic=effective_topic) or effective_topic
+    title_candidates: list[tuple[str, int]] = []
     for candidate in [
         *list(source_analysis.get("title_angles") or []),
         *[
             f"{effective_topic} | {keyword}".replace("|", "vs.") if " vs." not in effective_topic.lower() else f"{effective_topic} {keyword}"
             for keyword in list(channel_memory.get("proven_keywords") or [])[:2]
         ],
+        *(
+            [
+                f"The Hidden System Behind {pressure_subject}",
+                f"Why {pressure_subject} Quietly Controls More Than You Think",
+                f"What {pressure_subject} Is Really Doing Behind the Scenes",
+            ]
+            if pressure_primary_focus in {"hook", "packaging"} or weighted_packaging_rewrites
+            else []
+        ),
         *_same_arena_title_variants(
             source_bundle or {"title": effective_topic},
             topic=effective_topic,
@@ -2666,8 +2818,18 @@ def _longform_build_publish_package_candidates(
             continue
         if _title_reuses_opening_pattern(value, source_title, channel_title_memory):
             continue
-        if value not in title_variants:
-            title_variants.append(value)
+        keyword_bonus = 0
+        if any(keyword.lower() in value.lower() for keyword in list(channel_memory.get("proven_keywords") or [])[:6]):
+            keyword_bonus += 6
+        if not re.match(r"^\s*\d+", value) and re.match(r"^\s*\d+", source_title):
+            keyword_bonus += 8
+        novelty = _catalyst_title_novelty_score(value, source_title=source_title, recent_titles=channel_title_memory)
+        candidate_score = novelty + keyword_bonus
+        if weighted_packaging_rewrites and any(token.lower() in value.lower() for token in _extract_catalyst_keywords(" ".join(weighted_packaging_rewrites), max_items=10)):
+            candidate_score += 4
+        title_candidates.append((value, candidate_score))
+    title_candidates.sort(key=lambda row: row[1], reverse=True)
+    title_variants = _dedupe_preserve_order([value for value, _score in title_candidates], max_items=6, max_chars=160)
     if not title_variants:
         rescue_subject = _same_arena_subject(source_bundle, topic=effective_topic) or effective_topic
         for candidate in [
@@ -2688,6 +2850,7 @@ def _longform_build_publish_package_candidates(
     for candidate in [
         input_description,
         *list(source_analysis.get("description_angles") or []),
+        *weighted_next_moves[:2],
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_description_variants(
             source_bundle or {"title": effective_topic},
@@ -2703,6 +2866,8 @@ def _longform_build_publish_package_candidates(
     thumbnail_prompts: list[str] = []
     for candidate in [
         *list(source_analysis.get("thumbnail_angles") or []),
+        *weighted_packaging_rewrites[:2],
+        *weighted_next_moves[:2],
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_thumbnail_angles(
             source_bundle or {"title": effective_topic},
@@ -2770,9 +2935,17 @@ def _heuristic_catalyst_chapter_blueprints(
     subject: str,
     improvement_moves: list[str] | None = None,
     retention_findings: list[str] | None = None,
+    pressure_profile: dict | None = None,
 ) -> list[dict]:
     improvement_moves = [str(v).strip() for v in list(improvement_moves or []) if str(v).strip()]
     retention_findings = [str(v).strip() for v in list(retention_findings or []) if str(v).strip()]
+    pressure_profile = dict(pressure_profile or {})
+    pressure_scores = {
+        str(row.get("key", "") or ""): int(row.get("score", 0) or 0)
+        for row in list(pressure_profile.get("categories") or [])
+        if str(row.get("key", "") or "").strip()
+    }
+    pressure_priorities = [str(v).strip() for v in list(pressure_profile.get("next_run_priorities") or []) if str(v).strip()]
     base_arc = [
         ("Hook the viewer with the most concrete high-stakes reveal.", "Start on the promise and immediate consequence.", "unexpected reveal", "hero object under aggressive spotlight", "fast push-in then hard contrast cutaway", "opening hit plus sub-bass tension", "No throat-clearing. First 10 seconds must state the payoff."),
         ("Expose the hidden mechanism that makes the topic work.", "Translate abstract theory into visible cause-and-effect.", "mechanism cutaway", "macro cross-section or exploded system view", "precise motion-graphic overlays and clean dolly move", "tight whooshes, ticks, and system sweeps", "Make the viewer feel smarter, not confused."),
@@ -2786,15 +2959,33 @@ def _heuristic_catalyst_chapter_blueprints(
         base = base_arc[idx % len(base_arc)]
         improvement = improvement_moves[idx % len(improvement_moves)] if improvement_moves else ""
         retention = retention_findings[idx % len(retention_findings)] if retention_findings else ""
+        focus = f"{base[0]} Subject focus: {subject}."
+        hook_job = base[1]
+        shock_device = base[2]
+        visual_motif = f"{base[3]} built around {subject}."
+        motion_note = base[4]
+        sound_note = base[5]
+        retention_goal = _clip_text(retention or base[6], 180)
+        if idx == 0 and pressure_scores.get("hook", 0) >= 60:
+            hook_job = "Start directly on the consequence, contradiction, or hidden control point before any setup."
+            shock_device = "counterintuitive reveal + immediate payoff"
+            focus = f"Open on the sharpest high-stakes contradiction around {subject}. Subject focus: {subject}."
+            retention_goal = _clip_text(pressure_priorities[0] if pressure_priorities else retention_goal, 180)
+        if pressure_scores.get("pacing", 0) >= 60 and idx <= 2:
+            motion_note = _clip_text(f"{motion_note}; force a pattern interrupt within 10 to 12 seconds", 180)
+        if pressure_scores.get("visuals", 0) >= 60:
+            visual_motif = _clip_text(f"{visual_motif} Avoid repeating the same hero-object framing back-to-back.", 220)
+        if pressure_scores.get("sound", 0) >= 60:
+            sound_note = _clip_text(f"{sound_note}; add a silence pocket before the main reveal", 180)
         blueprints.append({
             "index": idx,
-            "focus": f"{base[0]} Subject focus: {subject}.",
-            "hook_job": base[1],
-            "shock_device": base[2],
-            "visual_motif": f"{base[3]} built around {subject}.",
-            "motion_note": base[4],
-            "sound_note": base[5],
-            "retention_goal": _clip_text(retention or base[6], 180),
+            "focus": focus,
+            "hook_job": hook_job,
+            "shock_device": shock_device,
+            "visual_motif": visual_motif,
+            "motion_note": motion_note,
+            "sound_note": sound_note,
+            "retention_goal": retention_goal,
             "improvement_focus": _clip_text(improvement or "Keep the promise clearer and the payoff more immediate.", 180),
         })
     return blueprints
@@ -2816,6 +3007,7 @@ def _heuristic_catalyst_edit_blueprint(
     source_analysis = dict(source_analysis or {})
     channel_context = dict(channel_context or {})
     memory_view = _catalyst_channel_memory_public_view(channel_memory)
+    rewrite_pressure = dict(memory_view.get("rewrite_pressure") or {})
     subject = _same_arena_subject({"title": input_title or topic}, topic=topic or input_title) or _clip_text(topic or input_title or "the core subject", 80)
     improvement_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
     retention_findings = [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
@@ -2850,31 +3042,52 @@ def _heuristic_catalyst_edit_blueprint(
     reference_visual_rewrites = list(memory_view.get("reference_visual_rewrites") or [])
     reference_sound_rewrites = list(memory_view.get("reference_sound_rewrites") or [])
     reference_packaging_rewrites = list(memory_view.get("reference_packaging_rewrites") or [])
+    pressure_scores = {
+        str(row.get("key", "") or ""): int(row.get("score", 0) or 0)
+        for row in list(rewrite_pressure.get("categories") or [])
+        if str(row.get("key", "") or "").strip()
+    }
+    rewrite_priorities = [str(v).strip() for v in list(rewrite_pressure.get("next_run_priorities") or []) if str(v).strip()]
     weighted_next_moves = _dedupe_preserve_order([
         *list(memory_view.get("reference_next_video_moves") or []),
         *list(memory_view.get("next_video_moves") or []),
     ], max_items=8, max_chars=180)
+    pattern_interrupt_interval = 15 if format_preset == "documentary" else 12
+    if pressure_scores.get("pacing", 0) >= 75:
+        pattern_interrupt_interval = 9
+    elif pressure_scores.get("pacing", 0) >= 55:
+        pattern_interrupt_interval = 11
+    hook_promise = _clip_text(reference_hook_rewrites[0] if reference_hook_rewrites else f"Open on the strongest hidden consequence around {subject}, not generic setup.", 220)
+    hook_open_loop = _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180)
+    hook_first30 = _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180)
+    shock_device = "Use one unsettling or counterintuitive reveal within the first 15 seconds."
+    if pressure_scores.get("hook", 0) >= 70:
+        hook_promise = _clip_text(f"{hook_promise} The opening must land the claim before any explanation.", 220)
+        hook_open_loop = _clip_text(rewrite_priorities[0] if rewrite_priorities else hook_open_loop, 180)
+        hook_first30 = _clip_text("Shorten setup brutally. Promise, proof, and reversal must all appear in the first 30 seconds.", 180)
+        shock_device = "Use one counterintuitive reveal or disturbing contradiction in the first 10 to 15 seconds."
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),
         "format_preset": format_preset,
         "analysis_required_before_generation": True,
         "hook_strategy": {
-            "promise": _clip_text(reference_hook_rewrites[0] if reference_hook_rewrites else f"Open on the strongest hidden consequence around {subject}, not generic setup.", 220),
-            "open_loop": _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180),
-            "shock_device": "Use one unsettling or counterintuitive reveal within the first 15 seconds.",
-            "first_30s_mission": _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180),
+            "promise": hook_promise,
+            "open_loop": hook_open_loop,
+            "shock_device": shock_device,
+            "first_30s_mission": hook_first30,
         },
         "pacing_strategy": {
-            "scene_duration_sec": 5.0,
+            "scene_duration_sec": 4.5 if pressure_scores.get("pacing", 0) >= 70 else 5.0,
             "chapter_target_sec": round(float(chapter_target_sec or 0.0), 2),
             "chapter_count": int(chapter_count or 0),
             "escalation_curve": "hook -> mechanism -> consequence -> contrast -> payoff",
-            "pattern_interrupt_interval_sec": 15 if format_preset == "documentary" else 12,
+            "pattern_interrupt_interval_sec": pattern_interrupt_interval,
             "transition_style": transition_style,
             "micro_escalation_mode": bool(format_preset in {"documentary", "explainer", "recap"}),
             "pacing_rules": _dedupe_preserve_order([
                 primary_move,
+                rewrite_priorities[0] if rewrite_priorities else "",
                 *reference_pacing_rewrites[:2],
                 *pacing_wins[:2],
                 "Do not spend more than two scenes on the same visual idea.",
@@ -2890,6 +3103,7 @@ def _heuristic_catalyst_edit_blueprint(
                 "macro cutaways that reveal the hidden mechanism",
                 "miniature-world system sweeps for context",
                 "sharp pattern interrupts when the point changes",
+                rewrite_priorities[1] if len(rewrite_priorities) > 1 else "",
                 *reference_visual_rewrites[:2],
                 *visual_wins[:2],
             ], max_items=6, max_chars=160),
@@ -2897,6 +3111,7 @@ def _heuristic_catalyst_edit_blueprint(
                 "clean HUD-style overlays only when they clarify the beat",
                 "diagram callouts that explain one mechanism at a time",
                 "before-versus-after or myth-versus-reality comparisons",
+                rewrite_priorities[2] if len(rewrite_priorities) > 2 else "",
                 *reference_visual_rewrites[:2],
                 *packaging_wins[:1],
                 packaging_warning,
@@ -2906,6 +3121,7 @@ def _heuristic_catalyst_edit_blueprint(
                 "Stay obviously 3D and intentionally designed, not live-action.",
                 "Keep one dominant subject per frame and one dominant lighting cue.",
                 "Use contrast and scale shifts to reset attention.",
+                "Avoid reusing the same isolated hero-object stage in consecutive scenes." if pressure_scores.get("visuals", 0) >= 60 else "",
                 *reference_visual_rewrites[:2],
                 *visual_watchouts[:2],
                 *list(memory_view.get("retention_watchouts") or [])[:1],
@@ -2918,6 +3134,7 @@ def _heuristic_catalyst_edit_blueprint(
                 "Use trailer-grade impacts only on real reveals, not every scene.",
                 "Keep the ambience bed present but under narration.",
                 "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
+                "Use more deliberate silence pockets before the strongest reveals." if pressure_scores.get("sound", 0) >= 60 else "",
                 *reference_sound_rewrites[:2],
                 *sound_wins[:2],
                 *sound_watchouts[:1],
@@ -2940,12 +3157,15 @@ def _heuristic_catalyst_edit_blueprint(
             "memory_keywords": list(memory_view.get("proven_keywords") or [])[:8],
             "measured_ctr_context": f"Measured channel average CTR: {outcome_ctr:.2f}%." if outcome_ctr > 0 else "",
             "measured_retention_context": f"Measured average viewed: {outcome_avp:.2f}%." if outcome_avp > 0 else "",
+            "rewrite_pressure_summary": _clip_text(str(rewrite_pressure.get("summary", "") or ""), 240),
+            "next_run_priorities": rewrite_priorities[:5],
         },
         "scoring_rubric": _dedupe_preserve_order([
             "First 15 seconds must promise a concrete payoff.",
             "Every scene must visualize the exact narration beat, not a generic metaphor.",
             "Every chapter needs at least one escalation and one pattern interrupt.",
             "Packaging must stay in the same arena while avoiding title repetition.",
+            rewrite_priorities[0] if rewrite_priorities else "",
             *reference_hook_rewrites[:1],
             *reference_packaging_rewrites[:1],
             *hook_wins[:2],
@@ -2953,7 +3173,13 @@ def _heuristic_catalyst_edit_blueprint(
             *retention_wins[:1],
             *list(memory_view.get("retention_watchouts") or [])[:1],
         ], max_items=8, max_chars=180),
-        "chapter_blueprints": chapter_blueprints,
+        "chapter_blueprints": _heuristic_catalyst_chapter_blueprints(
+            chapter_count=chapter_count,
+            subject=subject,
+            improvement_moves=improvement_moves,
+            retention_findings=retention_findings,
+            pressure_profile=rewrite_pressure,
+        ),
     }
 
 
@@ -3021,6 +3247,8 @@ def _normalize_catalyst_edit_blueprint(raw: dict | None, heuristic: dict, chapte
             "packaging_opportunity": _clip_text(str(retention_in.get("packaging_opportunity", heuristic.get("retention_targets", {}).get("packaging_opportunity", "")) or ""), 220),
             "channel_title_hints": _dedupe_preserve_order(list(retention_in.get("channel_title_hints") or heuristic.get("retention_targets", {}).get("channel_title_hints", []) or []), max_items=6, max_chars=160),
             "memory_keywords": _dedupe_preserve_order(list(retention_in.get("memory_keywords") or heuristic.get("retention_targets", {}).get("memory_keywords", []) or []), max_items=10, max_chars=80),
+            "rewrite_pressure_summary": _clip_text(str(retention_in.get("rewrite_pressure_summary", heuristic.get("retention_targets", {}).get("rewrite_pressure_summary", "")) or ""), 240),
+            "next_run_priorities": _dedupe_preserve_order(list(retention_in.get("next_run_priorities") or heuristic.get("retention_targets", {}).get("next_run_priorities", []) or []), max_items=6, max_chars=180),
         },
         "scoring_rubric": _dedupe_preserve_order(list(raw.get("scoring_rubric") or heuristic.get("scoring_rubric", []) or []), max_items=10, max_chars=180),
         "chapter_blueprints": chapter_blueprints,
@@ -3793,6 +4021,38 @@ async def _harvest_catalyst_outcomes_for_channel(
     }
 
 
+async def _maybe_refresh_channel_outcomes_before_longform_run(
+    *,
+    user_id: str,
+    channel_id: str,
+    min_interval_sec: int = 1800,
+) -> dict:
+    user_key = str(user_id or "").strip()
+    channel_key = str(channel_id or "").strip()
+    if not user_key or not channel_key:
+        return {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
+    if not record:
+        return {}
+    last_sync_at = float(record.get("last_outcome_sync_at", 0.0) or 0.0)
+    last_sync_count = int(record.get("last_outcome_sync_count", 0) or 0)
+    sync_age = time.time() - last_sync_at if last_sync_at > 0 else float("inf")
+    if sync_age < float(min_interval_sec or 1800) and last_sync_count > 0:
+        return {"ok": True, "skipped": True, "reason": "fresh_enough"}
+    try:
+        return await _harvest_catalyst_outcomes_for_channel(
+            user_id=user_key,
+            channel_id=channel_key,
+            candidate_limit=12,
+            refresh_existing=False,
+        )
+    except Exception as e:
+        log.warning(f"[catalyst] automatic channel outcome sync failed before longform run: {e}")
+        return {"ok": False, "error": _clip_text(str(e), 220)}
+
+
 def _build_catalyst_outcome_record(
     *,
     session_snapshot: dict,
@@ -3947,6 +4207,7 @@ def _apply_catalyst_outcome_to_channel_memory(
     updated["reference_visual_score_sum"] = float(updated.get("reference_visual_score_sum", 0.0) or 0.0) + float(reference_scores.get("visuals", 0.0) or 0.0)
     updated["reference_sound_score_sum"] = float(updated.get("reference_sound_score_sum", 0.0) or 0.0) + float(reference_scores.get("sound", 0.0) or 0.0)
     updated["reference_packaging_score_sum"] = float(updated.get("reference_packaging_score_sum", 0.0) or 0.0) + float(reference_scores.get("packaging", 0.0) or 0.0)
+    updated["reference_title_novelty_score_sum"] = float(updated.get("reference_title_novelty_score_sum", 0.0) or 0.0) + float(reference_scores.get("title_novelty", 0.0) or 0.0)
     updated["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(updated.get("hook_learnings") or [])], max_items=10, max_chars=180)
     updated["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(updated.get("pacing_learnings") or [])], max_items=10, max_chars=180)
     updated["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(updated.get("visual_learnings") or [])], max_items=10, max_chars=180)
@@ -16751,6 +17012,13 @@ async def _create_longform_session_internal(
     auto_pipeline = bool(auto_pipeline_requested and _is_admin_user(user))
     channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=youtube_channel_id)
     memory_channel_id = str((channel_context or {}).get("channel_id", "") or youtube_channel_id or "").strip()
+    if memory_channel_id:
+        await _maybe_refresh_channel_outcomes_before_longform_run(
+            user_id=str(user.get("id", "") or ""),
+            channel_id=memory_channel_id,
+        )
+        channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=memory_channel_id)
+        memory_channel_id = str((channel_context or {}).get("channel_id", "") or memory_channel_id or "").strip()
     channel_memory_key = _catalyst_channel_memory_key(str(user.get("id", "") or ""), memory_channel_id, format_preset)
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
