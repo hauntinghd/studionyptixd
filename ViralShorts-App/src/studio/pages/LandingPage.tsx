@@ -88,6 +88,13 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
         'It is a fast skill to learn. With ten days of dedicated study, you can acquire valuable marketing skills.',
         'Be ready for a significant change as you learn and apply these marketing skills.',
     ];
+    const marketingDoctrineDisplay = marketingDoctrine.map((point) =>
+        point
+            .split('â€™').join("'")
+            .split('â€œ').join('"')
+            .split('â€\u009d').join('"')
+            .split('â€"').join(' - '),
+    );
 
     return (
         <>
@@ -235,7 +242,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         </p>
                     </div>
                     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {marketingDoctrine.map((point) => (
+                        {marketingDoctrineDisplay.map((point) => (
                             <div key={point} className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 text-sm leading-relaxed text-gray-300">
                                 {point}
                             </div>
