@@ -4695,20 +4695,18 @@ def _billing_site_url() -> str:
         return configured
     site = str(SITE_URL or "").strip().rstrip("/")
     if not site:
-        return site
+        return "https://studio.nyptidindustries.com"
     match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
     if not match:
-        return site
+        return "https://studio.nyptidindustries.com"
     scheme, host, suffix = match.groups()
     host_l = host.lower()
     for apex in ("nyptidindustries.com", "niptidindustries.com"):
-        if host_l == f"billing.{apex}":
+        if host_l == f"studio.{apex}":
             return f"{scheme}{host}{suffix}"
-        if host_l == apex:
-            return f"{scheme}billing.{apex}{suffix}"
-        if host_l.endswith("." + apex):
-            return f"{scheme}billing.{apex}{suffix}"
-    return site
+        if host_l in {apex, f"billing.{apex}", f"invoicer.{apex}"} or host_l.endswith("." + apex):
+            return f"{scheme}studio.{apex}{suffix}"
+    return "https://studio.nyptidindustries.com"
 
 
 def _api_public_url() -> str:

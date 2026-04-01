@@ -149,8 +149,8 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
                                 <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Voice Providers</p>
-                                <p className="mt-2 text-sm font-semibold text-white">Custom voice library first</p>
-                                <p className="mt-2 text-xs text-gray-500">ElevenLabs stays optional, but the default path is shifting toward owned or local voice assets.</p>
+                                <p className="mt-2 text-sm font-semibold text-white">ElevenLabs first</p>
+                                <p className="mt-2 text-xs text-gray-500">ElevenLabs is the main live voice provider now. The custom Catalyst rack stays available as a fallback and for tuned house voices.</p>
                             </div>
                         </div>
                     </section>

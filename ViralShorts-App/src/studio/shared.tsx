@@ -2,11 +2,18 @@ import { useState, useEffect, createContext, useCallback, useRef } from 'react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
-const isLocalDevHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-const billingHostAliases = new Set(["billing.nyptidindustries.com", "billing.niptidindustries.com"]);
-export const isBillingHost = billingHostAliases.has(window.location.hostname.toLowerCase()) || window.location.hostname.toLowerCase().startsWith("billing.");
-export const BILLING_SITE_URL = "https://billing.nyptidindustries.com";
+const hostLower = window.location.hostname.toLowerCase();
+const isLocalDevHost = hostLower === "localhost" || hostLower === "127.0.0.1";
+const billingHostAliases = new Set([
+    "billing.nyptidindustries.com",
+    "billing.niptidindustries.com",
+    "invoicer.nyptidindustries.com",
+    "invoicer.niptidindustries.com",
+]);
+export const isBillingHost = billingHostAliases.has(hostLower) || hostLower.startsWith("billing.") || hostLower.startsWith("invoicer.");
 export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
+export const BILLING_SITE_URL = STUDIO_SITE_URL;
+export const INVOICER_API_BASE_URL = "https://invoicer.nyptidindustries.com";
 export const PROD_API_BASE_URL = "https://api.nyptidindustries.com";
 const resolveSafeApiBase = (rawBase: string): string => {
     const cleaned = (rawBase || "").trim().replace(/\/+$/, "");

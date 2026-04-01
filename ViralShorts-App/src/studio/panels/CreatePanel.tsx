@@ -228,7 +228,7 @@ export default function CreatePanel() {
     const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
     const [showQuickStart, setShowQuickStart] = useState(false);
     const [quickStartStep, setQuickStartStep] = useState(0);
-    const [voiceProvider, setVoiceProvider] = useState<'custom' | 'elevenlabs'>('custom');
+    const [voiceProvider, setVoiceProvider] = useState<'custom' | 'elevenlabs'>('elevenlabs');
     const [customVoiceId, setCustomVoiceId] = useState(customVoiceLibrary[0].id);
     const [voicePitch, setVoicePitch] = useState(1);
     const [captionFont, setCaptionFont] = useState(finaleCaptionFonts[0]);
@@ -492,8 +492,8 @@ export default function CreatePanel() {
     }, [customVoicePresetMap]);
     useEffect(() => {
         if (selectedTemplate !== 'daytrading') return;
-        if (voiceProvider !== 'custom') {
-            setVoiceProvider('custom');
+        if (voiceProvider !== 'elevenlabs') {
+            setVoiceProvider('elevenlabs');
         }
         if (customVoiceId !== 'studio_voice_moneyline') {
             applyCustomVoicePreset('studio_voice_moneyline');
@@ -534,7 +534,7 @@ export default function CreatePanel() {
                     </p>
                 </div>
                 <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
-                    Custom Voices
+                    ElevenLabs First
                 </span>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -667,12 +667,12 @@ export default function CreatePanel() {
                         ))}
                     </div>
                     <p className="mt-3 text-[11px] text-gray-500">
-                        Custom library mode now drives the actual render voice instead of only changing local tuning. Use ElevenLabs mode if you want to browse the raw account catalog directly.
+                        Custom library mode is still available for the house voice rack, but ElevenLabs is the default live render path right now.
                     </p>
                 </div>
             ) : (
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-                    ElevenLabs is optional here. If its billing is disabled, Studio falls back to the custom voice stack or the default narrator.
+                    ElevenLabs is the main live voice lane right now. If it fails upstream, Studio falls back to the custom voice stack or the default narrator.
                 </div>
             )}
         </div>
