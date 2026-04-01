@@ -6739,6 +6739,57 @@ Output format MUST be valid JSON:
 
 Generate 10-12 scenes for a 50-65 second short. The story must have genuine emotional weight.""",
 
+    "daytrading": """You are an elite viral short-form scriptwriter for high-retention day trading and investing shorts. The content should feel like premium financial media compressed into a sharp, addictive, mobile-first short: polished, intelligent, fast, and visually precise.
+
+MISSION:
+- Build a NEW short around the user's topic in the same arena as strong trading/investing creators.
+- Make it entertaining first, educational second: curiosity, stakes, reversals, traps, and sharp payoffs.
+- Never promise guaranteed returns or fake certainty. Frame setups, mistakes, psychology, risk, and process clearly.
+
+VISUAL STYLE:
+- Premium 3D or photoreal finance visuals: trading desks, candlestick charts, heatmaps, macro dashboards, level-2/order-flow style screens, risk/reward diagrams, market structures, and cinematic market environments.
+- Readable, uncluttered compositions. The viewer should instantly understand the core trading idea on a phone screen.
+- Use shock-value intelligently: sharp chart breakdowns, liquidation danger, reversal traps, hidden market structure, emotional trader behavior, or risk explosions.
+- Avoid generic money rain, cheesy crypto scam vibes, and fake luxury shots unless the beat explicitly calls for them.
+- Every visual_description should feel like a directable production shot: specific subject, setup, chart concept, action, camera, and lighting.
+
+STRUCTURE (10-12 scenes, 45-60 seconds):
+1. HOOK: The exact trap, setup, myth, or edge. Hit the curiosity gap instantly.
+2. STAKES: Why this matters to the trader or investor right now.
+3-4. BREAKDOWN: Define the pattern, setup, or psychological mistake clearly.
+5-7. ESCALATION: Show where people get trapped, what goes wrong, or what the market does next.
+8-10. SOLUTION / EDGE: Show the better read, better behavior, or cleaner setup.
+11-12. PAYOFF: One memorable takeaway or rule that sticks.
+
+NARRATION RULES:
+- Fast, confident, sharp. 1-2 sentences max per scene.
+- Every scene must advance the trade logic or emotional tension.
+- Use concrete trading language when relevant: setup, liquidity, breakdown, reversal, risk, invalidation, entry, exit, confirmation, momentum, volatility.
+- Keep the copy punchy and scroll-stopping, but understandable for ambitious non-experts too.
+- Never repeat the source title word-for-word as the main idea. Build a fresh angle in the same lane.
+
+CAPTION STYLE:
+- text_overlay should be 1-4 high-impact words, numbers allowed.
+- Use direct phrases like "THE TRAP", "LATE ENTRY", "FAKE BREAKOUT", "RISK FIRST", "WHY TRADERS LOSE", "WAIT FOR CONFIRMATION".
+
+OUTPUT FORMAT MUST BE VALID JSON:
+{
+  "title": "Fresh, curiosity-driven title in the same arena as the topic without copying it exactly",
+  "scenes": [
+    {
+      "scene_num": 1,
+      "duration_sec": 4,
+      "narration": "Fast, high-retention narration for this beat.",
+      "visual_description": "Premium financial explainer visual with readable charts, trading screens, or 3D market objects, clear subject, sharp lighting, dynamic camera, and visible stakes.",
+      "text_overlay": "HIGH IMPACT"
+    }
+  ],
+  "description": "Short-form YouTube description with trading/investing hashtags",
+  "tags": ["tag1", "tag2"]
+}
+
+Generate 10-12 scenes. Keep the title fresh, the visuals premium, and the pacing aggressive without becoming incoherent.""",
+
     "reddit": """You are a viral short-form scriptwriter for Reddit story narration content. These are the massively popular videos where a compelling Reddit story (AITA, TIFU, relationship drama, revenge, etc) is narrated over satisfying background visuals.
 
 VISUAL STYLE:
@@ -7193,7 +7244,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     topic_text = str(topic or "").strip()
     script_to_short_mode = "SCRIPT-TO-SHORT MODE" in str(extra_instructions or "")
     comparison_topic = bool(re.search(r"\b(vs\.?|versus)\b", topic_text, re.IGNORECASE))
-    if template in {"skeleton", "story", "motivation"}:
+    if template in {"skeleton", "story", "motivation", "daytrading"}:
         system_prompt += (
             "\n\nSUBJECT DIVERSITY + TEMPLATE COVERAGE RULES (MUST FOLLOW): "
             "Avoid forcing one unchanged main character in every scene unless the topic is explicitly about one person. "
@@ -8376,6 +8427,73 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
         "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
     }
+
+
+async def _build_shorts_catalyst_extra_instructions(
+    user: dict | None,
+    template: str,
+    preferred_channel_id: str = "",
+    topic: str = "",
+) -> str:
+    if not isinstance(user, dict):
+        return ""
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id)
+    channel_id = str(channel_context.get("channel_id", "") or "").strip()
+    if not channel_id:
+        return ""
+    memory_key = _catalyst_channel_memory_key(
+        str(user.get("id", "") or ""),
+        channel_id,
+        str(template or "story").strip().lower() or "story",
+    )
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        memory = dict(_catalyst_channel_memory.get(memory_key) or {})
+    memory_public = _catalyst_channel_memory_public_view(memory)
+    memory_context = _render_catalyst_channel_memory_context(memory)
+    rewrite_pressure = _catalyst_rewrite_pressure_profile(memory_public)
+
+    parts: list[str] = [
+        "CATALYST SHORTS CHANNEL MODE: Build a NEW short in the same arena as the connected channel. Do not remake or lightly paraphrase an existing upload.",
+    ]
+    channel_title = str(channel_context.get("channel_title", "") or "").strip()
+    if channel_title:
+        parts.append(f"Connected YouTube channel: {channel_title}.")
+    if channel_context.get("summary"):
+        parts.append("Channel performance summary: " + _clip_text(str(channel_context.get("summary", "") or ""), 280))
+    recent_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    if recent_titles:
+        parts.append("Recent upload titles: " + ", ".join(recent_titles[:4]))
+    top_titles = [str(v).strip() for v in list(channel_context.get("top_video_titles") or []) if str(v).strip()]
+    if top_titles:
+        parts.append("Top titles from this channel: " + ", ".join(top_titles[:4]))
+    title_hints = [str(v).strip() for v in list(channel_context.get("title_pattern_hints") or []) if str(v).strip()]
+    if title_hints:
+        parts.append("Title pattern hints: " + "; ".join(title_hints[:4]))
+    packaging = [str(v).strip() for v in list(channel_context.get("packaging_learnings") or []) if str(v).strip()]
+    if packaging:
+        parts.append("Packaging learnings: " + "; ".join(packaging[:4]))
+    retention = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()]
+    if retention:
+        parts.append("Retention learnings: " + "; ".join(retention[:4]))
+    if memory_context:
+        parts.append(memory_context)
+    rewrite_summary = str(rewrite_pressure.get("summary", "") or "").strip()
+    if rewrite_summary:
+        parts.append("Rewrite pressure: " + rewrite_summary)
+    priorities = [str(v).strip() for v in list(rewrite_pressure.get("next_run_priorities") or []) if str(v).strip()]
+    if priorities:
+        parts.append("Next-run priorities: " + "; ".join(priorities[:5]))
+    if str(template or "").strip().lower() == "daytrading":
+        parts.append(
+            "DAY TRADING TEMPLATE RULES: keep the short anchored to real trading or investing behavior, chart logic, risk management, market psychology, or setup quality. "
+            "Use sharper hooks, clearer stakes, and premium trading-desk / chart visuals. Avoid generic wealth-posturing and empty motivational filler."
+        )
+    if topic:
+        parts.append(
+            "Fresh-angle rule: keep the short tightly in the same subject arena as the requested topic, but generate a new hook and framing instead of recycling the source headline."
+        )
+    return "\n\n".join(part for part in parts if str(part or "").strip())
 
 
 async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> dict:
@@ -9834,8 +9952,14 @@ def _transition_duration_for_style(style: str) -> float:
 
 def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
     if value is None:
-        return template in {"skeleton", "story", "motivation"}
-    return _bool_from_any(value, template in {"skeleton", "story", "motivation"})
+        return template in {"skeleton", "story", "motivation", "daytrading"}
+    return _bool_from_any(value, template in {"skeleton", "story", "motivation", "daytrading"})
+
+
+def _creative_template_supports_voice_controls(template: str) -> bool:
+    if not STORY_ADVANCED_CONTROLS_ENABLED:
+        return False
+    return str(template or "").strip().lower() in {"story", "daytrading"}
 
 
 def _normalize_cinematic_boost(value) -> bool:
@@ -15535,7 +15659,7 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
     """Deterministic scene rewrite pass for stronger first-render reliability."""
     if not _normalize_mint_mode(mint_mode, template):
         return scenes
-    if template not in {"skeleton", "story"}:
+    if template not in {"skeleton", "story", "daytrading"}:
         return scenes
 
     def _sentences(text: str) -> list[str]:
@@ -15616,31 +15740,44 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
             if not _skeleton_scene_has_camera_cue(combined):
                 chunks[2] = chunks[2].rstrip(".!?") + " Choose framing that fits the beat instead of repeating the same centered medium hero shot."
         else:
-            explainer_visuals = template == "story" and _story_scene_prefers_explainer_visuals(" ".join(chunks[:3]))
-            if explainer_visuals:
-                if not re.search(r"\b(anatomy|mechanism|process|system|cells?|organs?|brain|blood|temperature|infection|bacteria|virus|heat|sweat|diagram|cutaway|thermometer|molecule)\b", chunks[0], re.IGNORECASE):
+            if template == "daytrading":
+                if not re.search(r"\b(trader|chart|candlestick|market|ticker|screen|dashboard|price|order flow|trading desk|broker|asset|stock|option|futures|exchange)\b", chunks[0], re.IGNORECASE):
                     chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
-                        "The core mechanism or body-system concept for this script beat is clearly visible."
-                if not re.search(r"\b(environment|background|setting|location|interior|exterior|cutaway|macro|inside|within)\b", chunks[0], re.IGNORECASE):
-                    chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment or readable cutaway view."
-                if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding|flow|circulat|heat|signal|response|reaction|change)\b", chunks[1], re.IGNORECASE):
+                        "A premium trading or investing visual is clearly visible with readable charts, dashboards, or market context."
+                if not re.search(r"\b(environment|background|setting|location|desk|studio|screen|floor|exchange|dashboard)\b", chunks[0], re.IGNORECASE):
+                    chunks[0] = chunks[0].rstrip(".!?") + " In a specific trading environment with professional market screens."
+                if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding|breaking|spiking|reversing|rotating|flashing|updating)\b", chunks[1], re.IGNORECASE):
                     chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
-                        "Show the mechanism actively happening with visible cause-and-effect and readable stakes."
-                if not re.search(r"\b(camera|motion|continuity|transition|cutaway|macro|push)\b", chunks[2], re.IGNORECASE):
+                        "Show the trade idea, market move, or risk/reward mechanism actively happening with visible change."
+                if not re.search(r"\b(camera|motion|continuity|transition|push|orbit|parallax|zoom)\b", chunks[2], re.IGNORECASE):
                     chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
-                        "Camera movement and visual continuity should track the process clearly into the next scene."
+                        "Camera movement and motion graphics should keep the market explanation sharp and continuous into the next scene."
             else:
-                if not re.search(r"\b(character|protagonist|person|figure|subject|crowd|group|family|worker)\b", chunks[0], re.IGNORECASE):
-                    chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
-                        "The primary subject(s) for this script beat are clearly visible."
-                if not re.search(r"\b(environment|background|setting|location|interior|exterior)\b", chunks[0], re.IGNORECASE):
-                    chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment."
-                if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding)\b", chunks[1], re.IGNORECASE):
-                    chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
-                        "The subject(s) perform a clear action with visible stakes."
-                if not re.search(r"\b(camera|motion|continuity|transition)\b", chunks[2], re.IGNORECASE):
-                    chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
-                        "Camera and subject motion preserve smooth continuity into the next scene."
+                explainer_visuals = template == "story" and _story_scene_prefers_explainer_visuals(" ".join(chunks[:3]))
+                if explainer_visuals:
+                    if not re.search(r"\b(anatomy|mechanism|process|system|cells?|organs?|brain|blood|temperature|infection|bacteria|virus|heat|sweat|diagram|cutaway|thermometer|molecule)\b", chunks[0], re.IGNORECASE):
+                        chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
+                            "The core mechanism or body-system concept for this script beat is clearly visible."
+                    if not re.search(r"\b(environment|background|setting|location|interior|exterior|cutaway|macro|inside|within)\b", chunks[0], re.IGNORECASE):
+                        chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment or readable cutaway view."
+                    if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding|flow|circulat|heat|signal|response|reaction|change)\b", chunks[1], re.IGNORECASE):
+                        chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                            "Show the mechanism actively happening with visible cause-and-effect and readable stakes."
+                    if not re.search(r"\b(camera|motion|continuity|transition|cutaway|macro|push)\b", chunks[2], re.IGNORECASE):
+                        chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                            "Camera movement and visual continuity should track the process clearly into the next scene."
+                else:
+                    if not re.search(r"\b(character|protagonist|person|figure|subject|crowd|group|family|worker)\b", chunks[0], re.IGNORECASE):
+                        chunks[0] = (chunks[0].rstrip(".!?") + " " if chunks[0] else "") + \
+                            "The primary subject(s) for this script beat are clearly visible."
+                    if not re.search(r"\b(environment|background|setting|location|interior|exterior)\b", chunks[0], re.IGNORECASE):
+                        chunks[0] = chunks[0].rstrip(".!?") + " In a specific cinematic environment."
+                    if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding)\b", chunks[1], re.IGNORECASE):
+                        chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
+                            "The subject(s) perform a clear action with visible stakes."
+                    if not re.search(r"\b(camera|motion|continuity|transition)\b", chunks[2], re.IGNORECASE):
+                        chunks[2] = (chunks[2].rstrip(".!?") + " " if chunks[2] else "") + \
+                            "Camera and subject motion preserve smooth continuity into the next scene."
 
         scene["visual_description"] = " ".join([
             c.strip().rstrip(".!?") + "."
@@ -16063,7 +16200,9 @@ async def run_generation_pipeline(
         lang_instruction = ""
         if language != "en":
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
-        script_data = await generate_script(template, topic, extra_instructions=lang_instruction)
+        catalyst_shorts_instructions = str(job_state.get("catalyst_shorts_instructions", "") or "").strip()
+        extra_instructions = lang_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")
+        script_data = await generate_script(template, topic, extra_instructions=extra_instructions)
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
         mint_mode = _normalize_mint_mode(mint_mode, template=template)
@@ -18840,10 +18979,11 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode)
     animation_enabled = _bool_from_any(req.animation_enabled, _bool_from_any(req.story_animation_enabled, True))
-    if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+    if not _creative_template_supports_voice_controls(req.template):
         voice_id = ""
         voice_speed = 1.0
         pacing_mode = "standard"
+    youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
     lang_name = SUPPORTED_LANGUAGES.get(req.language, {}).get("name", "English")
     lang_instruction = ""
     if req.language != "en":
@@ -18867,12 +19007,18 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "Make the visual_description fields self-contained, specific, and editable so users can regenerate each scene from the prompt alone. "
             "Every visual_description should read like a production-ready image prompt with the exact subject, setting, action, framing, lighting, and key props required by that script beat."
         )
+    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+        user,
+        req.template,
+        preferred_channel_id=youtube_channel_id,
+        topic=req.prompt,
+    )
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     try:
         script_data = await generate_script(
             req.template,
             req.prompt,
-            extra_instructions=(lang_instruction + script_to_short_instruction),
+            extra_instructions=(lang_instruction + script_to_short_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")),
         )
     except httpx.HTTPStatusError as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
@@ -18921,6 +19067,8 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "reference_quality": reference_quality,
             "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
+            "youtube_channel_id": youtube_channel_id,
+            "catalyst_shorts_instructions": catalyst_shorts_instructions,
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
@@ -18950,6 +19098,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
+        "youtube_channel_id": youtube_channel_id,
         "prompt_passthrough": True,
         "mode": "script_to_short" if script_to_short_mode else "creative",
     }
@@ -18980,10 +19129,17 @@ async def creative_create_session(body: dict, request: Request = None):
     voice_id = str(body.get("voice_id", "") or "").strip()
     voice_speed = _normalize_voice_speed(body.get("voice_speed", 1.0), default=1.0)
     pacing_mode = _normalize_pacing_mode(body.get("pacing_mode", "standard"))
-    if template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+    if not _creative_template_supports_voice_controls(template):
         voice_id = ""
         voice_speed = 1.0
         pacing_mode = "standard"
+    youtube_channel_id = str(body.get("youtube_channel_id", "") or "").strip()
+    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+        user,
+        template,
+        preferred_channel_id=youtube_channel_id,
+        topic=str(body.get("topic", "") or ""),
+    )
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     default_reference_url = _default_reference_for_template(template)
     reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, template, reference_lock_mode)
@@ -19024,6 +19180,8 @@ async def creative_create_session(body: dict, request: Request = None):
             "reference_quality": reference_quality,
             "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
+            "youtube_channel_id": youtube_channel_id,
+            "catalyst_shorts_instructions": catalyst_shorts_instructions,
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
@@ -19045,6 +19203,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
+        "youtube_channel_id": youtube_channel_id,
         "session_id": session_id,
         "story_animation_enabled": story_animation_enabled,
         "scene_count": 0,
@@ -19067,6 +19226,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
+        "youtube_channel_id": youtube_channel_id,
         "prompt_passthrough": True,
     }
 
@@ -19262,6 +19422,9 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     if cinematic_boost:
         quality_mode = "cinematic"
         mint_mode = True
+    youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or session.get("youtube_channel_id", "") or "").strip()
+    if youtube_channel_id:
+        session["youtube_channel_id"] = youtube_channel_id
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
     session["reference_lock_mode"] = reference_lock_mode
     session["art_style"] = art_style
@@ -19637,10 +19800,11 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
     voice_speed = _normalize_voice_speed(req.voice_speed if req.voice_speed is not None else session.get("voice_speed", 1.0), default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode or session.get("pacing_mode", "standard"))
     subtitles_enabled = _bool_from_any(req.subtitles_enabled, _bool_from_any(session.get("subtitles_enabled"), True))
-    if session.get("template", req.template) != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+    if not _creative_template_supports_voice_controls(session.get("template", req.template)):
         voice_id = ""
         voice_speed = 1.0
         pacing_mode = "standard"
+    youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or session.get("youtube_channel_id", "") or "").strip()
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
     image_model_id = _normalize_creative_image_model_id(req.image_model_id or session.get("image_model_id"), template=session.get("template", req.template))
     video_model_id = _normalize_creative_video_model_id(req.video_model_id or session.get("video_model_id"))
@@ -19661,6 +19825,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         session["voice_speed"] = voice_speed
         session["pacing_mode"] = pacing_mode
         session["subtitles_enabled"] = subtitles_enabled
+        session["youtube_channel_id"] = youtube_channel_id
         session["reference_lock_mode"] = reference_lock_mode
         session["animation_enabled"] = animation_enabled
         session["story_animation_enabled"] = story_animation_enabled
@@ -19748,6 +19913,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         "voice_speed": voice_speed,
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
+        "youtube_channel_id": youtube_channel_id,
         "story_animation_enabled": story_animation_enabled,
         "image_model_id": image_model_id,
         "video_model_id": video_model_id,
@@ -20866,10 +21032,17 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
     voice_speed = _normalize_voice_speed(req.voice_speed, default=1.0)
     pacing_mode = _normalize_pacing_mode(req.pacing_mode)
     animation_enabled = _bool_from_any(req.animation_enabled, _bool_from_any(req.story_animation_enabled, True))
-    if req.template != "story" or not STORY_ADVANCED_CONTROLS_ENABLED:
+    if not _creative_template_supports_voice_controls(req.template):
         voice_id = ""
         voice_speed = 1.0
         pacing_mode = "standard"
+    youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
+    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+        user,
+        req.template,
+        preferred_channel_id=youtube_channel_id,
+        topic=req.prompt,
+    )
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
     reference_dna, reference_quality = await _extract_reference_profile(reference_image_url, req.template, reference_lock_mode)
@@ -20934,6 +21107,8 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "story_animation_enabled": animation_enabled if req.template == "story" else True,
+        "youtube_channel_id": youtube_channel_id,
+        "catalyst_shorts_instructions": catalyst_shorts_instructions,
         "reference_image_url": reference_image_url,
         "reference_lock_mode": reference_lock_mode,
         "reference_dna": reference_dna,
@@ -20964,6 +21139,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
             "voice_speed": voice_speed,
             "pacing_mode": pacing_mode,
             "animation_enabled": animation_enabled,
+            "youtube_channel_id": youtube_channel_id,
             "job_id": job_id,
         })
         jobs[job_id]["project_id"] = project_id

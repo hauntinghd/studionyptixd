@@ -126,6 +126,7 @@ PUBLIC_TEMPLATE_ALLOWLIST = {
     "skeleton",
     "story",
     "motivation",
+    "daytrading",
     "business",
     "finance",
     "tech",
@@ -163,6 +164,7 @@ TEMPLATE_VOICE_SETTINGS = {
     "skeleton": {"voice_id": "TX3LPaxmHKxFdv7VOQHJ", "stability": 0.30, "similarity_boost": 0.85, "style": 0.55, "speed": 1.15},
     "history": {"voice_id": "pNInz6obpgDQGcFmaJgB", "stability": 0.6, "similarity_boost": 0.8, "style": 0.2},
     "story": {"voice_id": "onwK4e9ZLuTAKqWW03F9", "stability": 0.65, "similarity_boost": 0.85, "style": 0.15},
+    "daytrading": {"voice_id": "pNInz6obpgDQGcFmaJgB", "stability": 0.55, "similarity_boost": 0.85, "style": 0.25, "speed": 1.06},
     "reddit": {"voice_id": "TX3LPaxmHKxFdv7VOQHJ", "stability": 0.5, "similarity_boost": 0.75, "style": 0.35},
     "top5": {"voice_id": "pNInz6obpgDQGcFmaJgB", "stability": 0.55, "similarity_boost": 0.8, "style": 0.25},
     "roblox": {"voice_id": "TX3LPaxmHKxFdv7VOQHJ", "stability": 0.35, "similarity_boost": 0.7, "style": 0.5},
@@ -184,4 +186,5 @@ TEMPLATE_SFX_STYLES = {
     "objects": "mysterious discovery sound, wonder ambient",
     "wouldyourather": "dramatic suspense, game show tension",
     "history": "epic cinematic atmosphere, dramatic orchestra hint",
+    "daytrading": "high-pressure financial pulses, UI clicks, sharp risers, market tension impacts",
 }

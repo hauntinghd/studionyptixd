@@ -4,6 +4,7 @@ from pydantic import BaseModel
 class GenerateRequest(BaseModel):
     template: str
     prompt: str
+    youtube_channel_id: str = ""
     resolution: str = "720p"
     language: str = "en"
     mode: str = "auto"
@@ -30,6 +31,7 @@ class SceneImageRequest(BaseModel):
     negative_prompt: str = ""
     scene_index: int = 0
     session_id: str = ""
+    youtube_channel_id: str = ""
     template: str = "skeleton"
     resolution: str = "720p"
     quality_mode: str = "cinematic"
@@ -45,6 +47,7 @@ class SceneImageRequest(BaseModel):
 class FinalizeRequest(BaseModel):
     session_id: str
     template: str = "skeleton"
+    youtube_channel_id: str = ""
     resolution: str = "720p"
     language: str = "en"
     quality_mode: str = "cinematic"

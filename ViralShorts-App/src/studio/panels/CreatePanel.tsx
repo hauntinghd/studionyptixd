@@ -51,6 +51,7 @@ interface CreatePanelPersistedState {
     captionFont?: string;
     backgroundMusic?: string;
     soundReferencePreset?: string;
+    youtubeChannelId?: string;
     jobId: string | null;
     ts: number;
 }
@@ -80,8 +81,21 @@ interface ProjectRow {
     art_style?: string;
     image_model_id?: string;
     video_model_id?: string;
+    youtube_channel_id?: string;
     cinematic_boost?: boolean;
     error?: string;
+}
+
+interface ConnectedYouTubeChannel {
+    channel_id: string;
+    title: string;
+    channel_handle?: string;
+    analytics_snapshot?: {
+        channel_summary?: string;
+        recent_upload_titles?: string[];
+        top_video_titles?: string[];
+    };
+    last_sync_error?: string;
 }
 
 interface CreativeModelProfile {
@@ -220,6 +234,11 @@ export default function CreatePanel() {
     const [captionFont, setCaptionFont] = useState(finaleCaptionFonts[0]);
     const [backgroundMusic, setBackgroundMusic] = useState(finaleMusicOptions[0]);
     const [soundReferencePreset, setSoundReferencePreset] = useState(soundReferenceOptions[0].id);
+    const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
+    const [youtubeChannelId, setYoutubeChannelId] = useState('');
+    const [youtubeLoading, setYoutubeLoading] = useState(false);
+    const [youtubeError, setYoutubeError] = useState('');
+    const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [templateChooserOpen, setTemplateChooserOpen] = useState(false);
     const [subscriptionPromptOpen, setSubscriptionPromptOpen] = useState(false);
     const [subscriptionCheckoutPlan, setSubscriptionCheckoutPlan] = useState<string | null>(null);
@@ -295,7 +314,8 @@ export default function CreatePanel() {
     const animationCreditsAvailable = Number(creditsTotalRemaining || 0);
     const animationCreditExhausted = !isAdmin && (requiresTopup || animationCreditsAvailable <= 0);
     const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
-    const autoModeComingSoon = selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton';
+    const templateSupportsVoiceControls = selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+    const autoModeComingSoon = selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton' || selectedTemplate === 'daytrading';
     const cinematicBoostAlwaysOn = true;
     const effectiveCinematicBoostEnabled = cinematicBoostAlwaysOn || cinematicBoostEnabled;
     const defaultSkeletonStyleLockActive = selectedTemplate === 'skeleton' && !creativeReferenceImage && !creativeReferenceAttached;
@@ -321,14 +341,19 @@ export default function CreatePanel() {
         { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
         { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
         { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
+        { id: 'daytrading', title: 'Day Trading', desc: 'Trading and investing shorts', icon: '📈' },
     ];
     const supportsArtStyle = selectedTemplate !== 'skeleton';
     const publicDefaultTemplateId = 'story';
     const templateIds = new Set(templates.map(t => t.id));
-    const liveTemplateIds = new Set(['story', 'motivation', 'skeleton', 'chatstory']);
+    const liveTemplateIds = new Set(['story', 'motivation', 'skeleton', 'daytrading', 'chatstory']);
     const chatStoryTemplateUnlocked = hasChatStoryTemplateAccess(plan, billingActive, role);
     const liveWorkspaceTemplates = templates.filter((template) => liveTemplateIds.has(template.id));
     const currentTemplateMeta = templates.find((template) => template.id === selectedTemplate) || templates[0];
+    const selectedYouTubeChannel = useMemo(
+        () => youtubeChannels.find((channel) => channel.channel_id === youtubeChannelId) || null,
+        [youtubeChannels, youtubeChannelId],
+    );
     useEffect(() => {
         if (!templateIds.has(selectedTemplate)) {
             setSelectedTemplate(publicDefaultTemplateId);
@@ -390,6 +415,59 @@ export default function CreatePanel() {
         if (session) h["Authorization"] = `Bearer ${session.access_token}`;
         return h;
     };
+    const loadYouTubeChannels = useCallback(async (silent = false) => {
+        if (!session) return;
+        if (!silent) setYoutubeLoading(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/youtube/channels?sync=true`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            const rows = Array.isArray((payload as any).channels) ? (payload as any).channels as ConnectedYouTubeChannel[] : [];
+            setYoutubeChannels(rows);
+            const defaultId = String((payload as any).default_channel_id || '').trim();
+            setYoutubeChannelId((prev) => {
+                const trimmedPrev = String(prev || '').trim();
+                if (trimmedPrev && rows.some((row) => String(row.channel_id || '').trim() === trimmedPrev)) {
+                    return trimmedPrev;
+                }
+                if (defaultId) {
+                    return defaultId;
+                }
+                return rows.length > 0 ? String(rows[0]?.channel_id || '').trim() : '';
+            });
+        } catch (e: any) {
+            setYoutubeChannels([]);
+            setYoutubeError(e?.message || 'Failed to load connected YouTube channels');
+        } finally {
+            if (!silent) setYoutubeLoading(false);
+        }
+    }, [session]);
+    const startYouTubeConnect = useCallback(async () => {
+        if (!session || youtubeConnecting) return;
+        setYoutubeConnecting(true);
+        setYoutubeError('');
+        try {
+            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ next_url: window.location.href }),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
+            const authUrl = String((payload as any).auth_url || '').trim();
+            if (!authUrl) throw new Error('Google connect response did not include an auth URL.');
+            window.location.href = authUrl;
+        } catch (e: any) {
+            setYoutubeError(e?.message || 'Failed to start YouTube connection');
+            setYoutubeConnecting(false);
+        }
+    }, [session, youtubeConnecting]);
     const fileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
@@ -412,6 +490,21 @@ export default function CreatePanel() {
             setVoicePitch(preset.defaultPitch);
         }
     }, [customVoicePresetMap]);
+    useEffect(() => {
+        if (selectedTemplate !== 'daytrading') return;
+        if (voiceProvider !== 'custom') {
+            setVoiceProvider('custom');
+        }
+        if (customVoiceId !== 'studio_voice_moneyline') {
+            applyCustomVoicePreset('studio_voice_moneyline');
+        }
+        if (storyPacingMode !== 'fast') {
+            setStoryPacingMode('fast');
+        }
+        if (soundReferencePreset !== 'social_hook') {
+            setSoundReferencePreset('social_hook');
+        }
+    }, [selectedTemplate, voiceProvider, customVoiceId, storyPacingMode, soundReferencePreset, applyCustomVoicePreset]);
 
     const renderWorkspaceStageTabs = () => (
         <div className="flex flex-wrap gap-2 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-2">
@@ -690,6 +783,9 @@ export default function CreatePanel() {
             if (typeof saved.soundReferencePreset === 'string' && saved.soundReferencePreset) {
                 setSoundReferencePreset(saved.soundReferencePreset);
             }
+            if (typeof saved.youtubeChannelId === 'string') {
+                setYoutubeChannelId(saved.youtubeChannelId);
+            }
             if (typeof saved.jobId === 'string' && saved.jobId) {
                 setJobId(saved.jobId);
                 setLoading(true);
@@ -744,6 +840,7 @@ export default function CreatePanel() {
             captionFont,
             backgroundMusic,
             soundReferencePreset,
+            youtubeChannelId,
             jobId,
             ts: Date.now(),
         };
@@ -784,6 +881,7 @@ export default function CreatePanel() {
         captionFont,
         backgroundMusic,
         soundReferencePreset,
+        youtubeChannelId,
         jobId,
     ]);
 
@@ -982,6 +1080,11 @@ export default function CreatePanel() {
     }, [createSubTab, loadProjects]);
 
     useEffect(() => {
+        if (!session) return;
+        void loadYouTubeChannels(true);
+    }, [session, loadYouTubeChannels]);
+
+    useEffect(() => {
         if (voiceProvider !== 'custom') return;
         const preset = customVoicePresetMap.get(customVoiceId);
         if (preset?.backingVoiceId && storyVoiceId !== preset.backingVoiceId) {
@@ -990,7 +1093,7 @@ export default function CreatePanel() {
     }, [voiceProvider, customVoiceId, storyVoiceId]);
 
     useEffect(() => {
-        if (selectedTemplate !== 'story') return;
+        if (!templateSupportsVoiceControls) return;
         if (!session) return;
         let cancelled = false;
         const run = async () => {
@@ -1021,7 +1124,7 @@ export default function CreatePanel() {
         };
         void run();
         return () => { cancelled = true; };
-    }, [selectedTemplate, session, storyVoiceId, voiceProvider]);
+    }, [templateSupportsVoiceControls, session, storyVoiceId, voiceProvider]);
 
     const previewStoryVoice = async () => {
         if (!session || !storyVoiceId || storyPreviewLoading) return;
@@ -1058,10 +1161,10 @@ export default function CreatePanel() {
             await handleScriptToShortStart();
             return;
         }
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         setLoading(true);
         setJobStatus(null);
         setJobId(null);
@@ -1088,10 +1191,11 @@ export default function CreatePanel() {
                     image_model_id: imageModelId,
                     video_model_id: videoModelId,
                     animation_enabled: effectiveAnimationEnabled,
-                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
-                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
-                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
-                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    voice_id: templateSupportsVoiceControls ? storyVoiceId : "",
+                    voice_speed: templateSupportsVoiceControls ? storyVoiceSpeed : 1,
+                    pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
+                    story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
+                    youtube_channel_id: youtubeChannelId.trim(),
                     reference_image_url: referenceImageDataUrl,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
@@ -1105,7 +1209,7 @@ export default function CreatePanel() {
     const handleRegenerateAutoScene = async (sceneIndex: number) => {
         const targetJobId = jobId || jobStatus?.job_id;
         if (!targetJobId) return;
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
         try {
             const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
@@ -1160,10 +1264,10 @@ export default function CreatePanel() {
             : (prompt.trim() || creativeNarration.trim())
         );
         if (!scriptText) return;
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
         setSceneBuildLoading(true);
         setSceneBuildError(null);
@@ -1189,10 +1293,11 @@ export default function CreatePanel() {
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
                     animation_enabled: effectiveAnimationEnabled,
-                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
-                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
-                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
-                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    voice_id: templateSupportsVoiceControls ? storyVoiceId : "",
+                    voice_speed: templateSupportsVoiceControls ? storyVoiceSpeed : 1,
+                    pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
+                    story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
+                    youtube_channel_id: youtubeChannelId.trim(),
                 }),
             });
             if (!res.ok) {
@@ -1209,6 +1314,9 @@ export default function CreatePanel() {
             }
             if (typeof data.video_model_id === 'string' && data.video_model_id) {
                 setVideoModelId(data.video_model_id);
+            }
+            if (typeof data.youtube_channel_id === 'string') {
+                setYoutubeChannelId(data.youtube_channel_id);
             }
             if (creativeReferenceImage) {
                 const uploadForm = new FormData();
@@ -1254,10 +1362,10 @@ export default function CreatePanel() {
     };
 
     const handleCreativeStart = async () => {
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         setScriptLoading(true);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
@@ -1270,7 +1378,7 @@ export default function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                     animation_enabled: effectiveAnimationEnabled,
-                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
@@ -1279,9 +1387,10 @@ export default function CreatePanel() {
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
-                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
-                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
-                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    voice_id: templateSupportsVoiceControls ? storyVoiceId : "",
+                    voice_speed: templateSupportsVoiceControls ? storyVoiceSpeed : 1,
+                    pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
+                    youtube_channel_id: youtubeChannelId.trim(),
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
@@ -1297,6 +1406,9 @@ export default function CreatePanel() {
             }
             if (typeof data.video_model_id === 'string' && data.video_model_id) {
                 setVideoModelId(data.video_model_id);
+            }
+            if (typeof data.youtube_channel_id === 'string') {
+                setYoutubeChannelId(data.youtube_channel_id);
             }
 
             if (creativeReferenceImage) {
@@ -1364,10 +1476,10 @@ export default function CreatePanel() {
             openAnimationCreditPrompt(imageCreditCost, 'image');
             return;
         }
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
@@ -1387,6 +1499,7 @@ export default function CreatePanel() {
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
+                    youtube_channel_id: youtubeChannelId.trim(),
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
@@ -1572,10 +1685,10 @@ export default function CreatePanel() {
         setJobStatus(null);
         setJobId(null);
         setCreativeStep('generating');
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
                 method: "POST",
@@ -1586,7 +1699,7 @@ export default function CreatePanel() {
                     resolution: canUse1080p ? resolution : '720p',
                     language,
                     animation_enabled: effectiveAnimationEnabled,
-                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
                     quality_mode: qualityMode,
                     mint_mode: mintMode,
                     art_style: supportsArtStyle ? artStyle : 'auto',
@@ -1595,10 +1708,11 @@ export default function CreatePanel() {
                     transition_style: transitionStyle,
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
-                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
-                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
-                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
-                    subtitles_enabled: selectedTemplate === 'story' ? subtitlesEnabled : true,
+                    voice_id: templateSupportsVoiceControls ? storyVoiceId : "",
+                    voice_speed: templateSupportsVoiceControls ? storyVoiceSpeed : 1,
+                    pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
+                    subtitles_enabled: templateSupportsVoiceControls ? subtitlesEnabled : true,
+                    youtube_channel_id: youtubeChannelId.trim(),
                     reference_lock_mode: creativeReferenceLockMode,
                     narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
@@ -1921,7 +2035,12 @@ export default function CreatePanel() {
     }, [imageModelPickerOpen, videoModelPickerOpen]);
 
     const handleModelPickerWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+        event.preventDefault();
         event.stopPropagation();
+        const target = event.currentTarget;
+        if (target && typeof target.scrollTop === 'number') {
+            target.scrollTop += event.deltaY;
+        }
     }, []);
 
     const imageModelPickerModal = imageModelPickerOpen ? (
@@ -2196,6 +2315,9 @@ export default function CreatePanel() {
             }
             if (typeof p.video_model_id === 'string' && p.video_model_id) {
                 setVideoModelId(p.video_model_id);
+            }
+            if (typeof p.youtube_channel_id === 'string') {
+                setYoutubeChannelId(p.youtube_channel_id);
             }
             setCinematicBoostEnabled(Boolean(p.cinematic_boost) || cinematicBoostAlwaysOn);
             if (p.mode === 'creative' || p.mode === 'script_to_short') {
@@ -2554,7 +2676,7 @@ export default function CreatePanel() {
 
                 {workspaceStage === 'finale' && renderCustomVoiceLibraryCard()}
 
-                {workspaceStage === 'finale' && selectedTemplate === 'story' && (
+                {workspaceStage === 'finale' && templateSupportsVoiceControls && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
                             <p className="text-sm font-semibold text-white">Voice + Pacing (Pre-Render)</p>
@@ -2673,7 +2795,9 @@ export default function CreatePanel() {
                                         value={scene.visual_description}
                                         onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
                                         rows={2}
-                                        placeholder="Describe the visual for this scene, e.g. 'A 3D skeleton wearing a doctor's coat in a hospital setting, dark moody lighting'"
+                                        placeholder={selectedTemplate === 'daytrading'
+                                            ? "Describe the visual for this scene, e.g. 'A cinematic 3D trading desk with red candlestick collapse, floating risk overlays, and a trader reacting to the loss'"
+                                            : "Describe the visual for this scene, e.g. 'A 3D skeleton wearing a doctor's coat in a hospital setting, dark moody lighting'"}
                                         className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
                                     />
                                 </div>
@@ -3101,6 +3225,60 @@ export default function CreatePanel() {
                     </div>
                 )}
 
+                {session && (
+                    <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 space-y-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <h2 className="text-xs font-medium text-cyan-200 uppercase tracking-wider">Catalyst Channel Context</h2>
+                                <p className="mt-1 text-xs text-gray-400">
+                                    Connect a YouTube channel so Catalyst can use recent winners, title patterns, and retention lessons while building the next short.
+                                </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => { void startYouTubeConnect(); }}
+                                    disabled={youtubeConnecting}
+                                    className="rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-500/20 disabled:opacity-60"
+                                >
+                                    {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { void loadYouTubeChannels(false); }}
+                                    disabled={youtubeLoading}
+                                    className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-xs font-semibold text-gray-200 transition hover:bg-white/[0.06] disabled:opacity-60"
+                                >
+                                    {youtubeLoading ? 'Refreshing...' : 'Refresh Channels'}
+                                </button>
+                            </div>
+                        </div>
+                        <select
+                            value={youtubeChannelId}
+                            onChange={(e) => setYoutubeChannelId(e.target.value)}
+                            className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
+                        >
+                            <option value="">No connected channel selected</option>
+                            {youtubeChannels.map((channel) => (
+                                <option key={channel.channel_id} value={channel.channel_id}>
+                                    {channel.title}{channel.channel_handle ? ` (${channel.channel_handle})` : ''}
+                                </option>
+                            ))}
+                        </select>
+                        {youtubeError ? <p className="text-xs text-red-400">{youtubeError}</p> : null}
+                        {selectedYouTubeChannel ? (
+                            <div className="rounded-lg border border-cyan-400/20 bg-black/20 p-3 text-xs text-gray-300">
+                                <p className="font-semibold text-white">{selectedYouTubeChannel.title}</p>
+                                {selectedYouTubeChannel.analytics_snapshot?.channel_summary ? (
+                                    <p className="mt-2">{selectedYouTubeChannel.analytics_snapshot.channel_summary}</p>
+                                ) : (
+                                    <p className="mt-2">Catalyst will use this channel’s saved winners and packaging memory on the next short-generation pass.</p>
+                                )}
+                            </div>
+                        ) : null}
+                    </div>
+                )}
+
                 {/* PROMPT */}
                 <div>
                     <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
@@ -3124,6 +3302,7 @@ export default function CreatePanel() {
                                 disabled={loading || scriptLoading}
                                 placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
                                     : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
+                                    : selectedTemplate === 'daytrading' ? "e.g., The day trading mistake that wipes beginners in the first 15 minutes"
                                     : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
                                     : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
                                     : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
@@ -3291,11 +3470,11 @@ export default function CreatePanel() {
                     </div>
                 </div>
 
-                {creativeMode === 'creative' && selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' && (
+                {creativeMode === 'creative' && templateSupportsVoiceControls && (canUse1080p ? resolution : '720p') === '720p' && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                         <div className="flex items-center justify-between gap-3">
                             <div>
-                                <p className="text-sm font-semibold text-white">AI Stories Animation</p>
+                                <p className="text-sm font-semibold text-white">{selectedTemplate === 'daytrading' ? 'Day Trading Animation' : 'AI Stories Animation'}</p>
                                 <p className="text-xs text-gray-500 mt-1">
                                     Turn OFF to render with image-based camera motion only (no Kling scene animation).
                                 </p>
@@ -3329,12 +3508,12 @@ export default function CreatePanel() {
                 {workspaceStage === 'finale' && (
                 <>
                 {renderCustomVoiceLibraryCard()}
-                {selectedTemplate === 'story' && (
+                {templateSupportsVoiceControls && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
                         <div className="flex items-center justify-between gap-3">
                             <div>
-                                <p className="text-sm font-semibold text-white">Story Voice + Pacing</p>
-                                <p className="text-xs text-gray-500 mt-1">Choose ElevenLabs voice, tune speed, and set pacing before render.</p>
+                                <p className="text-sm font-semibold text-white">Voice + Pacing</p>
+                                <p className="text-xs text-gray-500 mt-1">Choose the render voice, tune speed, and set pacing before render.</p>
                             </div>
                             <button
                                 onClick={() => { void previewStoryVoice(); }}
@@ -3500,6 +3679,9 @@ export default function CreatePanel() {
                                             value={activePromptEditorScene.visual_description}
                                             onChange={(e) => handleUpdateScene(scenePromptEditorIndex, 'visual_description', e.target.value)}
                                             rows={7}
+                                            placeholder={selectedTemplate === 'daytrading'
+                                                ? "Describe the trading/investing visual, e.g. 'A premium 3D trading terminal with glowing order-flow ribbons, aggressive red sell pressure, and a shocked trader in silhouette'"
+                                                : undefined}
                                             className="w-full resize-none rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50"
                                         />
                                     </div>

@@ -125,6 +125,13 @@ _TEMPLATE_ADAPTER_ROUTING_DEFAULT = {
         "negative_suffix": "",
         "loras": [],
     },
+    "daytrading": {
+        "checkpoint": "sd_xl_base_1.0.safetensors",
+        "prepend_trigger": "",
+        "prompt_suffix": "premium trading desk realism, cinematic market dashboards, sharp financial explainer composition, polished 3d market graphics",
+        "negative_suffix": "",
+        "loras": [],
+    },
 }
 
 
