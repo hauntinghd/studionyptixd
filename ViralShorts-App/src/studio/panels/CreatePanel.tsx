@@ -247,6 +247,7 @@ export default function CreatePanel() {
     const [animationCreditPromptRequired, setAnimationCreditPromptRequired] = useState<number | null>(null);
     const [animationCreditPromptMode, setAnimationCreditPromptMode] = useState<'video' | 'image'>('video');
     const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
+    const [renderMonitorDismissed, setRenderMonitorDismissed] = useState(false);
     const restoreDoneRef = useRef(false);
     const hydratedSceneImagesSessionRef = useRef<string | null>(null);
     const lastTrackedCompletedJobRef = useRef('');
@@ -2396,6 +2397,19 @@ export default function CreatePanel() {
         }
         setAnimateOutputEnabled(true);
     }, [animationCreditExhausted, effectiveAnimationEnabled, loading, scriptLoading]);
+    const globalSetRenderMode = useCallback((mode: 'slideshow' | 'animation') => {
+        if (loading || scriptLoading) return;
+        if (mode === 'slideshow') {
+            setAnimateOutputEnabled(false);
+            return;
+        }
+        if (effectiveAnimationEnabled) return;
+        if (animationCreditExhausted) {
+            openAnimationCreditPrompt(1);
+            return;
+        }
+        setAnimateOutputEnabled(true);
+    }, [animationCreditExhausted, effectiveAnimationEnabled, loading, scriptLoading]);
     const normalizeGenerationAssetUrl = useCallback((raw: unknown): string | null => {
         const value = String(raw || '').trim();
         if (!value) return null;
@@ -2452,14 +2466,22 @@ export default function CreatePanel() {
         }
         return null;
     }, [creativeScenes, extractScenePreviewUrl, jobStatus]);
-    const globalActiveRenderStatus = jobStatus || (loading ? { status: 'queued', progress: 0 } : null);
-    const globalRenderProgressWindow = globalActiveRenderStatus && globalActiveRenderStatus.status !== 'complete' && globalActiveRenderStatus.status !== 'error' ? (
+    useEffect(() => {
+        if (creativeStep === 'generating') {
+            setRenderMonitorDismissed(false);
+        }
+    }, [creativeStep, jobId]);
+    const globalActiveRenderStatus = creativeStep === 'generating'
+        ? (jobStatus || (loading ? { status: 'queued', progress: 0 } : null))
+        : null;
+    const globalRenderProgressWindow = globalActiveRenderStatus && !renderMonitorDismissed && globalActiveRenderStatus.status !== 'complete' && globalActiveRenderStatus.status !== 'error' ? (
         <RenderProgressWindow
             jobStatus={globalActiveRenderStatus}
             title={`${creativeTitle || currentTemplateMeta?.title || 'Untitled Project'} • ${effectiveAnimationEnabled ? 'Animation' : 'Slideshow'}`}
             previewUrl={globalRenderProgressPreview?.url || null}
             previewType={globalRenderProgressPreview?.kind || 'image'}
             previewLabel={globalRenderProgressPreview?.label || (effectiveAnimationEnabled ? 'Animation render preview' : 'Slideshow render preview')}
+            onDismiss={() => setRenderMonitorDismissed(true)}
         />
     ) : null;
 
@@ -3602,23 +3624,42 @@ export default function CreatePanel() {
                 {workspaceStage === 'finale' && (
                 <>
                 <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                    <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-3">
                         <div>
                             <p className="text-sm font-semibold text-white">Output Type</p>
                             <p className="text-xs text-gray-500 mt-1">
                                 Switch to animation here if you forgot earlier. Slideshow stays free, animation uses Catalyst render credits.
                             </p>
                         </div>
-                        <button
-                            type="button"
-                            onClick={globalToggleAnimationMode}
-                            disabled={loading || scriptLoading}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                                effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-cyan-600/80 text-white hover:bg-cyan-500"
-                            } disabled:opacity-50`}
-                        >
-                            {effectiveAnimationEnabled ? "Animation ON" : "Switch to Animation"}
-                        </button>
+                        <div className="inline-flex rounded-xl border border-white/[0.08] bg-black/30 p-1">
+                            <button
+                                type="button"
+                                onClick={() => globalSetRenderMode('slideshow')}
+                                disabled={loading || scriptLoading}
+                                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                    !effectiveAnimationEnabled
+                                        ? "bg-white text-black"
+                                        : "text-gray-300 hover:bg-white/[0.08]"
+                                } disabled:opacity-50`}
+                            >
+                                Slideshow
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => globalSetRenderMode('animation')}
+                                disabled={loading || scriptLoading}
+                                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                    effectiveAnimationEnabled
+                                        ? "bg-emerald-600/80 text-white"
+                                        : "text-cyan-200 hover:bg-cyan-500/15"
+                                } disabled:opacity-50`}
+                            >
+                                Animation
+                            </button>
+                        </div>
+                        <p className="text-[11px] text-gray-400">
+                            Current mode: <span className="font-semibold text-white">{effectiveAnimationEnabled ? 'Animation' : 'Slideshow'}</span>
+                        </p>
                     </div>
                 </div>
                 {renderCustomVoiceLibraryCard()}

@@ -8411,6 +8411,49 @@ def _probe_video_duration_seconds(video_path: str) -> float:
         return 0.0
 
 
+def _rebalance_scene_durations_for_audio(
+    scenes: list,
+    audio_path: str,
+    *,
+    minimum_scene_duration: float = 3.5,
+    ending_buffer_sec: float = 0.45,
+) -> list[float]:
+    """Stretch slideshow scene durations so the final video can cleanly cover the voice track."""
+    if not scenes:
+        return []
+    safe_min = max(0.5, float(minimum_scene_duration or 3.5))
+    audio_duration = max(0.0, _probe_audio_duration_seconds(audio_path))
+    base_durations: list[float] = []
+    for index, raw_scene in enumerate(scenes):
+        try:
+            duration = float((raw_scene or {}).get("duration_sec", safe_min))
+        except Exception:
+            duration = safe_min
+        duration = max(safe_min, min(duration, 12.0))
+        if index == len(scenes) - 1:
+            duration += max(0.2, float(ending_buffer_sec or 0.45))
+        base_durations.append(duration)
+    if audio_duration <= 0.1:
+        return [round(duration, 2) for duration in base_durations]
+    target_total = max(sum(base_durations), audio_duration + max(0.2, float(ending_buffer_sec or 0.45)))
+    current_total = sum(base_durations)
+    if target_total <= current_total + 0.05:
+        return [round(duration, 2) for duration in base_durations]
+    extra = target_total - current_total
+    weights = [max(1.0, duration) for duration in base_durations]
+    weight_total = sum(weights) or float(len(base_durations))
+    adjusted: list[float] = []
+    allocated = 0.0
+    for index, duration in enumerate(base_durations):
+        if index == len(base_durations) - 1:
+            share = max(0.0, extra - allocated)
+        else:
+            share = extra * (weights[index] / weight_total)
+            allocated += share
+        adjusted.append(round(duration + share, 2))
+    return adjusted
+
+
 TRANSITION_STYLE_MAP = {
     "no_motion": "none",
     "none": "none",
@@ -13676,6 +13719,8 @@ async def composite_video(
     ambience_gain: float = 0.18,
     sfx_gain: float = 1.0,
     bgm_gain: float = 0.55,
+    job_id: str | None = None,
+    minimum_scene_duration: float = 3.5,
 ) -> str:
     """Composite scene clips into final MP4 with optional burned-in captions and SFX.
     scene_assets: list of dicts with keys: image, frames, kling_clip
@@ -13692,10 +13737,24 @@ async def composite_video(
     clip_durations = []
 
     num_scenes = len(scenes)
+    planned_scene_durations = _rebalance_scene_durations_for_audio(
+        scenes,
+        audio_path,
+        minimum_scene_duration=minimum_scene_duration,
+    )
+    if planned_scene_durations:
+        log.info(
+            "Composite durations aligned to audio: scenes=%s total=%.2fs audio=%.2fs min_scene=%.2fs",
+            len(planned_scene_durations),
+            sum(planned_scene_durations),
+            _probe_audio_duration_seconds(audio_path),
+            float(minimum_scene_duration or 3.5),
+        )
     for i, (scene, asset) in enumerate(zip(scenes, scene_assets)):
-        duration = scene.get("duration_sec", 4)
-        if i == num_scenes - 1:
-            duration += 1.0
+        duration = planned_scene_durations[i] if i < len(planned_scene_durations) else max(
+            float((scene or {}).get("duration_sec", minimum_scene_duration or 3.5) or (minimum_scene_duration or 3.5)),
+            float(minimum_scene_duration or 3.5),
+        )
         text_overlay = "" if subtitle_path else scene.get("text_overlay", "")
         clip_name = "scene_" + str(i) + "_" + job_ts + ".mp4"
         clip_path = str(TEMP_DIR / clip_name)
@@ -13730,6 +13789,9 @@ async def composite_video(
         )
         scene_clips.append(Path(clip_path))
         clip_durations.append(float(duration))
+
+    if job_id:
+        _job_set_stage(job_id, "compositing", 86)
 
     existing_clips = [c for c in scene_clips if c.exists() and c.stat().st_size > 0]
     if not existing_clips:
@@ -13785,6 +13847,8 @@ async def composite_video(
             if sfx_track:
                 Path(sfx_track).unlink(missing_ok=True)
             log.info("Final compositing offloaded to RunPod")
+            if job_id:
+                _job_set_stage(job_id, "compositing", 98)
             return str(output_path)
         except Exception as e:
             if not RUNPOD_COMPOSITOR_FALLBACK_LOCAL:
@@ -13843,6 +13907,9 @@ async def composite_video(
     if not merged_video.exists() or merged_video.stat().st_size == 0:
         raise RuntimeError("FFmpeg concat produced no output file")
 
+    if job_id:
+        _job_set_stage(job_id, "compositing", 90)
+
     has_sfx = ambience_track and Path(ambience_track).exists()
 
     if subtitle_path and Path(subtitle_path).exists():
@@ -13900,6 +13967,9 @@ async def composite_video(
                 str(output_path),
             ]
 
+    if job_id:
+        _job_set_stage(job_id, "compositing", 94)
+
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -13928,6 +13998,9 @@ async def composite_video(
 
     if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
         raise RuntimeError("FFmpeg produced no final output file")
+
+    if job_id:
+        _job_set_stage(job_id, "compositing", 98)
 
     for clip in set(scene_clips + working_clips):
         clip.unlink(missing_ok=True)
@@ -14844,6 +14917,8 @@ async def run_generation_pipeline(
             sfx_paths=sfx_paths,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            job_id=job_id,
+            minimum_scene_duration=5.0,
         )
 
         for sfx in sfx_paths:
@@ -16022,6 +16097,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
             sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
             bgm_gain=float(sound_mix_profile.get("bgm_gain", 0.55) or 0.55),
+            job_id=job_id,
         )
 
         for sfx in sfx_paths:
@@ -18663,6 +18739,8 @@ async def _run_creative_pipeline(
             sfx_paths=sfx_paths,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            job_id=job_id,
+            minimum_scene_duration=5.0,
         )
 
         for sfx in sfx_paths:
@@ -20358,7 +20436,17 @@ async def run_clone_pipeline(
 
         output_filename = detected_template + "_" + job_id + ".mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        await composite_video(scenes, scene_assets, audio_path, output_path, resolution=resolution, use_svd=use_video, subtitle_path=subtitle_path)
+        await composite_video(
+            scenes,
+            scene_assets,
+            audio_path,
+            output_path,
+            resolution=resolution,
+            use_svd=use_video,
+            subtitle_path=subtitle_path,
+            job_id=job_id,
+            minimum_scene_duration=5.0,
+        )
 
         for asset in scene_assets:
             Path(asset["image"]).unlink(missing_ok=True)

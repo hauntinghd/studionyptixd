@@ -1,5 +1,5 @@
 import { useContext, useState } from 'react';
-import { CheckCircle2, Loader2, Send, Star } from 'lucide-react';
+import { CheckCircle2, Loader2, Send, Star, X } from 'lucide-react';
 import { API, AuthContext } from '../shared';
 
 export function ThumbProgressBar({ progress, status }: { progress: number; status: string }) {
@@ -172,6 +172,7 @@ type RenderProgressWindowProps = {
     previewUrl?: string | null;
     previewType?: 'image' | 'video';
     previewLabel?: string;
+    onDismiss?: () => void;
 };
 
 function buildRenderPreviewSrcDoc(previewUrl?: string | null, previewType: 'image' | 'video' = 'image', previewLabel?: string) {
@@ -266,10 +267,11 @@ export function RenderProgressWindow({
     previewUrl,
     previewType = 'image',
     previewLabel,
+    onDismiss,
 }: RenderProgressWindowProps) {
     if (!jobStatus || jobStatus.status === 'complete' || jobStatus.status === 'error') return null;
     const progress = Math.max(0, Math.min(100, Number(jobStatus.progress || 0)));
-    const radius = 28;
+    const radius = 44;
     const circumference = 2 * Math.PI * radius;
     const dashOffset = circumference - (progress / 100) * circumference;
     const statusLabels: Record<string, string> = {
@@ -282,28 +284,53 @@ export function RenderProgressWindow({
         generating_sfx: 'Building Sound Design',
         compositing: 'Compositing',
     };
+    const stageDescriptions: Record<string, string> = {
+        queued: 'Waiting for a render slot. Keep this tab open.',
+        analyzing: 'Checking the job payload and staging the render.',
+        generating_script: 'Building the narration and scene pacing.',
+        generating_images: 'Generating scene visuals and preparing preview frames.',
+        animating_scenes: 'Animating scene motion and preparing the render cut.',
+        generating_voice: 'Generating voiceover and syncing timing.',
+        generating_sfx: 'Building sound effects and ambience.',
+        compositing: 'Syncing scenes, voice, captions, and final MP4 output.',
+    };
     const currentScene = Number(jobStatus.current_scene || 0);
     const totalScenes = Number(jobStatus.total_scenes || 0);
+    const statusKey = String(jobStatus.status || '');
+    const statusLabel = statusLabels[statusKey] || String(jobStatus.status || 'Rendering');
+    const statusDescription = stageDescriptions[statusKey] || 'Catalyst is processing your render.';
 
     return (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-[70] w-[min(420px,calc(100vw-1.5rem))]">
-            <div className="pointer-events-auto overflow-hidden rounded-[28px] border border-cyan-500/20 bg-[#090b11]/95 shadow-2xl shadow-black/50 backdrop-blur-xl">
-                <div className="border-b border-white/[0.06] px-4 py-3">
-                    <div className="flex items-center justify-between gap-4">
-                        <div>
-                            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Catalyst Render Monitor</p>
-                            <h3 className="mt-1 text-base font-semibold text-white">{title}</h3>
-                        </div>
-                        <div className="relative h-16 w-16 shrink-0">
-                            <svg className="h-16 w-16 -rotate-90" viewBox="0 0 64 64" aria-hidden="true">
-                                <circle cx="32" cy="32" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="6" />
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/72 px-4 py-6 backdrop-blur-sm">
+            <div className="w-full max-w-5xl overflow-hidden rounded-[30px] border border-cyan-500/20 bg-[#090b11]/95 shadow-2xl shadow-black/60">
+                <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] px-6 py-5">
+                    <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Catalyst Render Monitor</p>
+                        <h3 className="mt-2 text-lg font-semibold text-white">{title}</h3>
+                    </div>
+                    {onDismiss ? (
+                        <button
+                            type="button"
+                            onClick={onDismiss}
+                            className="rounded-full border border-white/[0.08] bg-white/[0.04] p-2 text-gray-300 transition hover:bg-white/[0.08] hover:text-white"
+                            title="Dismiss render monitor"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    ) : null}
+                </div>
+                <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
+                    <div className="flex min-h-[420px] flex-col items-center justify-center gap-5 px-8 py-8 text-center">
+                        <div className="relative h-32 w-32 shrink-0">
+                            <svg className="h-32 w-32 -rotate-90" viewBox="0 0 108 108" aria-hidden="true">
+                                <circle cx="54" cy="54" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="8" />
                                 <circle
-                                    cx="32"
-                                    cy="32"
+                                    cx="54"
+                                    cy="54"
                                     r={radius}
                                     fill="none"
                                     stroke="url(#renderProgressGradient)"
-                                    strokeWidth="6"
+                                    strokeWidth="8"
                                     strokeLinecap="round"
                                     strokeDasharray={circumference}
                                     strokeDashoffset={dashOffset}
@@ -315,45 +342,62 @@ export function RenderProgressWindow({
                                     </linearGradient>
                                 </defs>
                             </svg>
-                            <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-white">
+                            <div className="absolute inset-0 flex items-center justify-center text-3xl font-semibold text-white">
                                 {progress}%
                             </div>
                         </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400">
-                        <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 font-semibold uppercase tracking-[0.16em] text-gray-200">
-                            {statusLabels[String(jobStatus.status || '')] || String(jobStatus.status || 'Rendering')}
-                        </span>
-                        {currentScene > 0 && totalScenes > 0 ? (
-                            <span>Scene {currentScene} of {totalScenes}</span>
-                        ) : null}
-                        {jobStatus.resolution ? <span>{String(jobStatus.resolution)}</span> : null}
-                    </div>
-                </div>
-                <div className="grid gap-4 p-4 md:grid-cols-[160px_minmax(0,1fr)]">
-                    <div className="space-y-3">
-                        <ProgressBar progress={progress} status={String(jobStatus.status || '')} />
-                        {jobStatus.queue_position > 0 && jobStatus.status === 'queued' ? (
-                            <p className="text-xs text-gray-400">
-                                Queue position {jobStatus.queue_position} of {jobStatus.queue_total}
-                            </p>
-                        ) : null}
-                        {jobStatus.current_scene && jobStatus.total_scenes ? (
-                            <p className="text-xs text-gray-400">
-                                Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
-                            </p>
-                        ) : null}
-                    </div>
-                    <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/40">
-                        <div className="border-b border-white/[0.06] px-3 py-2">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-gray-400">Live Preview</p>
+                        <div className="space-y-2">
+                            <p className="text-2xl font-semibold text-white">{statusLabel}</p>
+                            <p className="mx-auto max-w-xl text-sm text-gray-400">{statusDescription}</p>
                         </div>
-                        <iframe
-                            title="Render progress preview"
-                            className="h-56 w-full bg-black"
-                            sandbox="allow-scripts allow-same-origin"
-                            srcDoc={buildRenderPreviewSrcDoc(previewUrl, previewType, previewLabel)}
-                        />
+                        <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-gray-400">
+                            <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-3 py-1 font-semibold uppercase tracking-[0.16em] text-gray-200">
+                                {statusLabel}
+                            </span>
+                            {currentScene > 0 && totalScenes > 0 ? (
+                                <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1">
+                                    Scene {currentScene} of {totalScenes}
+                                </span>
+                            ) : null}
+                            {jobStatus.resolution ? (
+                                <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1">
+                                    {String(jobStatus.resolution)}
+                                </span>
+                            ) : null}
+                        </div>
+                        <div className="w-full max-w-xl rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
+                            <ProgressBar progress={progress} status={statusKey} />
+                            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-400">
+                                {jobStatus.queue_position > 0 && jobStatus.status === 'queued' ? (
+                                    <span>Queue position {jobStatus.queue_position} of {jobStatus.queue_total}</span>
+                                ) : (
+                                    <span>Keep this tab open. Studio will finish and unlock the download automatically.</span>
+                                )}
+                                {currentScene > 0 && totalScenes > 0 ? (
+                                    <span>{currentScene}/{totalScenes} scenes processed</span>
+                                ) : null}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="border-t border-white/[0.06] bg-black/25 p-5 lg:border-l lg:border-t-0">
+                        <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/40">
+                            <div className="border-b border-white/[0.06] px-4 py-3">
+                                <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-gray-400">Live Preview</p>
+                            </div>
+                            <iframe
+                                title="Render progress preview"
+                                className="h-[320px] w-full bg-black"
+                                sandbox="allow-scripts allow-same-origin"
+                                srcDoc={buildRenderPreviewSrcDoc(previewUrl, previewType, previewLabel)}
+                            />
+                        </div>
+                        <div className="mt-4 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 text-sm text-gray-400">
+                            <p className="font-medium text-white">What Studio is doing</p>
+                            <p className="mt-2">{statusDescription}</p>
+                            <p className="mt-3 text-xs text-gray-500">
+                                Slideshow mode still composites every scene, syncs voice timing, burns captions when enabled, and packages the final MP4.
+                            </p>
+                        </div>
                     </div>
                 </div>
             </div>
