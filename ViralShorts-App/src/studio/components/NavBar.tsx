@@ -48,8 +48,26 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         return url.toString();
     };
 
+    const navigateToUrl = (targetUrl: string) => {
+        const target = new URL(targetUrl, window.location.origin);
+        const current = new URL(window.location.href);
+        if (target.origin === current.origin) {
+            const nextHref = `${target.pathname}${target.search}${target.hash}`;
+            const currentHref = `${current.pathname}${current.search}${current.hash}`;
+            if (nextHref !== currentHref) {
+                window.history.pushState({}, '', nextHref);
+            } else if (target.hash) {
+                window.location.hash = target.hash;
+            }
+            window.dispatchEvent(new CustomEvent('nyptid:navigation'));
+            window.dispatchEvent(new PopStateEvent('popstate'));
+            return;
+        }
+        window.location.assign(target.toString());
+    };
+
     const handleTopupClick = () => {
-        window.location.href = buildTopupUrl();
+        navigateToUrl(buildTopupUrl());
     };
 
     const handleSubscriptionClick = () => {

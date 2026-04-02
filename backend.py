@@ -617,6 +617,18 @@ _longform_analysis_semaphore = asyncio.Semaphore(1)
 _longform_draft_semaphore = asyncio.Semaphore(1)
 _longform_render_semaphore = asyncio.Semaphore(1)
 _longform_outcome_sync_semaphore = asyncio.Semaphore(1)
+_SHORTFORM_PROTECTED_ACTIVE_JOB_STATUSES = {
+    "queued",
+    "generating_script",
+    "generating_images",
+    "animating_scenes",
+    "generating_voice",
+    "generating_sfx",
+    "compositing",
+    "analyzing",
+    "rendering",
+}
+_SHORTFORM_PROTECTED_LANES = {"create", "chatstory"}
 CATALYST_LEARNING_RECORDS_FILE = TEMP_DIR / "catalyst_learning_records.json"
 CATALYST_CHANNEL_MEMORY_FILE = TEMP_DIR / "catalyst_channel_memory.json"
 CATALYST_REFERENCE_MEMORY_FILE = Path(__file__).resolve().parent / "ops" / "catalyst_documentary_reference_memory.json"
@@ -4376,6 +4388,14 @@ async def _maybe_refresh_channel_outcomes_before_longform_run(
     sync_age = time.time() - last_sync_at if last_sync_at > 0 else float("inf")
     if sync_age < float(min_interval_sec or 1800) and last_sync_count > 0:
         return {"ok": True, "skipped": True, "reason": "fresh_enough"}
+    shortform_priority = await _shortform_priority_snapshot()
+    if shortform_priority.get("priority_active"):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "shortform_priority_window",
+            "shortform_priority": shortform_priority,
+        }
     try:
         return await _harvest_catalyst_outcomes_for_channel(
             user_id=user_key,
@@ -4386,6 +4406,83 @@ async def _maybe_refresh_channel_outcomes_before_longform_run(
     except Exception as e:
         log.warning(f"[catalyst] automatic channel outcome sync failed before longform run: {e}")
         return {"ok": False, "error": _clip_text(str(e), 220)}
+
+
+async def _shortform_priority_snapshot() -> dict:
+    queue_depth = 0
+    queue_workers = 1
+    queue_max_depth = 1
+    try:
+        queue_depth = max(0, int(await get_queue_depth()))
+    except Exception:
+        queue_depth = 0
+    try:
+        queue_workers = max(1, int(get_queue_workers()))
+    except Exception:
+        queue_workers = 1
+    try:
+        queue_max_depth = max(1, int(get_queue_max_depth()))
+    except Exception:
+        queue_max_depth = max(1, queue_workers)
+
+    active_shortform = 0
+    active_longform = 0
+    for job in list(jobs.values()):
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status", "") or "").strip().lower()
+        if status not in _SHORTFORM_PROTECTED_ACTIVE_JOB_STATUSES:
+            continue
+        lane = str(job.get("lane", "") or "").strip().lower()
+        if lane == "longform":
+            active_longform += 1
+            continue
+        if lane in _SHORTFORM_PROTECTED_LANES:
+            active_shortform += 1
+
+    queue_utilization_pct = round((queue_depth / max(queue_max_depth, 1)) * 100.0, 1)
+    priority_active = bool(active_shortform > 0 or queue_depth > 0)
+    reason = ""
+    if active_shortform > 0:
+        reason = "active_shortform_jobs"
+    elif queue_depth > 0:
+        reason = "shared_queue_busy"
+    return {
+        "priority_active": priority_active,
+        "reason": reason,
+        "active_shortform_jobs": int(active_shortform),
+        "active_longform_jobs": int(active_longform),
+        "queue_depth": int(queue_depth),
+        "queue_workers": int(queue_workers),
+        "queue_max_depth": int(queue_max_depth),
+        "queue_utilization_pct": float(queue_utilization_pct),
+    }
+
+
+async def _mark_longform_waiting_for_shortform_capacity(
+    session_id: str,
+    *,
+    stage: str,
+    snapshot: dict | None = None,
+) -> None:
+    snapshot = dict(snapshot or {})
+    async with _longform_sessions_lock:
+        live = _longform_sessions.get(session_id)
+        if not isinstance(live, dict):
+            return
+        progress = dict(live.get("draft_progress") or {})
+        progress["stage"] = stage
+        progress["shortform_priority"] = {
+            "reason": str(snapshot.get("reason", "") or ""),
+            "active_shortform_jobs": int(snapshot.get("active_shortform_jobs", 0) or 0),
+            "queue_depth": int(snapshot.get("queue_depth", 0) or 0),
+            "queue_workers": int(snapshot.get("queue_workers", 1) or 1),
+            "queue_utilization_pct": float(snapshot.get("queue_utilization_pct", 0.0) or 0.0),
+        }
+        live["draft_progress"] = progress
+        live["status"] = "draft_review"
+        live["updated_at"] = time.time()
+        _save_longform_sessions()
 
 
 def _build_catalyst_outcome_record(
@@ -17467,6 +17564,23 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
             live["updated_at"] = time.time()
             _save_longform_sessions()
 
+    shortform_priority = await _shortform_priority_snapshot()
+    if shortform_priority.get("priority_active"):
+        if should_auto_finalize:
+            await _mark_longform_waiting_for_shortform_capacity(
+                session_id,
+                stage="awaiting_render_capacity",
+                snapshot=shortform_priority,
+            )
+            return
+        if next_idx is not None:
+            await _mark_longform_waiting_for_shortform_capacity(
+                session_id,
+                stage="waiting_for_shortform_capacity",
+                snapshot=shortform_priority,
+            )
+            return
+
     if should_auto_finalize:
         asyncio.create_task(_auto_finalize_longform_session(session_id))
         return
@@ -18583,6 +18697,7 @@ async def longform_session_status(session_id: str, request: Request = None):
     if not _longform_owner_beta_enabled(user):
         raise HTTPException(403, "Long-form owner beta is restricted")
     should_resume = False
+    should_try_finalize = False
     now = time.time()
     async with _longform_sessions_lock:
         _load_longform_sessions()
@@ -18658,12 +18773,22 @@ async def longform_session_status(session_id: str, request: Request = None):
                     should_resume = bool(auto_pipeline and missing_count == 0)
             elif session_status != "bootstrapping" and any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
                 should_resume = True
+            progress_stage = str((dict(session.get("draft_progress") or {})).get("stage", "") or "").strip().lower()
+            if progress_stage == "waiting_for_shortform_capacity":
+                should_resume = True
+            if progress_stage == "awaiting_render_capacity" and _longform_review_state(session).get("all_approved", False):
+                should_try_finalize = True
     if not session:
         raise HTTPException(404, "Long-form session not found")
     if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
         raise HTTPException(403, "Forbidden")
     if should_resume:
         await _queue_next_longform_chapter_if_ready(session_id)
+        async with _longform_sessions_lock:
+            _load_longform_sessions()
+            session = _longform_sessions.get(session_id) or session
+    if should_try_finalize:
+        await _auto_finalize_longform_session(session_id)
         async with _longform_sessions_lock:
             _load_longform_sessions()
             session = _longform_sessions.get(session_id) or session
@@ -18928,6 +19053,17 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
 async def _start_longform_finalize_internal(session_id: str, acting_user: Optional[dict] = None) -> str:
     acting_user_id = str((acting_user or {}).get("id", "") or "")
     acting_is_admin = bool(_is_admin_user(acting_user)) if acting_user else False
+    shortform_priority = await _shortform_priority_snapshot()
+    if shortform_priority.get("priority_active"):
+        await _mark_longform_waiting_for_shortform_capacity(
+            session_id,
+            stage="awaiting_render_capacity",
+            snapshot=shortform_priority,
+        )
+        raise HTTPException(
+            409,
+            "Short-form generation is using shared render capacity right now. Long Form finalize is waiting so the public short-form lanes stay responsive.",
+        )
     async with _longform_sessions_lock:
         _load_longform_sessions()
         session = _longform_sessions.get(session_id)

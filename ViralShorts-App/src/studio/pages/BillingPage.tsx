@@ -27,15 +27,19 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         publicPlanPrices,
         requiresTopup,
     } = useContext(AuthContext);
+    const [locationState, setLocationState] = useState(() => ({
+        search: typeof window === 'undefined' ? '' : window.location.search,
+        hash: typeof window === 'undefined' ? '' : window.location.hash,
+    }));
     const params = useMemo(() => {
-        if (typeof window === 'undefined') return new URLSearchParams();
-        return new URLSearchParams(window.location.search);
-    }, []);
+        return new URLSearchParams(locationState.search);
+    }, [locationState.search]);
     const requestedSection = String(params.get('section') || '').trim().toLowerCase();
     const requestedPackId = String(params.get('pack') || '').trim();
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const subscriptionError = String(params.get('error') || '').trim();
+    const requestedHash = String(locationState.hash || '').replace(/^#/, '').trim().toLowerCase();
     const [selectedPackId, setSelectedPackId] = useState('');
     const [checkoutError, setCheckoutError] = useState('');
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
@@ -88,6 +92,23 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [publicPlanLimits, publicPlanPrices]);
 
     useEffect(() => {
+        const syncLocationState = () => {
+            setLocationState({
+                search: window.location.search,
+                hash: window.location.hash,
+            });
+        };
+        window.addEventListener('popstate', syncLocationState);
+        window.addEventListener('hashchange', syncLocationState);
+        window.addEventListener('nyptid:navigation', syncLocationState as EventListener);
+        return () => {
+            window.removeEventListener('popstate', syncLocationState);
+            window.removeEventListener('hashchange', syncLocationState);
+            window.removeEventListener('nyptid:navigation', syncLocationState as EventListener);
+        };
+    }, []);
+
+    useEffect(() => {
         if (!sortedPacks.length) return;
         const requestedExists = requestedPackId && sortedPacks.some((pack) => pack.price_id === requestedPackId);
         if (requestedExists) {
@@ -100,14 +121,24 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [requestedPackId, selectedPackId, sortedPacks]);
 
     useEffect(() => {
-        if (requestedSection !== 'topups' && !requestedPackId) return;
+        const wantsTopups = requestedSection === 'topups' || requestedHash === 'topup-packs' || Boolean(requestedPackId);
+        if (!wantsTopups) return;
         if (!topupSectionRef.current) return;
         const target = topupSectionRef.current;
-        const timer = window.setTimeout(() => {
+        let frameId = 0;
+        let timeoutId = 0;
+        const scrollIntoTopups = () => {
             target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+        timeoutId = window.setTimeout(() => {
+            scrollIntoTopups();
+            frameId = window.requestAnimationFrame(scrollIntoTopups);
         }, 60);
-        return () => window.clearTimeout(timer);
-    }, [requestedPackId, requestedSection, sortedPacks.length]);
+        return () => {
+            window.clearTimeout(timeoutId);
+            window.cancelAnimationFrame(frameId);
+        };
+    }, [requestedHash, requestedPackId, requestedSection, sortedPacks.length]);
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -342,7 +373,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <section
                     id="topup-packs"
                     ref={topupSectionRef}
-                    className="mt-8 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6"
+                    className="mt-8 scroll-mt-28 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6"
                 >
                     <div className="mb-5">
                         <h2 className="text-lg font-semibold text-white">Top-up packs</h2>

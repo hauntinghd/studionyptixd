@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import AccountPage from './studio/pages/AccountPage';
 import AuthPage from './studio/pages/AuthPage';
 import BillingPage from './studio/pages/BillingPage';
@@ -14,13 +14,20 @@ function AppShell() {
     const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
+    const resolvePageFromLocation = useCallback((): StudioPage | null => {
+        if (typeof window === 'undefined') return null;
+        const search = new URLSearchParams(window.location.search);
+        const urlPage = String(search.get('page') || '').trim().toLowerCase();
+        if (urlPage === 'billing') return 'billing';
+        if (urlPage === 'subscription') return 'subscription';
+        if (urlPage === 'settings') return 'settings';
+        if (urlPage === 'account') return 'account';
+        return billingHost ? 'billing' : null;
+    }, [billingHost]);
     const [page, setPage] = useState<StudioPage>(() => {
         try {
-            const urlPage = new URLSearchParams(window.location.search).get('page');
-            if (urlPage === 'billing') return 'billing';
-            if (urlPage === 'subscription') return 'subscription';
-            if (urlPage === 'settings') return 'settings';
-            if (urlPage === 'account') return 'account';
+            const locationPage = resolvePageFromLocation();
+            if (locationPage) return locationPage;
             const saved = localStorage.getItem('nyptid_page');
             if (saved === 'landing' || saved === 'dashboard' || saved === 'auth' || saved === 'account' || saved === 'settings' || saved === 'billing' || saved === 'subscription') {
                 return saved;
@@ -31,6 +38,20 @@ function AppShell() {
         if (billingHost) return 'billing';
         return 'landing';
     });
+
+    useEffect(() => {
+        const syncPageFromLocation = () => {
+            const locationPage = resolvePageFromLocation();
+            if (!locationPage) return;
+            setPage((current) => (current === locationPage ? current : locationPage));
+        };
+        window.addEventListener('popstate', syncPageFromLocation);
+        window.addEventListener('nyptid:navigation', syncPageFromLocation as EventListener);
+        return () => {
+            window.removeEventListener('popstate', syncPageFromLocation);
+            window.removeEventListener('nyptid:navigation', syncPageFromLocation as EventListener);
+        };
+    }, [resolvePageFromLocation]);
 
     useEffect(() => {
         if (!thumblabHost) return;
