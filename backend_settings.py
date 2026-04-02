@@ -229,10 +229,20 @@ ANIMATION_CREDIT_UNIT_USD = round(
 
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 TOPUP_PACK_SPECS = [
+    {"id": "ac_trial", "pack": "trial", "credits": 1, "price_usd": 0.60},
+    {"id": "ac_starter", "pack": "starter", "credits": 3, "price_usd": 1.80},
     {"id": "ac_mini", "pack": "mini", "credits": 5, "price_usd": 3.00},
+    {"id": "ac_lite", "pack": "lite", "credits": 10, "price_usd": 6.00},
+    {"id": "ac_boost", "pack": "boost", "credits": 15, "price_usd": 9.00},
     {"id": "ac_basic", "pack": "basic", "credits": 25, "price_usd": 15.00},
+    {"id": "ac_runner", "pack": "runner", "credits": 40, "price_usd": 24.00},
+    {"id": "ac_creator", "pack": "creator", "credits": 50, "price_usd": 30.00},
+    {"id": "ac_operator", "pack": "operator", "credits": 75, "price_usd": 45.00},
     {"id": "ac_growth", "pack": "growth", "credits": 100, "price_usd": 60.00},
+    {"id": "ac_power", "pack": "power", "credits": 150, "price_usd": 90.00},
     {"id": "ac_scale", "pack": "scale", "credits": 250, "price_usd": 150.00},
+    {"id": "ac_studio", "pack": "studio", "credits": 500, "price_usd": 300.00},
+    {"id": "ac_agency", "pack": "agency", "credits": 1000, "price_usd": 600.00},
 ]
 TOPUP_PACKS = {
     str(spec["id"]): {

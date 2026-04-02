@@ -867,6 +867,50 @@ _CATALYST_KEYWORD_STOPWORDS = {
     "documentary", "channel", "studio", "nyptid",
 }
 
+_CATALYST_NICHE_RULES = {
+    "manga_recap": {
+        "label": "Manga / Manhua Recap",
+        "keywords": [
+            "manga", "manhwa", "manhua", "webtoon", "recap", "chapter", "murim", "isekai",
+            "cultivation", "regressor", "reincarnated", "hunter", "necromancer", "dungeon",
+            "martial", "ranker", "overpowered", "wrecker", "driver",
+        ],
+        "follow_up_rule": "Stay in recap mode. Build the next video around a stronger arc turn, power jump, betrayal, reveal, or chapter escalation instead of generic documentary framing.",
+    },
+    "day_trading": {
+        "label": "Day Trading / Investing",
+        "keywords": [
+            "day trading", "daytrading", "trading", "trader", "market", "stock", "stocks", "options",
+            "forex", "crypto", "futures", "spy", "nasdaq", "setup", "chart", "liquidity", "risk", "scalp",
+        ],
+        "follow_up_rule": "Keep the video anchored to real setups, risk, trader psychology, and chart consequences. Avoid generic wealth-posturing or broad business fluff.",
+    },
+    "dark_psychology": {
+        "label": "Psychology / Hidden Behavior",
+        "keywords": [
+            "brain", "mind", "memory", "attention", "psychology", "manipulation", "disturbing",
+            "subconscious", "secret", "lies", "blind spot", "decision", "habits", "behavior",
+        ],
+        "follow_up_rule": "Lean into hidden mechanisms, mental blind spots, and consequence-first reveals. Keep the emotional charge high without drifting into textbook visuals.",
+    },
+    "business_documentary": {
+        "label": "Business Documentary",
+        "keywords": [
+            "business", "company", "startup", "industry", "money", "market", "billion", "brand",
+            "economy", "economics", "finance", "capital", "investor", "wealth",
+        ],
+        "follow_up_rule": "Frame the next video around systems, incentives, leverage, money flow, or power structures. Keep it engineered and documentary-driven.",
+    },
+    "geopolitics_history": {
+        "label": "History / Geopolitics",
+        "keywords": [
+            "war", "empire", "leader", "iran", "battle", "killed", "assassin", "history",
+            "nation", "military", "power", "border", "regime", "operation", "strategy",
+        ],
+        "follow_up_rule": "Stay on power shifts, hidden chains of events, and consequence-led storytelling. Avoid generic business framing.",
+    },
+}
+
 
 def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
     scores: dict[str, int] = {}
@@ -877,6 +921,58 @@ def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
             scores[token] = scores.get(token, 0) + 1
     ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
     return [token for token, _ in ranked[:max_items]]
+
+
+def _catalyst_infer_niche(*texts: str, format_preset: str = "") -> dict:
+    normalized_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    combined = " \n ".join(normalized_texts).lower()
+    scored: list[tuple[str, int, list[str]]] = []
+    for niche_key, spec in _CATALYST_NICHE_RULES.items():
+        hits: list[str] = []
+        score = 0
+        for raw_keyword in list(spec.get("keywords") or []):
+            keyword = str(raw_keyword or "").strip().lower()
+            if not keyword:
+                continue
+            if keyword in combined:
+                hits.append(keyword)
+                score += 3 if " " in keyword else 2
+        if score > 0:
+            scored.append((niche_key, score, hits))
+    preset = str(format_preset or "").strip().lower()
+    if preset == "recap":
+        scored.append(("manga_recap", 6, ["recap"]))
+    elif preset == "documentary":
+        scored.append(("business_documentary", 1, ["documentary"]))
+    if not scored:
+        fallback_key = "business_documentary" if preset == "documentary" else ("manga_recap" if preset == "recap" else "")
+        if not fallback_key:
+            return {
+                "key": "",
+                "label": "",
+                "confidence": 0.0,
+                "keywords": [],
+                "follow_up_rule": "",
+            }
+        fallback = dict(_CATALYST_NICHE_RULES.get(fallback_key) or {})
+        return {
+            "key": fallback_key,
+            "label": str(fallback.get("label", "") or ""),
+            "confidence": 0.35,
+            "keywords": [],
+            "follow_up_rule": str(fallback.get("follow_up_rule", "") or ""),
+        }
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    chosen_key, chosen_score, chosen_hits = scored[0]
+    chosen = dict(_CATALYST_NICHE_RULES.get(chosen_key) or {})
+    confidence = 0.45 if chosen_score <= 3 else (0.72 if chosen_score <= 7 else 0.9)
+    return {
+        "key": chosen_key,
+        "label": str(chosen.get("label", "") or ""),
+        "confidence": round(confidence, 2),
+        "keywords": _dedupe_preserve_order(chosen_hits, max_items=8, max_chars=40),
+        "follow_up_rule": str(chosen.get("follow_up_rule", "") or ""),
+    }
 
 
 def _catalyst_metric_average(total: float, count: int, digits: int = 2) -> float:
@@ -1070,6 +1166,11 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
         "key": str(data.get("key", "") or ""),
         "channel_id": str(data.get("channel_id", "") or ""),
         "format_preset": str(data.get("format_preset", "") or ""),
+        "niche_key": str(data.get("niche_key", "") or ""),
+        "niche_label": str(data.get("niche_label", "") or ""),
+        "niche_confidence": round(float(data.get("niche_confidence", 0.0) or 0.0), 2),
+        "niche_keywords": list(data.get("niche_keywords") or []),
+        "niche_follow_up_rule": str(data.get("niche_follow_up_rule", "") or ""),
         "run_count": int(data.get("run_count", 0) or 0),
         "outcome_count": outcome_count,
         "summary": str(data.get("summary", "") or ""),
@@ -1135,6 +1236,13 @@ def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
     parts: list[str] = []
     if public.get("summary"):
         parts.append("Catalyst channel memory summary: " + _clip_text(str(public.get("summary", "")), 320))
+    if public.get("niche_label"):
+        niche_line = f"Detected niche: {str(public.get('niche_label', '')).strip()}"
+        if public.get("niche_keywords"):
+            niche_line += " (" + ", ".join(list(public.get("niche_keywords") or [])[:6]) + ")"
+        parts.append(niche_line + ".")
+    if public.get("niche_follow_up_rule"):
+        parts.append("Niche follow-up rule: " + _clip_text(str(public.get("niche_follow_up_rule", "") or ""), 220))
     if int(public.get("outcome_count", 0) or 0) > 0:
         parts.append(
             f"Measured outcomes logged: {int(public.get('outcome_count', 0) or 0)}. "
@@ -2774,8 +2882,40 @@ def _same_arena_title_variants(
     source_title = str((source_bundle or {}).get("title", "") or "").strip()
     subject = _same_arena_subject(source_bundle, topic=topic)
     focus = _same_arena_focus_entity(source_bundle, topic=topic) or subject
+    niche = _catalyst_infer_niche(source_title, subject, focus, topic, format_preset=format_preset)
+    niche_key = str(niche.get("key", "") or "").strip().lower()
     pattern, top_number = _source_title_pattern(source_title)
     variants: list[str] = []
+    if niche_key == "manga_recap":
+        variants.extend([
+            f"Why {focus} Became the Most Dangerous Force in the Story",
+            f"How {focus} Broke the Entire Power System",
+            f"The Brutal Rise of {focus}",
+        ])
+    elif niche_key == "day_trading":
+        variants.extend([
+            "Why Most Traders Keep Losing This Setup",
+            "The Day Trading Trap That Keeps Wiping People Out",
+            "The Market Pattern Most Traders Keep Misreading",
+        ])
+    elif niche_key == "dark_psychology":
+        variants.extend([
+            "The Hidden Pattern Quietly Rewriting Your Decisions",
+            "Why Your Brain Keeps Falling for the Same Trap",
+            "The Mental Blind Spot Running More Than You Think",
+        ])
+    elif niche_key == "geopolitics_history":
+        variants.extend([
+            f"The Hidden Power System Behind {focus}",
+            f"How {focus} Quietly Changed the Entire Region",
+            f"What {focus} Set in Motion Next",
+        ])
+    elif niche_key == "business_documentary":
+        variants.extend([
+            f"The System Behind {focus} No One Sees",
+            f"Why {focus} Quietly Controls the Outcome",
+            f"How {focus} Shapes Power Behind the Scenes",
+        ])
     if pattern == "top_list":
         if re.search(r"\b(brain|mind|memory|attention)\b", focus, flags=re.IGNORECASE):
             variants.extend([
@@ -2852,7 +2992,21 @@ def _same_arena_thumbnail_angles(
 ) -> list[str]:
     subject = _same_arena_subject(source_bundle, topic=topic)
     normalized_format = str(format_preset or "").strip().lower()
-    if normalized_format == "documentary":
+    niche = _catalyst_infer_niche(str((source_bundle or {}).get("title", "") or ""), subject, topic, format_preset=format_preset)
+    niche_key = str(niche.get("key", "") or "").strip().lower()
+    if niche_key == "manga_recap":
+        angles = [
+            f"{subject} framed like a premium manga/manhwa recap key visual, one dominant character or symbol, cinematic panel energy, strong hierarchy, 16:9",
+            f"{subject} shown at the peak of a power reveal with one clean environment, intense contrast, recap-ready 16:9 packaging",
+            f"One overpowered hero-versus-system composition built around {subject}, premium recap thumbnail, clear focal hierarchy, 16:9",
+        ]
+    elif niche_key == "day_trading":
+        angles = [
+            f"{subject} turned into a premium trading thumbnail: one dominant chart or setup, one trader reaction, one red or green consequence cue, 16:9",
+            f"Day trading desk scene built around {subject}, sharp chart hierarchy, one highlighted setup failure or win, premium finance thumbnail, 16:9",
+            f"One oversized candlestick or liquidity zone interacting with a trader silhouette, clean black background, strong contrast, 16:9",
+        ]
+    elif normalized_format == "documentary":
         angles = [
             f"{subject} shown as one dominant 3D hero object in a dark void, hard contrast, one red accent element, minimal background clutter, 16:9 documentary thumbnail",
             f"{subject} translated into a clean tabletop system or map composition with one red highlighted zone, white-gray environment, strong hierarchy, 16:9",
@@ -3564,6 +3718,13 @@ def _update_catalyst_channel_memory(
     selected_title = str(learning_record.get("selected_title", "") or package.get("selected_title", "") or "").strip()
     source_title = str(source_video.get("title", "") or "").strip()
     format_preset = str(session_snapshot.get("format_preset", "") or existing.get("format_preset", "") or "documentary")
+    niche = _catalyst_infer_niche(
+        selected_title,
+        source_title,
+        " ".join(str(v).strip() for v in list(package.get("selected_tags") or []) if str(v).strip()),
+        " ".join(str(v).strip() for v in list(channel_context.get("recent_upload_titles") or [])[:6] if str(v).strip()),
+        format_preset=format_preset,
+    )
     proven_keywords = _extract_catalyst_keywords(
         selected_title,
         source_title,
@@ -3576,6 +3737,15 @@ def _update_catalyst_channel_memory(
         "key": str(updated.get("key", "") or session_snapshot.get("channel_memory_key", "") or ""),
         "channel_id": str(session_snapshot.get("youtube_channel_id", "") or updated.get("channel_id", "") or ""),
         "format_preset": format_preset,
+        "niche_key": str(niche.get("key", "") or updated.get("niche_key", "") or ""),
+        "niche_label": str(niche.get("label", "") or updated.get("niche_label", "") or ""),
+        "niche_confidence": round(float(niche.get("confidence", 0.0) or updated.get("niche_confidence", 0.0) or 0.0), 2),
+        "niche_keywords": _dedupe_preserve_order(
+            [*list(niche.get("keywords") or []), *list(updated.get("niche_keywords") or [])],
+            max_items=8,
+            max_chars=40,
+        ),
+        "niche_follow_up_rule": str(niche.get("follow_up_rule", "") or updated.get("niche_follow_up_rule", "") or ""),
         "run_count": run_count,
         "last_session_id": str(session_snapshot.get("session_id", "") or ""),
         "preferred_transition_style": str(motion_strategy.get("transition_style", "") or updated.get("preferred_transition_style", "") or ""),
@@ -3605,6 +3775,7 @@ def _update_catalyst_channel_memory(
     updated["summary"] = _clip_text(
         "Catalyst has "
         + f"{run_count} run{'s' if run_count != 1 else ''} on this channel lane. "
+        + (f"Niche: {str(updated.get('niche_label', '') or '').strip()}. " if str(updated.get("niche_label", "") or "").strip() else "")
         + ("Keep " + ", ".join(list(updated.get("proven_keywords") or [])[:6]) + ". " if list(updated.get("proven_keywords") or []) else "")
         + ("Best hook lesson: " + str((list(public.get("hook_wins") or []) or [""])[0]) + ". " if list(public.get("hook_wins") or []) else "")
         + ("Current retention watchout: " + str((list(public.get("retention_watchouts") or []) or [""])[0]) + "." if list(public.get("retention_watchouts") or []) else ""),
@@ -4477,7 +4648,17 @@ def _same_arena_follow_up_topic(source_bundle: dict, format_preset: str = "docum
     source_title = str((source_bundle or {}).get("title", "") or "").strip()
     subject = _same_arena_subject(source_bundle)
     focus = _same_arena_focus_entity(source_bundle) or subject
+    niche = _catalyst_infer_niche(source_title, subject, focus, format_preset=format_preset)
+    niche_key = str(niche.get("key", "") or "").strip().lower()
     pattern, top_number = _source_title_pattern(source_title)
+    if niche_key == "manga_recap":
+        return f"How {focus} Became the Most Dangerous Force in the Story"
+    if niche_key == "day_trading":
+        return "The trading setup most people keep getting wrong"
+    if niche_key == "dark_psychology":
+        return "The hidden pattern quietly rewriting your decisions"
+    if niche_key == "geopolitics_history":
+        return f"The hidden power system behind {focus}"
     if pattern == "top_list":
         if re.search(r"\b(brain|mind|memory|attention)\b", focus, flags=re.IGNORECASE):
             return "The hidden blind spots inside your brain"

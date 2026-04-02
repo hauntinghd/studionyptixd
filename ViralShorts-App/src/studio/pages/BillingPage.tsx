@@ -1,7 +1,8 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, CheckCircle2, WalletCards } from 'lucide-react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, CheckCircle2, CreditCard, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { startHostedStudioCheckout } from '../lib/invoicer';
 
 type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
 
@@ -30,6 +31,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         if (typeof window === 'undefined') return new URLSearchParams();
         return new URLSearchParams(window.location.search);
     }, []);
+    const requestedSection = String(params.get('section') || '').trim().toLowerCase();
     const requestedPackId = String(params.get('pack') || '').trim();
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
@@ -38,6 +40,8 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const [checkoutError, setCheckoutError] = useState('');
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
     const [planLoadingId, setPlanLoadingId] = useState('');
+    const [hostedCheckoutLoading, setHostedCheckoutLoading] = useState(false);
+    const topupSectionRef = useRef<HTMLElement | null>(null);
 
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
@@ -94,6 +98,16 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             setSelectedPackId(sortedPacks[0].price_id);
         }
     }, [requestedPackId, selectedPackId, sortedPacks]);
+
+    useEffect(() => {
+        if (requestedSection !== 'topups' && !requestedPackId) return;
+        if (!topupSectionRef.current) return;
+        const target = topupSectionRef.current;
+        const timer = window.setTimeout(() => {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 60);
+        return () => window.clearTimeout(timer);
+    }, [requestedPackId, requestedSection, sortedPacks.length]);
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -153,6 +167,21 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         }
     }, [checkoutTopup, onNavigate, selectedPack, session]);
 
+    const handleHostedCheckout = useCallback(async () => {
+        if (!session) {
+            onNavigate('auth');
+            return;
+        }
+        setCheckoutError('');
+        setHostedCheckoutLoading(true);
+        try {
+            const error = await startHostedStudioCheckout(session);
+            if (error) setCheckoutError(error);
+        } finally {
+            setHostedCheckoutLoading(false);
+        }
+    }, [onNavigate, session]);
+
     return (
         <>
             <NavBar onNavigate={onNavigate} active="billing" />
@@ -167,15 +196,29 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
                             Studio now sells one clean short-form offer: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
                         </p>
+                        <div className="mt-5 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
+                            Hosted Studio business licensing now starts through Invoicer at a one-time $300 price. The monthly plans and wallet packs below are the legacy billing model until the separate Studio entitlement backend is migrated.
+                        </div>
                     </div>
-                    <button
-                        type="button"
-                        onClick={handleBack}
-                        className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
-                    >
-                        <ArrowLeft className="h-4 w-4" />
-                        Back
-                    </button>
+                    <div className="flex flex-wrap gap-3">
+                        <button
+                            type="button"
+                            onClick={handleBack}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                        >
+                            <ArrowLeft className="h-4 w-4" />
+                            Back
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleHostedCheckout()}
+                            disabled={hostedCheckoutLoading}
+                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:opacity-60"
+                        >
+                            <CreditCard className="h-4 w-4" />
+                            {hostedCheckoutLoading ? 'Opening Invoicer...' : 'Start $300 Hosted License'}
+                        </button>
+                    </div>
                 </div>
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr),minmax(320px,0.75fr)]">
@@ -296,7 +339,11 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     </aside>
                 </div>
 
-                <section className="mt-8 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+                <section
+                    id="topup-packs"
+                    ref={topupSectionRef}
+                    className="mt-8 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6"
+                >
                     <div className="mb-5">
                         <h2 className="text-lg font-semibold text-white">Top-up packs</h2>
                         <p className="mt-1 text-sm text-gray-400">

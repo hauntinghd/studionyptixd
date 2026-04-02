@@ -39,8 +39,17 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         onNavigate('landing');
     };
 
+    const buildTopupUrl = () => {
+        const base = BILLING_SITE_URL || STUDIO_SITE_URL;
+        const url = new URL(base);
+        url.searchParams.set('page', 'billing');
+        url.searchParams.set('section', 'topups');
+        url.hash = 'topup-packs';
+        return url.toString();
+    };
+
     const handleTopupClick = () => {
-        window.location.href = `${BILLING_SITE_URL}?view=checkout`;
+        window.location.href = buildTopupUrl();
     };
 
     const handleSubscriptionClick = () => {
