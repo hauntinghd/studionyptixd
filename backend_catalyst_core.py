@@ -555,6 +555,7 @@ def _build_catalyst_cluster_playbook(
     ranked = _rank_catalyst_channel_series_clusters(clusters, channel_memory=channel_memory)
     if not ranked:
         return {}
+    measured_ranked = _catalyst_rank_series_memory(dict(channel_memory or {}).get("series_memory_map") or {})
     selected_raw = dict(selected_cluster or {})
     selected_key = str(selected_raw.get("key", "") or "").strip()
     selected = next((dict(row) for row in ranked if str(row.get("key", "") or "").strip() == selected_key), dict(selected_raw))
@@ -570,6 +571,8 @@ def _build_catalyst_cluster_playbook(
     )
     if not selected:
         selected = dict(best)
+    promoted_memory = dict(measured_ranked[0] or {}) if measured_ranked else {}
+    demoted_memory = dict(measured_ranked[-1] or {}) if measured_ranked else {}
     ctr_gap_vs_best = round(max(0.0, float(best.get("average_ctr", 0.0) or 0.0) - float(selected.get("average_ctr", 0.0) or 0.0)), 2)
     avp_gap_vs_best = round(max(0.0, float(best.get("average_avp", 0.0) or 0.0) - float(selected.get("average_avp", 0.0) or 0.0)), 2)
     winning_patterns = _dedupe_preserve_order(
@@ -591,6 +594,12 @@ def _build_catalyst_cluster_playbook(
             else "",
             ("Weak arc keywords to avoid overusing: " + ", ".join(list(worst.get("keywords") or [])[:6])) if list(worst.get("keywords") or []) else "",
             ("Weak arc sample titles: " + ", ".join(list(worst.get("sample_titles") or [])[:3])) if list(worst.get("sample_titles") or []) else "",
+            (
+                f"Measured demoted arc is {str(demoted_memory.get('series_anchor', '') or '').strip()} based on actual post-publish outcomes."
+                if str(demoted_memory.get("series_anchor", "") or "").strip()
+                and str(demoted_memory.get("series_anchor", "") or "").strip().lower() != str(worst.get("series_anchor", "") or "").strip().lower()
+                else ""
+            ),
         ],
         max_items=5,
         max_chars=180,
@@ -613,6 +622,17 @@ def _build_catalyst_cluster_playbook(
             ("Favor these winning arc keywords: " + ", ".join(list(best.get("keywords") or [])[:5])) if list(best.get("keywords") or []) else "",
             ("Avoid drifting toward these weaker arc cues: " + ", ".join(list(worst.get("keywords") or [])[:5])) if list(worst.get("keywords") or []) else "",
             (
+                f"Measured outcomes currently promote {str(promoted_memory.get('series_anchor', '') or '').strip()}, so borrow its stronger package and hook discipline."
+                if str(promoted_memory.get("series_anchor", "") or "").strip()
+                and str(promoted_memory.get("series_anchor", "") or "").strip().lower() != str(selected.get("series_anchor", "") or "").strip().lower()
+                else ""
+            ),
+            (
+                f"Measured outcomes currently demote {str(demoted_memory.get('series_anchor', '') or '').strip()}, so avoid repeating its weaker hook or pacing habits."
+                if str(demoted_memory.get("series_anchor", "") or "").strip()
+                else ""
+            ),
+            (
                 f"Protect the winning {str(best.get('label', '') or '').strip()} arena, but generate a fresh adjacent angle instead of recycling its exact headline structure."
                 if str(selected.get("key", "") or "").strip() == str(best.get("key", "") or "").strip()
                 and str(best.get("label", "") or "").strip()
@@ -631,6 +651,12 @@ def _build_catalyst_cluster_playbook(
                 else "",
                 f"Weak arc: {str(worst.get('label', '') or '').strip()}."
                 if str(worst.get("label", "") or "").strip()
+                else "",
+                f"Measured promoted arc: {str(promoted_memory.get('series_anchor', '') or '').strip()}."
+                if str(promoted_memory.get("series_anchor", "") or "").strip()
+                else "",
+                f"Measured demoted arc: {str(demoted_memory.get('series_anchor', '') or '').strip()}."
+                if str(demoted_memory.get("series_anchor", "") or "").strip()
                 else "",
                 f"Selected arc: {str(selected.get('label', '') or '').strip()}."
                 if str(selected.get("label", "") or "").strip()
@@ -657,6 +683,8 @@ def _build_catalyst_cluster_playbook(
         "next_run_moves": next_run_moves,
         "ctr_gap_to_best": ctr_gap_vs_best,
         "average_viewed_gap_to_best": avp_gap_vs_best,
+        "promoted_memory_arc": dict(promoted_memory or {}),
+        "demoted_memory_arc": dict(demoted_memory or {}),
     }
 
 
@@ -754,6 +782,82 @@ def _catalyst_pressure_label(score: float) -> str:
     if numeric >= 24:
         return "low"
     return "stable"
+
+
+def _catalyst_series_memory_score(bucket: dict | None) -> float:
+    data = dict(bucket or {})
+    if not data:
+        return 0.0
+    outcome_count = int(data.get("outcome_count", 0) or 0)
+    ctr = float(data.get("average_ctr", 0.0) or 0.0)
+    avp = float(data.get("average_average_percentage_viewed", 0.0) or 0.0)
+    first30 = float(data.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
+    ref_overall = float(data.get("average_reference_overall_score", 0.0) or 0.0)
+    hook_watchouts = len([str(v).strip() for v in list(data.get("hook_watchouts") or []) if str(v).strip()])
+    retention_watchouts = len([str(v).strip() for v in list(data.get("retention_watchouts") or []) if str(v).strip()])
+    packaging_watchouts = len([str(v).strip() for v in list(data.get("packaging_watchouts") or []) if str(v).strip()])
+    wins = len([str(v).strip() for v in list(data.get("hook_wins") or []) if str(v).strip()]) + len([str(v).strip() for v in list(data.get("packaging_wins") or []) if str(v).strip()])
+    score = 0.0
+    score += min(32.0, outcome_count * 8.0)
+    score += min(26.0, ctr * 4.5)
+    score += min(26.0, avp * 0.55)
+    score += min(18.0, first30 * 0.22)
+    score += min(24.0, ref_overall * 0.24)
+    score += min(10.0, wins * 2.0)
+    score -= min(18.0, hook_watchouts * 3.0)
+    score -= min(18.0, retention_watchouts * 3.0)
+    score -= min(14.0, packaging_watchouts * 2.5)
+    return round(max(0.0, score), 2)
+
+
+def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
+    ranked: list[dict] = []
+    for raw in list(dict(series_map or {}).values()):
+        if not isinstance(raw, dict):
+            continue
+        bucket = dict(raw or {})
+        label = str(bucket.get("series_anchor", "") or "").strip()
+        if not label:
+            continue
+        hook_wins = _catalyst_merge_signal_lists(_catalyst_weighted_signal_items(bucket.get("hook_wins_map") or {}, max_items=6), list(bucket.get("hook_learnings") or [])[:4], max_items=10, max_chars=180)
+        packaging_wins = _catalyst_merge_signal_lists(_catalyst_weighted_signal_items(bucket.get("packaging_wins_map") or {}, max_items=6), list(bucket.get("packaging_learnings") or [])[:4], max_items=10, max_chars=180)
+        retention_watchouts = _catalyst_weighted_signal_items(bucket.get("retention_watchouts_map") or {}, max_items=6)
+        memory_score = _catalyst_series_memory_score(
+            {
+                "outcome_count": int(bucket.get("outcome_count", 0) or 0),
+                "average_ctr": float(bucket.get("average_ctr", 0.0) or 0.0),
+                "average_average_percentage_viewed": float(bucket.get("average_average_percentage_viewed", 0.0) or 0.0),
+                "average_first_30_sec_retention_pct": float(bucket.get("average_first_30_sec_retention_pct", 0.0) or 0.0),
+                "average_reference_overall_score": float(bucket.get("average_reference_overall_score", 0.0) or 0.0),
+                "hook_wins": hook_wins,
+                "packaging_wins": packaging_wins,
+                "retention_watchouts": retention_watchouts,
+                "packaging_watchouts": _catalyst_weighted_signal_items(bucket.get("packaging_watchouts_map") or {}, max_items=6),
+                "hook_watchouts": _catalyst_weighted_signal_items(bucket.get("hook_watchouts_map") or {}, max_items=6),
+            }
+        )
+        row = {
+            "series_anchor": label,
+            "outcome_count": int(bucket.get("outcome_count", 0) or 0),
+            "average_ctr": float(bucket.get("average_ctr", 0.0) or 0.0),
+            "average_average_percentage_viewed": float(bucket.get("average_average_percentage_viewed", 0.0) or 0.0),
+            "average_first_30_sec_retention_pct": float(bucket.get("average_first_30_sec_retention_pct", 0.0) or 0.0),
+            "average_reference_overall_score": float(bucket.get("average_reference_overall_score", 0.0) or 0.0),
+            "proven_keywords": _dedupe_preserve_order(list(bucket.get("proven_keywords") or []), max_items=8, max_chars=60),
+            "next_video_moves": _dedupe_preserve_order(list(bucket.get("next_video_moves") or []), max_items=6, max_chars=180),
+            "packaging_wins": _dedupe_preserve_order(packaging_wins, max_items=4, max_chars=180),
+            "retention_watchouts": _dedupe_preserve_order(retention_watchouts, max_items=4, max_chars=180),
+            "memory_score": memory_score,
+        }
+        ranked.append(row)
+    ranked.sort(
+        key=lambda row: (
+            -float(row.get("memory_score", 0.0) or 0.0),
+            -int(row.get("outcome_count", 0) or 0),
+            str(row.get("series_anchor", "") or "").lower(),
+        )
+    )
+    return ranked[:10]
 
 
 def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
@@ -863,6 +967,37 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "selected_cluster_label": str(data.get("selected_cluster_label", "") or ""),
         "selected_cluster_key": str(data.get("selected_cluster_key", "") or ""),
     }
+    ranked_series_memory = _catalyst_rank_series_memory(series_map)
+    public["series_rankings"] = ranked_series_memory
+    public["promoted_arcs"] = [str(row.get("series_anchor", "") or "").strip() for row in ranked_series_memory[:3] if str(row.get("series_anchor", "") or "").strip()]
+    public["demoted_arcs"] = [
+        str(row.get("series_anchor", "") or "").strip()
+        for row in list(reversed(ranked_series_memory[-3:]))
+        if str(row.get("series_anchor", "") or "").strip()
+    ]
+    public["best_series_memory"] = dict(ranked_series_memory[0] or {}) if ranked_series_memory else {}
+    public["weakest_series_memory"] = dict(ranked_series_memory[-1] or {}) if ranked_series_memory else {}
+    if ranked_series_memory:
+        best_row = dict(ranked_series_memory[0] or {})
+        weak_row = dict(ranked_series_memory[-1] or {})
+        public["series_memory_summary"] = _clip_text(
+            " ".join(
+                part
+                for part in [
+                    f"Promoted arc: {str(best_row.get('series_anchor', '') or '').strip()} ({float(best_row.get('average_ctr', 0.0) or 0.0):.2f}% CTR, {float(best_row.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}% viewed)."
+                    if str(best_row.get("series_anchor", "") or "").strip()
+                    else "",
+                    f"Demoted arc: {str(weak_row.get('series_anchor', '') or '').strip()} ({float(weak_row.get('average_ctr', 0.0) or 0.0):.2f}% CTR, {float(weak_row.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}% viewed)."
+                    if str(weak_row.get("series_anchor", "") or "").strip()
+                    and str(weak_row.get("series_anchor", "") or "").strip() != str(best_row.get("series_anchor", "") or "").strip()
+                    else "",
+                ]
+                if part
+            ),
+            320,
+        )
+    else:
+        public["series_memory_summary"] = ""
     public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
     return public
 
@@ -914,6 +1049,9 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     reference_visual_rewrites = [str(v).strip() for v in list(public.get("reference_visual_rewrites") or []) if str(v).strip()]
     reference_sound_rewrites = [str(v).strip() for v in list(public.get("reference_sound_rewrites") or []) if str(v).strip()]
     reference_packaging_rewrites = [str(v).strip() for v in list(public.get("reference_packaging_rewrites") or []) if str(v).strip()]
+    promoted_arcs = [str(v).strip() for v in list(public.get("promoted_arcs") or []) if str(v).strip()]
+    demoted_arcs = [str(v).strip() for v in list(public.get("demoted_arcs") or []) if str(v).strip()]
+    active_series_anchor = str(public.get("series_anchor", "") or "").strip()
     avg_ctr = float(public.get("average_ctr", 0.0) or 0.0)
     avg_avp = float(public.get("average_average_percentage_viewed", 0.0) or 0.0)
     avg_first30 = float(public.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
@@ -929,6 +1067,15 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
     sound_pressure = 8.0 + max(0.0, (78.0 - avg_sound) * 0.55) + max(0.0, (52.0 - avg_first60) * 0.35) + (len(sound_watchouts) * 7.0) - (len(sound_wins) * 4.0)
     packaging_pressure = 10.0 + max(0.0, (4.5 - avg_ctr) * 12.0) + max(0.0, (76.0 - avg_packaging) * 0.65) + max(0.0, (82.0 - avg_title_novelty) * 0.35) + (len(packaging_watchouts) * 7.0) - (len(packaging_wins) * 4.0)
+    if active_series_anchor:
+        lowered_anchor = active_series_anchor.lower()
+        if any(lowered_anchor == arc.lower() for arc in demoted_arcs[:2]):
+            hook_pressure += 6.0
+            pacing_pressure += 7.0
+            packaging_pressure += 8.0
+        if any(lowered_anchor == arc.lower() for arc in promoted_arcs[:2]):
+            packaging_pressure += 3.0
+            hook_pressure += 2.0
     categories = [
         {"key": "hook", "label": "Hook", "score": max(8, min(100, int(round(hook_pressure)))), "wins": hook_wins[:3], "watchouts": hook_watchouts[:3], "rewrites": reference_hook_rewrites[:3]},
         {"key": "pacing", "label": "Pacing", "score": max(8, min(100, int(round(pacing_pressure)))), "wins": pacing_wins[:3], "watchouts": pacing_watchouts[:3], "rewrites": reference_pacing_rewrites[:3]},
@@ -941,7 +1088,12 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         row["severity"] = _catalyst_pressure_label(float(row.get("score", 0) or 0.0))
     top = categories[0] if categories else {}
     secondary = categories[1] if len(categories) > 1 else {}
-    priorities = _dedupe_preserve_order([*(top.get("rewrites") or []), *(top.get("watchouts") or []), *(secondary.get("rewrites") or []), *(secondary.get("watchouts") or []), *next_moves[:3]], max_items=8, max_chars=180)
+    arc_moves: list[str] = []
+    if active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in demoted_arcs[:2]):
+        arc_moves.append(f"{active_series_anchor} is currently a demoted arc from measured outcomes, so the next run must sharpen hook, pacing, and package execution aggressively.")
+    elif active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in promoted_arcs[:2]):
+        arc_moves.append(f"{active_series_anchor} is a promoted arc, so preserve its winning arena but force a fresher adjacent angle to avoid repetition.")
+    priorities = _dedupe_preserve_order([*arc_moves, *(top.get("rewrites") or []), *(top.get("watchouts") or []), *(secondary.get("rewrites") or []), *(secondary.get("watchouts") or []), *next_moves[:3]], max_items=8, max_chars=180)
     summary = ""
     if top:
         summary = f"Primary rewrite pressure is {str(top.get('label', 'Hook'))} ({int(top.get('score', 0) or 0)}/100, {str(top.get('severity', 'medium'))}). "
