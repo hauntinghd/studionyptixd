@@ -873,7 +873,7 @@ _CATALYST_NICHE_RULES = {
         "keywords": [
             "manga", "manhwa", "manhua", "webtoon", "recap", "chapter", "murim", "isekai",
             "cultivation", "regressor", "reincarnated", "hunter", "necromancer", "dungeon",
-            "martial", "ranker", "overpowered", "wrecker", "driver",
+            "martial", "ranker", "overpowered", "wrecker", "driver", "wrecker driver",
         ],
         "follow_up_rule": "Stay in recap mode. Build the next video around a stronger arc turn, power jump, betrayal, reveal, or chapter escalation instead of generic documentary framing.",
     },
@@ -973,6 +973,37 @@ def _catalyst_infer_niche(*texts: str, format_preset: str = "") -> dict:
         "keywords": _dedupe_preserve_order(chosen_hits, max_items=8, max_chars=40),
         "follow_up_rule": str(chosen.get("follow_up_rule", "") or ""),
     }
+
+
+def _catalyst_titlecase_phrase(text: str) -> str:
+    words = [str(word or "").strip() for word in str(text or "").split() if str(word or "").strip()]
+    out: list[str] = []
+    for word in words:
+        if word.isupper() and len(word) <= 5:
+            out.append(word)
+        else:
+            out.append(word[:1].upper() + word[1:])
+    return " ".join(out).strip()
+
+
+def _catalyst_extract_series_anchor(*texts: str, niche_key: str = "") -> str:
+    raw_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not raw_texts:
+        return ""
+    combined = " \n ".join(raw_texts)
+    lower_combined = combined.lower()
+    if str(niche_key or "").strip().lower() == "manga_recap" or "wrecker driver" in lower_combined:
+        if "wrecker driver" in lower_combined:
+            return "Wrecker Driver"
+        phrase_match = re.search(
+            r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,3})\b",
+            combined,
+        )
+        if phrase_match:
+            candidate = _clean_same_arena_phrase(phrase_match.group(1), max_words=4)
+            if candidate and len(candidate.split()) >= 2:
+                return _catalyst_titlecase_phrase(candidate)
+    return ""
 
 
 def _catalyst_metric_average(total: float, count: int, digits: int = 2) -> float:
@@ -1171,6 +1202,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
         "niche_confidence": round(float(data.get("niche_confidence", 0.0) or 0.0), 2),
         "niche_keywords": list(data.get("niche_keywords") or []),
         "niche_follow_up_rule": str(data.get("niche_follow_up_rule", "") or ""),
+        "series_anchor": str(data.get("series_anchor", "") or ""),
         "run_count": int(data.get("run_count", 0) or 0),
         "outcome_count": outcome_count,
         "summary": str(data.get("summary", "") or ""),
@@ -1236,6 +1268,8 @@ def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
     parts: list[str] = []
     if public.get("summary"):
         parts.append("Catalyst channel memory summary: " + _clip_text(str(public.get("summary", "")), 320))
+    if public.get("series_anchor"):
+        parts.append("Series anchor to preserve: " + _clip_text(str(public.get("series_anchor", "") or ""), 120))
     if public.get("niche_label"):
         niche_line = f"Detected niche: {str(public.get('niche_label', '')).strip()}"
         if public.get("niche_keywords"):
@@ -2884,9 +2918,16 @@ def _same_arena_title_variants(
     focus = _same_arena_focus_entity(source_bundle, topic=topic) or subject
     niche = _catalyst_infer_niche(source_title, subject, focus, topic, format_preset=format_preset)
     niche_key = str(niche.get("key", "") or "").strip().lower()
+    series_anchor = _catalyst_extract_series_anchor(source_title, topic, focus, niche_key=niche_key)
     pattern, top_number = _source_title_pattern(source_title)
     variants: list[str] = []
     if niche_key == "manga_recap":
+        if series_anchor:
+            variants.extend([
+                f"Why {series_anchor} Became the Most Dangerous Force in the Story",
+                f"How {series_anchor} Broke the Entire Power System",
+                f"The Brutal Rise of {series_anchor}",
+            ])
         variants.extend([
             f"Why {focus} Became the Most Dangerous Force in the Story",
             f"How {focus} Broke the Entire Power System",
@@ -2994,11 +3035,12 @@ def _same_arena_thumbnail_angles(
     normalized_format = str(format_preset or "").strip().lower()
     niche = _catalyst_infer_niche(str((source_bundle or {}).get("title", "") or ""), subject, topic, format_preset=format_preset)
     niche_key = str(niche.get("key", "") or "").strip().lower()
+    series_anchor = _catalyst_extract_series_anchor(str((source_bundle or {}).get("title", "") or ""), topic, subject, niche_key=niche_key)
     if niche_key == "manga_recap":
         angles = [
-            f"{subject} framed like a premium manga/manhwa recap key visual, one dominant character or symbol, cinematic panel energy, strong hierarchy, 16:9",
-            f"{subject} shown at the peak of a power reveal with one clean environment, intense contrast, recap-ready 16:9 packaging",
-            f"One overpowered hero-versus-system composition built around {subject}, premium recap thumbnail, clear focal hierarchy, 16:9",
+            f"{series_anchor or subject} framed like a premium manga/manhwa recap key visual, one dominant character or symbol, cinematic panel energy, strong hierarchy, 16:9",
+            f"{series_anchor or subject} shown at the peak of a power reveal with one clean environment, intense contrast, recap-ready 16:9 packaging",
+            f"One overpowered hero-versus-system composition built around {series_anchor or subject}, premium recap thumbnail, clear focal hierarchy, 16:9",
         ]
     elif niche_key == "day_trading":
         angles = [
@@ -3725,6 +3767,12 @@ def _update_catalyst_channel_memory(
         " ".join(str(v).strip() for v in list(channel_context.get("recent_upload_titles") or [])[:6] if str(v).strip()),
         format_preset=format_preset,
     )
+    series_anchor = _catalyst_extract_series_anchor(
+        selected_title,
+        source_title,
+        " ".join(str(v).strip() for v in list(channel_context.get("recent_upload_titles") or [])[:6] if str(v).strip()),
+        niche_key=str(niche.get("key", "") or ""),
+    ) or str(existing.get("series_anchor", "") or "").strip()
     proven_keywords = _extract_catalyst_keywords(
         selected_title,
         source_title,
@@ -3746,6 +3794,7 @@ def _update_catalyst_channel_memory(
             max_chars=40,
         ),
         "niche_follow_up_rule": str(niche.get("follow_up_rule", "") or updated.get("niche_follow_up_rule", "") or ""),
+        "series_anchor": series_anchor,
         "run_count": run_count,
         "last_session_id": str(session_snapshot.get("session_id", "") or ""),
         "preferred_transition_style": str(motion_strategy.get("transition_style", "") or updated.get("preferred_transition_style", "") or ""),
@@ -3776,6 +3825,7 @@ def _update_catalyst_channel_memory(
         "Catalyst has "
         + f"{run_count} run{'s' if run_count != 1 else ''} on this channel lane. "
         + (f"Niche: {str(updated.get('niche_label', '') or '').strip()}. " if str(updated.get("niche_label", "") or "").strip() else "")
+        + (f"Series anchor: {str(updated.get('series_anchor', '') or '').strip()}. " if str(updated.get("series_anchor", "") or "").strip() else "")
         + ("Keep " + ", ".join(list(updated.get("proven_keywords") or [])[:6]) + ". " if list(updated.get("proven_keywords") or []) else "")
         + ("Best hook lesson: " + str((list(public.get("hook_wins") or []) or [""])[0]) + ". " if list(public.get("hook_wins") or []) else "")
         + ("Current retention watchout: " + str((list(public.get("retention_watchouts") or []) or [""])[0]) + "." if list(public.get("retention_watchouts") or []) else ""),
@@ -4650,8 +4700,11 @@ def _same_arena_follow_up_topic(source_bundle: dict, format_preset: str = "docum
     focus = _same_arena_focus_entity(source_bundle) or subject
     niche = _catalyst_infer_niche(source_title, subject, focus, format_preset=format_preset)
     niche_key = str(niche.get("key", "") or "").strip().lower()
+    series_anchor = _catalyst_extract_series_anchor(source_title, subject, focus, niche_key=niche_key)
     pattern, top_number = _source_title_pattern(source_title)
     if niche_key == "manga_recap":
+        if series_anchor:
+            return f"How {series_anchor} Raised the Stakes Even Higher"
         return f"How {focus} Became the Most Dangerous Force in the Story"
     if niche_key == "day_trading":
         return "The trading setup most people keep getting wrong"
