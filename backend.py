@@ -5796,6 +5796,111 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             "tags": [template, "shorts", "nyptid"],
         }
 
+    def _topic_title_fallback() -> str:
+        title_words = re.findall(r"[A-Za-z0-9']+", topic_text)[:8]
+        if title_words:
+            return " ".join(title_words).strip()
+        template_titles = {
+            "story": "AI Story Short",
+            "motivation": "Motivation Short",
+            "skeleton": "Skeleton AI Short",
+            "daytrading": "Day Trading Short",
+        }
+        return template_titles.get(template, "Catalyst Short")
+
+    def _topic_fallback_beats() -> list[str]:
+        compact_topic = re.sub(r"\s+", " ", topic_text).strip(" .")
+        if not compact_topic:
+            compact_topic = _topic_title_fallback()
+        if template == "daytrading":
+            return [
+                f"Open with the trading pain point behind {compact_topic}.",
+                f"Show the hidden mistake beginners make around {compact_topic}.",
+                f"Explain the market condition or setup that matters most for {compact_topic}.",
+                f"Reveal the emotional trap that ruins execution during {compact_topic}.",
+                f"Show the smarter risk rule that protects traders during {compact_topic}.",
+                f"Break down the cleaner entry or confirmation for {compact_topic}.",
+                f"Show how patience changes the result with {compact_topic}.",
+                f"End with the hard lesson or rule traders should remember from {compact_topic}.",
+            ]
+        if template == "motivation":
+            return [
+                f"Open with the painful truth behind {compact_topic}.",
+                f"Show the excuse or fear that keeps people stuck around {compact_topic}.",
+                f"Explain the cost of doing nothing about {compact_topic}.",
+                f"Show the mindset shift that changes the direction of {compact_topic}.",
+                f"Reveal the disciplined action that turns {compact_topic} into progress.",
+                f"Show how consistency compounds when someone commits to {compact_topic}.",
+                f"Escalate the stakes by showing who wins and who loses around {compact_topic}.",
+                f"End with a decisive challenge connected to {compact_topic}.",
+            ]
+        if template == "skeleton":
+            return [
+                f"Open with the core contrast or reveal behind {compact_topic}.",
+                f"Show the first side of {compact_topic} with clear props and setting.",
+                f"Show the opposite side of {compact_topic} and make the contrast obvious.",
+                f"Highlight the hidden cost, struggle, or tradeoff inside {compact_topic}.",
+                f"Raise the stakes with money, time, status, or lifestyle consequences in {compact_topic}.",
+                f"Show the turning point that makes the comparison behind {compact_topic} undeniable.",
+                f"Present the most visual proof point for {compact_topic}.",
+                f"End with the sharpest payoff or verdict for {compact_topic}.",
+            ]
+        return [
+            f"Open with the strongest hook inside {compact_topic}.",
+            f"Introduce the main subject and immediate problem behind {compact_topic}.",
+            f"Show the first escalation or discovery connected to {compact_topic}.",
+            f"Reveal the hidden truth, risk, or twist behind {compact_topic}.",
+            f"Raise the emotional or practical stakes around {compact_topic}.",
+            f"Show the turning point that changes the direction of {compact_topic}.",
+            f"Push toward the clearest payoff or consequence of {compact_topic}.",
+            f"End with the strongest final line for {compact_topic}.",
+        ]
+
+    def _fallback_visual_description_for_template(scene_text: str) -> str:
+        beat = re.sub(r"\s+", " ", str(scene_text or "").strip().rstrip("."))
+        if template == "daytrading":
+            return (
+                f"Photoreal premium trading scene illustrating: {beat}. "
+                "Realistic trading desk, market screens, believable charts, human hands or trader presence when useful, grounded finance lighting, and vertical short-video framing."
+            )
+        if template == "skeleton":
+            return (
+                f"Canonical cinematic skeleton scene illustrating: {beat}. "
+                "Same ivory-white skeleton with realistic eyes and translucent shell, topic-matched props, grounded environment, and readable vertical framing."
+            )
+        return _fallback_visual_description(scene_text)
+
+    def _build_topic_fallback() -> dict:
+        beats = _topic_fallback_beats()
+        scenes: list[dict] = []
+        for idx, beat in enumerate(beats, start=1):
+            narration = beat.strip()
+            scenes.append(
+                {
+                    "scene_num": idx,
+                    "duration_sec": 5.0,
+                    "narration": narration,
+                    "visual_description": _fallback_visual_description_for_template(narration),
+                    "text_overlay": _fallback_scene_overlay(narration),
+                }
+            )
+        title = _topic_title_fallback()
+        tags = [template, "shorts", "nyptid"]
+        if template == "daytrading":
+            tags.extend(["trading", "investing", "finance"])
+        elif template == "motivation":
+            tags.extend(["motivation", "mindset", "discipline"])
+        elif template == "skeleton":
+            tags.extend(["comparison", "viral", "3d"])
+        elif template == "story":
+            tags.extend(["story", "cinematic", "viral"])
+        return {
+            "title": title,
+            "scenes": scenes,
+            "description": f"{title} generated by Catalyst.",
+            "tags": tags[:8],
+        }
+
     async def _call_script_gen(prompt_text: str, temp: float = 0.8) -> dict:
         user_prompt = (
             "Adapt this exact source script into an editable short-form scene plan. "
@@ -5895,11 +6000,16 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         first = await _call_script_gen(system_prompt, temp=0.8)
     except Exception as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if script_to_short_mode and status_code in {429, 500, 502, 503, 504}:
+        if status_code in {429, 500, 502, 503, 504}:
+            if script_to_short_mode:
+                log.warning(
+                    f"Script-to-short upstream unavailable ({status_code}); using local scene-plan fallback for template={template}"
+                )
+                return _build_script_to_short_fallback()
             log.warning(
-                f"Script-to-short upstream unavailable ({status_code}); using local scene-plan fallback for template={template}"
+                f"Short-form script upstream unavailable ({status_code}); using local topic fallback for template={template}"
             )
-            return _build_script_to_short_fallback()
+            return _build_topic_fallback()
         raise
     if template != "story":
         return first
@@ -5923,10 +6033,15 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         + "include camera/motion continuity language in each scene, and preserve beat-by-beat coverage of the full script without skipping the ending."
         + retention_tuning
     )
-    second = await _call_script_gen(hardened_prompt, temp=0.65)
-    second_score, _ = _score_story_script_quality(second)
-    best = second if second_score >= first_score else first
-    best_score = max(first_score, second_score)
+    try:
+        second = await _call_script_gen(hardened_prompt, temp=0.65)
+        second_score, _ = _score_story_script_quality(second)
+        best = second if second_score >= first_score else first
+        best_score = max(first_score, second_score)
+    except Exception as retry_exc:
+        log.warning(f"Story script hardening retry failed; keeping first draft: {retry_exc}")
+        best = first
+        best_score = first_score
     if story_script_to_short_mode and best_score < 80:
         ultra_hardened = (
             hardened_prompt
@@ -5934,11 +6049,14 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             + "Do NOT truncate. Complete all script beats in order. "
             + "Output exactly 12-15 scenes with no premature ending, no skipped late-script events, and no generic replacement prompts."
         )
-        third = await _call_script_gen(ultra_hardened, temp=0.55)
-        third_score, _ = _score_story_script_quality(third)
-        if third_score >= best_score:
-            best = third
-            best_score = third_score
+        try:
+            third = await _call_script_gen(ultra_hardened, temp=0.55)
+            third_score, _ = _score_story_script_quality(third)
+            if third_score >= best_score:
+                best = third
+                best_score = third_score
+        except Exception as retry_exc:
+            log.warning(f"Story script ultra-hardening retry failed; keeping best available draft: {retry_exc}")
     return best
 
 
