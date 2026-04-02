@@ -128,7 +128,7 @@ _TEMPLATE_ADAPTER_ROUTING_DEFAULT = {
     "daytrading": {
         "checkpoint": "sd_xl_base_1.0.safetensors",
         "prepend_trigger": "",
-        "prompt_suffix": "premium trading desk realism, cinematic market dashboards, sharp financial explainer composition, polished 3d market graphics",
+        "prompt_suffix": "ultra realistic professional trading desk, photoreal market screens, tradingview or bloomberg style chart hierarchy, order-flow and level-2 realism, cinematic financial explainer composition, polished 3d finance graphics only when they look like real market tools",
         "negative_suffix": "",
         "loras": [],
     },

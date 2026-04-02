@@ -261,11 +261,13 @@ def _heuristic_catalyst_edit_blueprint(
     ], max_items=4, max_chars=180)
     if archetype_key == "trading_execution" and not is_recap_lane:
         camera_language = _dedupe_preserve_order([
+            "photoreal desk-to-screen moves that feel like a real trading terminal",
             "chart-level push-ins and execution-proof closeups",
             "entry-versus-exit contrasts with immediate stakes",
             *camera_language,
         ], max_items=7, max_chars=160)
         motion_graphics = _dedupe_preserve_order([
+            "real market UI hierarchy with chart windows, DOM ladders, and execution proof instead of abstract sci-fi widgets",
             "clean chart overlays and liquidity callouts only when they prove the setup",
             "risk-versus-reward comparisons instead of generic financial luxury visuals",
             *motion_graphics,

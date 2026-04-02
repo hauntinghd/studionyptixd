@@ -165,3 +165,198 @@ export function JobDiagnostics({ jobStatus }: { jobStatus: any }) {
         </div>
     );
 }
+
+type RenderProgressWindowProps = {
+    jobStatus: any;
+    title?: string;
+    previewUrl?: string | null;
+    previewType?: 'image' | 'video';
+    previewLabel?: string;
+};
+
+function buildRenderPreviewSrcDoc(previewUrl?: string | null, previewType: 'image' | 'video' = 'image', previewLabel?: string) {
+    const safeUrl = String(previewUrl || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;');
+    const safeLabel = String(previewLabel || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const media = safeUrl
+        ? previewType === 'video'
+            ? `<video autoplay muted loop playsinline controls src="${safeUrl}"></video>`
+            : `<img src="${safeUrl}" alt="${safeLabel || 'Render preview'}" />`
+        : `<div class="placeholder">Preview will appear here as the render advances.</div>`;
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #05060a;
+        color: #e5e7eb;
+        font-family: Inter, system-ui, sans-serif;
+      }
+      .shell {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at top, rgba(34,211,238,0.12), transparent 55%),
+          linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+      }
+      img, video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #05060a;
+      }
+      .placeholder {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 24px;
+        font-size: 13px;
+        color: rgba(229,231,235,0.75);
+        background:
+          radial-gradient(circle at top, rgba(168,85,247,0.18), transparent 45%),
+          linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+      }
+      .label {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        border-radius: 999px;
+        background: rgba(5, 6, 10, 0.78);
+        border: 1px solid rgba(255,255,255,0.1);
+        padding: 8px 12px;
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(224,231,255,0.92);
+        backdrop-filter: blur(8px);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      ${media}
+      ${safeLabel ? `<div class="label">${safeLabel}</div>` : ''}
+    </div>
+  </body>
+</html>`;
+}
+
+export function RenderProgressWindow({
+    jobStatus,
+    title = 'Rendering in progress',
+    previewUrl,
+    previewType = 'image',
+    previewLabel,
+}: RenderProgressWindowProps) {
+    if (!jobStatus || jobStatus.status === 'complete' || jobStatus.status === 'error') return null;
+    const progress = Math.max(0, Math.min(100, Number(jobStatus.progress || 0)));
+    const radius = 28;
+    const circumference = 2 * Math.PI * radius;
+    const dashOffset = circumference - (progress / 100) * circumference;
+    const statusLabels: Record<string, string> = {
+        queued: 'Queued',
+        analyzing: 'Analyzing',
+        generating_script: 'Writing Script',
+        generating_images: 'Generating Images',
+        animating_scenes: 'Animating Scenes',
+        generating_voice: 'Generating Voice',
+        generating_sfx: 'Building Sound Design',
+        compositing: 'Compositing',
+    };
+    const currentScene = Number(jobStatus.current_scene || 0);
+    const totalScenes = Number(jobStatus.total_scenes || 0);
+
+    return (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[70] w-[min(420px,calc(100vw-1.5rem))]">
+            <div className="pointer-events-auto overflow-hidden rounded-[28px] border border-cyan-500/20 bg-[#090b11]/95 shadow-2xl shadow-black/50 backdrop-blur-xl">
+                <div className="border-b border-white/[0.06] px-4 py-3">
+                    <div className="flex items-center justify-between gap-4">
+                        <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Catalyst Render Monitor</p>
+                            <h3 className="mt-1 text-base font-semibold text-white">{title}</h3>
+                        </div>
+                        <div className="relative h-16 w-16 shrink-0">
+                            <svg className="h-16 w-16 -rotate-90" viewBox="0 0 64 64" aria-hidden="true">
+                                <circle cx="32" cy="32" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="6" />
+                                <circle
+                                    cx="32"
+                                    cy="32"
+                                    r={radius}
+                                    fill="none"
+                                    stroke="url(#renderProgressGradient)"
+                                    strokeWidth="6"
+                                    strokeLinecap="round"
+                                    strokeDasharray={circumference}
+                                    strokeDashoffset={dashOffset}
+                                />
+                                <defs>
+                                    <linearGradient id="renderProgressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                        <stop offset="0%" stopColor="#22d3ee" />
+                                        <stop offset="100%" stopColor="#a855f7" />
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-white">
+                                {progress}%
+                            </div>
+                        </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                        <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 font-semibold uppercase tracking-[0.16em] text-gray-200">
+                            {statusLabels[String(jobStatus.status || '')] || String(jobStatus.status || 'Rendering')}
+                        </span>
+                        {currentScene > 0 && totalScenes > 0 ? (
+                            <span>Scene {currentScene} of {totalScenes}</span>
+                        ) : null}
+                        {jobStatus.resolution ? <span>{String(jobStatus.resolution)}</span> : null}
+                    </div>
+                </div>
+                <div className="grid gap-4 p-4 md:grid-cols-[160px_minmax(0,1fr)]">
+                    <div className="space-y-3">
+                        <ProgressBar progress={progress} status={String(jobStatus.status || '')} />
+                        {jobStatus.queue_position > 0 && jobStatus.status === 'queued' ? (
+                            <p className="text-xs text-gray-400">
+                                Queue position {jobStatus.queue_position} of {jobStatus.queue_total}
+                            </p>
+                        ) : null}
+                        {jobStatus.current_scene && jobStatus.total_scenes ? (
+                            <p className="text-xs text-gray-400">
+                                Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                            </p>
+                        ) : null}
+                    </div>
+                    <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-black/40">
+                        <div className="border-b border-white/[0.06] px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-gray-400">Live Preview</p>
+                        </div>
+                        <iframe
+                            title="Render progress preview"
+                            className="h-56 w-full bg-black"
+                            sandbox="allow-scripts allow-same-origin"
+                            srcDoc={buildRenderPreviewSrcDoc(previewUrl, previewType, previewLabel)}
+                        />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}

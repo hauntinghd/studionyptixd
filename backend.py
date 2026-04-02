@@ -5148,10 +5148,12 @@ MISSION:
 - Never promise guaranteed returns or fake certainty. Frame setups, mistakes, psychology, risk, and process clearly.
 
 VISUAL STYLE:
-- Premium 3D or photoreal finance visuals: trading desks, candlestick charts, heatmaps, macro dashboards, level-2/order-flow style screens, risk/reward diagrams, market structures, and cinematic market environments.
+- Premium photoreal or UE5-grade finance visuals: realistic trading desks, candlestick charts, heatmaps, macro dashboards, level-2/order-flow style screens, DOM ladders, time-and-sales, volume profile, risk/reward diagrams, market structures, and believable market environments.
+- Make the finance tools look real: trading terminals, broker dashboards, chart windows, and execution screens should resemble actual pro trading setups, not generic sci-fi panels.
 - Readable, uncluttered compositions. The viewer should instantly understand the core trading idea on a phone screen.
 - Use shock-value intelligently: sharp chart breakdowns, liquidation danger, reversal traps, hidden market structure, emotional trader behavior, or risk explosions.
-- Avoid generic money rain, cheesy crypto scam vibes, and fake luxury shots unless the beat explicitly calls for them.
+- Avoid generic money rain, cheesy crypto scam vibes, fake luxury shots, sterile white product stages, floating abstract props, random machinery, or anatomy/medical-looking objects unless the beat explicitly calls for them.
+- If a person appears, they should look like a real trader or investor in a real market environment, not an influencer stock photo.
 - Every visual_description should feel like a directable production shot: specific subject, setup, chart concept, action, camera, and lighting.
 
 STRUCTURE (10-12 scenes, 45-60 seconds):
@@ -5181,7 +5183,7 @@ OUTPUT FORMAT MUST BE VALID JSON:
       "scene_num": 1,
       "duration_sec": 4,
       "narration": "Fast, high-retention narration for this beat.",
-      "visual_description": "Premium financial explainer visual with readable charts, trading screens, or 3D market objects, clear subject, sharp lighting, dynamic camera, and visible stakes.",
+      "visual_description": "Photoreal or UE5-grade financial explainer shot with readable trading charts or execution screens, realistic market environment, specific setup or risk event, sharp lighting, dynamic camera, and visible stakes.",
       "text_overlay": "HIGH IMPACT"
     }
   ],
@@ -6969,7 +6971,7 @@ async def _build_shorts_catalyst_extra_instructions(
     if str(template or "").strip().lower() == "daytrading":
         parts.append(
             "DAY TRADING TEMPLATE RULES: keep the short anchored to real trading or investing behavior, chart logic, risk management, market psychology, or setup quality. "
-            "Use sharper hooks, clearer stakes, and premium trading-desk / chart visuals. Avoid generic wealth-posturing and empty motivational filler."
+            "Use sharper hooks, clearer stakes, and premium trading-desk / chart visuals. Use photoreal market screens, execution dashboards, order-flow or chart realism, and avoid generic wealth-posturing, empty motivational filler, medical objects, or abstract sci-fi props."
         )
     if topic:
         parts.append(
@@ -14193,6 +14195,10 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
                         "A premium trading or investing visual is clearly visible with readable charts, dashboards, or market context."
                 if not re.search(r"\b(environment|background|setting|location|desk|studio|screen|floor|exchange|dashboard)\b", chunks[0], re.IGNORECASE):
                     chunks[0] = chunks[0].rstrip(".!?") + " In a specific trading environment with professional market screens."
+                if not re.search(r"\b(photoreal|realistic|ue5|terminal|tradingview|bloomberg|dom ladder|time-and-sales|volume profile|level 2)\b", " ".join(chunks[:2]), re.IGNORECASE):
+                    chunks[0] = chunks[0].rstrip(".!?") + " The setup should feel photoreal and professional, with believable chart windows, order-flow tools, and trading-terminal realism."
+                if re.search(r"\b(heart|brain|organ|anatomy|medical|cells?|neuron|blood|virus|capsule|machine core|reactor)\b", " ".join(chunks[:3]), re.IGNORECASE):
+                    chunks[0] = chunks[0].rstrip(".!?") + " Replace any anatomy, medical, or random machine imagery with realistic trading screens, execution dashboards, chart structures, or a professional trading desk."
                 if not re.search(r"\b(action|moving|running|walking|turning|interacting|holding|breaking|spiking|reversing|rotating|flashing|updating)\b", chunks[1], re.IGNORECASE):
                     chunks[1] = (chunks[1].rstrip(".!?") + " " if chunks[1] else "") + \
                         "Show the trade idea, market move, or risk/reward mechanism actively happening with visible change."

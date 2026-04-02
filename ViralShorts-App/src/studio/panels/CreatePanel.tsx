@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess } from '../shared';
-import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/StudioWidgets';
+import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
@@ -2384,6 +2384,85 @@ export default function CreatePanel() {
         }
     };
 
+    const globalToggleAnimationMode = useCallback(() => {
+        if (loading || scriptLoading) return;
+        if (effectiveAnimationEnabled) {
+            setAnimateOutputEnabled(false);
+            return;
+        }
+        if (animationCreditExhausted) {
+            openAnimationCreditPrompt(1);
+            return;
+        }
+        setAnimateOutputEnabled(true);
+    }, [animationCreditExhausted, effectiveAnimationEnabled, loading, scriptLoading]);
+    const normalizeGenerationAssetUrl = useCallback((raw: unknown): string | null => {
+        const value = String(raw || '').trim();
+        if (!value) return null;
+        if (/^(https?:|data:|blob:)/i.test(value)) return value;
+        const sanitized = value.replace(/^\/+/, '');
+        return value.startsWith('/') ? `${GENERATION_API}${value}` : `${GENERATION_API}/${sanitized}`;
+    }, []);
+    const extractScenePreviewUrl = useCallback((sceneAsset: unknown): string | null => {
+        if (!sceneAsset) return null;
+        if (typeof sceneAsset === 'string') return normalizeGenerationAssetUrl(sceneAsset);
+        if (typeof sceneAsset === 'object') {
+            const candidateMap = sceneAsset as Record<string, unknown>;
+            for (const candidate of [
+                candidateMap.image_url,
+                candidateMap.url,
+                candidateMap.imageData,
+                candidateMap.image_data,
+                candidateMap.preview_url,
+            ]) {
+                const resolved = normalizeGenerationAssetUrl(candidate);
+                if (resolved) return resolved;
+            }
+        }
+        return null;
+    }, [normalizeGenerationAssetUrl]);
+    const globalRenderProgressPreview = useMemo(() => {
+        const sceneImages = Array.isArray(jobStatus?.scene_images) ? jobStatus.scene_images : [];
+        const safeSceneIndex = Math.max(0, Number(jobStatus?.current_scene || 1) - 1);
+        const candidates: unknown[] = [];
+        if (sceneImages[safeSceneIndex]) candidates.push(sceneImages[safeSceneIndex]);
+        for (let index = sceneImages.length - 1; index >= 0; index -= 1) {
+            if (index !== safeSceneIndex && sceneImages[index]) candidates.push(sceneImages[index]);
+        }
+        if (creativeScenes[safeSceneIndex]?.imageData) candidates.push(creativeScenes[safeSceneIndex].imageData);
+        for (let index = creativeScenes.length - 1; index >= 0; index -= 1) {
+            if (index !== safeSceneIndex && creativeScenes[index]?.imageData) candidates.push(creativeScenes[index].imageData);
+        }
+        for (const candidate of candidates) {
+            const url = extractScenePreviewUrl(candidate);
+            if (url) {
+                return {
+                    url,
+                    kind: 'image' as const,
+                    label: `Scene ${safeSceneIndex + 1} preview`,
+                };
+            }
+        }
+        if (jobStatus?.output_file) {
+            return {
+                url: `${GENERATION_API}/api/download/${jobStatus.output_file}`,
+                kind: 'video' as const,
+                label: 'Current render output',
+            };
+        }
+        return null;
+    }, [creativeScenes, extractScenePreviewUrl, jobStatus]);
+    const globalActiveRenderStatus = jobStatus || (loading ? { status: 'queued', progress: 0 } : null);
+    const globalRenderProgressWindow = globalActiveRenderStatus && globalActiveRenderStatus.status !== 'complete' && globalActiveRenderStatus.status !== 'error' ? (
+        <RenderProgressWindow
+            jobStatus={globalActiveRenderStatus}
+            title={`${creativeTitle || currentTemplateMeta?.title || 'Untitled Project'} • ${effectiveAnimationEnabled ? 'Animation' : 'Slideshow'}`}
+            previewUrl={globalRenderProgressPreview?.url || null}
+            previewType={globalRenderProgressPreview?.kind || 'image'}
+            previewLabel={globalRenderProgressPreview?.label || (effectiveAnimationEnabled ? 'Animation render preview' : 'Slideshow render preview')}
+        />
+    ) : null;
+
     if ((creativeMode === 'creative' || creativeMode === 'script_to_short') && creativeStep === 'edit' && createSubTab === 'builder') {
     const hasNarration = creativeNarration.trim().length > 0;
     const promptScenes = creativeScenes.filter((s) => !!s.visual_description.trim());
@@ -2453,9 +2532,25 @@ export default function CreatePanel() {
                         <h1 className="text-xl font-bold text-white">{creativeTitle || activeTemplateMeta?.title || 'Untitled Project'}</h1>
                         <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Control'} &middot; {resolution} &middot; {language.toUpperCase()}</p>
                     </div>
-                    <div className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
-                        {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode'}
-                    </div>
+                    {workspaceStage === 'finale' ? (
+                        <button
+                            type="button"
+                            onClick={globalToggleAnimationMode}
+                            disabled={loading || scriptLoading}
+                            className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] transition ${
+                                effectiveAnimationEnabled
+                                    ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/20'
+                                    : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/15'
+                            } disabled:opacity-50`}
+                            title="Switch output mode"
+                        >
+                            {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode • Click to Animate'}
+                        </button>
+                    ) : (
+                        <div className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
+                            {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode'}
+                        </div>
+                    )}
                 </div>
                 {animationCreditsShort && (
                     <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
@@ -3046,6 +3141,7 @@ export default function CreatePanel() {
                 {imageModelPickerModal}
                 {videoModelPickerModal}
                 {animationCreditPromptModal}
+                {globalRenderProgressWindow}
             </div>
         );
     }
@@ -3445,18 +3541,7 @@ export default function CreatePanel() {
                             </p>
                         </div>
                         <button
-                            onClick={() => {
-                                if (loading || scriptLoading) return;
-                                if (effectiveAnimationEnabled) {
-                                    setAnimateOutputEnabled(false);
-                                    return;
-                                }
-                                if (animationCreditExhausted) {
-                                    openAnimationCreditPrompt(1);
-                                    return;
-                                }
-                                setAnimateOutputEnabled(true);
-                            }}
+                            onClick={globalToggleAnimationMode}
                             disabled={loading || scriptLoading}
                             className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
                                 effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
@@ -3500,18 +3585,7 @@ export default function CreatePanel() {
                                 </p>
                             </div>
                             <button
-                                onClick={() => {
-                                    if (loading || scriptLoading) return;
-                                    if (effectiveAnimationEnabled) {
-                                        setAnimateOutputEnabled(false);
-                                        return;
-                                    }
-                                    if (animationCreditExhausted) {
-                                        openAnimationCreditPrompt(1);
-                                        return;
-                                    }
-                                    setAnimateOutputEnabled(true);
-                                }}
+                                onClick={globalToggleAnimationMode}
                                 disabled={loading || scriptLoading}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
                                     effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
@@ -3527,6 +3601,26 @@ export default function CreatePanel() {
 
                 {workspaceStage === 'finale' && (
                 <>
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-sm font-semibold text-white">Output Type</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                Switch to animation here if you forgot earlier. Slideshow stays free, animation uses Catalyst render credits.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={globalToggleAnimationMode}
+                            disabled={loading || scriptLoading}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-cyan-600/80 text-white hover:bg-cyan-500"
+                            } disabled:opacity-50`}
+                        >
+                            {effectiveAnimationEnabled ? "Animation ON" : "Switch to Animation"}
+                        </button>
+                    </div>
+                </div>
                 {renderCustomVoiceLibraryCard()}
                 {templateSupportsVoiceControls && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
@@ -3660,6 +3754,7 @@ export default function CreatePanel() {
                 {imageModelPickerModal}
                 {videoModelPickerModal}
                 {animationCreditPromptModal}
+                {globalRenderProgressWindow}
 
                 {activePromptEditorScene && scenePromptEditorIndex !== null && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
