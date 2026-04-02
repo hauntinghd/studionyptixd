@@ -3330,13 +3330,18 @@ def _heuristic_catalyst_edit_blueprint(
     channel_context = dict(channel_context or {})
     memory_view = _catalyst_channel_memory_public_view(channel_memory)
     rewrite_pressure = dict(memory_view.get("rewrite_pressure") or {})
+    niche_key = str(memory_view.get("niche_key", "") or "").strip().lower()
+    series_anchor = _clip_text(str(memory_view.get("series_anchor", "") or ""), 120)
+    niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or ""), 220)
+    is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     subject = _same_arena_subject({"title": input_title or topic}, topic=topic or input_title) or _clip_text(topic or input_title or "the core subject", 80)
+    recap_subject = series_anchor or subject
     improvement_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
     retention_findings = [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
     packaging_findings = [str(v).strip() for v in list(source_analysis.get("packaging_findings") or []) if str(v).strip()]
     title_hints = [str(v).strip() for v in list(channel_context.get("title_pattern_hints") or []) if str(v).strip()]
     sound_profile, music_profile = _catalyst_default_sound_profile(topic, input_title, format_preset)
-    transition_style = "cinematic" if format_preset in {"documentary", "explainer", "recap"} else "smooth"
+    transition_style = "snap" if is_recap_lane else ("cinematic" if format_preset in {"documentary", "explainer", "recap"} else "smooth")
     chapter_blueprints = _heuristic_catalyst_chapter_blueprints(
         chapter_count=chapter_count,
         subject=subject,
@@ -3374,24 +3379,185 @@ def _heuristic_catalyst_edit_blueprint(
         *list(memory_view.get("reference_next_video_moves") or []),
         *list(memory_view.get("next_video_moves") or []),
     ], max_items=8, max_chars=180)
-    pattern_interrupt_interval = 15 if format_preset == "documentary" else 12
+    pattern_interrupt_interval = 10 if is_recap_lane else (15 if format_preset == "documentary" else 12)
     if pressure_scores.get("pacing", 0) >= 75:
-        pattern_interrupt_interval = 9
+        pattern_interrupt_interval = 8 if is_recap_lane else 9
     elif pressure_scores.get("pacing", 0) >= 55:
-        pattern_interrupt_interval = 11
+        pattern_interrupt_interval = 9 if is_recap_lane else 11
     hook_promise = _clip_text(reference_hook_rewrites[0] if reference_hook_rewrites else f"Open on the strongest hidden consequence around {subject}, not generic setup.", 220)
     hook_open_loop = _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180)
     hook_first30 = _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180)
     shock_device = "Use one unsettling or counterintuitive reveal within the first 15 seconds."
+    if is_recap_lane:
+        hook_promise = _clip_text(
+            reference_hook_rewrites[0]
+            if reference_hook_rewrites
+            else f"Open on the sharpest power jump, betrayal, hidden system rule, or chapter-turn inside {recap_subject}.",
+            220,
+        )
+        hook_open_loop = _clip_text(
+            weighted_next_moves[0]
+            if weighted_next_moves
+            else (niche_follow_up_rule or f"Stay inside {recap_subject} and escalate the next chapter-turn instead of retelling setup."),
+            180,
+        )
+        hook_first30 = _clip_text(
+            reference_hook_rewrites[1]
+            if len(reference_hook_rewrites) > 1
+            else "The first 30 seconds must land the strongest chapter-turn, power consequence, or betrayal before any recap exposition.",
+            180,
+        )
+        shock_device = "Use one addiction-grade chapter-turn, betrayal, rank jump, or system reveal in the first 10 to 15 seconds."
     if pressure_scores.get("hook", 0) >= 70:
         hook_promise = _clip_text(f"{hook_promise} The opening must land the claim before any explanation.", 220)
         hook_open_loop = _clip_text(rewrite_priorities[0] if rewrite_priorities else hook_open_loop, 180)
         hook_first30 = _clip_text("Shorten setup brutally. Promise, proof, and reversal must all appear in the first 30 seconds.", 180)
         shock_device = "Use one counterintuitive reveal or disturbing contradiction in the first 10 to 15 seconds."
+    if is_recap_lane:
+        recap_arc_moves = _dedupe_preserve_order([
+            niche_follow_up_rule,
+            "Escalate the strongest power turn or betrayal faster than the source video.",
+            "Keep the recap locked to the same series arena instead of drifting into generic documentary framing.",
+            "Use protagonist, rival, weapon, monster, or system iconography instead of random abstract objects.",
+        ], max_items=4, max_chars=180)
+        recap_blueprints: list[dict] = []
+        for idx, raw_blueprint in enumerate(chapter_blueprints):
+            chapter = dict(raw_blueprint or {})
+            chapter["focus"] = _clip_text(
+                f"{str(chapter.get('focus', '') or '').strip()} Keep the recap anchored to {recap_subject} and escalate the next chapter-turn.",
+                220,
+            )
+            if idx == 0:
+                chapter["hook_job"] = _clip_text(
+                    f"Start on the most addictive reveal around {recap_subject} before any broad recap setup.",
+                    180,
+                )
+                chapter["shock_device"] = _clip_text("chapter-turn + betrayal or power-system reveal", 160)
+            chapter["visual_motif"] = _clip_text(
+                f"{str(chapter.get('visual_motif', '') or '').strip()} Use {recap_subject} iconography, power hierarchy, rival tension, or system-energy cues instead of sterile documentary props.",
+                220,
+            )
+            chapter["motion_note"] = _clip_text(
+                f"{str(chapter.get('motion_note', '') or '').strip()}; use kinetic panel-smash energy, power-rank contrast, and faster recap resets.",
+                180,
+            )
+            chapter["sound_note"] = _clip_text(
+                f"{str(chapter.get('sound_note', '') or '').strip()}; emphasize trailer pulses, reveal hits, and rank-jump impacts.",
+                180,
+            )
+            chapter["improvement_focus"] = _clip_text(
+                f"{str(chapter.get('improvement_focus', '') or '').strip()} {recap_arc_moves[idx % len(recap_arc_moves)]}",
+                180,
+            )
+            recap_blueprints.append(chapter)
+        chapter_blueprints = recap_blueprints
+    camera_language = _dedupe_preserve_order([
+        "controlled dolly pushes into hero objects",
+        "macro cutaways that reveal the hidden mechanism",
+        "miniature-world system sweeps for context",
+        "sharp pattern interrupts when the point changes",
+        rewrite_priorities[1] if len(rewrite_priorities) > 1 else "",
+        *reference_visual_rewrites[:2],
+        *visual_wins[:2],
+    ], max_items=6, max_chars=160)
+    motion_graphics = _dedupe_preserve_order([
+        "clean HUD-style overlays only when they clarify the beat",
+        "diagram callouts that explain one mechanism at a time",
+        "before-versus-after or myth-versus-reality comparisons",
+        rewrite_priorities[2] if len(rewrite_priorities) > 2 else "",
+        *reference_visual_rewrites[:2],
+        *packaging_wins[:1],
+        packaging_warning,
+    ], max_items=6, max_chars=180)
+    visual_rules = _dedupe_preserve_order([
+        "Stay obviously 3D and intentionally designed, not live-action.",
+        "Keep one dominant subject per frame and one dominant lighting cue.",
+        "Use contrast and scale shifts to reset attention.",
+        "Avoid reusing the same isolated hero-object stage in consecutive scenes." if pressure_scores.get("visuals", 0) >= 60 else "",
+        *reference_visual_rewrites[:2],
+        *visual_watchouts[:2],
+        *list(memory_view.get("retention_watchouts") or [])[:1],
+    ], max_items=6, max_chars=180)
+    mix_notes = _dedupe_preserve_order([
+        "Use trailer-grade impacts only on real reveals, not every scene.",
+        "Keep the ambience bed present but under narration.",
+        "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
+        "Use more deliberate silence pockets before the strongest reveals." if pressure_scores.get("sound", 0) >= 60 else "",
+        *reference_sound_rewrites[:2],
+        *sound_wins[:2],
+        *sound_watchouts[:1],
+    ], max_items=6, max_chars=160)
+    voice_direction = _dedupe_preserve_order([
+        "Confident, controlled, and slightly ominous.",
+        "Short declarative lines in the first 20 to 30 seconds.",
+        "Speed up on mechanism beats and slow slightly on payoffs.",
+    ], max_items=4, max_chars=160)
+    scoring_rubric = _dedupe_preserve_order([
+        "First 15 seconds must promise a concrete payoff.",
+        "Every scene must visualize the exact narration beat, not a generic metaphor.",
+        "Every chapter needs at least one escalation and one pattern interrupt.",
+        "Packaging must stay in the same arena while avoiding title repetition.",
+        rewrite_priorities[0] if rewrite_priorities else "",
+        *reference_hook_rewrites[:1],
+        *reference_packaging_rewrites[:1],
+        *hook_wins[:2],
+        *packaging_wins[:1],
+        *retention_wins[:1],
+        *list(memory_view.get("retention_watchouts") or [])[:1],
+    ], max_items=8, max_chars=180)
+    niche_execution_notes = _dedupe_preserve_order([
+        niche_follow_up_rule,
+        f"Preserve the series anchor {recap_subject} across hook, visuals, and packaging." if is_recap_lane and recap_subject else "",
+    ], max_items=4, max_chars=180)
+    if is_recap_lane:
+        camera_language = _dedupe_preserve_order([
+            "kinetic manga-recap push-ins on power beats",
+            "panel-smash snap cuts between reveal states",
+            "weapon, aura, or system-energy sweeps that escalate hierarchy",
+            *camera_language,
+        ], max_items=7, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "manga-style energy cues and chapter-impact framing only when they sharpen the beat",
+            "power-system or rank overlays only when they clarify escalation",
+            "betrayal-versus-trust or before-versus-after clash frames instead of sterile business diagrams",
+            *motion_graphics,
+        ], max_items=7, max_chars=180)
+        visual_rules = _dedupe_preserve_order([
+            f"Stay inside the {recap_subject} universe; every scene must look like it belongs to that recap world." if recap_subject else "",
+            "Prefer protagonist, rival, weapon, monster, or system iconography over generic abstract objects.",
+            "Escalate power, betrayal, rank, survival, or system stakes instead of generic documentary explanation.",
+            "Avoid medical, lab, map-room, or business metaphors unless the narration is literally about them.",
+            *visual_rules,
+        ], max_items=7, max_chars=180)
+        mix_notes = _dedupe_preserve_order([
+            "Use anime-recap trailer pulses, energy swells, and hard impact accents on power turns.",
+            "Hit betrayals, rank jumps, and system reveals with sharper transient design.",
+            *mix_notes,
+        ], max_items=7, max_chars=160)
+        voice_direction = _dedupe_preserve_order([
+            "Urgent, high-pressure, and confident.",
+            "Punch the turn words harder: reveal, rank, betrayal, system, death, power.",
+            *voice_direction,
+        ], max_items=5, max_chars=160)
+        scoring_rubric = _dedupe_preserve_order([
+            f"Every chapter must stay unmistakably inside {recap_subject}, not generic documentary space." if recap_subject else "",
+            "Scenes should escalate power, betrayal, rank, survival, or system stakes.",
+            "Hook must land the most addictive chapter-turn first.",
+            *scoring_rubric,
+        ], max_items=8, max_chars=180)
+        niche_execution_notes = _dedupe_preserve_order([
+            *niche_execution_notes,
+            "Use recap energy, chapter-turn escalation, and power hierarchy instead of documentary explanation rhythms.",
+            "The next video should feel like a stronger chapter obsession, not a remake of the last upload.",
+        ], max_items=5, max_chars=180)
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),
         "format_preset": format_preset,
+        "niche_key": niche_key,
+        "series_anchor": series_anchor,
+        "niche_follow_up_rule": niche_follow_up_rule,
+        "niche_execution_notes": niche_execution_notes,
         "analysis_required_before_generation": True,
         "hook_strategy": {
             "promise": hook_promise,
@@ -3420,56 +3586,20 @@ def _heuristic_catalyst_edit_blueprint(
             ], max_items=6, max_chars=180),
         },
         "motion_strategy": {
-            "camera_language": _dedupe_preserve_order([
-                "controlled dolly pushes into hero objects",
-                "macro cutaways that reveal the hidden mechanism",
-                "miniature-world system sweeps for context",
-                "sharp pattern interrupts when the point changes",
-                rewrite_priorities[1] if len(rewrite_priorities) > 1 else "",
-                *reference_visual_rewrites[:2],
-                *visual_wins[:2],
-            ], max_items=6, max_chars=160),
-            "motion_graphics": _dedupe_preserve_order([
-                "clean HUD-style overlays only when they clarify the beat",
-                "diagram callouts that explain one mechanism at a time",
-                "before-versus-after or myth-versus-reality comparisons",
-                rewrite_priorities[2] if len(rewrite_priorities) > 2 else "",
-                *reference_visual_rewrites[:2],
-                *packaging_wins[:1],
-                packaging_warning,
-            ], max_items=6, max_chars=180),
+            "camera_language": camera_language,
+            "motion_graphics": motion_graphics,
             "transition_style": transition_style,
-            "visual_rules": _dedupe_preserve_order([
-                "Stay obviously 3D and intentionally designed, not live-action.",
-                "Keep one dominant subject per frame and one dominant lighting cue.",
-                "Use contrast and scale shifts to reset attention.",
-                "Avoid reusing the same isolated hero-object stage in consecutive scenes." if pressure_scores.get("visuals", 0) >= 60 else "",
-                *reference_visual_rewrites[:2],
-                *visual_watchouts[:2],
-                *list(memory_view.get("retention_watchouts") or [])[:1],
-            ], max_items=6, max_chars=180),
+            "visual_rules": visual_rules,
         },
         "sound_strategy": {
             "sfx_profile": sound_profile,
             "music_profile": music_profile,
-            "mix_notes": _dedupe_preserve_order([
-                "Use trailer-grade impacts only on real reveals, not every scene.",
-                "Keep the ambience bed present but under narration.",
-                "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
-                "Use more deliberate silence pockets before the strongest reveals." if pressure_scores.get("sound", 0) >= 60 else "",
-                *reference_sound_rewrites[:2],
-                *sound_wins[:2],
-                *sound_watchouts[:1],
-            ], max_items=6, max_chars=160),
+            "mix_notes": mix_notes,
             "silence_rules": _dedupe_preserve_order([
                 "Drop the bed briefly before the biggest reveal in each chapter.",
                 "Leave short pockets of space after heavy claims so the next hit lands harder.",
             ], max_items=4, max_chars=160),
-            "voice_direction": _dedupe_preserve_order([
-                "Confident, controlled, and slightly ominous.",
-                "Short declarative lines in the first 20 to 30 seconds.",
-                "Speed up on mechanism beats and slow slightly on payoffs.",
-            ], max_items=4, max_chars=160),
+            "voice_direction": voice_direction,
         },
         "retention_targets": {
             "main_bottleneck": _clip_text(hook_watchouts[0] if hook_watchouts else hook_warning, 220),
@@ -3477,24 +3607,14 @@ def _heuristic_catalyst_edit_blueprint(
             "packaging_opportunity": _clip_text(reference_packaging_rewrites[0] if reference_packaging_rewrites else (packaging_watchouts[0] if packaging_watchouts else packaging_warning), 220),
             "channel_title_hints": title_hints[:4],
             "memory_keywords": list(memory_view.get("proven_keywords") or [])[:8],
+            "series_anchor": series_anchor,
+            "niche_follow_up_rule": niche_follow_up_rule,
             "measured_ctr_context": f"Measured channel average CTR: {outcome_ctr:.2f}%." if outcome_ctr > 0 else "",
             "measured_retention_context": f"Measured average viewed: {outcome_avp:.2f}%." if outcome_avp > 0 else "",
             "rewrite_pressure_summary": _clip_text(str(rewrite_pressure.get("summary", "") or ""), 240),
             "next_run_priorities": rewrite_priorities[:5],
         },
-        "scoring_rubric": _dedupe_preserve_order([
-            "First 15 seconds must promise a concrete payoff.",
-            "Every scene must visualize the exact narration beat, not a generic metaphor.",
-            "Every chapter needs at least one escalation and one pattern interrupt.",
-            "Packaging must stay in the same arena while avoiding title repetition.",
-            rewrite_priorities[0] if rewrite_priorities else "",
-            *reference_hook_rewrites[:1],
-            *reference_packaging_rewrites[:1],
-            *hook_wins[:2],
-            *packaging_wins[:1],
-            *retention_wins[:1],
-            *list(memory_view.get("retention_watchouts") or [])[:1],
-        ], max_items=8, max_chars=180),
+        "scoring_rubric": scoring_rubric,
         "chapter_blueprints": _heuristic_catalyst_chapter_blueprints(
             chapter_count=chapter_count,
             subject=subject,
@@ -9644,6 +9764,11 @@ def _catalyst_scene_execution_profile(
     pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
     motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    format_preset = str(edit_blueprint.get("format_preset", "") or "").strip().lower()
+    niche_key = str(edit_blueprint.get("niche_key", "") or "").strip().lower()
+    series_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or ""), 120)
+    niche_execution_notes = [str(v).strip() for v in list(edit_blueprint.get("niche_execution_notes") or []) if str(v).strip()]
+    is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     total = max(1, int(total_scenes or 1))
     idx = max(0, int(scene_index or 0))
     opening_span = 2 if total >= 6 else 1
@@ -9685,6 +9810,25 @@ def _catalyst_scene_execution_profile(
         "Reset attention with a new contrast or consequence right now." if is_interrupt else "",
         "Make the payoff concrete enough that the next chapter feels inevitable." if is_closer else "",
     ], max_items=8, max_chars=180)
+    if is_recap_lane:
+        motion_cues = _dedupe_preserve_order([
+            f"Keep the visual language locked to {series_anchor}." if series_anchor else "",
+            "Use recap-grade panel energy, power hierarchy, and chapter-turn escalation.",
+            "Avoid sterile documentary staging or generic explainer objects.",
+            *niche_execution_notes[:2],
+            *motion_cues,
+        ], max_items=8, max_chars=180)
+        sound_cues = _dedupe_preserve_order([
+            "Use sharper reveal hits, energy swells, and rank-jump accents.",
+            "Push the recap trailer bed harder on betrayal, survival, or power turns.",
+            *niche_execution_notes[:1],
+            *sound_cues,
+        ], max_items=8, max_chars=180)
+        retention_cues = _dedupe_preserve_order([
+            f"Escalate the next obsession inside {series_anchor}." if series_anchor else "Escalate the next obsession inside the same recap universe.",
+            "Make every beat feel like a stronger chapter-turn, not a summary retread.",
+            *retention_cues,
+        ], max_items=8, max_chars=180)
     return {
         "scene_role": scene_role,
         "is_opening": is_opening,
@@ -9700,6 +9844,8 @@ def _catalyst_scene_execution_profile(
             or pacing_strategy.get("transition_style", "")
             or "smooth"
         ),
+        "series_anchor": series_anchor,
+        "niche_execution_notes": niche_execution_notes,
         "pattern_interrupt_interval_sec": int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12),
         "voice_direction": _dedupe_preserve_order(list(sound_strategy.get("voice_direction") or []), max_items=6, max_chars=180),
     }
@@ -9730,6 +9876,8 @@ def _build_longform_scene_execution_prompt(
     visual_delta = " ".join(part for part in [
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
+        f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") else "",
+        f"Niche execution: {'; '.join(execution.get('niche_execution_notes') or [])}." if execution.get("niche_execution_notes") else "",
         f"Motion execution: {'; '.join(execution.get('motion_cues') or [])}." if execution.get("motion_cues") else "",
         f"Retention objective: {'; '.join(execution.get('retention_cues') or [])}." if execution.get("retention_cues") else "",
         f"Scene-specific motion beat: {motion_direction}." if motion_direction else "",
@@ -9768,6 +9916,8 @@ def _build_longform_scene_motion_prompt(
     parts = _dedupe_preserve_order([
         str(scene.get("visual_description", "") or ""),
         str(scene.get("motion_direction", "") or ""),
+        f"Series anchor: {execution.get('series_anchor', '')}" if execution.get("series_anchor") else "",
+        *list(execution.get("niche_execution_notes") or [])[:2],
         *list(execution.get("motion_cues") or [])[:4],
         "Start with a stronger push-in and immediate reveal." if execution.get("is_opening") else "",
         "Use a visible pattern interrupt and contrast reset mid-shot." if execution.get("is_interrupt") else "",
@@ -9795,6 +9945,8 @@ def _build_longform_scene_sfx_brief(
         str(scene.get("visual_description", "") or "").strip(),
         f"SFX direction: {str(scene.get('sfx_direction', '') or '').strip()}." if str(scene.get("sfx_direction", "") or "").strip() else "",
         f"Engagement purpose: {str(scene.get('engagement_purpose', '') or '').strip()}." if str(scene.get("engagement_purpose", "") or "").strip() else "",
+        f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") else "",
+        f"Niche execution: {'; '.join(execution.get('niche_execution_notes') or [])}." if execution.get("niche_execution_notes") else "",
         f"Sound execution: {'; '.join(execution.get('sound_cues') or [])}." if execution.get("sound_cues") else "",
     ] if part).strip()
 
@@ -9914,6 +10066,14 @@ async def _generate_longform_chapter(
             "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that. "
             "Scene variation rule: rotate between symbolic hero objects, macro mechanism cutaways, stylized human interaction, map or system views, before-versus-after contrasts, and consequence-driven environments. "
             "Do not repeat the same floating object in the same room across the whole chapter."
+        )
+    if format_preset == "recap" or str(edit_blueprint.get("niche_key", "") or "").strip().lower() == "manga_recap":
+        recap_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or topic or input_title or "the series"), 120)
+        system_prompt += (
+            f" Recap execution lock: this is a premium manga/manhwa recap follow-up inside {recap_anchor}, not a generic documentary explainer. "
+            "Keep scenes inside the same fictional universe, chapter-turn logic, power system, betrayal stakes, and rivalry hierarchy. "
+            "Prefer protagonist/rival/system/monster/weapon environments, kinetic panel-like composition, and addiction-grade reveal pacing. "
+            "Do not drift into generic business, lab, medical, or empty-object documentary visuals unless narration literally requires it."
         )
     if template == "skeleton":
         system_prompt += (
