@@ -32,6 +32,11 @@ COPY backend_demo.py .
 COPY backend_state.py .
 COPY backend_queue.py .
 COPY backend_worker.py .
+COPY backend_catalyst_core.py .
+COPY backend_catalyst_profiles.py .
+COPY backend_catalyst_learning.py .
+COPY backend_catalyst_blueprint.py .
+COPY backend_catalyst_reference.py .
 COPY ops ./ops
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
