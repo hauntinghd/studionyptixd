@@ -9428,9 +9428,20 @@ async def _build_shorts_catalyst_extra_instructions(
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
         memory = dict(_catalyst_channel_memory.get(memory_key) or {})
-    memory_public = _catalyst_channel_memory_public_view(memory)
-    memory_context = _render_catalyst_channel_memory_context(memory)
-    rewrite_pressure = _catalyst_rewrite_pressure_profile(memory_public)
+    series_context = _resolve_catalyst_series_context(
+        channel_context,
+        channel_memory=memory,
+        topic=topic,
+        source_title="",
+        input_title="",
+        input_description="",
+        format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
+    )
+    memory_public = dict(series_context.get("memory_view") or {})
+    memory_context = _render_catalyst_channel_memory_context(memory_public)
+    rewrite_pressure = dict(memory_public.get("rewrite_pressure") or _catalyst_rewrite_pressure_profile(memory_public))
+    selected_cluster = dict(series_context.get("selected_cluster") or {})
+    cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320)
 
     parts: list[str] = [
         "CATALYST SHORTS CHANNEL MODE: Build a NEW short in the same arena as the connected channel. Do not remake or lightly paraphrase an existing upload.",
@@ -9447,6 +9458,8 @@ async def _build_shorts_catalyst_extra_instructions(
     if top_titles:
         parts.append("Top titles from this channel: " + ", ".join(top_titles[:4]))
     title_hints = [str(v).strip() for v in list(channel_context.get("title_pattern_hints") or []) if str(v).strip()]
+    if list(selected_cluster.get("sample_titles") or []):
+        title_hints = _dedupe_preserve_order([*list(selected_cluster.get("sample_titles") or []), *title_hints], max_items=6, max_chars=160)
     if title_hints:
         parts.append("Title pattern hints: " + "; ".join(title_hints[:4]))
     packaging = [str(v).strip() for v in list(channel_context.get("packaging_learnings") or []) if str(v).strip()]
@@ -9455,6 +9468,10 @@ async def _build_shorts_catalyst_extra_instructions(
     retention = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()]
     if retention:
         parts.append("Retention learnings: " + "; ".join(retention[:4]))
+    if cluster_context:
+        parts.append(cluster_context)
+    if list(selected_cluster.get("keywords") or []):
+        parts.append("Matched arc keywords: " + ", ".join(list(selected_cluster.get("keywords") or [])[:6]))
     if memory_context:
         parts.append(memory_context)
     rewrite_summary = str(rewrite_pressure.get("summary", "") or "").strip()

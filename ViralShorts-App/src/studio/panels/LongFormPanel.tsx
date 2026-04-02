@@ -99,6 +99,7 @@ type LongFormSession = {
         source_video?: Record<string, any>;
         source_analysis?: Record<string, any>;
         youtube_channel?: Record<string, any>;
+        selected_series_cluster?: Record<string, any>;
         source_context?: string;
         strategy_notes?: string;
         marketing_doctrine?: string[];
@@ -693,20 +694,27 @@ export default function LongFormPanel() {
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
     const connectedYouTubeChannel = (lfSession?.metadata_pack?.youtube_channel || {}) as Record<string, any>;
-  const channelMemory = (lfSession?.channel_memory || {}) as Record<string, any>;
-  const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
-  const referenceComparison = (latestOutcome?.reference_comparison || {}) as Record<string, any>;
-  const referenceScores = (referenceComparison?.scores || {}) as Record<string, any>;
-  const rewritePressure = (channelMemory?.rewrite_pressure || {}) as Record<string, any>;
-  const rewriteCategories = Array.isArray(rewritePressure?.categories)
-    ? rewritePressure.categories.filter((value: any) => value && String(value.key || '').trim())
-    : [];
-  const rewritePriorities = Array.isArray(rewritePressure?.next_run_priorities)
-    ? rewritePressure.next_run_priorities.filter((value: any) => String(value || '').trim())
-    : [];
-  const referenceChannels = Array.isArray(referenceComparison?.benchmark_channels)
-    ? referenceComparison.benchmark_channels.filter((value: any) => String(value || '').trim())
-    : [];
+    const selectedSeriesCluster = (lfSession?.metadata_pack?.selected_series_cluster || {}) as Record<string, any>;
+    const selectedSeriesKeywords = Array.isArray(selectedSeriesCluster?.keywords)
+        ? selectedSeriesCluster.keywords.filter((value: any) => String(value || '').trim())
+        : [];
+    const selectedSeriesTitles = Array.isArray(selectedSeriesCluster?.sample_titles)
+        ? selectedSeriesCluster.sample_titles.filter((value: any) => String(value || '').trim())
+        : [];
+    const channelMemory = (lfSession?.channel_memory || {}) as Record<string, any>;
+    const latestOutcome = (lfSession?.latest_outcome || {}) as Record<string, any>;
+    const referenceComparison = (latestOutcome?.reference_comparison || {}) as Record<string, any>;
+    const referenceScores = (referenceComparison?.scores || {}) as Record<string, any>;
+    const rewritePressure = (channelMemory?.rewrite_pressure || {}) as Record<string, any>;
+    const rewriteCategories = Array.isArray(rewritePressure?.categories)
+        ? rewritePressure.categories.filter((value: any) => value && String(value.key || '').trim())
+        : [];
+    const rewritePriorities = Array.isArray(rewritePressure?.next_run_priorities)
+        ? rewritePressure.next_run_priorities.filter((value: any) => String(value || '').trim())
+        : [];
+    const referenceChannels = Array.isArray(referenceComparison?.benchmark_channels)
+        ? referenceComparison.benchmark_channels.filter((value: any) => String(value || '').trim())
+        : [];
     const titleVariants = hasPublishPackage && Array.isArray(lfSession?.package?.title_variants) ? lfSession?.package?.title_variants as string[] : [];
     const descriptionVariants = hasPublishPackage && Array.isArray(lfSession?.package?.description_variants) ? lfSession?.package?.description_variants as string[] : [];
     const thumbnailPrompts = hasPublishPackage && Array.isArray(lfSession?.package?.thumbnail_prompts) ? lfSession?.package?.thumbnail_prompts as string[] : [];
@@ -1298,6 +1306,73 @@ export default function LongFormPanel() {
                                                     <li key={`channel-title-hint-${idx}`}>- {item}</li>
                                                 ))}
                                             </ul>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                                {Object.keys(selectedSeriesCluster).length ? (
+                                    <div className="rounded-lg border border-fuchsia-400/20 bg-fuchsia-500/5 p-3 space-y-3">
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-300">Matched Catalyst Arc</p>
+                                                <p className="mt-2 text-sm font-semibold text-white">
+                                                    {String(selectedSeriesCluster.label || selectedSeriesCluster.series_anchor || 'Channel cluster')}
+                                                </p>
+                                                {selectedSeriesCluster.follow_up_rule ? (
+                                                    <p className="mt-2 text-xs text-gray-300">{String(selectedSeriesCluster.follow_up_rule)}</p>
+                                                ) : null}
+                                            </div>
+                                            <div className="rounded-lg border border-fuchsia-400/20 bg-black/20 px-3 py-2 text-xs text-fuchsia-100/90 space-y-1">
+                                                <div>Anchor: {String(selectedSeriesCluster.series_anchor || 'n/a')}</div>
+                                                <div>Niche: {String(selectedSeriesCluster.niche_label || 'n/a')}</div>
+                                            </div>
+                                        </div>
+                                        <div className="grid gap-3 md:grid-cols-4 text-xs text-gray-300">
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <div className="text-gray-500">Avg views</div>
+                                                <div className="mt-1 text-lg font-semibold text-white">
+                                                    {Number(selectedSeriesCluster.avg_views || 0).toFixed(0)}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <div className="text-gray-500">Avg CTR</div>
+                                                <div className="mt-1 text-lg font-semibold text-white">
+                                                    {Number(selectedSeriesCluster.avg_ctr || 0).toFixed(2)}%
+                                                </div>
+                                            </div>
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <div className="text-gray-500">Avg viewed</div>
+                                                <div className="mt-1 text-lg font-semibold text-white">
+                                                    {Number(selectedSeriesCluster.avg_avp || 0).toFixed(1)}%
+                                                </div>
+                                            </div>
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <div className="text-gray-500">Videos</div>
+                                                <div className="mt-1 text-lg font-semibold text-white">
+                                                    {Number(selectedSeriesCluster.video_count || 0).toFixed(0)}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        {selectedSeriesKeywords.length ? (
+                                            <div>
+                                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">Cluster Keywords</p>
+                                                <div className="mt-2 flex flex-wrap gap-2 text-xs text-fuchsia-100">
+                                                    {selectedSeriesKeywords.slice(0, 10).map((item: string, idx: number) => (
+                                                        <span key={`series-keyword-${idx}`} className="rounded-full border border-fuchsia-400/25 bg-fuchsia-500/10 px-2 py-1">
+                                                            {item}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
+                                        {selectedSeriesTitles.length ? (
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">Reference Titles In This Arc</p>
+                                                <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                    {selectedSeriesTitles.slice(0, 4).map((item: string, idx: number) => (
+                                                        <li key={`series-title-${idx}`}>- {item}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
                                         ) : null}
                                     </div>
                                 ) : null}
