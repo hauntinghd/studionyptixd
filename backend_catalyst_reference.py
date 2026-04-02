@@ -2,6 +2,7 @@
     _clip_text,
     _dedupe_preserve_order,
     _catalyst_channel_memory_public_view,
+    _catalyst_infer_archetype,
     _catalyst_metric_score,
     _catalyst_pressure_label,
     _catalyst_reference_score_tier,
@@ -110,41 +111,243 @@ def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_o
     return "\n".join(part for part in parts if part)
 
 
-def _select_catalyst_reference_channels(reference_memory: dict | None = None, format_preset: str = "documentary", topic: str = "") -> tuple[dict, list[dict]]:
+def _reference_channel_archetype(entry: dict | None) -> dict:
+    payload = dict(entry or {})
+    seed = dict(payload.get("seed") or {})
+    channel = dict(payload.get("channel") or {})
+    memory = dict(payload.get("memory_seed") or {})
+    text_parts = [
+        str(seed.get("niche", "") or ""),
+        str(seed.get("style_notes", "") or ""),
+        str(channel.get("title", "") or ""),
+        " ".join(str(v).strip() for v in list(payload.get("recent_upload_titles") or [])[:8] if str(v).strip()),
+        " ".join(str(v).strip() for v in list(payload.get("top_video_titles") or [])[:8] if str(v).strip()),
+        " ".join(str(v).strip() for v in list(memory.get("proven_keywords") or [])[:8] if str(v).strip()),
+    ]
+    return _catalyst_infer_archetype(" ".join(part for part in text_parts if part), format_preset="documentary")
+
+
+def _build_catalyst_reference_playbook(
+    *,
+    reference_memory: dict | None = None,
+    format_preset: str = "documentary",
+    topic: str = "",
+    channel_memory: dict | None = None,
+    selected_cluster: dict | None = None,
+) -> dict:
+    if str(format_preset or "").strip().lower() != "documentary":
+        return {}
+    payload = dict(reference_memory or {})
+    if not payload:
+        return {}
+    aggregate = dict(payload.get("aggregate_memory_seed") or {})
+    channels = [dict(item) for item in list(payload.get("channels") or []) if isinstance(item, dict)]
+    cluster = dict(selected_cluster or {})
+    memory_public = _catalyst_channel_memory_public_view(channel_memory)
+    target_archetype_key = str(
+        memory_public.get("archetype_key", "")
+        or cluster.get("archetype_key", "")
+        or _catalyst_infer_archetype(
+            topic,
+            " ".join(str(v).strip() for v in list(cluster.get("sample_titles") or []) if str(v).strip()),
+            niche_key=str(memory_public.get("niche_key", "") or cluster.get("niche_key", "") or ""),
+            format_preset=format_preset,
+        ).get("key", "")
+        or ""
+    ).strip().lower()
+    target_archetype_label = str(memory_public.get("archetype_label", "") or cluster.get("archetype_label", "") or "").strip()
+    target_keywords = set(
+        str(v).strip().lower()
+        for v in [
+            *_extract_catalyst_keywords(str(topic or ""), max_items=12),
+            *list(memory_public.get("proven_keywords") or [])[:8],
+            *list(cluster.get("keywords") or [])[:8],
+        ]
+        if str(v).strip()
+    )
+    ranked_channels: list[tuple[float, dict, dict]] = []
+    for entry in channels:
+        seed = dict(entry.get("seed") or {})
+        memory = dict(entry.get("memory_seed") or {})
+        entry_archetype = _reference_channel_archetype(entry)
+        entry_archetype_key = str(entry_archetype.get("key", "") or "").strip().lower()
+        searchable = " ".join(
+            [
+                str(seed.get("niche", "") or ""),
+                str(seed.get("style_notes", "") or ""),
+                " ".join(list(entry.get("recent_upload_titles") or [])),
+                " ".join(list(entry.get("top_video_titles") or [])),
+                " ".join(list(memory.get("proven_keywords") or [])),
+            ]
+        ).lower()
+        searchable_tokens = set(_extract_catalyst_keywords(searchable, max_items=24))
+        score = 0.0
+        if target_keywords and searchable_tokens:
+            score += len(target_keywords & searchable_tokens) * 2.0
+        if target_archetype_key and entry_archetype_key == target_archetype_key:
+            score += 12.0
+        elif target_archetype_key and entry_archetype_key:
+            score -= 2.0
+        score += min(6.0, float(entry.get("average_top_video_views", 0) or 0) / 400000.0)
+        ranked_channels.append((score, entry, entry_archetype))
+    ranked_channels.sort(
+        key=lambda item: (
+            -item[0],
+            -float((item[1] or {}).get("average_top_video_views", 0) or 0.0),
+            str((((item[1] or {}).get("channel") or {}).get("title")) or "").lower(),
+        )
+    )
+    chosen = [entry for _score, entry, _arch in ranked_channels[:4]]
+    chosen_arches = [arch for _score, _entry, arch in ranked_channels[:4]]
+    chosen_titles = _dedupe_preserve_order(
+        [
+            str(((entry.get("channel") or {}).get("title")) or "").strip()
+            for entry in chosen
+            if str(((entry.get("channel") or {}).get("title")) or "").strip()
+        ],
+        max_items=4,
+        max_chars=120,
+    )
+    matched_archetypes = _dedupe_preserve_order(
+        [
+            str(arch.get("label", "") or arch.get("key", "") or "").strip()
+            for arch in chosen_arches
+            if str(arch.get("label", "") or arch.get("key", "") or "").strip()
+        ],
+        max_items=4,
+        max_chars=80,
+    )
+    hook_rewrites = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "hook_learnings", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("hook_learnings") or [])[:3] if str(v).strip()],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    pacing_rewrites = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "pacing_learnings", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("pacing_learnings") or [])[:3] if str(v).strip()],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    visual_rewrites = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "visual_learnings", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("visual_learnings") or [])[:3] if str(v).strip()],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    sound_rewrites = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "sound_learnings", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("sound_learnings") or [])[:3] if str(v).strip()],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    packaging_rewrites = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "packaging_learnings", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("packaging_learnings") or [])[:3] if str(v).strip()],
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    next_moves = _dedupe_preserve_order(
+        [
+            *_catalyst_reference_signal_list(chosen, "next_video_moves", max_items=6),
+            *[str(v).strip() for v in list(aggregate.get("next_video_moves") or [])[:4] if str(v).strip()],
+        ],
+        max_items=10,
+        max_chars=180,
+    )
+    proven_keywords = _dedupe_preserve_order(
+        [
+            *[str(v).strip() for v in list(aggregate.get("proven_keywords") or [])[:10] if str(v).strip()],
+            *[str(v).strip() for v in list(memory_public.get("proven_keywords") or [])[:8] if str(v).strip()],
+            *[str(v).strip() for v in list(cluster.get("keywords") or [])[:8] if str(v).strip()],
+        ],
+        max_items=12,
+        max_chars=60,
+    )
+    summary = _clip_text(
+        " ".join(
+            part
+            for part in [
+                f"Reference archetype target: {target_archetype_label or target_archetype_key}."
+                if (target_archetype_label or target_archetype_key)
+                else "",
+                f"Matched reference channels: {', '.join(chosen_titles[:3])}."
+                if chosen_titles
+                else "",
+                f"Matched reference archetypes: {', '.join(matched_archetypes[:3])}."
+                if matched_archetypes
+                else "",
+                ("Reference packaging rule: " + packaging_rewrites[0] + ".") if packaging_rewrites else "",
+                ("Reference hook rule: " + hook_rewrites[0] + ".") if hook_rewrites else "",
+            ]
+            if part
+        ),
+        320,
+    )
+    return {
+        "summary": summary,
+        "benchmark_channels": chosen_titles,
+        "matched_archetypes": matched_archetypes,
+        "target_archetype_key": target_archetype_key,
+        "hook_rewrites": hook_rewrites,
+        "pacing_rewrites": pacing_rewrites,
+        "visual_rewrites": visual_rewrites,
+        "sound_rewrites": sound_rewrites,
+        "packaging_rewrites": packaging_rewrites,
+        "next_video_moves": next_moves,
+        "proven_keywords": proven_keywords,
+    }
+
+
+def _select_catalyst_reference_channels(reference_memory: dict | None = None, format_preset: str = "documentary", topic: str = "", channel_memory: dict | None = None, selected_cluster: dict | None = None) -> tuple[dict, list[dict]]:
     if str(format_preset or "").strip().lower() != "documentary":
         return {}, []
     payload = dict(reference_memory or {})
     if not payload:
         return {}, []
     aggregate = dict(payload.get("aggregate_memory_seed") or {})
-    channels = [dict(item) for item in list(payload.get("channels") or []) if isinstance(item, dict)]
-    topic_tokens = set(_extract_catalyst_keywords(str(topic or ""), max_items=12))
-    ranked_channels: list[tuple[float, dict]] = []
-    for entry in channels:
-        seed = dict(entry.get("seed") or {})
-        memory = dict(entry.get("memory_seed") or {})
-        title = str(((entry.get("channel") or {}).get("title")) or "").strip()
-        searchable = " ".join(
-            [
-                str(seed.get("niche", "") or ""),
-                str(seed.get("style_notes", "") or ""),
-                " ".join(list(memory.get("proven_keywords") or [])),
-                title,
-            ]
-        ).lower()
-        score = 0.0
-        if topic_tokens:
-            searchable_tokens = set(_extract_catalyst_keywords(searchable, max_items=20))
-            score += len(topic_tokens & searchable_tokens)
-        score += min(4.0, float(entry.get("average_top_video_views", 0) or 0) / 500000.0)
-        ranked_channels.append((score, entry))
-    ranked_channels.sort(key=lambda item: (-item[0], str(((item[1].get("channel") or {}).get("title")) or "").lower()))
-    chosen = [entry for _score, entry in ranked_channels[:4]]
+    playbook = _build_catalyst_reference_playbook(
+        reference_memory=reference_memory,
+        format_preset=format_preset,
+        topic=topic,
+        channel_memory=channel_memory,
+        selected_cluster=selected_cluster,
+    )
+    chosen_titles = set(str(v).strip() for v in list(playbook.get("benchmark_channels") or []) if str(v).strip())
+    chosen = [
+        dict(item)
+        for item in list(payload.get("channels") or [])
+        if isinstance(item, dict)
+        and str(((item.get("channel") or {}).get("title")) or "").strip() in chosen_titles
+    ]
     return aggregate, chosen
 
 
-def _render_catalyst_reference_corpus_context(reference_memory: dict | None = None, format_preset: str = "documentary", topic: str = "") -> str:
-    aggregate, chosen = _select_catalyst_reference_channels(reference_memory=reference_memory, format_preset=format_preset, topic=topic)
+def _render_catalyst_reference_corpus_context(reference_memory: dict | None = None, format_preset: str = "documentary", topic: str = "", channel_memory: dict | None = None, selected_cluster: dict | None = None) -> str:
+    playbook = _build_catalyst_reference_playbook(
+        reference_memory=reference_memory,
+        format_preset=format_preset,
+        topic=topic,
+        channel_memory=channel_memory,
+        selected_cluster=selected_cluster,
+    )
+    aggregate, chosen = _select_catalyst_reference_channels(
+        reference_memory=reference_memory,
+        format_preset=format_preset,
+        topic=topic,
+        channel_memory=channel_memory,
+        selected_cluster=selected_cluster,
+    )
     if not aggregate and not chosen:
         return ""
     parts: list[str] = []
@@ -165,6 +368,14 @@ def _render_catalyst_reference_corpus_context(reference_memory: dict | None = No
         sound = [str(v).strip() for v in list(aggregate.get("sound_learnings") or []) if str(v).strip()]
         if sound:
             parts.append("Cross-channel sound wins: " + "; ".join(sound[:4]))
+    if str(playbook.get("summary", "") or "").strip():
+        parts.append("Reference playbook match: " + _clip_text(str(playbook.get("summary", "") or ""), 320))
+    if list(playbook.get("hook_rewrites") or []):
+        parts.append("Reference hook moves: " + "; ".join(list(playbook.get("hook_rewrites") or [])[:3]))
+    if list(playbook.get("visual_rewrites") or []):
+        parts.append("Reference visual moves: " + "; ".join(list(playbook.get("visual_rewrites") or [])[:3]))
+    if list(playbook.get("packaging_rewrites") or []):
+        parts.append("Reference packaging moves: " + "; ".join(list(playbook.get("packaging_rewrites") or [])[:3]))
     for entry in chosen:
         channel = dict(entry.get("channel") or {})
         seed = dict(entry.get("seed") or {})
@@ -203,7 +414,13 @@ def _score_catalyst_outcome_against_reference(*, session_snapshot: dict, outcome
         or str(outcome_record.get("title_used", "") or "").strip()
         or str(source_video.get("title", "") or "").strip()
     )
-    aggregate, chosen = _select_catalyst_reference_channels(reference_memory=reference_memory, format_preset=format_preset, topic=topic_anchor)
+    aggregate, chosen = _select_catalyst_reference_channels(
+        reference_memory=reference_memory,
+        format_preset=format_preset,
+        topic=topic_anchor,
+        channel_memory=channel_memory,
+        selected_cluster=dict(metadata_pack.get("selected_series_cluster") or {}),
+    )
     chosen_titles = [
         str(((entry.get("channel") or {}).get("title")) or "").strip()
         for entry in list(chosen or [])

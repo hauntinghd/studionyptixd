@@ -208,6 +208,7 @@ from backend_catalyst_learning import (
     _update_catalyst_channel_memory,
 )
 from backend_catalyst_reference import (
+    _build_catalyst_reference_playbook,
     _render_catalyst_channel_memory_context,
     _render_catalyst_reference_corpus_context,
     _score_catalyst_outcome_against_reference,
@@ -2201,6 +2202,13 @@ def _longform_build_publish_package_candidates(
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     channel_memory = dict(series_context.get("memory_view") or {})
     cluster_playbook = dict(series_context.get("cluster_playbook") or {})
+    reference_playbook = _build_catalyst_reference_playbook(
+        reference_memory=_catalyst_reference_memory,
+        format_preset=format_preset,
+        topic=effective_topic,
+        channel_memory=channel_memory,
+        selected_cluster=selected_cluster,
+    )
     rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
     best_cluster = dict(cluster_playbook.get("best_cluster") or {})
     series_anchor = _clip_text(str(channel_memory.get("series_anchor", "") or series_anchor_override or ""), 120)
@@ -2220,6 +2228,11 @@ def _longform_build_publish_package_candidates(
     ]
     weighted_packaging_rewrites = [str(v).strip() for v in list(channel_memory.get("reference_packaging_rewrites") or []) if str(v).strip()]
     weighted_next_moves = [str(v).strip() for v in list(channel_memory.get("reference_next_video_moves") or channel_memory.get("next_video_moves") or []) if str(v).strip()]
+    reference_packaging_rewrites = [str(v).strip() for v in list(reference_playbook.get("packaging_rewrites") or []) if str(v).strip()]
+    reference_next_moves = [str(v).strip() for v in list(reference_playbook.get("next_video_moves") or []) if str(v).strip()]
+    reference_hook_rewrites = [str(v).strip() for v in list(reference_playbook.get("hook_rewrites") or []) if str(v).strip()]
+    reference_visual_rewrites = [str(v).strip() for v in list(reference_playbook.get("visual_rewrites") or []) if str(v).strip()]
+    reference_proven_keywords = [str(v).strip() for v in list(reference_playbook.get("proven_keywords") or []) if str(v).strip()]
     cluster_next_moves = [str(v).strip() for v in list(cluster_playbook.get("next_run_moves") or []) if str(v).strip()]
     cluster_winning_patterns = [str(v).strip() for v in list(cluster_playbook.get("winning_patterns") or []) if str(v).strip()]
     best_cluster_keywords = [str(v).strip() for v in list(best_cluster.get("keywords") or []) if str(v).strip()]
@@ -2282,6 +2295,8 @@ def _longform_build_publish_package_candidates(
         keyword_bonus = 0
         if any(keyword.lower() in value.lower() for keyword in list(channel_memory.get("proven_keywords") or [])[:6]):
             keyword_bonus += 6
+        if any(keyword.lower() in value.lower() for keyword in reference_proven_keywords[:8]):
+            keyword_bonus += 5
         if any(keyword.lower() in value.lower() for keyword in promoted_archetype_keywords[:6]):
             keyword_bonus += 5
         if any(keyword.lower() in value.lower() for keyword in demoted_archetype_keywords[:6]):
@@ -2290,7 +2305,13 @@ def _longform_build_publish_package_candidates(
             keyword_bonus += 8
         novelty = _catalyst_title_novelty_score(value, source_title=source_title, recent_titles=channel_title_memory)
         candidate_score = novelty + keyword_bonus
-        if weighted_packaging_rewrites and any(token.lower() in value.lower() for token in _extract_catalyst_keywords(" ".join(weighted_packaging_rewrites), max_items=10)):
+        if (weighted_packaging_rewrites or reference_packaging_rewrites) and any(
+            token.lower() in value.lower()
+            for token in _extract_catalyst_keywords(
+                " ".join([*weighted_packaging_rewrites, *reference_packaging_rewrites]),
+                max_items=12,
+            )
+        ):
             candidate_score += 4
         title_candidates.append((value, candidate_score))
     title_candidates.sort(key=lambda row: row[1], reverse=True)
@@ -2317,10 +2338,12 @@ def _longform_build_publish_package_candidates(
         *list(source_analysis.get("description_angles") or []),
         *cluster_next_moves[:2],
         *weighted_next_moves[:2],
+        *reference_next_moves[:2],
         cluster_follow_rule,
         archetype_memory_summary,
         archetype_hook_rule,
         archetype_packaging_rule,
+        *reference_hook_rewrites[:2],
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_description_variants(
             source_bundle or {"title": effective_topic},
@@ -2338,8 +2361,10 @@ def _longform_build_publish_package_candidates(
         *list(source_analysis.get("thumbnail_angles") or []),
         *cluster_winning_patterns[:2],
         *weighted_packaging_rewrites[:2],
+        *reference_packaging_rewrites[:2],
         *cluster_next_moves[:1],
         *weighted_next_moves[:2],
+        *reference_visual_rewrites[:2],
         archetype_memory_summary,
         archetype_visual_rule,
         archetype_packaging_rule,
@@ -2366,6 +2391,7 @@ def _longform_build_publish_package_candidates(
         package_subject[:32].replace(" ", "_").lower(),
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:10] if str(tag).strip()],
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(channel_memory.get("proven_keywords") or [])[:6] if str(tag).strip()],
+        *[str(tag).strip().replace(" ", "_").lower() for tag in reference_proven_keywords[:8] if str(tag).strip()],
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(selected_cluster.get("keywords") or [])[:6] if str(tag).strip()],
     ]:
         value = str(candidate or "").strip()
@@ -6875,6 +6901,13 @@ async def _build_shorts_catalyst_extra_instructions(
     archetype_hook_rule = str(memory_public.get("archetype_hook_rule", "") or "").strip()
     archetype_visual_rule = str(memory_public.get("archetype_visual_rule", "") or "").strip()
     archetype_packaging_rule = str(memory_public.get("archetype_packaging_rule", "") or "").strip()
+    reference_playbook = _build_catalyst_reference_playbook(
+        reference_memory=_catalyst_reference_memory,
+        format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
+        topic=topic,
+        channel_memory=memory_public,
+        selected_cluster=selected_cluster,
+    )
 
     parts: list[str] = [
         "CATALYST SHORTS CHANNEL MODE: Build a NEW short in the same arena as the connected channel. Do not remake or lightly paraphrase an existing upload.",
@@ -6913,6 +6946,18 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Archetype visual rule: " + _clip_text(archetype_visual_rule, 220))
     if archetype_packaging_rule:
         parts.append("Archetype packaging rule: " + _clip_text(archetype_packaging_rule, 220))
+    if str(reference_playbook.get("summary", "") or "").strip():
+        parts.append("Reference playbook match: " + _clip_text(str(reference_playbook.get("summary", "") or ""), 280))
+    if list(reference_playbook.get("benchmark_channels") or []):
+        parts.append("Reference benchmark channels: " + ", ".join(list(reference_playbook.get("benchmark_channels") or [])[:3]))
+    if list(reference_playbook.get("hook_rewrites") or []):
+        parts.append("Reference hook moves: " + "; ".join(list(reference_playbook.get("hook_rewrites") or [])[:3]))
+    if list(reference_playbook.get("visual_rewrites") or []):
+        parts.append("Reference visual moves: " + "; ".join(list(reference_playbook.get("visual_rewrites") or [])[:3]))
+    if list(reference_playbook.get("packaging_rewrites") or []):
+        parts.append("Reference packaging moves: " + "; ".join(list(reference_playbook.get("packaging_rewrites") or [])[:3]))
+    if list(reference_playbook.get("next_video_moves") or []):
+        parts.append("Reference next-video moves: " + "; ".join(list(reference_playbook.get("next_video_moves") or [])[:3]))
     if memory_context:
         parts.append(memory_context)
     rewrite_summary = str(rewrite_pressure.get("summary", "") or "").strip()
@@ -7421,7 +7466,6 @@ async def _build_source_performance_analysis(
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 1200)
     memory_view = dict(series_context.get("memory_view") or {})
     cluster_playbook = dict(series_context.get("cluster_playbook") or {})
-    cluster_playbook = dict(series_context.get("cluster_playbook") or {})
     heuristic = _heuristic_source_performance_analysis(
         source_bundle=source_bundle,
         analytics_notes=analytics_notes,
@@ -7434,6 +7478,8 @@ async def _build_source_performance_analysis(
         reference_memory=_catalyst_reference_memory,
         format_preset=format_preset,
         topic=topic or input_title or input_description,
+        channel_memory=memory_view,
+        selected_cluster=selected_cluster,
     )
     system_prompt = (
         "You are a YouTube growth strategist for NYPTID Studio. "
@@ -7496,6 +7542,7 @@ async def _derive_longform_seed_from_source(
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 1200)
     memory_view = dict(series_context.get("memory_view") or {})
+    cluster_playbook = dict(series_context.get("cluster_playbook") or {})
     channel_title_memory = [str(v).strip() for v in list((channel_context or {}).get("recent_upload_titles") or []) if str(v).strip()]
     channel_title_memory.extend(str(v).strip() for v in list((channel_context or {}).get("top_video_titles") or []) if str(v).strip())
     channel_title_memory.extend(str(v).strip() for v in list(memory_view.get("recent_selected_titles") or []) if str(v).strip())
@@ -7510,6 +7557,8 @@ async def _derive_longform_seed_from_source(
         reference_memory=_catalyst_reference_memory,
         format_preset=format_preset,
         topic=source_title,
+        channel_memory=memory_view,
+        selected_cluster=selected_cluster,
     )
     system_prompt = (
         "You are a faceless YouTube strategist for NYPTID Studio. "
