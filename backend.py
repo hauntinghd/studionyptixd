@@ -2204,6 +2204,10 @@ def _longform_build_publish_package_candidates(
     rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
     best_cluster = dict(cluster_playbook.get("best_cluster") or {})
     series_anchor = _clip_text(str(channel_memory.get("series_anchor", "") or series_anchor_override or ""), 120)
+    archetype_label = _clip_text(str(channel_memory.get("archetype_label", "") or selected_cluster.get("archetype_label", "") or ""), 120)
+    archetype_hook_rule = _clip_text(str(channel_memory.get("archetype_hook_rule", "") or selected_cluster.get("archetype_hook_rule", "") or ""), 220)
+    archetype_visual_rule = _clip_text(str(channel_memory.get("archetype_visual_rule", "") or selected_cluster.get("archetype_visual_rule", "") or ""), 220)
+    archetype_packaging_rule = _clip_text(str(channel_memory.get("archetype_packaging_rule", "") or selected_cluster.get("archetype_packaging_rule", "") or ""), 220)
     channel_title_memory = [
         str(v).strip()
         for v in [
@@ -2238,6 +2242,14 @@ def _longform_build_publish_package_candidates(
                 f"What {package_subject} Is Really Doing Behind the Scenes",
             ]
             if pressure_primary_focus in {"hook", "packaging"} or weighted_packaging_rewrites
+            else []
+        ),
+        *(
+            [
+                f"{package_subject}: The Hidden Edge Most People Miss",
+                f"The Truth About {package_subject} That Changes Everything",
+            ]
+            if archetype_label in {"Trading Execution", "Dark Psychology", "Power History"}
             else []
         ),
         *[
@@ -2297,6 +2309,8 @@ def _longform_build_publish_package_candidates(
         *cluster_next_moves[:2],
         *weighted_next_moves[:2],
         cluster_follow_rule,
+        archetype_hook_rule,
+        archetype_packaging_rule,
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_description_variants(
             source_bundle or {"title": effective_topic},
@@ -2316,6 +2330,8 @@ def _longform_build_publish_package_candidates(
         *weighted_packaging_rewrites[:2],
         *cluster_next_moves[:1],
         *weighted_next_moves[:2],
+        archetype_visual_rule,
+        archetype_packaging_rule,
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_thumbnail_angles(
             source_bundle or {"title": effective_topic},
@@ -2335,6 +2351,7 @@ def _longform_build_publish_package_candidates(
         format_preset,
         "nyptid",
         "longform",
+        archetype_label[:32].replace(" ", "_").lower() if archetype_label else "",
         package_subject[:32].replace(" ", "_").lower(),
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:10] if str(tag).strip()],
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(channel_memory.get("proven_keywords") or [])[:6] if str(tag).strip()],
@@ -6843,6 +6860,10 @@ async def _build_shorts_catalyst_extra_instructions(
     rewrite_pressure = dict(memory_public.get("rewrite_pressure") or _catalyst_rewrite_pressure_profile(memory_public))
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320)
+    archetype_label = str(memory_public.get("archetype_label", "") or "").strip()
+    archetype_hook_rule = str(memory_public.get("archetype_hook_rule", "") or "").strip()
+    archetype_visual_rule = str(memory_public.get("archetype_visual_rule", "") or "").strip()
+    archetype_packaging_rule = str(memory_public.get("archetype_packaging_rule", "") or "").strip()
 
     parts: list[str] = [
         "CATALYST SHORTS CHANNEL MODE: Build a NEW short in the same arena as the connected channel. Do not remake or lightly paraphrase an existing upload.",
@@ -6873,6 +6894,14 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append(cluster_context)
     if list(selected_cluster.get("keywords") or []):
         parts.append("Matched arc keywords: " + ", ".join(list(selected_cluster.get("keywords") or [])[:6]))
+    if archetype_label:
+        parts.append(f"Matched Catalyst archetype: {archetype_label}.")
+    if archetype_hook_rule:
+        parts.append("Archetype hook rule: " + _clip_text(archetype_hook_rule, 220))
+    if archetype_visual_rule:
+        parts.append("Archetype visual rule: " + _clip_text(archetype_visual_rule, 220))
+    if archetype_packaging_rule:
+        parts.append("Archetype packaging rule: " + _clip_text(archetype_packaging_rule, 220))
     if memory_context:
         parts.append(memory_context)
     rewrite_summary = str(rewrite_pressure.get("summary", "") or "").strip()

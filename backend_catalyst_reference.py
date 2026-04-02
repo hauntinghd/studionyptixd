@@ -27,8 +27,19 @@ def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_o
         if public.get("niche_keywords"):
             niche_line += " (" + ", ".join(list(public.get("niche_keywords") or [])[:6]) + ")"
         parts.append(niche_line + ".")
+    if public.get("archetype_label"):
+        archetype_line = f"Detected Catalyst archetype: {str(public.get('archetype_label', '')).strip()}"
+        if public.get("archetype_keywords"):
+            archetype_line += " (" + ", ".join(list(public.get("archetype_keywords") or [])[:6]) + ")"
+        parts.append(archetype_line + ".")
     if public.get("niche_follow_up_rule"):
         parts.append("Niche follow-up rule: " + _clip_text(str(public.get("niche_follow_up_rule", "") or ""), 220))
+    if public.get("archetype_hook_rule"):
+        parts.append("Archetype hook rule: " + _clip_text(str(public.get("archetype_hook_rule", "") or ""), 220))
+    if public.get("archetype_visual_rule"):
+        parts.append("Archetype visual rule: " + _clip_text(str(public.get("archetype_visual_rule", "") or ""), 220))
+    if public.get("archetype_packaging_rule"):
+        parts.append("Archetype packaging rule: " + _clip_text(str(public.get("archetype_packaging_rule", "") or ""), 220))
     if int(public.get("outcome_count", 0) or 0) > 0:
         parts.append(
             f"Measured outcomes logged: {int(public.get('outcome_count', 0) or 0)}. "

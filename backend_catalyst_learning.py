@@ -5,6 +5,7 @@ from backend_catalyst_core import (
     _dedupe_preserve_order,
     _catalyst_channel_memory_public_view,
     _catalyst_extract_series_anchor,
+    _catalyst_infer_archetype,
     _catalyst_infer_niche,
     _catalyst_outcome_weight,
     _catalyst_series_memory_key,
@@ -156,6 +157,14 @@ def _update_catalyst_channel_memory(
         " ".join(str(v).strip() for v in list(channel_context.get("recent_upload_titles") or [])[:6] if str(v).strip()),
         format_preset=format_preset,
     )
+    archetype = _catalyst_infer_archetype(
+        selected_title,
+        source_title,
+        " ".join(str(v).strip() for v in list(package.get("selected_tags") or []) if str(v).strip()),
+        " ".join(str(v).strip() for v in list(channel_context.get("recent_upload_titles") or [])[:6] if str(v).strip()),
+        niche_key=str(niche.get("key", "") or ""),
+        format_preset=format_preset,
+    )
     series_anchor = _catalyst_extract_series_anchor(
         selected_title,
         source_title,
@@ -183,6 +192,19 @@ def _update_catalyst_channel_memory(
             max_chars=40,
         ),
         "niche_follow_up_rule": str(niche.get("follow_up_rule", "") or updated.get("niche_follow_up_rule", "") or ""),
+        "archetype_key": str(archetype.get("key", "") or updated.get("archetype_key", "") or ""),
+        "archetype_label": str(archetype.get("label", "") or updated.get("archetype_label", "") or ""),
+        "archetype_confidence": round(float(archetype.get("confidence", 0.0) or updated.get("archetype_confidence", 0.0) or 0.0), 2),
+        "archetype_keywords": _dedupe_preserve_order(
+            [*list(archetype.get("keywords") or []), *list(updated.get("archetype_keywords") or [])],
+            max_items=8,
+            max_chars=40,
+        ),
+        "archetype_hook_rule": str(archetype.get("hook_rule", "") or updated.get("archetype_hook_rule", "") or ""),
+        "archetype_pace_rule": str(archetype.get("pace_rule", "") or updated.get("archetype_pace_rule", "") or ""),
+        "archetype_visual_rule": str(archetype.get("visual_rule", "") or updated.get("archetype_visual_rule", "") or ""),
+        "archetype_sound_rule": str(archetype.get("sound_rule", "") or updated.get("archetype_sound_rule", "") or ""),
+        "archetype_packaging_rule": str(archetype.get("packaging_rule", "") or updated.get("archetype_packaging_rule", "") or ""),
         "selected_cluster_label": str(selected_cluster.get("label", "") or updated.get("selected_cluster_label", "") or ""),
         "selected_cluster_key": str(selected_cluster.get("key", "") or updated.get("selected_cluster_key", "") or ""),
         "series_anchor": series_anchor,
@@ -216,6 +238,7 @@ def _update_catalyst_channel_memory(
         "Catalyst has "
         + f"{run_count} run{'s' if run_count != 1 else ''} on this channel lane. "
         + (f"Niche: {str(updated.get('niche_label', '') or '').strip()}. " if str(updated.get("niche_label", "") or "").strip() else "")
+        + (f"Archetype: {str(updated.get('archetype_label', '') or '').strip()}. " if str(updated.get("archetype_label", "") or "").strip() else "")
         + (f"Series anchor: {str(updated.get('series_anchor', '') or '').strip()}. " if str(updated.get("series_anchor", "") or "").strip() else "")
         + (f"Matched cluster: {str(updated.get('selected_cluster_label', '') or '').strip()}. " if str(updated.get("selected_cluster_label", "") or "").strip() else "")
         + ("Keep " + ", ".join(list(updated.get("proven_keywords") or [])[:6]) + ". " if list(updated.get("proven_keywords") or []) else "")
@@ -237,6 +260,15 @@ def _update_catalyst_channel_memory(
             "niche_confidence": round(float(updated.get("niche_confidence", 0.0) or 0.0), 2),
             "niche_keywords": _dedupe_preserve_order([*list(updated.get("niche_keywords") or []), *list(series_bucket.get("niche_keywords") or [])], max_items=8, max_chars=40),
             "niche_follow_up_rule": str(updated.get("niche_follow_up_rule", "") or ""),
+            "archetype_key": str(updated.get("archetype_key", "") or ""),
+            "archetype_label": str(updated.get("archetype_label", "") or ""),
+            "archetype_confidence": round(float(updated.get("archetype_confidence", 0.0) or 0.0), 2),
+            "archetype_keywords": _dedupe_preserve_order([*list(updated.get("archetype_keywords") or []), *list(series_bucket.get("archetype_keywords") or [])], max_items=8, max_chars=40),
+            "archetype_hook_rule": str(updated.get("archetype_hook_rule", "") or ""),
+            "archetype_pace_rule": str(updated.get("archetype_pace_rule", "") or ""),
+            "archetype_visual_rule": str(updated.get("archetype_visual_rule", "") or ""),
+            "archetype_sound_rule": str(updated.get("archetype_sound_rule", "") or ""),
+            "archetype_packaging_rule": str(updated.get("archetype_packaging_rule", "") or ""),
             "run_count": series_run_count,
             "last_session_id": str(session_snapshot.get("session_id", "") or ""),
             "preferred_transition_style": str(motion_strategy.get("transition_style", "") or series_bucket.get("preferred_transition_style", "") or ""),
@@ -265,6 +297,7 @@ def _update_catalyst_channel_memory(
         series_public = _catalyst_channel_memory_public_view(series_bucket, series_anchor_override=series_anchor)
         series_bucket["summary"] = _clip_text(
             f"Catalyst has {series_run_count} run{'s' if series_run_count != 1 else ''} inside {series_anchor}. "
+            + (f"Archetype: {str(series_bucket.get('archetype_label', '') or '').strip()}. " if str(series_bucket.get("archetype_label", "") or "").strip() else "")
             + ("Best hook lesson: " + str((list(series_public.get("hook_wins") or []) or [""])[0]) + ". " if list(series_public.get("hook_wins") or []) else "")
             + ("Current watchout: " + str((list(series_public.get('retention_watchouts') or []) or [''])[0]) + ". " if list(series_public.get("retention_watchouts") or []) else "")
             + ("Next move: " + str((list(series_public.get("next_video_moves") or []) or [""])[0]) + "." if list(series_public.get("next_video_moves") or []) else ""),

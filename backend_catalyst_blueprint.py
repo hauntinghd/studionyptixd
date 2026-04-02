@@ -44,6 +44,14 @@ def _heuristic_catalyst_edit_blueprint(
     rewrite_pressure = dict(memory_view.get("rewrite_pressure") or {})
     niche_key = str(memory_view.get("niche_key", "") or "").strip().lower()
     series_anchor = _clip_text(str(memory_view.get("series_anchor", "") or ""), 120)
+    archetype_key = str(memory_view.get("archetype_key", "") or "").strip().lower()
+    archetype_label = _clip_text(str(memory_view.get("archetype_label", "") or ""), 120)
+    archetype_keywords = [str(v).strip() for v in list(memory_view.get("archetype_keywords") or []) if str(v).strip()]
+    archetype_hook_rule = _clip_text(str(memory_view.get("archetype_hook_rule", "") or ""), 220)
+    archetype_pace_rule = _clip_text(str(memory_view.get("archetype_pace_rule", "") or ""), 220)
+    archetype_visual_rule = _clip_text(str(memory_view.get("archetype_visual_rule", "") or ""), 220)
+    archetype_sound_rule = _clip_text(str(memory_view.get("archetype_sound_rule", "") or ""), 220)
+    archetype_packaging_rule = _clip_text(str(memory_view.get("archetype_packaging_rule", "") or ""), 220)
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
@@ -57,6 +65,10 @@ def _heuristic_catalyst_edit_blueprint(
     title_hints = _dedupe_preserve_order([*title_hints, *list(selected_cluster.get("sample_titles") or [])[:3]], max_items=6, max_chars=160)
     sound_profile, music_profile = _catalyst_default_sound_profile(topic, input_title, format_preset)
     transition_style = "snap" if is_recap_lane else ("cinematic" if format_preset in {"documentary", "explainer", "recap"} else "smooth")
+    if archetype_key == "trading_execution":
+        transition_style = "crisp"
+    elif archetype_key in {"dark_psychology", "power_history"}:
+        transition_style = "tension"
     chapter_blueprints = _heuristic_catalyst_chapter_blueprints(
         chapter_count=chapter_count,
         subject=subject,
@@ -103,6 +115,10 @@ def _heuristic_catalyst_edit_blueprint(
     hook_open_loop = _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180)
     hook_first30 = _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180)
     shock_device = "Use one unsettling or counterintuitive reveal within the first 15 seconds."
+    if archetype_hook_rule and not is_recap_lane:
+        hook_promise = _clip_text(archetype_hook_rule, 220)
+    if archetype_pace_rule and not is_recap_lane and not weighted_next_moves:
+        hook_open_loop = _clip_text(archetype_pace_rule, 180)
     if is_recap_lane:
         hook_promise = _clip_text(
             reference_hook_rewrites[0]
@@ -128,6 +144,12 @@ def _heuristic_catalyst_edit_blueprint(
         hook_open_loop = _clip_text(rewrite_priorities[0] if rewrite_priorities else hook_open_loop, 180)
         hook_first30 = _clip_text("Shorten setup brutally. Promise, proof, and reversal must all appear in the first 30 seconds.", 180)
         shock_device = "Use one counterintuitive reveal or disturbing contradiction in the first 10 to 15 seconds."
+    elif archetype_key == "dark_psychology":
+        shock_device = "Use one intimate contradiction or disturbing subconscious reveal in the first 10 to 15 seconds."
+    elif archetype_key == "trading_execution":
+        shock_device = "Use one money consequence, execution mistake, or setup edge in the first 10 to 15 seconds."
+    elif archetype_key == "power_history":
+        shock_device = "Use one power shift, strike, or leadership consequence in the first 10 to 15 seconds."
     if is_recap_lane:
         recap_arc_moves = _dedupe_preserve_order([
             niche_follow_up_rule,
@@ -171,6 +193,7 @@ def _heuristic_catalyst_edit_blueprint(
         "macro cutaways that reveal the hidden mechanism",
         "miniature-world system sweeps for context",
         "sharp pattern interrupts when the point changes",
+        archetype_visual_rule,
         rewrite_priorities[1] if len(rewrite_priorities) > 1 else "",
         *reference_visual_rewrites[:2],
         *visual_wins[:2],
@@ -179,6 +202,7 @@ def _heuristic_catalyst_edit_blueprint(
         "clean HUD-style overlays only when they clarify the beat",
         "diagram callouts that explain one mechanism at a time",
         "before-versus-after or myth-versus-reality comparisons",
+        archetype_packaging_rule,
         rewrite_priorities[2] if len(rewrite_priorities) > 2 else "",
         *reference_visual_rewrites[:2],
         *packaging_wins[:1],
@@ -188,6 +212,7 @@ def _heuristic_catalyst_edit_blueprint(
         "Stay obviously 3D and intentionally designed, not live-action.",
         "Keep one dominant subject per frame and one dominant lighting cue.",
         "Use contrast and scale shifts to reset attention.",
+        archetype_visual_rule,
         "Avoid reusing the same isolated hero-object stage in consecutive scenes." if pressure_scores.get("visuals", 0) >= 60 else "",
         *reference_visual_rewrites[:2],
         *visual_watchouts[:2],
@@ -197,6 +222,7 @@ def _heuristic_catalyst_edit_blueprint(
         "Use trailer-grade impacts only on real reveals, not every scene.",
         "Keep the ambience bed present but under narration.",
         "Accent chapter turns with sharp motion-graphic sweeps and low-end hits.",
+        archetype_sound_rule,
         "Use more deliberate silence pockets before the strongest reveals." if pressure_scores.get("sound", 0) >= 60 else "",
         *reference_sound_rewrites[:2],
         *sound_wins[:2],
@@ -206,12 +232,14 @@ def _heuristic_catalyst_edit_blueprint(
         "Confident, controlled, and slightly ominous.",
         "Short declarative lines in the first 20 to 30 seconds.",
         "Speed up on mechanism beats and slow slightly on payoffs.",
+        archetype_hook_rule,
     ], max_items=4, max_chars=160)
     scoring_rubric = _dedupe_preserve_order([
         "First 15 seconds must promise a concrete payoff.",
         "Every scene must visualize the exact narration beat, not a generic metaphor.",
         "Every chapter needs at least one escalation and one pattern interrupt.",
         "Packaging must stay in the same arena while avoiding title repetition.",
+        archetype_packaging_rule,
         rewrite_priorities[0] if rewrite_priorities else "",
         *reference_hook_rewrites[:1],
         *reference_packaging_rewrites[:1],
@@ -222,9 +250,42 @@ def _heuristic_catalyst_edit_blueprint(
     ], max_items=8, max_chars=180)
     niche_execution_notes = _dedupe_preserve_order([
         niche_follow_up_rule,
+        f"Archetype: {archetype_label}." if archetype_label else "",
+        archetype_hook_rule,
+        archetype_pace_rule,
+        archetype_visual_rule,
+        archetype_sound_rule,
+        archetype_packaging_rule,
         _render_catalyst_series_cluster_context(selected_cluster),
         f"Preserve the series anchor {recap_subject} across hook, visuals, and packaging." if is_recap_lane and recap_subject else "",
     ], max_items=4, max_chars=180)
+    if archetype_key == "trading_execution" and not is_recap_lane:
+        camera_language = _dedupe_preserve_order([
+            "chart-level push-ins and execution-proof closeups",
+            "entry-versus-exit contrasts with immediate stakes",
+            *camera_language,
+        ], max_items=7, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "clean chart overlays and liquidity callouts only when they prove the setup",
+            "risk-versus-reward comparisons instead of generic financial luxury visuals",
+            *motion_graphics,
+        ], max_items=7, max_chars=180)
+    elif archetype_key == "dark_psychology" and not is_recap_lane:
+        camera_language = _dedupe_preserve_order([
+            "intimate macro moves into mental symbols and hidden mechanisms",
+            "stark contrast resets that feel invasive and personal",
+            *camera_language,
+        ], max_items=7, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "thought-pattern, subconscious, and contradiction overlays only when they sharpen the emotional point",
+            *motion_graphics,
+        ], max_items=7, max_chars=180)
+    elif archetype_key == "power_history" and not is_recap_lane:
+        camera_language = _dedupe_preserve_order([
+            "map-room sweeps and consequence-led push-ins on leaders or conflict zones",
+            "corridor-of-power staging with clear cause-versus-fallout transitions",
+            *camera_language,
+        ], max_items=7, max_chars=160)
     if is_recap_lane:
         camera_language = _dedupe_preserve_order([
             "kinetic manga-recap push-ins on power beats",

@@ -203,6 +203,122 @@ _CATALYST_NICHE_RULES = {
 }
 
 
+_CATALYST_ARCHETYPE_RULES = {
+    "recap_escalation": {
+        "label": "Recap Escalation",
+        "keywords": [
+            "manga", "manhwa", "manhua", "webtoon", "recap", "chapter", "murim", "isekai",
+            "cultivation", "regressor", "reincarnated", "hunter", "necromancer", "dungeon",
+            "ranker", "overpowered", "wrecker", "driver", "betrayal", "system",
+        ],
+        "hook_rule": "Open on the most addictive power turn, betrayal, reveal, or chapter escalation before any recap setup.",
+        "pace_rule": "Escalate faster than the source. Reset attention with hard turn-after-turn momentum instead of slow explanation.",
+        "visual_rule": "Use unmistakable series-world iconography, power hierarchy, rivals, weapons, monsters, and system-energy cues instead of generic documentary objects.",
+        "sound_rule": "Use trailer-grade impacts, energy swells, and rank-jump hits on real escalation beats.",
+        "packaging_rule": "Package around one dominant character, symbol, or power clash that instantly sells the chapter-turn.",
+    },
+    "systems_documentary": {
+        "label": "Systems Documentary",
+        "keywords": [
+            "business", "company", "industry", "startup", "factory", "machine", "mechanism",
+            "supply", "chain", "economy", "finance", "capital", "billion", "market", "system",
+            "infrastructure", "logistics", "process", "coca-cola", "manufacturing",
+        ],
+        "hook_rule": "Open on the hidden mechanism, leverage point, or bottleneck that quietly drives the whole system.",
+        "pace_rule": "Move from hidden driver to visible consequence fast. Every section should reveal a new system layer or incentive clash.",
+        "visual_rule": "Use engineered 3D cutaways, miniature worlds, diagram-led reveals, infrastructure sweeps, and cause-effect staging.",
+        "sound_rule": "Use precise mechanical impacts, restrained low-end pressure, and controlled silence before key reveals.",
+        "packaging_rule": "Package around one engineered system or machine with one crystal-clear consequence and strong contrast.",
+    },
+    "dark_psychology": {
+        "label": "Dark Psychology",
+        "keywords": [
+            "brain", "mind", "memory", "attention", "psychology", "manipulation", "subconscious",
+            "habit", "behavior", "secret", "dark", "disturbing", "lies", "blind", "spot",
+            "emotion", "decision", "trauma", "dopamine",
+        ],
+        "hook_rule": "Open on an unsettling contradiction about what the mind is doing to the viewer without them realizing it.",
+        "pace_rule": "Deliver a sharp first claim, then chain hidden mechanisms into escalating personal consequences.",
+        "visual_rule": "Use controlled surreal 3D mind-worlds, neural mechanisms, emotional symbols, and clean dark-stage contrast instead of textbook diagrams.",
+        "sound_rule": "Use tension swells, ominous pulses, and silence pockets that make the reveal feel invasive and personal.",
+        "packaging_rule": "Package around one disturbing mental symbol, one clean emotional contradiction, and one obvious personal consequence.",
+    },
+    "trading_execution": {
+        "label": "Trading Execution",
+        "keywords": [
+            "trading", "day trading", "daytrading", "chart", "setup", "liquidity", "entry",
+            "exit", "risk", "market", "stock", "stocks", "options", "spy", "nasdaq",
+            "futures", "trade", "scalp", "breakout", "stop loss",
+        ],
+        "hook_rule": "Open on the money consequence, execution mistake, or setup edge immediately. Show what was won, lost, or missed.",
+        "pace_rule": "Keep every beat tied to proof, setup quality, risk, and consequence. Skip broad motivation or wealth fluff.",
+        "visual_rule": "Use premium trading-desk 3D scenes, chart structures, liquidity maps, entry/exit comparisons, and execution proof.",
+        "sound_rule": "Use crisp ticks, fills, alert stabs, and controlled tension pulses around setup confirmations and failures.",
+        "packaging_rule": "Package around one trade setup, one chart-level, or one mistake-versus-edge contrast that feels immediately monetizable.",
+    },
+    "power_history": {
+        "label": "Power History",
+        "keywords": [
+            "history", "war", "empire", "leader", "iran", "killed", "assassin", "military",
+            "regime", "operation", "border", "strategy", "nation", "power", "conflict",
+            "geopolitics", "coup", "missile", "strike",
+        ],
+        "hook_rule": "Open on the consequence of one decision, strike, betrayal, or power shift before backstory.",
+        "pace_rule": "Chain cause and effect aggressively. Every new beat should escalate stakes, power, or fallout.",
+        "visual_rule": "Use stylized map-room systems, leader tokens, military geometry, corridor-of-power staging, and strategy boards.",
+        "sound_rule": "Use low percussion, pressure swells, and hard reveal hits when power shifts become irreversible.",
+        "packaging_rule": "Package around one leader, map zone, strike marker, or power symbol with strong red-vs-neutral contrast.",
+    },
+    "science_mechanism": {
+        "label": "Science Mechanism",
+        "keywords": [
+            "science", "biology", "physics", "cell", "cells", "neuron", "neurons", "brain",
+            "heart", "body", "memory", "disease", "immune", "engineering", "reaction",
+            "molecule", "mechanism", "medical", "health",
+        ],
+        "hook_rule": "Open on the hidden physical mechanism or body-system behavior that feels surprising or counterintuitive.",
+        "pace_rule": "Move from visualized mechanism to real-world consequence with minimal detours.",
+        "visual_rule": "Use premium 3D cutaways, process diagrams, macro system views, and cause-effect staging instead of flat textbook renders.",
+        "sound_rule": "Use precision pulses, subtle mechanical-scientific accents, and payoff hits when the mechanism clicks into place.",
+        "packaging_rule": "Package around one striking mechanism, organ-system, or before-versus-after scientific contradiction.",
+    },
+    "gaming_breakdown": {
+        "label": "Gaming Breakdown",
+        "keywords": [
+            "game", "gaming", "boss", "build", "meta", "speedrun", "fps", "rpg",
+            "minecraft", "fortnite", "league", "valorant", "roblox", "weapon", "strat",
+            "strategy", "combo", "loadout",
+        ],
+        "hook_rule": "Open on the broken mechanic, impossible advantage, or decisive mistake instantly.",
+        "pace_rule": "Keep each beat tied to a specific strategy shift, exploit, or win-condition change.",
+        "visual_rule": "Use gameplay-derived 3D breakdowns, map positioning, weapon-state comparisons, and decisive action frames.",
+        "sound_rule": "Use crisp digital impacts, fast UI sweeps, and high-energy rhythm without muddying the voiceover.",
+        "packaging_rule": "Package around one decisive mechanic, one unfair advantage, or one before-versus-after gameplay contrast.",
+    },
+    "viral_explainer": {
+        "label": "Viral Explainer",
+        "keywords": [
+            "explained", "breakdown", "story", "why", "how", "hidden", "truth", "secrets",
+            "facts", "behind", "inside",
+        ],
+        "hook_rule": "Open on the strongest hidden truth, reversal, or consequence before broad context.",
+        "pace_rule": "Every 10 to 15 seconds should add a clearer payoff, not just more setup.",
+        "visual_rule": "Use one dominant symbol per beat, fast contrast resets, and readable 3D explanation scenes.",
+        "sound_rule": "Use measured build-up, clean reveal hits, and silence to sharpen the main point.",
+        "packaging_rule": "Package around one dominant payoff and one visual contradiction that makes the viewer click immediately.",
+    },
+}
+
+
+_CATALYST_NICHE_TO_ARCHETYPE = {
+    "manga_recap": "recap_escalation",
+    "day_trading": "trading_execution",
+    "dark_psychology": "dark_psychology",
+    "business_documentary": "systems_documentary",
+    "geopolitics_history": "power_history",
+}
+
+
 def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
     scores: dict[str, int] = {}
     for text in texts:
@@ -257,6 +373,63 @@ def _catalyst_infer_niche(*texts: str, format_preset: str = "") -> dict:
         "confidence": round(confidence, 2),
         "keywords": _dedupe_preserve_order(chosen_hits, max_items=8, max_chars=40),
         "follow_up_rule": str(chosen.get("follow_up_rule", "") or ""),
+    }
+
+
+def _catalyst_infer_archetype(*texts: str, niche_key: str = "", format_preset: str = "") -> dict:
+    normalized_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    combined = " \n ".join(normalized_texts).lower()
+    scored: list[tuple[str, int, list[str]]] = []
+    for archetype_key, spec in _CATALYST_ARCHETYPE_RULES.items():
+        hits: list[str] = []
+        score = 0
+        for raw_keyword in list(spec.get("keywords") or []):
+            keyword = str(raw_keyword or "").strip().lower()
+            if not keyword:
+                continue
+            if keyword in combined:
+                hits.append(keyword)
+                score += 3 if " " in keyword else 2
+        if score > 0:
+            scored.append((archetype_key, score, hits))
+    mapped_niche = str(_CATALYST_NICHE_TO_ARCHETYPE.get(str(niche_key or "").strip().lower()) or "").strip()
+    preset = str(format_preset or "").strip().lower()
+    if mapped_niche:
+        scored.append((mapped_niche, 5, [str(niche_key or "").strip().lower()]))
+    elif preset == "documentary":
+        scored.append(("systems_documentary", 2, ["documentary"]))
+    elif preset == "recap":
+        scored.append(("recap_escalation", 4, ["recap"]))
+    elif preset == "explainer":
+        scored.append(("science_mechanism", 1, ["explainer"]))
+    if not scored:
+        fallback_key = mapped_niche or ("systems_documentary" if preset == "documentary" else ("recap_escalation" if preset == "recap" else "viral_explainer"))
+        fallback = dict(_CATALYST_ARCHETYPE_RULES.get(fallback_key) or {})
+        return {
+            "key": fallback_key,
+            "label": str(fallback.get("label", "") or ""),
+            "confidence": 0.35,
+            "keywords": [],
+            "hook_rule": str(fallback.get("hook_rule", "") or ""),
+            "pace_rule": str(fallback.get("pace_rule", "") or ""),
+            "visual_rule": str(fallback.get("visual_rule", "") or ""),
+            "sound_rule": str(fallback.get("sound_rule", "") or ""),
+            "packaging_rule": str(fallback.get("packaging_rule", "") or ""),
+        }
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    chosen_key, chosen_score, chosen_hits = scored[0]
+    chosen = dict(_CATALYST_ARCHETYPE_RULES.get(chosen_key) or {})
+    confidence = 0.45 if chosen_score <= 3 else (0.72 if chosen_score <= 7 else 0.9)
+    return {
+        "key": chosen_key,
+        "label": str(chosen.get("label", "") or ""),
+        "confidence": round(confidence, 2),
+        "keywords": _dedupe_preserve_order(chosen_hits, max_items=8, max_chars=40),
+        "hook_rule": str(chosen.get("hook_rule", "") or ""),
+        "pace_rule": str(chosen.get("pace_rule", "") or ""),
+        "visual_rule": str(chosen.get("visual_rule", "") or ""),
+        "sound_rule": str(chosen.get("sound_rule", "") or ""),
+        "packaging_rule": str(chosen.get("packaging_rule", "") or ""),
     }
 
 
@@ -327,6 +500,7 @@ def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_vi
             continue
         niche = _catalyst_infer_niche(title, description, " ".join(tags), format_preset="")
         niche_key = str(niche.get("key", "") or "").strip().lower()
+        archetype = _catalyst_infer_archetype(title, description, " ".join(tags), niche_key=niche_key, format_preset="")
         series_anchor = _catalyst_extract_series_anchor(title, description, " ".join(tags), niche_key=niche_key)
         cluster_key = f"series:{_catalyst_series_memory_key(series_anchor)}" if series_anchor else f"niche:{niche_key or 'general'}"
         bucket = dict(cluster_map.get(cluster_key) or {})
@@ -334,8 +508,16 @@ def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_vi
         bucket.setdefault("niche_key", niche_key)
         bucket.setdefault("niche_label", str(niche.get("label", "") or ""))
         bucket.setdefault("niche_follow_up_rule", str(niche.get("follow_up_rule", "") or ""))
+        bucket.setdefault("archetype_key", str(archetype.get("key", "") or ""))
+        bucket.setdefault("archetype_label", str(archetype.get("label", "") or ""))
+        bucket.setdefault("archetype_hook_rule", str(archetype.get("hook_rule", "") or ""))
+        bucket.setdefault("archetype_pace_rule", str(archetype.get("pace_rule", "") or ""))
+        bucket.setdefault("archetype_visual_rule", str(archetype.get("visual_rule", "") or ""))
+        bucket.setdefault("archetype_sound_rule", str(archetype.get("sound_rule", "") or ""))
+        bucket.setdefault("archetype_packaging_rule", str(archetype.get("packaging_rule", "") or ""))
         bucket.setdefault("titles", [])
         bucket.setdefault("keywords", [])
+        bucket.setdefault("archetype_keywords", [])
         bucket.setdefault("video_count", 0)
         bucket.setdefault("views_sum", 0.0)
         bucket.setdefault("ctr_sum", 0.0)
@@ -347,6 +529,7 @@ def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_vi
         bucket["video_count"] = int(bucket.get("video_count", 0) or 0) + 1
         bucket["titles"] = _dedupe_preserve_order([title, *list(bucket.get("titles") or [])], max_items=10, max_chars=160)
         bucket["keywords"] = _dedupe_preserve_order([*_extract_catalyst_keywords(title, description, *tags, max_items=10), *list(bucket.get("keywords") or [])], max_items=10, max_chars=60)
+        bucket["archetype_keywords"] = _dedupe_preserve_order([*list(archetype.get("keywords") or []), *list(bucket.get("archetype_keywords") or [])], max_items=8, max_chars=40)
         views = float(video.get("views", 0.0) or 0.0)
         bucket["views_sum"] = float(bucket.get("views_sum", 0.0) or 0.0) + views
         ctr = float(video.get("impression_click_through_rate", 0.0) or 0.0)
@@ -375,6 +558,13 @@ def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_vi
             "niche_key": str(bucket.get("niche_key", "") or "").strip(),
             "niche_label": str(bucket.get("niche_label", "") or "").strip(),
             "follow_up_rule": str(bucket.get("niche_follow_up_rule", "") or "").strip(),
+            "archetype_key": str(bucket.get("archetype_key", "") or "").strip(),
+            "archetype_label": str(bucket.get("archetype_label", "") or "").strip(),
+            "archetype_hook_rule": str(bucket.get("archetype_hook_rule", "") or "").strip(),
+            "archetype_pace_rule": str(bucket.get("archetype_pace_rule", "") or "").strip(),
+            "archetype_visual_rule": str(bucket.get("archetype_visual_rule", "") or "").strip(),
+            "archetype_sound_rule": str(bucket.get("archetype_sound_rule", "") or "").strip(),
+            "archetype_packaging_rule": str(bucket.get("archetype_packaging_rule", "") or "").strip(),
             "video_count": int(bucket.get("video_count", 0) or 0),
             "average_views": avg_views,
             "average_ctr": avg_ctr,
@@ -382,6 +572,7 @@ def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_vi
             "top_title": str(bucket.get("top_title", "") or "").strip(),
             "sample_titles": _dedupe_preserve_order(list(bucket.get("titles") or []), max_items=4, max_chars=160),
             "keywords": _dedupe_preserve_order(list(bucket.get("keywords") or []), max_items=8, max_chars=60),
+            "archetype_keywords": _dedupe_preserve_order(list(bucket.get("archetype_keywords") or []), max_items=6, max_chars=40),
             "score": round((float(bucket.get("top_views", 0.0) or 0.0) * 0.02) + (avg_views * 0.01) + (avg_ctr * 6.0) + (avg_avp * 2.2) + (int(bucket.get("video_count", 0) or 0) * 5.0), 2),
         })
     clusters.sort(key=lambda row: (-float(row.get("score", 0.0) or 0.0), -int(row.get("video_count", 0) or 0), str(row.get("label", "") or "").lower()))
@@ -465,10 +656,14 @@ def _render_catalyst_series_cluster_context(cluster: dict | None) -> str:
         f"Matched channel series cluster: {str(cluster.get('label', '') or '').strip()}." if str(cluster.get("label", "") or "").strip() else "",
         f"Series anchor: {str(cluster.get('series_anchor', '') or '').strip()}." if str(cluster.get("series_anchor", "") or "").strip() else "",
         f"Cluster niche: {str(cluster.get('niche_label', '') or '').strip()}." if str(cluster.get("niche_label", "") or "").strip() else "",
+        f"Cluster archetype: {str(cluster.get('archetype_label', '') or '').strip()}." if str(cluster.get("archetype_label", "") or "").strip() else "",
         f"Cluster performance snapshot: {int(cluster.get('video_count', 0) or 0)} videos, avg views {int(float(cluster.get('average_views', 0.0) or 0.0)):,}, avg CTR {float(cluster.get('average_ctr', 0.0) or 0.0):.2f}%, avg viewed {float(cluster.get('average_avp', 0.0) or 0.0):.2f}%." if int(cluster.get("video_count", 0) or 0) > 0 else "",
         ("Cluster sample titles: " + ", ".join(list(cluster.get("sample_titles") or [])[:3])) if list(cluster.get("sample_titles") or []) else "",
         ("Cluster keywords: " + ", ".join(list(cluster.get("keywords") or [])[:6])) if list(cluster.get("keywords") or []) else "",
+        ("Cluster archetype cues: " + ", ".join(list(cluster.get("archetype_keywords") or [])[:5])) if list(cluster.get("archetype_keywords") or []) else "",
         ("Cluster follow-up rule: " + _clip_text(str(cluster.get("follow_up_rule", "") or ""), 220)) if str(cluster.get("follow_up_rule", "") or "").strip() else "",
+        ("Cluster hook rule: " + _clip_text(str(cluster.get("archetype_hook_rule", "") or ""), 220)) if str(cluster.get("archetype_hook_rule", "") or "").strip() else "",
+        ("Cluster visual rule: " + _clip_text(str(cluster.get("archetype_visual_rule", "") or ""), 220)) if str(cluster.get("archetype_visual_rule", "") or "").strip() else "",
     ]
     return " ".join(part for part in parts if part).strip()
 
@@ -483,6 +678,14 @@ def _catalyst_compact_cluster_snapshot(cluster: dict | None) -> dict:
         "series_anchor": str(payload.get("series_anchor", "") or "").strip(),
         "niche_key": str(payload.get("niche_key", "") or "").strip(),
         "niche_label": str(payload.get("niche_label", "") or "").strip(),
+        "archetype_key": str(payload.get("archetype_key", "") or "").strip(),
+        "archetype_label": str(payload.get("archetype_label", "") or "").strip(),
+        "archetype_keywords": _dedupe_preserve_order(list(payload.get("archetype_keywords") or []), max_items=6, max_chars=40),
+        "archetype_hook_rule": _clip_text(str(payload.get("archetype_hook_rule", "") or "").strip(), 180),
+        "archetype_pace_rule": _clip_text(str(payload.get("archetype_pace_rule", "") or "").strip(), 180),
+        "archetype_visual_rule": _clip_text(str(payload.get("archetype_visual_rule", "") or "").strip(), 180),
+        "archetype_sound_rule": _clip_text(str(payload.get("archetype_sound_rule", "") or "").strip(), 180),
+        "archetype_packaging_rule": _clip_text(str(payload.get("archetype_packaging_rule", "") or "").strip(), 180),
         "video_count": int(payload.get("video_count", 0) or 0),
         "average_views": float(payload.get("average_views", 0.0) or 0.0),
         "average_ctr": float(payload.get("average_ctr", 0.0) or 0.0),
@@ -580,9 +783,14 @@ def _build_catalyst_cluster_playbook(
             f"Best-performing arc is {str(best.get('label', '') or '').strip()} with avg CTR {float(best.get('average_ctr', 0.0) or 0.0):.2f}% and avg viewed {float(best.get('average_avp', 0.0) or 0.0):.2f}%."
             if str(best.get("label", "") or "").strip()
             else "",
+            f"Winning archetype is {str(best.get('archetype_label', '') or '').strip()}."
+            if str(best.get("archetype_label", "") or "").strip()
+            else "",
             ("Winning arc keywords: " + ", ".join(list(best.get("keywords") or [])[:6])) if list(best.get("keywords") or []) else "",
+            ("Winning archetype cues: " + ", ".join(list(best.get("archetype_keywords") or [])[:5])) if list(best.get("archetype_keywords") or []) else "",
             ("Winning arc sample titles: " + ", ".join(list(best.get("sample_titles") or [])[:3])) if list(best.get("sample_titles") or []) else "",
             _clip_text(str(best.get("follow_up_rule", "") or "").strip(), 220) if str(best.get("follow_up_rule", "") or "").strip() else "",
+            _clip_text(str(best.get("archetype_hook_rule", "") or "").strip(), 180) if str(best.get("archetype_hook_rule", "") or "").strip() else "",
         ],
         max_items=6,
         max_chars=180,
@@ -591,6 +799,9 @@ def _build_catalyst_cluster_playbook(
         [
             f"Underperforming arc is {str(worst.get('label', '') or '').strip()} with avg CTR {float(worst.get('average_ctr', 0.0) or 0.0):.2f}% and avg viewed {float(worst.get('average_avp', 0.0) or 0.0):.2f}%."
             if str(worst.get("label", "") or "").strip()
+            else "",
+            f"Weak archetype is {str(worst.get('archetype_label', '') or '').strip()}."
+            if str(worst.get("archetype_label", "") or "").strip()
             else "",
             ("Weak arc keywords to avoid overusing: " + ", ".join(list(worst.get("keywords") or [])[:6])) if list(worst.get("keywords") or []) else "",
             ("Weak arc sample titles: " + ", ".join(list(worst.get("sample_titles") or [])[:3])) if list(worst.get("sample_titles") or []) else "",
@@ -620,7 +831,10 @@ def _build_catalyst_cluster_playbook(
             if avp_gap_vs_best >= 3.0 and str(selected.get("label", "") or "").strip()
             else "",
             ("Favor these winning arc keywords: " + ", ".join(list(best.get("keywords") or [])[:5])) if list(best.get("keywords") or []) else "",
+            ("Use the winning archetype grammar: " + str(best.get("archetype_label", "") or "").strip()) if str(best.get("archetype_label", "") or "").strip() else "",
             ("Avoid drifting toward these weaker arc cues: " + ", ".join(list(worst.get("keywords") or [])[:5])) if list(worst.get("keywords") or []) else "",
+            _clip_text(str(best.get("archetype_visual_rule", "") or "").strip(), 180) if str(best.get("archetype_visual_rule", "") or "").strip() else "",
+            _clip_text(str(best.get("archetype_packaging_rule", "") or "").strip(), 180) if str(best.get("archetype_packaging_rule", "") or "").strip() else "",
             (
                 f"Measured outcomes currently promote {str(promoted_memory.get('series_anchor', '') or '').strip()}, so borrow its stronger package and hook discipline."
                 if str(promoted_memory.get("series_anchor", "") or "").strip()
@@ -648,6 +862,9 @@ def _build_catalyst_cluster_playbook(
             for part in [
                 f"Best arc: {str(best.get('label', '') or '').strip()}."
                 if str(best.get("label", "") or "").strip()
+                else "",
+                f"Winning archetype: {str(best.get('archetype_label', '') or '').strip()}."
+                if str(best.get("archetype_label", "") or "").strip()
                 else "",
                 f"Weak arc: {str(worst.get('label', '') or '').strip()}."
                 if str(worst.get("label", "") or "").strip()
@@ -699,8 +916,10 @@ def _select_catalyst_channel_series_cluster(channel_context: dict | None, *, top
     memory_public = _catalyst_channel_memory_public_view(channel_memory)
     memory_anchor = str(memory_public.get("series_anchor", "") or "").strip().lower()
     memory_niche = str(memory_public.get("niche_key", "") or "").strip().lower()
+    memory_archetype = str(memory_public.get("archetype_key", "") or "").strip().lower()
     inferred = _catalyst_infer_niche(topic, source_title, format_preset=format_preset)
     inferred_niche = str(inferred.get("key", "") or "").strip().lower()
+    inferred_archetype = str(_catalyst_infer_archetype(topic, source_title, niche_key=inferred_niche, format_preset=format_preset).get("key", "") or "").strip().lower()
     ref_text = f"{topic} {source_title}".strip()
     best_score = -1.0
     best_cluster: dict = {}
@@ -708,13 +927,18 @@ def _select_catalyst_channel_series_cluster(channel_context: dict | None, *, top
         score = float(cluster.get("ranked_score", cluster.get("score", 0.0)) or 0.0)
         anchor = str(cluster.get("series_anchor", "") or "").strip()
         niche_key = str(cluster.get("niche_key", "") or "").strip().lower()
+        archetype_key = str(cluster.get("archetype_key", "") or "").strip().lower()
         label = str(cluster.get("label", "") or "").strip()
         if memory_anchor and anchor and anchor.lower() == memory_anchor:
             score += 80.0
         if memory_niche and niche_key and niche_key == memory_niche:
             score += 22.0
+        if memory_archetype and archetype_key and archetype_key == memory_archetype:
+            score += 18.0
         if inferred_niche and niche_key and niche_key == inferred_niche:
             score += 18.0
+        if inferred_archetype and archetype_key and archetype_key == inferred_archetype:
+            score += 20.0
         if ref_text:
             score += _catalyst_text_overlap_score(ref_text, " ".join([anchor, label, *list(cluster.get("sample_titles") or []), *list(cluster.get("keywords") or [])])) * 100.0
         if score > best_score:
@@ -838,12 +1062,17 @@ def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
         )
         row = {
             "series_anchor": label,
+            "niche_key": str(bucket.get("niche_key", "") or "").strip(),
+            "niche_label": str(bucket.get("niche_label", "") or "").strip(),
+            "archetype_key": str(bucket.get("archetype_key", "") or "").strip(),
+            "archetype_label": str(bucket.get("archetype_label", "") or "").strip(),
             "outcome_count": int(bucket.get("outcome_count", 0) or 0),
             "average_ctr": float(bucket.get("average_ctr", 0.0) or 0.0),
             "average_average_percentage_viewed": float(bucket.get("average_average_percentage_viewed", 0.0) or 0.0),
             "average_first_30_sec_retention_pct": float(bucket.get("average_first_30_sec_retention_pct", 0.0) or 0.0),
             "average_reference_overall_score": float(bucket.get("average_reference_overall_score", 0.0) or 0.0),
             "proven_keywords": _dedupe_preserve_order(list(bucket.get("proven_keywords") or []), max_items=8, max_chars=60),
+            "archetype_keywords": _dedupe_preserve_order(list(bucket.get("archetype_keywords") or []), max_items=6, max_chars=40),
             "next_video_moves": _dedupe_preserve_order(list(bucket.get("next_video_moves") or []), max_items=6, max_chars=180),
             "packaging_wins": _dedupe_preserve_order(packaging_wins, max_items=4, max_chars=180),
             "retention_watchouts": _dedupe_preserve_order(retention_watchouts, max_items=4, max_chars=180),
@@ -915,7 +1144,17 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "channel_id": str(data.get("channel_id", "") or ""),
         "series_anchor": str(data.get("series_anchor", "") or ""),
         "niche_key": str(data.get("niche_key", "") or ""),
+        "niche_label": str(data.get("niche_label", "") or ""),
         "niche_follow_up_rule": str(data.get("niche_follow_up_rule", "") or ""),
+        "archetype_key": str(data.get("archetype_key", "") or ""),
+        "archetype_label": str(data.get("archetype_label", "") or ""),
+        "archetype_confidence": round(float(data.get("archetype_confidence", 0.0) or 0.0), 2),
+        "archetype_keywords": list(data.get("archetype_keywords") or []),
+        "archetype_hook_rule": str(data.get("archetype_hook_rule", "") or ""),
+        "archetype_pace_rule": str(data.get("archetype_pace_rule", "") or ""),
+        "archetype_visual_rule": str(data.get("archetype_visual_rule", "") or ""),
+        "archetype_sound_rule": str(data.get("archetype_sound_rule", "") or ""),
+        "archetype_packaging_rule": str(data.get("archetype_packaging_rule", "") or ""),
         "summary": _clip_text(str(data.get("summary", "") or ""), 320),
         "outcome_count": outcome_count,
         "run_count": int(data.get("run_count", 0) or 0),
@@ -1016,6 +1255,28 @@ def _resolve_catalyst_series_context(channel_context: dict | None, *, channel_me
     cluster_anchor = str((selected_cluster or {}).get("series_anchor", "") or "").strip()
     series_anchor_override = cluster_anchor or extracted_anchor
     memory_view = _catalyst_channel_memory_public_view(channel_memory_raw, series_anchor_override=series_anchor_override)
+    archetype = _catalyst_infer_archetype(
+        " ".join(part for part in [topic, source_title, input_title, input_description] if str(part or "").strip()),
+        " ".join(str(v).strip() for v in list((selected_cluster or {}).get("sample_titles") or []) if str(v).strip()),
+        " ".join(str(v).strip() for v in list((selected_cluster or {}).get("keywords") or []) if str(v).strip()),
+        niche_key=str(memory_view.get("niche_key", "") or (selected_cluster or {}).get("niche_key", "") or ""),
+        format_preset=format_preset,
+    )
+    if not str(memory_view.get("archetype_key", "") or "").strip():
+        memory_view["archetype_key"] = str(archetype.get("key", "") or (selected_cluster or {}).get("archetype_key", "") or "")
+        memory_view["archetype_label"] = str(archetype.get("label", "") or (selected_cluster or {}).get("archetype_label", "") or "")
+        memory_view["archetype_confidence"] = round(float(archetype.get("confidence", 0.0) or 0.0), 2)
+        memory_view["archetype_keywords"] = _dedupe_preserve_order(
+            [*list(archetype.get("keywords") or []), *list((selected_cluster or {}).get("archetype_keywords") or [])],
+            max_items=8,
+            max_chars=40,
+        )
+        memory_view["archetype_hook_rule"] = str(archetype.get("hook_rule", "") or (selected_cluster or {}).get("archetype_hook_rule", "") or "")
+        memory_view["archetype_pace_rule"] = str(archetype.get("pace_rule", "") or (selected_cluster or {}).get("archetype_pace_rule", "") or "")
+        memory_view["archetype_visual_rule"] = str(archetype.get("visual_rule", "") or (selected_cluster or {}).get("archetype_visual_rule", "") or "")
+        memory_view["archetype_sound_rule"] = str(archetype.get("sound_rule", "") or (selected_cluster or {}).get("archetype_sound_rule", "") or "")
+        memory_view["archetype_packaging_rule"] = str(archetype.get("packaging_rule", "") or (selected_cluster or {}).get("archetype_packaging_rule", "") or "")
+        memory_view["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(memory_view)
     cluster_playbook = _build_catalyst_cluster_playbook(
         list(channel_context.get("series_clusters") or []),
         channel_memory=channel_memory_raw,
@@ -1024,6 +1285,17 @@ def _resolve_catalyst_series_context(channel_context: dict | None, *, channel_me
     return {
         "selected_cluster": dict(selected_cluster or {}),
         "series_anchor_override": series_anchor_override,
+        "archetype": {
+            "key": str(memory_view.get("archetype_key", "") or ""),
+            "label": str(memory_view.get("archetype_label", "") or ""),
+            "confidence": round(float(memory_view.get("archetype_confidence", 0.0) or 0.0), 2),
+            "keywords": list(memory_view.get("archetype_keywords") or []),
+            "hook_rule": str(memory_view.get("archetype_hook_rule", "") or ""),
+            "pace_rule": str(memory_view.get("archetype_pace_rule", "") or ""),
+            "visual_rule": str(memory_view.get("archetype_visual_rule", "") or ""),
+            "sound_rule": str(memory_view.get("archetype_sound_rule", "") or ""),
+            "packaging_rule": str(memory_view.get("archetype_packaging_rule", "") or ""),
+        },
         "cluster_context": _render_catalyst_series_cluster_context(selected_cluster),
         "memory_view": memory_view,
         "cluster_playbook": cluster_playbook,
@@ -1052,6 +1324,13 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     promoted_arcs = [str(v).strip() for v in list(public.get("promoted_arcs") or []) if str(v).strip()]
     demoted_arcs = [str(v).strip() for v in list(public.get("demoted_arcs") or []) if str(v).strip()]
     active_series_anchor = str(public.get("series_anchor", "") or "").strip()
+    archetype_key = str(public.get("archetype_key", "") or "").strip().lower()
+    archetype_label = str(public.get("archetype_label", "") or "").strip()
+    archetype_hook_rule = str(public.get("archetype_hook_rule", "") or "").strip()
+    archetype_pace_rule = str(public.get("archetype_pace_rule", "") or "").strip()
+    archetype_visual_rule = str(public.get("archetype_visual_rule", "") or "").strip()
+    archetype_sound_rule = str(public.get("archetype_sound_rule", "") or "").strip()
+    archetype_packaging_rule = str(public.get("archetype_packaging_rule", "") or "").strip()
     avg_ctr = float(public.get("average_ctr", 0.0) or 0.0)
     avg_avp = float(public.get("average_average_percentage_viewed", 0.0) or 0.0)
     avg_first30 = float(public.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
@@ -1076,6 +1355,21 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         if any(lowered_anchor == arc.lower() for arc in promoted_arcs[:2]):
             packaging_pressure += 3.0
             hook_pressure += 2.0
+    if archetype_key == "dark_psychology":
+        hook_pressure += 3.0
+        sound_pressure += 2.0
+    elif archetype_key == "trading_execution":
+        pacing_pressure += 3.0
+        packaging_pressure += 2.0
+    elif archetype_key == "systems_documentary":
+        visual_pressure += 2.0
+        pacing_pressure += 1.5
+    elif archetype_key == "power_history":
+        hook_pressure += 2.0
+        packaging_pressure += 2.0
+    elif archetype_key == "science_mechanism":
+        visual_pressure += 2.0
+        sound_pressure += 1.0
     categories = [
         {"key": "hook", "label": "Hook", "score": max(8, min(100, int(round(hook_pressure)))), "wins": hook_wins[:3], "watchouts": hook_watchouts[:3], "rewrites": reference_hook_rewrites[:3]},
         {"key": "pacing", "label": "Pacing", "score": max(8, min(100, int(round(pacing_pressure)))), "wins": pacing_wins[:3], "watchouts": pacing_watchouts[:3], "rewrites": reference_pacing_rewrites[:3]},
@@ -1089,11 +1383,29 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     top = categories[0] if categories else {}
     secondary = categories[1] if len(categories) > 1 else {}
     arc_moves: list[str] = []
+    if archetype_label:
+        arc_moves.append(f"Current Catalyst archetype is {archetype_label}, so the next run should preserve that content grammar instead of drifting across niches.")
     if active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in demoted_arcs[:2]):
         arc_moves.append(f"{active_series_anchor} is currently a demoted arc from measured outcomes, so the next run must sharpen hook, pacing, and package execution aggressively.")
     elif active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in promoted_arcs[:2]):
         arc_moves.append(f"{active_series_anchor} is a promoted arc, so preserve its winning arena but force a fresher adjacent angle to avoid repetition.")
-    priorities = _dedupe_preserve_order([*arc_moves, *(top.get("rewrites") or []), *(top.get("watchouts") or []), *(secondary.get("rewrites") or []), *(secondary.get("watchouts") or []), *next_moves[:3]], max_items=8, max_chars=180)
+    priorities = _dedupe_preserve_order(
+        [
+            *arc_moves,
+            archetype_hook_rule,
+            archetype_pace_rule,
+            archetype_visual_rule,
+            archetype_sound_rule,
+            archetype_packaging_rule,
+            *(top.get("rewrites") or []),
+            *(top.get("watchouts") or []),
+            *(secondary.get("rewrites") or []),
+            *(secondary.get("watchouts") or []),
+            *next_moves[:3],
+        ],
+        max_items=10,
+        max_chars=180,
+    )
     summary = ""
     if top:
         summary = f"Primary rewrite pressure is {str(top.get('label', 'Hook'))} ({int(top.get('score', 0) or 0)}/100, {str(top.get('severity', 'medium'))}). "
