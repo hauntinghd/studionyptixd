@@ -5,6 +5,7 @@ import { FeedbackWidget, JobDiagnostics, ProgressBar } from '../components/Studi
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
+import { trackShortProjectStarted, trackShortRenderCompleted } from '../lib/googleAds';
 
 interface CreativeScene {
     index: number;
@@ -248,6 +249,7 @@ export default function CreatePanel() {
     const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
     const restoreDoneRef = useRef(false);
     const hydratedSceneImagesSessionRef = useRef<string | null>(null);
+    const lastTrackedCompletedJobRef = useRef('');
     const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
     const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
     const pendingChatStoryTemplateStorageKey = session ? `nyptid_pending_chatstory_${session.user.id}` : "nyptid_pending_chatstory_guest";
@@ -704,6 +706,19 @@ export default function CreatePanel() {
         }, 2000);
         return () => clearInterval(interval);
     }, [jobId]);
+
+    useEffect(() => {
+        if (!jobStatus || jobStatus.status !== 'complete') return;
+        const completedJobId = String(jobStatus.job_id || jobId || '').trim();
+        if (!completedJobId) return;
+        if (lastTrackedCompletedJobRef.current === completedJobId) return;
+        lastTrackedCompletedJobRef.current = completedJobId;
+        trackShortRenderCompleted(
+            selectedTemplate,
+            String(jobStatus.resolution || resolution || '720p'),
+            true,
+        );
+    }, [jobId, jobStatus, resolution, selectedTemplate]);
 
     useEffect(() => {
         if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
@@ -1201,7 +1216,10 @@ export default function CreatePanel() {
                 }),
             });
             const { data } = await readJsonResponse<any>(res);
-            if (data?.job_id) setJobId(data.job_id);
+            if (data?.job_id) {
+                setJobId(data.job_id);
+                trackShortProjectStarted(selectedTemplate, 'auto', true);
+            }
             else { setLoading(false); }
         } catch { setLoading(false); }
     };
@@ -1309,6 +1327,7 @@ export default function CreatePanel() {
                 throw new Error("Invalid Script to Short response");
             }
             setSessionId(data.session_id);
+            trackShortProjectStarted(selectedTemplate, generationMode, true);
             if (typeof data.image_model_id === 'string' && data.image_model_id) {
                 setImageModelId(data.image_model_id);
             }
@@ -1401,6 +1420,7 @@ export default function CreatePanel() {
             const { data } = await readJsonResponse<any>(res);
             if (!data || typeof data !== "object") throw new Error("Invalid creative session response");
             setSessionId(data.session_id);
+            trackShortProjectStarted(selectedTemplate, 'creative', true);
             if (typeof data.image_model_id === 'string' && data.image_model_id) {
                 setImageModelId(data.image_model_id);
             }

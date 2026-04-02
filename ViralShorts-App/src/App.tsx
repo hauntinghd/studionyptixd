@@ -7,6 +7,7 @@ import LandingPage from './studio/pages/LandingPage';
 import SettingsPage from './studio/pages/SettingsPage';
 import SubscriptionPage from './studio/pages/SubscriptionPage';
 import { AuthContext, AuthProvider, isBillingHost } from './studio/shared';
+import { trackStudioPageView } from './studio/lib/googleAds';
 
 type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription';
 
@@ -78,6 +79,10 @@ function AppShell() {
         } catch {
             // ignore storage errors
         }
+    }, [page]);
+
+    useEffect(() => {
+        trackStudioPageView(page);
     }, [page]);
 
     useEffect(() => {

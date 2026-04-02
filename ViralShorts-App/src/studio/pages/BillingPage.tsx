@@ -2,6 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 import { ArrowLeft, CheckCircle2, CreditCard, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
 import { startHostedStudioCheckout } from '../lib/invoicer';
 
 type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
@@ -36,6 +37,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [locationState.search]);
     const requestedSection = String(params.get('section') || '').trim().toLowerCase();
     const requestedPackId = String(params.get('pack') || '').trim();
+    const requestedPlanId = String(params.get('plan') || '').trim().toLowerCase();
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const subscriptionError = String(params.get('error') || '').trim();
@@ -139,6 +141,23 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             window.cancelAnimationFrame(frameId);
         };
     }, [requestedHash, requestedPackId, requestedSection, sortedPacks.length]);
+
+    useEffect(() => {
+        if (topupResult !== 'success') return;
+        const topupValue = Number(selectedPack?.price_usd || 0);
+        trackOnce(`billing_topup_success:${locationState.search}`, () => {
+            trackTopupPurchaseCompleted(topupValue);
+        });
+    }, [locationState.search, selectedPack?.price_usd, topupResult]);
+
+    useEffect(() => {
+        if (subscriptionResult !== 'success') return;
+        const planId = requestedPlanId || normalizedCurrentPlan;
+        const value = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
+        trackOnce(`billing_membership_success:${locationState.search}`, () => {
+            trackMembershipPurchaseCompleted(planId, value);
+        });
+    }, [locationState.search, normalizedCurrentPlan, publicPlanPrices, requestedPlanId, subscriptionResult]);
 
     const handleBack = () => {
         if (isBillingHost) {

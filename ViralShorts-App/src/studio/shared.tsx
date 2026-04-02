@@ -1,5 +1,6 @@
 import { useState, useEffect, createContext, useCallback, useRef } from 'react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
+import { trackAuthCompletion } from './lib/googleAds';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
 const hostLower = window.location.hostname.toLowerCase();
@@ -418,6 +419,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [longformOwnerBeta, setLongformOwnerBeta] = useState(false);
     const [waitlistOnlyMode, setWaitlistOnlyMode] = useState(false);
     const [waitlistRequiresStripePayment, setWaitlistRequiresStripePayment] = useState(false);
+    const pendingAuthIntentRef = useRef<'signup' | 'signin' | 'google' | ''>('');
+    const lastTrackedSessionUserRef = useRef('');
     const healthFailureCountRef = useRef(0);
     const lastHealthSuccessAtRef = useRef(0);
     const ownerLaneAccess: LaneAccessMap = {
@@ -722,12 +725,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const signIn = useCallback(async (email: string, password: string): Promise<string | null> => {
         if (!supabase) return "Auth not configured yet";
+        pendingAuthIntentRef.current = 'signin';
         const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) pendingAuthIntentRef.current = '';
         return error ? error.message : null;
     }, [supabase]);
 
     const signInWithGoogle = useCallback(async (): Promise<string | null> => {
         if (!supabase) return "Auth not configured yet";
+        pendingAuthIntentRef.current = 'google';
         const redirectTo = isLocalDevHost ? `${window.location.origin}?page=dashboard` : `${STUDIO_SITE_URL}?page=dashboard`;
         const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google',
@@ -735,6 +741,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 redirectTo,
             },
         });
+        if (error) pendingAuthIntentRef.current = '';
         if (!error) return null;
         const message = String(error.message || '').trim();
         if (message.toLowerCase().includes('provider is not enabled')) {
@@ -745,16 +752,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {
         if (!supabase) return "Auth not configured yet";
+        pendingAuthIntentRef.current = 'signup';
         const { error } = await supabase.auth.signUp({
             email,
             password,
             options: { emailRedirectTo: window.location.origin },
         });
+        if (error) pendingAuthIntentRef.current = '';
         return error ? error.message : null;
     }, [supabase]);
 
     const signOut = useCallback(async () => {
         if (supabase) await supabase.auth.signOut();
+        pendingAuthIntentRef.current = '';
+        lastTrackedSessionUserRef.current = '';
         setSession(null);
         setPlan('none');
         setRole('user');
@@ -770,6 +781,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setCreditsTotalRemaining(0);
         setRequiresTopup(false);
     }, [supabase]);
+
+    useEffect(() => {
+        const userId = String(session?.user?.id || '').trim();
+        if (!userId) {
+            lastTrackedSessionUserRef.current = '';
+            return;
+        }
+        if (lastTrackedSessionUserRef.current === userId) return;
+        lastTrackedSessionUserRef.current = userId;
+        const intent = pendingAuthIntentRef.current;
+        if (!intent) return;
+        const createdAtMs = Date.parse(String((session as any)?.user?.created_at || ''));
+        const lastSignInAtMs = Date.parse(String((session as any)?.user?.last_sign_in_at || ''));
+        const isLikelyNewUser =
+            Number.isFinite(createdAtMs)
+            && Number.isFinite(lastSignInAtMs)
+            && Math.abs(lastSignInAtMs - createdAtMs) <= (10 * 60 * 1000);
+        trackAuthCompletion(intent, isLikelyNewUser);
+        pendingAuthIntentRef.current = '';
+    }, [session]);
 
     const checkout = useCallback(async (planName: string): Promise<string | null> => {
         if (!session) return "Missing membership checkout details";
