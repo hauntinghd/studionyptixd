@@ -1,9 +1,8 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, CreditCard, WalletCards } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, STUDIO_SITE_URL, isBillingHost } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
-import { startHostedStudioCheckout } from '../lib/invoicer';
 
 type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
 
@@ -46,7 +45,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const [checkoutError, setCheckoutError] = useState('');
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
     const [planLoadingId, setPlanLoadingId] = useState('');
-    const [hostedCheckoutLoading, setHostedCheckoutLoading] = useState(false);
     const topupSectionRef = useRef<HTMLElement | null>(null);
 
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
@@ -86,8 +84,8 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     `${durationMinutes} minute max job length`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output cap`,
                     planId === 'free'
-                        ? 'Short-form Create workflow included'
-                        : 'Short-form Create workflow + Chat Story',
+                        ? 'Create workspace with AI Stories, Motivation, Skeleton AI, and Day Trading'
+                        : 'Create workspace + Chat Story template access',
                 ],
             };
         });
@@ -217,21 +215,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         }
     }, [checkoutTopup, onNavigate, selectedPack, session]);
 
-    const handleHostedCheckout = useCallback(async () => {
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        setCheckoutError('');
-        setHostedCheckoutLoading(true);
-        try {
-            const error = await startHostedStudioCheckout(session);
-            if (error) setCheckoutError(error);
-        } finally {
-            setHostedCheckoutLoading(false);
-        }
-    }, [onNavigate, session]);
-
     return (
         <>
             <NavBar onNavigate={onNavigate} active="billing" />
@@ -246,9 +229,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
                             Studio now sells one clean short-form offer: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
                         </p>
-                        <div className="mt-5 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
-                            Hosted Studio business licensing now starts through Invoicer at a one-time $300 price. The monthly plans and wallet packs below are the legacy billing model until the separate Studio entitlement backend is migrated.
-                        </div>
                     </div>
                     <div className="flex flex-wrap gap-3">
                         <button
@@ -258,15 +238,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         >
                             <ArrowLeft className="h-4 w-4" />
                             Back
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleHostedCheckout()}
-                            disabled={hostedCheckoutLoading}
-                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:opacity-60"
-                        >
-                            <CreditCard className="h-4 w-4" />
-                            {hostedCheckoutLoading ? 'Opening Invoicer...' : 'Start $300 Hosted License'}
                         </button>
                     </div>
                 </div>

@@ -8,7 +8,6 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
     const billingHost = isBillingHost;
     const sortedPacks = [...topupPacks].sort((a, b) => a.credits - b.credits);
     const [googleLoading, setGoogleLoading] = useState(false);
-
     const openBilling = () => {
         window.location.href = billingHost ? `${window.location.origin}?page=billing` : `${BILLING_SITE_URL}?page=billing`;
     };
@@ -28,13 +27,28 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const liveLanes = [
         {
-            title: 'Create',
-            desc: 'Scene-first short-form workflows for AI stories, motivation, skeleton videos, and Chat Story.',
+            title: 'AI Stories',
+            desc: 'Cinematic story shorts inside the Create workspace.',
             icon: <Sparkles className="h-5 w-5" />,
         },
         {
+            title: 'Motivation',
+            desc: 'Short-form motivational videos with stronger pacing and narration.',
+            icon: <Workflow className="h-5 w-5" />,
+        },
+        {
+            title: 'Skeleton AI',
+            desc: '3D comparison shorts with the locked skeleton visual identity.',
+            icon: <Wrench className="h-5 w-5" />,
+        },
+        {
+            title: 'Day Trading',
+            desc: 'Trading and investing shorts with Catalyst channel context.',
+            icon: <Rocket className="h-5 w-5" />,
+        },
+        {
             title: 'Chat Story',
-            desc: 'Monthly-plan short-form lane for premium text-message videos with owned voices, uploads, and live preview.',
+            desc: 'Premium text-message shorts unlocked on the paid monthly plans.',
             icon: <Workflow className="h-5 w-5" />,
         },
     ];
@@ -134,9 +148,9 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 </button>
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
-                                <StatCard label="Live Public Lanes" value="2" />
-                                <StatCard label="Plans" value="Free + 3 Monthly" />
-                                <StatCard label="Checkout" value="PayPal" />
+                                <StatCard label="Live Templates" value="5" />
+                                <StatCard label="Free Renders" value="2" />
+                                <StatCard label="Primary Auth" value="Google" />
                             </div>
                         </div>
 
@@ -172,10 +186,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">Live Now</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">Public launch surface</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            The public offer is intentionally tight: Create and Chat Story. Product Demo stays internal. Analytics stays owner-only. Clone, Thumbnails, Long Form, and AutoClipper remain visible in the vision but are not part of the public short-form plan promise yet.
+                            The public offer is intentionally tight: one Create workspace with five live short-form templates. Product Demo stays internal. Analytics stays owner-only. Clone, Thumbnails, Long Form, and AutoClipper remain visible in the vision but are not part of the public billing promise yet.
                         </p>
                     </div>
-                    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-2">
+                    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
                         {liveLanes.map((lane) => (
                             <div key={lane.title} className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10 text-violet-300">
@@ -195,23 +209,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Offer Design</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">One product, two ways to pay</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            Every signed-in account starts on Free. Then there are only three monthly plans and the credit wallet packs for short-form usage spikes.
+                            Use the monthly plans for recurring short-form output, or buy top-up packs when animation usage spikes. Billing stays inside Studio.
                         </p>
                     </div>
-                    <div className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
-                        <div className="rounded-[32px] border border-violet-500/20 bg-violet-500/[0.06] p-6">
-                            <p className="text-xs uppercase tracking-[0.18em] text-violet-200/70">Plans</p>
-                            <p className="mt-3 text-4xl font-bold text-white">Free, Starter, Creator, Pro</p>
-                            <p className="mt-3 text-sm text-gray-300">
-                                Free includes enough credits for two short-form animated renders. The three paid monthly plans add more included credits and unlock Chat Story.
-                            </p>
-                            <ul className="mt-6 space-y-3 text-sm text-gray-300">
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Free plan starts every signed-in account with two short-form animated renders</li>
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Starter, Creator, and Pro add more included credits each month</li>
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Chat Story stays monthly-only on the paid plans</li>
-                                <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />Thumbnails, Clone, and Long Form are not sold in the public plans yet</li>
-                            </ul>
-                        </div>
+                    <div className="grid gap-6">
                         <div className="rounded-[32px] border border-white/[0.06] bg-white/[0.02] p-6">
                             <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Credit Wallet</p>
                             <h3 className="mt-3 text-2xl font-bold text-white">Top up only when usage spikes</h3>
@@ -276,7 +277,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Start Here</p>
                     <h2 className="mt-3 text-4xl font-bold text-white">Open Studio and build from one workspace.</h2>
                     <p className="mx-auto mt-4 max-w-2xl text-gray-400">
-                        If you already know your niche, open Studio now. If you need billing first, go straight to the membership and wallet page. Either way, the offer is finally one product instead of a pile of disconnected tools.
+                        If you already know your niche, open Studio now. If you want to test pricing first, go straight to the monthly plans and top-up packs.
                     </p>
                     <div className="mt-8 flex flex-col justify-center gap-4 sm:flex-row">
                         <button

@@ -1,9 +1,8 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, BadgeCheck, CreditCard, Sparkles } from 'lucide-react';
+import { ArrowLeft, BadgeCheck, Sparkles } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce } from '../lib/googleAds';
-import { startHostedStudioCheckout } from '../lib/invoicer';
 
 type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
 
@@ -33,8 +32,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const subscriptionError = String(params.get('error') || '').trim();
     const [actionError, setActionError] = useState('');
     const [loadingPlanId, setLoadingPlanId] = useState('');
-    const [hostedCheckoutLoading, setHostedCheckoutLoading] = useState(false);
-
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
@@ -66,8 +63,8 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                     `${Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60))} minute max jobs`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output`,
                     planId === 'free'
-                        ? 'Short-form Create workflow included'
-                        : 'Short-form Create workflow + Chat Story',
+                        ? 'Create workspace with AI Stories, Motivation, Skeleton AI, and Day Trading'
+                        : 'Create workspace + Chat Story template access',
                 ],
             };
         });
@@ -132,21 +129,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         }
     }, [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
 
-    const handleHostedCheckout = useCallback(async () => {
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        setActionError('');
-        setHostedCheckoutLoading(true);
-        try {
-            const error = await startHostedStudioCheckout(session);
-            if (error) setActionError(error);
-        } finally {
-            setHostedCheckoutLoading(false);
-        }
-    }, [onNavigate, session]);
-
     return (
         <>
             <NavBar onNavigate={onNavigate} active="subscription" />
@@ -161,9 +143,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
                             Free gets users into Catalyst short-form. The three monthly plans add more included credits and unlock Chat Story, while wallet top-ups stay separate on the billing page.
                         </p>
-                        <div className="mt-5 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
-                            Hosted Studio business licensing now starts through Invoicer at a one-time $300 price. The monthly plan cards below are the legacy Studio billing path until the separate entitlement backend is migrated.
-                        </div>
                     </div>
                     <div className="flex flex-wrap gap-3">
                         <button
@@ -180,15 +159,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                             className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
                         >
                             Open Billing
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleHostedCheckout()}
-                            disabled={hostedCheckoutLoading}
-                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:opacity-60"
-                        >
-                            <CreditCard className="h-4 w-4" />
-                            {hostedCheckoutLoading ? 'Opening Invoicer...' : 'Start $300 Hosted License'}
                         </button>
                     </div>
                 </div>
