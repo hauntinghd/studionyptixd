@@ -855,6 +855,11 @@ def _catalyst_channel_memory_key(user_id: str, channel_id: str, format_preset: s
     return f"{user_key}:{channel_key}:{format_key}"
 
 
+def _catalyst_series_memory_key(series_anchor: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(series_anchor or "").strip().lower()).strip("_")
+    return normalized or "general"
+
+
 def _dedupe_preserve_order(values: list[str], max_items: int = 8, max_chars: int = 200) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -1148,8 +1153,119 @@ def _catalyst_outcome_weight(metrics: dict | None) -> float:
     return round(max(0.85, min(5.0, base)), 2)
 
 
-def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
+def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
     data = dict(memory or {})
+    series_map = dict(data.get("series_memory_map") or {})
+    series_catalog = _dedupe_preserve_order(
+        [
+            _clip_text(str((row or {}).get("series_anchor", "") or ""), 120)
+            for row in list(series_map.values())
+            if isinstance(row, dict) and str((row or {}).get("series_anchor", "") or "").strip()
+        ],
+        max_items=16,
+        max_chars=120,
+    )
+    active_series_anchor = _clip_text(str(series_anchor_override or data.get("series_anchor", "") or ""), 120)
+    active_series_bucket: dict = {}
+    if active_series_anchor:
+        active_series_key = _catalyst_series_memory_key(active_series_anchor)
+        active_series_bucket = dict(series_map.get(active_series_key) or {})
+        if not active_series_bucket:
+            active_series_bucket = next(
+                (
+                    dict(row or {})
+                    for row in list(series_map.values())
+                    if isinstance(row, dict)
+                    and str((row or {}).get("series_anchor", "") or "").strip().lower() == active_series_anchor.lower()
+                ),
+                {},
+            )
+    if active_series_bucket:
+        for field in (
+            "series_anchor",
+            "niche_key",
+            "niche_label",
+            "niche_confidence",
+            "niche_follow_up_rule",
+            "preferred_transition_style",
+            "preferred_music_profile",
+            "preferred_visual_engine",
+            "last_outcome_summary",
+            "last_reference_summary",
+            "reference_tier",
+            "last_session_id",
+            "updated_at",
+        ):
+            if active_series_bucket.get(field) not in (None, "", [], {}):
+                data[field] = active_series_bucket.get(field)
+        if int(active_series_bucket.get("run_count", 0) or 0) > 0:
+            data["run_count"] = int(active_series_bucket.get("run_count", 0) or 0)
+        if int(active_series_bucket.get("outcome_count", 0) or 0) > 0:
+            data["outcome_count"] = int(active_series_bucket.get("outcome_count", 0) or 0)
+            for field in (
+                "outcome_views_sum",
+                "outcome_impressions_sum",
+                "outcome_ctr_sum",
+                "outcome_avp_sum",
+                "outcome_avd_sum",
+                "outcome_first30_sum",
+                "outcome_first60_sum",
+                "reference_overall_score_sum",
+                "reference_hook_score_sum",
+                "reference_pacing_score_sum",
+                "reference_visual_score_sum",
+                "reference_sound_score_sum",
+                "reference_packaging_score_sum",
+                "reference_title_novelty_score_sum",
+            ):
+                if active_series_bucket.get(field) not in (None, "", [], {}):
+                    data[field] = active_series_bucket.get(field)
+        for field in (
+            "recent_source_titles",
+            "recent_selected_titles",
+            "proven_keywords",
+            "hook_learnings",
+            "pacing_learnings",
+            "visual_learnings",
+            "sound_learnings",
+            "packaging_learnings",
+            "retention_watchouts",
+            "next_video_moves",
+            "reference_benchmark_channels",
+        ):
+            merged = _dedupe_preserve_order(
+                [
+                    *list(active_series_bucket.get(field) or []),
+                    *list(data.get(field) or []),
+                ],
+                max_items=14 if field == "proven_keywords" else 10,
+                max_chars=80 if field == "proven_keywords" else 180,
+            )
+            if merged:
+                data[field] = merged
+        for field in (
+            "hook_wins_map",
+            "hook_watchouts_map",
+            "pacing_wins_map",
+            "pacing_watchouts_map",
+            "visual_wins_map",
+            "visual_watchouts_map",
+            "sound_wins_map",
+            "sound_watchouts_map",
+            "packaging_wins_map",
+            "packaging_watchouts_map",
+            "retention_wins_map",
+            "retention_watchouts_map",
+            "next_video_moves_map",
+            "reference_hook_rewrites_map",
+            "reference_pacing_rewrites_map",
+            "reference_visual_rewrites_map",
+            "reference_sound_rewrites_map",
+            "reference_packaging_rewrites_map",
+            "reference_next_video_moves_map",
+        ):
+            if active_series_bucket.get(field):
+                data[field] = dict(active_series_bucket.get(field) or {})
     outcome_count = int(data.get("outcome_count", 0) or 0)
     hook_wins = _catalyst_merge_signal_lists(
         _catalyst_weighted_signal_items(data.get("hook_wins_map") or {}, max_items=6),
@@ -1268,13 +1384,15 @@ def _catalyst_channel_memory_public_view(memory: dict | None) -> dict:
         "preferred_visual_engine": str(data.get("preferred_visual_engine", "") or ""),
         "last_session_id": str(data.get("last_session_id", "") or ""),
         "updated_at": float(data.get("updated_at", 0) or 0),
+        "series_anchors": series_catalog,
+        "series_scope_active": bool(active_series_bucket),
     }
     public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
     return public
 
 
-def _render_catalyst_channel_memory_context(memory: dict | None) -> str:
-    public = _catalyst_channel_memory_public_view(memory)
+def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_override: str = "") -> str:
+    public = _catalyst_channel_memory_public_view(memory, series_anchor_override=series_anchor_override)
     if not any(public.values()):
         return ""
     parts: list[str] = []
@@ -3090,10 +3208,17 @@ def _longform_build_publish_package_candidates(
     source_bundle = dict(source_bundle or {})
     source_analysis = dict(source_analysis or {})
     channel_context = dict(channel_context or {})
-    channel_memory = _catalyst_channel_memory_public_view(channel_memory)
-    rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
     source_title = str(source_bundle.get("title", "") or "").strip()
     effective_topic = str(topic or input_title or source_title or "Follow-up video breakdown").strip()
+    series_anchor_override = _catalyst_extract_series_anchor(
+        input_title,
+        source_title,
+        effective_topic,
+        niche_key=str((dict(channel_memory or {})).get("niche_key", "") or ""),
+    )
+    channel_memory = _catalyst_channel_memory_public_view(channel_memory, series_anchor_override=series_anchor_override)
+    rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
+    series_anchor = _clip_text(str(channel_memory.get("series_anchor", "") or series_anchor_override or ""), 120)
     channel_title_memory = [
         str(v).strip()
         for v in [
@@ -3107,18 +3232,19 @@ def _longform_build_publish_package_candidates(
     weighted_next_moves = [str(v).strip() for v in list(channel_memory.get("reference_next_video_moves") or channel_memory.get("next_video_moves") or []) if str(v).strip()]
     pressure_primary_focus = str(rewrite_pressure.get("primary_focus", "") or "").strip()
     pressure_subject = _same_arena_subject(source_bundle or {"title": effective_topic}, topic=effective_topic) or effective_topic
+    package_subject = series_anchor or pressure_subject
     title_candidates: list[tuple[str, int]] = []
     for candidate in [
         *list(source_analysis.get("title_angles") or []),
         *[
-            f"{effective_topic} | {keyword}".replace("|", "vs.") if " vs." not in effective_topic.lower() else f"{effective_topic} {keyword}"
+            f"{package_subject} | {keyword}".replace("|", "vs.") if " vs." not in package_subject.lower() else f"{package_subject} {keyword}"
             for keyword in list(channel_memory.get("proven_keywords") or [])[:2]
         ],
         *(
             [
-                f"The Hidden System Behind {pressure_subject}",
-                f"Why {pressure_subject} Quietly Controls More Than You Think",
-                f"What {pressure_subject} Is Really Doing Behind the Scenes",
+                f"The Hidden System Behind {package_subject}",
+                f"Why {package_subject} Quietly Controls More Than You Think",
+                f"What {package_subject} Is Really Doing Behind the Scenes",
             ]
             if pressure_primary_focus in {"hook", "packaging"} or weighted_packaging_rewrites
             else []
@@ -3129,7 +3255,7 @@ def _longform_build_publish_package_candidates(
             format_preset=format_preset,
             max_items=6,
         ),
-        _longform_title_variant(input_title or effective_topic, effective_topic),
+        _longform_title_variant(input_title or package_subject, package_subject),
     ]:
         value = str(candidate or "").strip()
         if not value:
@@ -3153,7 +3279,7 @@ def _longform_build_publish_package_candidates(
     title_candidates.sort(key=lambda row: row[1], reverse=True)
     title_variants = _dedupe_preserve_order([value for value, _score in title_candidates], max_items=6, max_chars=160)
     if not title_variants:
-        rescue_subject = _same_arena_subject(source_bundle, topic=effective_topic) or effective_topic
+        rescue_subject = series_anchor or _same_arena_subject(source_bundle, topic=effective_topic) or effective_topic
         for candidate in [
             f"The Hidden System Behind {rescue_subject}",
             f"Why {rescue_subject} Quietly Rewrites More Than You Think",
@@ -3193,11 +3319,11 @@ def _longform_build_publish_package_candidates(
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_thumbnail_angles(
             source_bundle or {"title": effective_topic},
-            topic=effective_topic,
+            topic=package_subject,
             format_preset=format_preset,
             max_items=4,
         ),
-        f"{effective_topic} premium faceless documentary thumbnail, one dominant 3D subject, strong contrast, 16:9",
+        f"{package_subject} premium faceless documentary thumbnail, one dominant 3D subject, strong contrast, 16:9",
     ]:
         value = str(candidate or "").strip()
         if value and value not in thumbnail_prompts:
@@ -3209,7 +3335,7 @@ def _longform_build_publish_package_candidates(
         format_preset,
         "nyptid",
         "longform",
-        effective_topic[:32].replace(" ", "_").lower(),
+        package_subject[:32].replace(" ", "_").lower(),
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(source_bundle.get("tags") or [])[:10] if str(tag).strip()],
         *[str(tag).strip().replace(" ", "_").lower() for tag in list(channel_memory.get("proven_keywords") or [])[:6] if str(tag).strip()],
     ]:
@@ -3328,14 +3454,21 @@ def _heuristic_catalyst_edit_blueprint(
 ) -> dict:
     source_analysis = dict(source_analysis or {})
     channel_context = dict(channel_context or {})
-    memory_view = _catalyst_channel_memory_public_view(channel_memory)
+    channel_memory_raw = dict(channel_memory or {})
+    series_anchor_override = _catalyst_extract_series_anchor(
+        input_title,
+        topic,
+        input_description,
+        niche_key=str(channel_memory_raw.get("niche_key", "") or ""),
+    )
+    memory_view = _catalyst_channel_memory_public_view(channel_memory_raw, series_anchor_override=series_anchor_override)
     rewrite_pressure = dict(memory_view.get("rewrite_pressure") or {})
     niche_key = str(memory_view.get("niche_key", "") or "").strip().lower()
     series_anchor = _clip_text(str(memory_view.get("series_anchor", "") or ""), 120)
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     subject = _same_arena_subject({"title": input_title or topic}, topic=topic or input_title) or _clip_text(topic or input_title or "the core subject", 80)
-    recap_subject = series_anchor or subject
+    recap_subject = series_anchor or series_anchor_override or subject
     improvement_moves = [str(v).strip() for v in list(source_analysis.get("improvement_moves") or []) if str(v).strip()]
     retention_findings = [str(v).strip() for v in list(source_analysis.get("retention_findings") or []) if str(v).strip()]
     packaging_findings = [str(v).strip() for v in list(source_analysis.get("packaging_findings") or []) if str(v).strip()]
@@ -3963,6 +4096,55 @@ def _update_catalyst_channel_memory(
         + ("Current retention watchout: " + str((list(public.get("retention_watchouts") or []) or [""])[0]) + "." if list(public.get("retention_watchouts") or []) else ""),
         320,
     )
+    if series_anchor:
+        series_map = dict(updated.get("series_memory_map") or {})
+        series_key = _catalyst_series_memory_key(series_anchor)
+        series_bucket = dict(series_map.get(series_key) or {})
+        series_run_count = int(series_bucket.get("run_count", 0) or 0) + 1
+        series_bucket.update({
+            "series_anchor": series_anchor,
+            "channel_id": str(updated.get("channel_id", "") or ""),
+            "format_preset": format_preset,
+            "niche_key": str(updated.get("niche_key", "") or ""),
+            "niche_label": str(updated.get("niche_label", "") or ""),
+            "niche_confidence": round(float(updated.get("niche_confidence", 0.0) or 0.0), 2),
+            "niche_keywords": _dedupe_preserve_order([*list(updated.get("niche_keywords") or []), *list(series_bucket.get("niche_keywords") or [])], max_items=8, max_chars=40),
+            "niche_follow_up_rule": str(updated.get("niche_follow_up_rule", "") or ""),
+            "run_count": series_run_count,
+            "last_session_id": str(session_snapshot.get("session_id", "") or ""),
+            "preferred_transition_style": str(motion_strategy.get("transition_style", "") or series_bucket.get("preferred_transition_style", "") or ""),
+            "preferred_music_profile": str(sound_strategy.get("music_profile", "") or series_bucket.get("preferred_music_profile", "") or ""),
+            "preferred_visual_engine": str(edit_blueprint.get("visual_engine", "") or series_bucket.get("preferred_visual_engine", "") or ""),
+            "updated_at": time.time(),
+        })
+        series_bucket["recent_source_titles"] = _dedupe_preserve_order([source_title, *list(series_bucket.get("recent_source_titles") or [])], max_items=10, max_chars=160)
+        series_bucket["recent_selected_titles"] = _dedupe_preserve_order([selected_title, *list(series_bucket.get("recent_selected_titles") or [])], max_items=10, max_chars=160)
+        series_bucket["proven_keywords"] = _dedupe_preserve_order([*proven_keywords, *list(series_bucket.get("proven_keywords") or [])], max_items=14, max_chars=80)
+        series_bucket["hook_learnings"] = _dedupe_preserve_order([*list(learning_record.get("hook_adjustments") or []), *list(learning_record.get("wins_to_keep") or [])[:2], *list(series_bucket.get("hook_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["pacing_learnings"] = _dedupe_preserve_order([*list(learning_record.get("pacing_adjustments") or []), *list(series_bucket.get("pacing_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["visual_learnings"] = _dedupe_preserve_order([*list(learning_record.get("visual_adjustments") or []), *list(series_bucket.get("visual_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["sound_learnings"] = _dedupe_preserve_order([*list(learning_record.get("sound_adjustments") or []), *list(series_bucket.get("sound_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(learning_record.get("packaging_adjustments") or []), *list(source_analysis.get("packaging_findings") or [])[:2], *list(series_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(learning_record.get("mistakes_to_avoid") or []), *list(source_analysis.get("retention_findings") or [])[:2], *list(series_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
+        series_bucket["next_video_moves"] = _dedupe_preserve_order([*list(learning_record.get("next_video_moves") or []), *list(series_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        _catalyst_update_weighted_signals(series_bucket, "hook_wins_map", list(learning_record.get("wins_to_keep") or [])[:2] + list(learning_record.get("hook_adjustments") or []), 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "hook_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:2], 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "pacing_wins_map", list(learning_record.get("pacing_adjustments") or []), 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "visual_wins_map", list(learning_record.get("visual_adjustments") or []), 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "sound_wins_map", list(learning_record.get("sound_adjustments") or []), 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "packaging_wins_map", list(learning_record.get("packaging_adjustments") or [])[:3], 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "retention_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:4], 0.35)
+        _catalyst_update_weighted_signals(series_bucket, "next_video_moves_map", list(learning_record.get("next_video_moves") or []), 0.35)
+        series_public = _catalyst_channel_memory_public_view(series_bucket, series_anchor_override=series_anchor)
+        series_bucket["summary"] = _clip_text(
+            f"Catalyst has {series_run_count} run{'s' if series_run_count != 1 else ''} inside {series_anchor}. "
+            + ("Best hook lesson: " + str((list(series_public.get("hook_wins") or []) or [""])[0]) + ". " if list(series_public.get("hook_wins") or []) else "")
+            + ("Current watchout: " + str((list(series_public.get('retention_watchouts') or []) or [''])[0]) + ". " if list(series_public.get("retention_watchouts") or []) else "")
+            + ("Next move: " + str((list(series_public.get("next_video_moves") or []) or [""])[0]) + "." if list(series_public.get("next_video_moves") or []) else ""),
+            320,
+        )
+        series_map[series_key] = series_bucket
+        updated["series_memory_map"] = series_map
     return updated
 
 
@@ -4806,6 +4988,104 @@ def _apply_catalyst_outcome_to_channel_memory(
         + ("Reference rewrite pressure: " + str((list(public.get("reference_packaging_rewrites") or list(public.get("reference_hook_rewrites") or [])) or [""])[0]) + "." if list(public.get("reference_packaging_rewrites") or list(public.get("reference_hook_rewrites") or [])) else ""),
         320,
     )
+    outcome_title = str(outcome_record.get("title_used", "") or "").strip()
+    outcome_source_title = str(((dict(session_snapshot.get("metadata_pack") or {})).get("source_video") or {}).get("title", "") or "").strip()
+    series_anchor = _catalyst_extract_series_anchor(
+        outcome_title,
+        outcome_source_title,
+        str(session_snapshot.get("topic", "") or ""),
+        niche_key=str(updated.get("niche_key", "") or ""),
+    ) or str(updated.get("series_anchor", "") or "").strip()
+    if series_anchor:
+        series_map = dict(updated.get("series_memory_map") or {})
+        series_key = _catalyst_series_memory_key(series_anchor)
+        series_bucket = dict(series_map.get(series_key) or {})
+        series_bucket["series_anchor"] = series_anchor
+        series_bucket["channel_id"] = str(updated.get("channel_id", "") or "")
+        series_bucket["format_preset"] = format_preset
+        series_bucket["niche_key"] = str(updated.get("niche_key", "") or "")
+        series_bucket["niche_label"] = str(updated.get("niche_label", "") or "")
+        series_bucket["niche_confidence"] = round(float(updated.get("niche_confidence", 0.0) or 0.0), 2)
+        series_bucket["niche_keywords"] = _dedupe_preserve_order([*list(updated.get("niche_keywords") or []), *list(series_bucket.get("niche_keywords") or [])], max_items=8, max_chars=40)
+        series_bucket["niche_follow_up_rule"] = str(updated.get("niche_follow_up_rule", "") or "")
+        series_bucket["run_count"] = max(int(series_bucket.get("run_count", 0) or 0), 1)
+        series_bucket["outcome_count"] = int(series_bucket.get("outcome_count", 0) or 0) + 1
+        series_bucket["last_session_id"] = str(session_snapshot.get("session_id", "") or "")
+        series_bucket["updated_at"] = time.time()
+        series_bucket["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+        series_bucket["recent_selected_titles"] = _dedupe_preserve_order([outcome_title, *list(series_bucket.get("recent_selected_titles") or [])], max_items=10, max_chars=160)
+        series_bucket["recent_source_titles"] = _dedupe_preserve_order([outcome_source_title, *list(series_bucket.get("recent_source_titles") or [])], max_items=10, max_chars=160)
+        series_bucket["proven_keywords"] = _dedupe_preserve_order([
+            *_extract_catalyst_keywords(outcome_title, *list(outcome_record.get("tags") or [])),
+            *list(series_bucket.get("proven_keywords") or []),
+        ], max_items=14, max_chars=80)
+        for field, metric_key in (
+            ("outcome_views_sum", "views"),
+            ("outcome_impressions_sum", "impressions"),
+            ("outcome_ctr_sum", "impression_click_through_rate"),
+            ("outcome_avp_sum", "average_percentage_viewed"),
+            ("outcome_avd_sum", "average_view_duration_sec"),
+            ("outcome_first30_sum", "first_30_sec_retention_pct"),
+            ("outcome_first60_sum", "first_60_sec_retention_pct"),
+        ):
+            series_bucket[field] = float(series_bucket.get(field, 0.0) or 0.0) + float(metrics.get(metric_key, 0.0) or 0.0)
+        for field, metric_key in (
+            ("reference_overall_score_sum", "overall"),
+            ("reference_hook_score_sum", "hook"),
+            ("reference_pacing_score_sum", "pacing"),
+            ("reference_visual_score_sum", "visuals"),
+            ("reference_sound_score_sum", "sound"),
+            ("reference_packaging_score_sum", "packaging"),
+            ("reference_title_novelty_score_sum", "title_novelty"),
+        ):
+            series_bucket[field] = float(series_bucket.get(field, 0.0) or 0.0) + float(reference_scores.get(metric_key, 0.0) or 0.0)
+        series_bucket["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(series_bucket.get("hook_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(series_bucket.get("pacing_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(series_bucket.get("visual_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["sound_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("sound_wins") or []), *list(series_bucket.get("sound_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(series_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
+        series_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(series_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
+        series_bucket["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(series_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        series_bucket["reference_benchmark_channels"] = _dedupe_preserve_order([
+            *list(reference_comparison.get("benchmark_channels") or []),
+            *list(series_bucket.get("reference_benchmark_channels") or []),
+        ], max_items=8, max_chars=80)
+        series_bucket["reference_tier"] = str(reference_comparison.get("tier", "") or series_bucket.get("reference_tier", "") or "")
+        series_bucket["last_reference_summary"] = _clip_text(str(reference_comparison.get("reference_summary", "") or series_bucket.get("last_reference_summary", "") or ""), 360)
+        for field, items in (
+            ("hook_wins_map", list(outcome_record.get("hook_wins") or [])),
+            ("hook_watchouts_map", list(outcome_record.get("hook_watchouts") or [])),
+            ("pacing_wins_map", list(outcome_record.get("pacing_wins") or [])),
+            ("pacing_watchouts_map", list(outcome_record.get("pacing_watchouts") or [])),
+            ("visual_wins_map", list(outcome_record.get("visual_wins") or [])),
+            ("visual_watchouts_map", list(outcome_record.get("visual_watchouts") or [])),
+            ("sound_wins_map", list(outcome_record.get("sound_wins") or [])),
+            ("sound_watchouts_map", list(outcome_record.get("sound_watchouts") or [])),
+            ("packaging_wins_map", list(outcome_record.get("packaging_wins") or [])),
+            ("packaging_watchouts_map", list(outcome_record.get("packaging_watchouts") or [])),
+            ("retention_wins_map", list(outcome_record.get("retention_wins") or [])),
+            ("retention_watchouts_map", list(outcome_record.get("retention_watchouts") or [])),
+            ("next_video_moves_map", list(outcome_record.get("next_video_moves") or [])),
+            ("reference_hook_rewrites_map", list(reference_comparison.get("hook_rewrites") or [])),
+            ("reference_pacing_rewrites_map", list(reference_comparison.get("pacing_rewrites") or [])),
+            ("reference_visual_rewrites_map", list(reference_comparison.get("visual_rewrites") or [])),
+            ("reference_sound_rewrites_map", list(reference_comparison.get("sound_rewrites") or [])),
+            ("reference_packaging_rewrites_map", list(reference_comparison.get("packaging_rewrites") or [])),
+            ("reference_next_video_moves_map", list(reference_comparison.get("next_run_moves") or [])),
+        ):
+            _catalyst_update_weighted_signals(series_bucket, field, items, weight)
+        _catalyst_update_weighted_signals(series_bucket, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+        series_public = _catalyst_channel_memory_public_view(series_bucket, series_anchor_override=series_anchor)
+        series_bucket["summary"] = _clip_text(
+            f"Catalyst now has {int(series_public.get('outcome_count', 0) or 0)} measured outcome{'s' if int(series_public.get('outcome_count', 0) or 0) != 1 else ''} inside {series_anchor}. "
+            + (f"Avg CTR {float(series_public.get('average_ctr', 0.0) or 0.0):.2f}%. " if float(series_public.get("average_ctr", 0.0) or 0.0) > 0 else "")
+            + ("Best hook win: " + str((list(series_public.get("hook_wins") or []) or [""])[0]) + ". " if list(series_public.get("hook_wins") or []) else "")
+            + ("Primary watchout: " + str((list(series_public.get("retention_watchouts") or []) or [""])[0]) + ". " if list(series_public.get("retention_watchouts") or []) else "")
+            + ("Reference rewrite pressure: " + str((list(series_public.get("reference_packaging_rewrites") or list(series_public.get("reference_hook_rewrites") or [])) or [""])[0]) + "." if list(series_public.get("reference_packaging_rewrites") or list(series_public.get("reference_hook_rewrites") or [])) else ""),
+            320,
+        )
+        series_map[series_key] = series_bucket
+        updated["series_memory_map"] = series_map
     return updated
 
 
@@ -9419,6 +9699,12 @@ async def _build_source_performance_analysis(
     if not source_bundle and not analytics_notes and not channel_context and not channel_memory:
         return {}
     format_preset = "documentary" if re.search(r"\b(documentary|explainer|breakdown|analysis)\b", f"{topic} {input_title} {input_description}", flags=re.IGNORECASE) else "explainer"
+    series_anchor_override = _catalyst_extract_series_anchor(
+        input_title,
+        str((source_bundle or {}).get("title", "") or ""),
+        topic,
+        niche_key=str((dict(channel_memory or {})).get("niche_key", "") or ""),
+    )
     heuristic = _heuristic_source_performance_analysis(
         source_bundle=source_bundle,
         analytics_notes=analytics_notes,
@@ -9444,7 +9730,7 @@ async def _build_source_performance_analysis(
         f"Draft description constraint: {input_description}\n"
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
-        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory), ensure_ascii=True)}\n"
+        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory, series_anchor_override=series_anchor_override), ensure_ascii=True)}\n"
         f"Reference documentary corpus: {_clip_text(reference_corpus_context, 3000)}\n"
         f"Private analytics/operator notes: {_clip_text(analytics_notes, 1800)}\n"
         "Use this marketing doctrine as operating context:\n"
@@ -9473,9 +9759,15 @@ async def _derive_longform_seed_from_source(
         return {}
     source_title = _clip_text(str((source_bundle or {}).get("title", "") or "").strip(), 140)
     source_summary = _clip_text(str((source_bundle or {}).get("public_summary", "") or "").strip(), 420)
+    series_anchor_override = _catalyst_extract_series_anchor(
+        source_title,
+        str((source_bundle or {}).get("description", "") or ""),
+        str((source_bundle or {}).get("channel", "") or ""),
+        niche_key=str((dict(channel_memory or {})).get("niche_key", "") or ""),
+    )
     channel_title_memory = [str(v).strip() for v in list((channel_context or {}).get("recent_upload_titles") or []) if str(v).strip()]
     channel_title_memory.extend(str(v).strip() for v in list((channel_context or {}).get("top_video_titles") or []) if str(v).strip())
-    channel_title_memory.extend(str(v).strip() for v in list((_catalyst_channel_memory_public_view(channel_memory)).get("recent_selected_titles") or []) if str(v).strip())
+    channel_title_memory.extend(str(v).strip() for v in list((_catalyst_channel_memory_public_view(channel_memory, series_anchor_override=series_anchor_override)).get("recent_selected_titles") or []) if str(v).strip())
     improvement_moves = source_analysis.get("improvement_moves") or []
     heuristic_titles = _same_arena_title_variants(source_bundle, topic="", format_preset=format_preset)
     heuristic_descriptions = _same_arena_description_variants(source_bundle, topic="", source_analysis=source_analysis)
@@ -9497,7 +9789,7 @@ async def _derive_longform_seed_from_source(
         f"Public source bundle: {json.dumps(source_bundle or {}, ensure_ascii=True)}\n"
         f"Source performance analysis: {json.dumps(source_analysis or {}, ensure_ascii=True)}\n"
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
-        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory), ensure_ascii=True)}\n"
+        f"Catalyst channel memory: {json.dumps(_catalyst_channel_memory_public_view(channel_memory, series_anchor_override=series_anchor_override), ensure_ascii=True)}\n"
         f"Reference documentary corpus: {_clip_text(reference_corpus_context, 3000)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{_marketing_doctrine_text(strategy_notes)}"
