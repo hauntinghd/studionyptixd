@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import base64
 import shutil
@@ -163,6 +163,41 @@ from backend_image_prompts import (
     WAN22_I2V_HIGH,
     WAN22_T2V_HIGH,
     WAN22_T2V_LOW,
+)
+from backend_catalyst_core import (
+    _CATALYST_NICHE_RULES,
+    _catalyst_build_channel_series_clusters,
+    _catalyst_channel_memory_key,
+    _catalyst_channel_memory_public_view,
+    _catalyst_extract_series_anchor,
+    _catalyst_infer_niche,
+    _catalyst_merge_signal_lists,
+    _catalyst_merge_weighted_signals,
+    _catalyst_metric_average,
+    _catalyst_metric_score,
+    _catalyst_outcome_weight,
+    _catalyst_pressure_label,
+    _catalyst_reference_score_tier,
+    _catalyst_reference_signal_list,
+    _catalyst_rewrite_pressure_profile,
+    _catalyst_series_memory_key,
+    _catalyst_signal_balance_score,
+    _catalyst_text_overlap_score,
+    _catalyst_title_novelty_score,
+    _catalyst_update_weighted_signals,
+    _catalyst_weighted_signal_items,
+    _extract_catalyst_keywords,
+    _render_catalyst_series_cluster_context,
+    _resolve_catalyst_series_context,
+    _select_catalyst_channel_series_cluster,
+)
+from backend_catalyst_profiles import (
+    _catalyst_audio_mix_profile,
+    _catalyst_chapter_blueprint_for_index,
+    _catalyst_default_sound_profile,
+    _catalyst_default_visual_engine,
+    _catalyst_scene_execution_profile,
+    _heuristic_catalyst_chapter_blueprints,
 )
 from backend_models import (
     GenerateRequest,
@@ -848,18 +883,6 @@ def _save_catalyst_memory() -> None:
         pass
 
 
-def _catalyst_channel_memory_key(user_id: str, channel_id: str, format_preset: str) -> str:
-    user_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(user_id or "").strip()) or "anon"
-    channel_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(channel_id or "").strip()) or "unbound"
-    format_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(format_preset or "").strip().lower()) or "explainer"
-    return f"{user_key}:{channel_key}:{format_key}"
-
-
-def _catalyst_series_memory_key(series_anchor: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(series_anchor or "").strip().lower()).strip("_")
-    return normalized or "general"
-
-
 def _dedupe_preserve_order(values: list[str], max_items: int = 8, max_chars: int = 200) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -875,712 +898,6 @@ def _dedupe_preserve_order(values: list[str], max_items: int = 8, max_chars: int
         if len(out) >= max_items:
             break
     return out
-
-
-_CATALYST_KEYWORD_STOPWORDS = {
-    "the", "and", "with", "that", "this", "from", "your", "into", "what", "when", "will", "have",
-    "about", "their", "them", "they", "over", "more", "than", "just", "make", "made", "make", "video",
-    "videos", "how", "why", "top", "best", "worst", "full", "complete", "guide", "explained", "breakdown",
-    "documentary", "channel", "studio", "nyptid",
-}
-
-_CATALYST_NICHE_RULES = {
-    "manga_recap": {
-        "label": "Manga / Manhua Recap",
-        "keywords": [
-            "manga", "manhwa", "manhua", "webtoon", "recap", "chapter", "murim", "isekai",
-            "cultivation", "regressor", "reincarnated", "hunter", "necromancer", "dungeon",
-            "martial", "ranker", "overpowered", "wrecker", "driver", "wrecker driver",
-        ],
-        "follow_up_rule": "Stay in recap mode. Build the next video around a stronger arc turn, power jump, betrayal, reveal, or chapter escalation instead of generic documentary framing.",
-    },
-    "day_trading": {
-        "label": "Day Trading / Investing",
-        "keywords": [
-            "day trading", "daytrading", "trading", "trader", "market", "stock", "stocks", "options",
-            "forex", "crypto", "futures", "spy", "nasdaq", "setup", "chart", "liquidity", "risk", "scalp",
-        ],
-        "follow_up_rule": "Keep the video anchored to real setups, risk, trader psychology, and chart consequences. Avoid generic wealth-posturing or broad business fluff.",
-    },
-    "dark_psychology": {
-        "label": "Psychology / Hidden Behavior",
-        "keywords": [
-            "brain", "mind", "memory", "attention", "psychology", "manipulation", "disturbing",
-            "subconscious", "secret", "lies", "blind spot", "decision", "habits", "behavior",
-        ],
-        "follow_up_rule": "Lean into hidden mechanisms, mental blind spots, and consequence-first reveals. Keep the emotional charge high without drifting into textbook visuals.",
-    },
-    "business_documentary": {
-        "label": "Business Documentary",
-        "keywords": [
-            "business", "company", "startup", "industry", "money", "market", "billion", "brand",
-            "economy", "economics", "finance", "capital", "investor", "wealth",
-        ],
-        "follow_up_rule": "Frame the next video around systems, incentives, leverage, money flow, or power structures. Keep it engineered and documentary-driven.",
-    },
-    "geopolitics_history": {
-        "label": "History / Geopolitics",
-        "keywords": [
-            "war", "empire", "leader", "iran", "battle", "killed", "assassin", "history",
-            "nation", "military", "power", "border", "regime", "operation", "strategy",
-        ],
-        "follow_up_rule": "Stay on power shifts, hidden chains of events, and consequence-led storytelling. Avoid generic business framing.",
-    },
-}
-
-
-def _extract_catalyst_keywords(*texts: str, max_items: int = 12) -> list[str]:
-    scores: dict[str, int] = {}
-    for text in texts:
-        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", str(text or "").lower()):
-            if token in _CATALYST_KEYWORD_STOPWORDS:
-                continue
-            scores[token] = scores.get(token, 0) + 1
-    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-    return [token for token, _ in ranked[:max_items]]
-
-
-def _catalyst_infer_niche(*texts: str, format_preset: str = "") -> dict:
-    normalized_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
-    combined = " \n ".join(normalized_texts).lower()
-    scored: list[tuple[str, int, list[str]]] = []
-    for niche_key, spec in _CATALYST_NICHE_RULES.items():
-        hits: list[str] = []
-        score = 0
-        for raw_keyword in list(spec.get("keywords") or []):
-            keyword = str(raw_keyword or "").strip().lower()
-            if not keyword:
-                continue
-            if keyword in combined:
-                hits.append(keyword)
-                score += 3 if " " in keyword else 2
-        if score > 0:
-            scored.append((niche_key, score, hits))
-    preset = str(format_preset or "").strip().lower()
-    if preset == "recap":
-        scored.append(("manga_recap", 6, ["recap"]))
-    elif preset == "documentary":
-        scored.append(("business_documentary", 1, ["documentary"]))
-    if not scored:
-        fallback_key = "business_documentary" if preset == "documentary" else ("manga_recap" if preset == "recap" else "")
-        if not fallback_key:
-            return {
-                "key": "",
-                "label": "",
-                "confidence": 0.0,
-                "keywords": [],
-                "follow_up_rule": "",
-            }
-        fallback = dict(_CATALYST_NICHE_RULES.get(fallback_key) or {})
-        return {
-            "key": fallback_key,
-            "label": str(fallback.get("label", "") or ""),
-            "confidence": 0.35,
-            "keywords": [],
-            "follow_up_rule": str(fallback.get("follow_up_rule", "") or ""),
-        }
-    scored.sort(key=lambda item: (-item[1], item[0]))
-    chosen_key, chosen_score, chosen_hits = scored[0]
-    chosen = dict(_CATALYST_NICHE_RULES.get(chosen_key) or {})
-    confidence = 0.45 if chosen_score <= 3 else (0.72 if chosen_score <= 7 else 0.9)
-    return {
-        "key": chosen_key,
-        "label": str(chosen.get("label", "") or ""),
-        "confidence": round(confidence, 2),
-        "keywords": _dedupe_preserve_order(chosen_hits, max_items=8, max_chars=40),
-        "follow_up_rule": str(chosen.get("follow_up_rule", "") or ""),
-    }
-
-
-def _catalyst_titlecase_phrase(text: str) -> str:
-    words = [str(word or "").strip() for word in str(text or "").split() if str(word or "").strip()]
-    out: list[str] = []
-    for word in words:
-        if word.isupper() and len(word) <= 5:
-            out.append(word)
-        else:
-            out.append(word[:1].upper() + word[1:])
-    return " ".join(out).strip()
-
-
-def _catalyst_extract_series_anchor(*texts: str, niche_key: str = "") -> str:
-    raw_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
-    if not raw_texts:
-        return ""
-    combined = " \n ".join(raw_texts)
-    lower_combined = combined.lower()
-    if str(niche_key or "").strip().lower() == "manga_recap" or "wrecker driver" in lower_combined:
-        if "wrecker driver" in lower_combined:
-            return "Wrecker Driver"
-        phrase_match = re.search(
-            r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,3})\b",
-            combined,
-        )
-        if phrase_match:
-            candidate = _clean_same_arena_phrase(phrase_match.group(1), max_words=4)
-            if candidate and len(candidate.split()) >= 2:
-                return _catalyst_titlecase_phrase(candidate)
-    return ""
-
-
-def _catalyst_build_channel_series_clusters(videos: list[dict] | None, *, top_videos: list[dict] | None = None) -> list[dict]:
-    merged_by_id: dict[str, dict] = {}
-    for raw in list(videos or []):
-        if not isinstance(raw, dict):
-            continue
-        video_id = str(raw.get("video_id", "") or "").strip()
-        key = video_id or f"title:{str(raw.get('title', '') or '').strip().lower()}"
-        if not key:
-            continue
-        merged_by_id[key] = dict(raw or {})
-    for raw in list(top_videos or []):
-        if not isinstance(raw, dict):
-            continue
-        video_id = str(raw.get("video_id", "") or "").strip()
-        if not video_id:
-            continue
-        base = dict(merged_by_id.get(video_id) or {})
-        merged = dict(base)
-        merged.update({k: v for k, v in dict(raw or {}).items() if v not in (None, "", [], {})})
-        merged_by_id[video_id] = merged
-    cluster_map: dict[str, dict] = {}
-    for video in list(merged_by_id.values()):
-        title = str(video.get("title", "") or "").strip()
-        description = str(video.get("description", "") or "").strip()
-        tags = [str(tag).strip() for tag in list(video.get("tags") or []) if str(tag).strip()]
-        if not title:
-            continue
-        niche = _catalyst_infer_niche(title, description, " ".join(tags), format_preset="")
-        niche_key = str(niche.get("key", "") or "").strip().lower()
-        series_anchor = _catalyst_extract_series_anchor(title, description, " ".join(tags), niche_key=niche_key)
-        cluster_key = f"series:{_catalyst_series_memory_key(series_anchor)}" if series_anchor else f"niche:{niche_key or 'general'}"
-        bucket = dict(cluster_map.get(cluster_key) or {})
-        bucket.setdefault("series_anchor", series_anchor)
-        bucket.setdefault("niche_key", niche_key)
-        bucket.setdefault("niche_label", str(niche.get("label", "") or ""))
-        bucket.setdefault("niche_follow_up_rule", str(niche.get("follow_up_rule", "") or ""))
-        bucket.setdefault("titles", [])
-        bucket.setdefault("keywords", [])
-        bucket.setdefault("video_count", 0)
-        bucket.setdefault("views_sum", 0.0)
-        bucket.setdefault("ctr_sum", 0.0)
-        bucket.setdefault("ctr_count", 0)
-        bucket.setdefault("avp_sum", 0.0)
-        bucket.setdefault("avp_count", 0)
-        bucket.setdefault("top_title", "")
-        bucket.setdefault("top_views", 0.0)
-        bucket["video_count"] = int(bucket.get("video_count", 0) or 0) + 1
-        bucket["titles"] = _dedupe_preserve_order([title, *list(bucket.get("titles") or [])], max_items=10, max_chars=160)
-        bucket["keywords"] = _dedupe_preserve_order([*_extract_catalyst_keywords(title, description, *tags, max_items=10), *list(bucket.get("keywords") or [])], max_items=10, max_chars=60)
-        views = float(video.get("views", 0.0) or 0.0)
-        bucket["views_sum"] = float(bucket.get("views_sum", 0.0) or 0.0) + views
-        ctr = float(video.get("impression_click_through_rate", 0.0) or 0.0)
-        if ctr > 0:
-            bucket["ctr_sum"] = float(bucket.get("ctr_sum", 0.0) or 0.0) + ctr
-            bucket["ctr_count"] = int(bucket.get("ctr_count", 0) or 0) + 1
-        avp = float(video.get("average_view_percentage", video.get("average_percentage_viewed", 0.0)) or 0.0)
-        if avp > 0:
-            bucket["avp_sum"] = float(bucket.get("avp_sum", 0.0) or 0.0) + avp
-            bucket["avp_count"] = int(bucket.get("avp_count", 0) or 0) + 1
-        if views > float(bucket.get("top_views", 0.0) or 0.0):
-            bucket["top_views"] = views
-            bucket["top_title"] = title
-        cluster_map[cluster_key] = bucket
-    clusters: list[dict] = []
-    for key, bucket in list(cluster_map.items()):
-        avg_views = _catalyst_metric_average(float(bucket.get("views_sum", 0.0) or 0.0), int(bucket.get("video_count", 0) or 0), 0)
-        avg_ctr = _catalyst_metric_average(float(bucket.get("ctr_sum", 0.0) or 0.0), int(bucket.get("ctr_count", 0) or 0), 2)
-        avg_avp = _catalyst_metric_average(float(bucket.get("avp_sum", 0.0) or 0.0), int(bucket.get("avp_count", 0) or 0), 2)
-        cluster_label = str(bucket.get("series_anchor", "") or bucket.get("niche_label", "") or "Channel lane").strip()
-        clusters.append({
-            "key": key,
-            "kind": "series" if str(bucket.get("series_anchor", "") or "").strip() else "niche",
-            "series_anchor": str(bucket.get("series_anchor", "") or "").strip(),
-            "label": cluster_label,
-            "niche_key": str(bucket.get("niche_key", "") or "").strip(),
-            "niche_label": str(bucket.get("niche_label", "") or "").strip(),
-            "follow_up_rule": str(bucket.get("niche_follow_up_rule", "") or "").strip(),
-            "video_count": int(bucket.get("video_count", 0) or 0),
-            "average_views": avg_views,
-            "average_ctr": avg_ctr,
-            "average_avp": avg_avp,
-            "top_title": str(bucket.get("top_title", "") or "").strip(),
-            "sample_titles": _dedupe_preserve_order(list(bucket.get("titles") or []), max_items=4, max_chars=160),
-            "keywords": _dedupe_preserve_order(list(bucket.get("keywords") or []), max_items=8, max_chars=60),
-            "score": round((float(bucket.get("top_views", 0.0) or 0.0) * 0.02) + (avg_views * 0.01) + (avg_ctr * 6.0) + (avg_avp * 2.2) + (int(bucket.get("video_count", 0) or 0) * 5.0), 2),
-        })
-    clusters.sort(key=lambda row: (-float(row.get("score", 0.0) or 0.0), -int(row.get("video_count", 0) or 0), str(row.get("label", "") or "").lower()))
-    return clusters[:12]
-
-
-def _select_catalyst_channel_series_cluster(
-    channel_context: dict | None,
-    *,
-    topic: str = "",
-    source_title: str = "",
-    channel_memory: dict | None = None,
-    format_preset: str = "",
-) -> dict:
-    channel_context = dict(channel_context or {})
-    clusters = [dict(row or {}) for row in list(channel_context.get("series_clusters") or []) if isinstance(row, dict)]
-    if not clusters:
-        return {}
-    memory_public = _catalyst_channel_memory_public_view(channel_memory)
-    memory_anchor = str(memory_public.get("series_anchor", "") or "").strip().lower()
-    memory_niche = str(memory_public.get("niche_key", "") or "").strip().lower()
-    inferred = _catalyst_infer_niche(topic, source_title, format_preset=format_preset)
-    inferred_niche = str(inferred.get("key", "") or "").strip().lower()
-    ref_text = f"{topic} {source_title}".strip()
-    best_score = -1.0
-    best_cluster: dict = {}
-    for cluster in clusters:
-        score = float(cluster.get("score", 0.0) or 0.0)
-        anchor = str(cluster.get("series_anchor", "") or "").strip()
-        niche_key = str(cluster.get("niche_key", "") or "").strip().lower()
-        label = str(cluster.get("label", "") or "").strip()
-        if memory_anchor and anchor and anchor.lower() == memory_anchor:
-            score += 80.0
-        if memory_niche and niche_key and niche_key == memory_niche:
-            score += 22.0
-        if inferred_niche and niche_key and niche_key == inferred_niche:
-            score += 18.0
-        if ref_text:
-            score += _catalyst_text_overlap_score(ref_text, " ".join([
-                anchor,
-                label,
-                *list(cluster.get("sample_titles") or []),
-                *list(cluster.get("keywords") or []),
-            ])) * 100.0
-        if score > best_score:
-            best_score = score
-            best_cluster = cluster
-    return best_cluster
-
-
-def _render_catalyst_series_cluster_context(cluster: dict | None) -> str:
-    cluster = dict(cluster or {})
-    if not cluster:
-        return ""
-    parts = [
-        f"Matched channel series cluster: {str(cluster.get('label', '') or '').strip()}." if str(cluster.get("label", "") or "").strip() else "",
-        f"Series anchor: {str(cluster.get('series_anchor', '') or '').strip()}." if str(cluster.get("series_anchor", "") or "").strip() else "",
-        f"Cluster niche: {str(cluster.get('niche_label', '') or '').strip()}." if str(cluster.get("niche_label", "") or "").strip() else "",
-        f"Cluster performance snapshot: {int(cluster.get('video_count', 0) or 0)} videos, avg views {int(float(cluster.get('average_views', 0.0) or 0.0)):,}, avg CTR {float(cluster.get('average_ctr', 0.0) or 0.0):.2f}%, avg viewed {float(cluster.get('average_avp', 0.0) or 0.0):.2f}%." if int(cluster.get("video_count", 0) or 0) > 0 else "",
-        ("Cluster sample titles: " + ", ".join(list(cluster.get("sample_titles") or [])[:3])) if list(cluster.get("sample_titles") or []) else "",
-        ("Cluster keywords: " + ", ".join(list(cluster.get("keywords") or [])[:6])) if list(cluster.get("keywords") or []) else "",
-        ("Cluster follow-up rule: " + _clip_text(str(cluster.get("follow_up_rule", "") or ""), 220)) if str(cluster.get("follow_up_rule", "") or "").strip() else "",
-    ]
-    return " ".join(part for part in parts if part).strip()
-
-
-def _resolve_catalyst_series_context(
-    channel_context: dict | None,
-    *,
-    channel_memory: dict | None = None,
-    topic: str = "",
-    source_title: str = "",
-    input_title: str = "",
-    input_description: str = "",
-    format_preset: str = "",
-) -> dict:
-    channel_context = dict(channel_context or {})
-    channel_memory_raw = dict(channel_memory or {})
-    extracted_anchor = _catalyst_extract_series_anchor(
-        input_title,
-        source_title,
-        topic,
-        input_description,
-        niche_key=str(channel_memory_raw.get("niche_key", "") or ""),
-    )
-    selected_cluster = _select_catalyst_channel_series_cluster(
-        channel_context,
-        topic=" ".join(
-            part for part in [topic, input_title, input_description] if str(part or "").strip()
-        ),
-        source_title=source_title or input_title,
-        channel_memory=channel_memory_raw,
-        format_preset=format_preset,
-    )
-    cluster_anchor = str((selected_cluster or {}).get("series_anchor", "") or "").strip()
-    series_anchor_override = cluster_anchor or extracted_anchor
-    memory_view = _catalyst_channel_memory_public_view(
-        channel_memory_raw,
-        series_anchor_override=series_anchor_override,
-    )
-    return {
-        "selected_cluster": dict(selected_cluster or {}),
-        "series_anchor_override": series_anchor_override,
-        "cluster_context": _render_catalyst_series_cluster_context(selected_cluster),
-        "memory_view": memory_view,
-    }
-
-
-def _catalyst_metric_average(total: float, count: int, digits: int = 2) -> float:
-    safe_count = max(0, int(count or 0))
-    if safe_count <= 0:
-        return 0.0
-    try:
-        return round(float(total or 0.0) / safe_count, digits)
-    except Exception:
-        return 0.0
-
-
-def _catalyst_weighted_signal_items(
-    signal_map: dict | None,
-    *,
-    max_items: int = 8,
-    max_chars: int = 180,
-) -> list[str]:
-    rows: list[tuple[str, float]] = []
-    for raw_text, raw_weight in dict(signal_map or {}).items():
-        text = _clip_text(str(raw_text or "").strip(), max_chars)
-        if not text:
-            continue
-        try:
-            weight = float(raw_weight or 0.0)
-        except Exception:
-            continue
-        if weight <= 0:
-            continue
-        rows.append((text, weight))
-    rows.sort(key=lambda item: (-item[1], item[0].lower()))
-    return [text for text, _ in rows[:max_items]]
-
-
-def _catalyst_merge_signal_lists(*groups: list[str], max_items: int = 10, max_chars: int = 180) -> list[str]:
-    merged: list[str] = []
-    for group in groups:
-        merged.extend(str(v or "").strip() for v in list(group or []) if str(v or "").strip())
-    return _dedupe_preserve_order(merged, max_items=max_items, max_chars=max_chars)
-
-
-def _catalyst_merge_weighted_signals(
-    existing_map: dict | None,
-    signals: list[str] | None,
-    weight: float,
-    *,
-    max_items: int = 24,
-    max_chars: int = 180,
-) -> dict[str, float]:
-    display_by_key: dict[str, str] = {}
-    score_by_key: dict[str, float] = {}
-    for raw_text, raw_weight in dict(existing_map or {}).items():
-        text = _clip_text(str(raw_text or "").strip(), max_chars)
-        if not text:
-            continue
-        key = text.lower()
-        try:
-            parsed = float(raw_weight or 0.0)
-        except Exception:
-            parsed = 0.0
-        if parsed <= 0:
-            continue
-        if parsed > score_by_key.get(key, 0.0):
-            score_by_key[key] = parsed
-            display_by_key[key] = text
-    for raw_text in list(signals or []):
-        text = _clip_text(str(raw_text or "").strip(), max_chars)
-        if not text:
-            continue
-        key = text.lower()
-        score_by_key[key] = round(score_by_key.get(key, 0.0) + float(weight or 0.0), 4)
-        display_by_key[key] = text
-    ranked = sorted(score_by_key.items(), key=lambda item: (-item[1], display_by_key.get(item[0], item[0]).lower()))
-    return {
-        display_by_key[key]: round(score, 4)
-        for key, score in ranked[:max_items]
-        if key in display_by_key
-    }
-
-
-def _catalyst_update_weighted_signals(
-    memory: dict,
-    field_name: str,
-    signals: list[str] | None,
-    weight: float,
-    *,
-    max_items: int = 24,
-    max_chars: int = 180,
-) -> None:
-    if not signals:
-        return
-    memory[field_name] = _catalyst_merge_weighted_signals(
-        memory.get(field_name) or {},
-        signals,
-        weight,
-        max_items=max_items,
-        max_chars=max_chars,
-    )
-
-
-def _catalyst_outcome_weight(metrics: dict | None) -> float:
-    data = dict(metrics or {})
-    ctr = max(0.0, float(data.get("impression_click_through_rate", 0.0) or 0.0))
-    avp = max(0.0, float(data.get("average_percentage_viewed", 0.0) or 0.0))
-    first30 = max(0.0, float(data.get("first_30_sec_retention_pct", 0.0) or 0.0))
-    first60 = max(0.0, float(data.get("first_60_sec_retention_pct", 0.0) or 0.0))
-    views = max(0, int(data.get("views", 0) or 0))
-    signals: list[float] = []
-    if ctr > 0:
-        signals.append(min(1.8, ctr / 4.0))
-    if avp > 0:
-        signals.append(min(1.8, avp / 45.0))
-    if first30 > 0:
-        signals.append(min(1.8, first30 / 55.0))
-    if first60 > 0:
-        signals.append(min(1.8, first60 / 45.0))
-    base = 0.85
-    if signals:
-        base += sum(signals) / len(signals)
-    if views >= 100000:
-        base += 1.25
-    elif views >= 10000:
-        base += 0.95
-    elif views >= 1000:
-        base += 0.7
-    elif views >= 300:
-        base += 0.45
-    elif views >= 100:
-        base += 0.25
-    return round(max(0.85, min(5.0, base)), 2)
-
-
-def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
-    data = dict(memory or {})
-    series_map = dict(data.get("series_memory_map") or {})
-    series_catalog = _dedupe_preserve_order(
-        [
-            _clip_text(str((row or {}).get("series_anchor", "") or ""), 120)
-            for row in list(series_map.values())
-            if isinstance(row, dict) and str((row or {}).get("series_anchor", "") or "").strip()
-        ],
-        max_items=16,
-        max_chars=120,
-    )
-    active_series_anchor = _clip_text(str(series_anchor_override or data.get("series_anchor", "") or ""), 120)
-    active_series_bucket: dict = {}
-    if active_series_anchor:
-        active_series_key = _catalyst_series_memory_key(active_series_anchor)
-        active_series_bucket = dict(series_map.get(active_series_key) or {})
-        if not active_series_bucket:
-            active_series_bucket = next(
-                (
-                    dict(row or {})
-                    for row in list(series_map.values())
-                    if isinstance(row, dict)
-                    and str((row or {}).get("series_anchor", "") or "").strip().lower() == active_series_anchor.lower()
-                ),
-                {},
-            )
-    if active_series_bucket:
-        for field in (
-            "series_anchor",
-            "niche_key",
-            "niche_label",
-            "niche_confidence",
-            "niche_follow_up_rule",
-            "preferred_transition_style",
-            "preferred_music_profile",
-            "preferred_visual_engine",
-            "last_outcome_summary",
-            "last_reference_summary",
-            "reference_tier",
-            "last_session_id",
-            "updated_at",
-        ):
-            if active_series_bucket.get(field) not in (None, "", [], {}):
-                data[field] = active_series_bucket.get(field)
-        if int(active_series_bucket.get("run_count", 0) or 0) > 0:
-            data["run_count"] = int(active_series_bucket.get("run_count", 0) or 0)
-        if int(active_series_bucket.get("outcome_count", 0) or 0) > 0:
-            data["outcome_count"] = int(active_series_bucket.get("outcome_count", 0) or 0)
-            for field in (
-                "outcome_views_sum",
-                "outcome_impressions_sum",
-                "outcome_ctr_sum",
-                "outcome_avp_sum",
-                "outcome_avd_sum",
-                "outcome_first30_sum",
-                "outcome_first60_sum",
-                "reference_overall_score_sum",
-                "reference_hook_score_sum",
-                "reference_pacing_score_sum",
-                "reference_visual_score_sum",
-                "reference_sound_score_sum",
-                "reference_packaging_score_sum",
-                "reference_title_novelty_score_sum",
-            ):
-                if active_series_bucket.get(field) not in (None, "", [], {}):
-                    data[field] = active_series_bucket.get(field)
-        for field in (
-            "recent_source_titles",
-            "recent_selected_titles",
-            "proven_keywords",
-            "hook_learnings",
-            "pacing_learnings",
-            "visual_learnings",
-            "sound_learnings",
-            "packaging_learnings",
-            "retention_watchouts",
-            "next_video_moves",
-            "reference_benchmark_channels",
-        ):
-            merged = _dedupe_preserve_order(
-                [
-                    *list(active_series_bucket.get(field) or []),
-                    *list(data.get(field) or []),
-                ],
-                max_items=14 if field == "proven_keywords" else 10,
-                max_chars=80 if field == "proven_keywords" else 180,
-            )
-            if merged:
-                data[field] = merged
-        for field in (
-            "hook_wins_map",
-            "hook_watchouts_map",
-            "pacing_wins_map",
-            "pacing_watchouts_map",
-            "visual_wins_map",
-            "visual_watchouts_map",
-            "sound_wins_map",
-            "sound_watchouts_map",
-            "packaging_wins_map",
-            "packaging_watchouts_map",
-            "retention_wins_map",
-            "retention_watchouts_map",
-            "next_video_moves_map",
-            "reference_hook_rewrites_map",
-            "reference_pacing_rewrites_map",
-            "reference_visual_rewrites_map",
-            "reference_sound_rewrites_map",
-            "reference_packaging_rewrites_map",
-            "reference_next_video_moves_map",
-        ):
-            if active_series_bucket.get(field):
-                data[field] = dict(active_series_bucket.get(field) or {})
-    outcome_count = int(data.get("outcome_count", 0) or 0)
-    hook_wins = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("hook_wins_map") or {}, max_items=6),
-        list(data.get("hook_learnings") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    pacing_wins = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("pacing_wins_map") or {}, max_items=6),
-        list(data.get("pacing_learnings") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    visual_wins = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("visual_wins_map") or {}, max_items=6),
-        list(data.get("visual_learnings") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    sound_wins = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("sound_wins_map") or {}, max_items=6),
-        list(data.get("sound_learnings") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    packaging_wins = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("packaging_wins_map") or {}, max_items=6),
-        list(data.get("packaging_learnings") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    next_video_moves = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("next_video_moves_map") or {}, max_items=6),
-        list(data.get("next_video_moves") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    hook_watchouts = _catalyst_weighted_signal_items(data.get("hook_watchouts_map") or {}, max_items=6)
-    pacing_watchouts = _catalyst_weighted_signal_items(data.get("pacing_watchouts_map") or {}, max_items=6)
-    visual_watchouts = _catalyst_weighted_signal_items(data.get("visual_watchouts_map") or {}, max_items=6)
-    sound_watchouts = _catalyst_weighted_signal_items(data.get("sound_watchouts_map") or {}, max_items=6)
-    packaging_watchouts = _catalyst_weighted_signal_items(data.get("packaging_watchouts_map") or {}, max_items=6)
-    retention_wins = _catalyst_weighted_signal_items(data.get("retention_wins_map") or {}, max_items=6)
-    retention_watchouts = _catalyst_merge_signal_lists(
-        _catalyst_weighted_signal_items(data.get("retention_watchouts_map") or {}, max_items=6),
-        list(data.get("retention_watchouts") or [])[:4],
-        max_items=10,
-        max_chars=180,
-    )
-    reference_hook_rewrites = _catalyst_weighted_signal_items(data.get("reference_hook_rewrites_map") or {}, max_items=6)
-    reference_pacing_rewrites = _catalyst_weighted_signal_items(data.get("reference_pacing_rewrites_map") or {}, max_items=6)
-    reference_visual_rewrites = _catalyst_weighted_signal_items(data.get("reference_visual_rewrites_map") or {}, max_items=6)
-    reference_sound_rewrites = _catalyst_weighted_signal_items(data.get("reference_sound_rewrites_map") or {}, max_items=6)
-    reference_packaging_rewrites = _catalyst_weighted_signal_items(data.get("reference_packaging_rewrites_map") or {}, max_items=6)
-    reference_next_video_moves = _catalyst_weighted_signal_items(data.get("reference_next_video_moves_map") or {}, max_items=8)
-    public = {
-        "key": str(data.get("key", "") or ""),
-        "channel_id": str(data.get("channel_id", "") or ""),
-        "format_preset": str(data.get("format_preset", "") or ""),
-        "niche_key": str(data.get("niche_key", "") or ""),
-        "niche_label": str(data.get("niche_label", "") or ""),
-        "niche_confidence": round(float(data.get("niche_confidence", 0.0) or 0.0), 2),
-        "niche_keywords": list(data.get("niche_keywords") or []),
-        "niche_follow_up_rule": str(data.get("niche_follow_up_rule", "") or ""),
-        "series_anchor": str(data.get("series_anchor", "") or ""),
-        "run_count": int(data.get("run_count", 0) or 0),
-        "outcome_count": outcome_count,
-        "summary": str(data.get("summary", "") or ""),
-        "proven_keywords": list(data.get("proven_keywords") or []),
-        "hook_learnings": hook_wins,
-        "pacing_learnings": pacing_wins,
-        "visual_learnings": visual_wins,
-        "sound_learnings": sound_wins,
-        "packaging_learnings": packaging_wins,
-        "retention_watchouts": retention_watchouts,
-        "next_video_moves": next_video_moves,
-        "hook_wins": hook_wins,
-        "hook_watchouts": hook_watchouts,
-        "pacing_wins": pacing_wins,
-        "pacing_watchouts": pacing_watchouts,
-        "visual_wins": visual_wins,
-        "visual_watchouts": visual_watchouts,
-        "sound_wins": sound_wins,
-        "sound_watchouts": sound_watchouts,
-        "packaging_wins": packaging_wins,
-        "packaging_watchouts": packaging_watchouts,
-        "retention_wins": retention_wins,
-        "average_ctr": _catalyst_metric_average(float(data.get("outcome_ctr_sum", 0.0) or 0.0), outcome_count, 2),
-        "average_average_percentage_viewed": _catalyst_metric_average(float(data.get("outcome_avp_sum", 0.0) or 0.0), outcome_count, 2),
-        "average_view_duration_sec": _catalyst_metric_average(float(data.get("outcome_avd_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_first_30_sec_retention_pct": _catalyst_metric_average(float(data.get("outcome_first30_sum", 0.0) or 0.0), outcome_count, 2),
-        "average_first_60_sec_retention_pct": _catalyst_metric_average(float(data.get("outcome_first60_sum", 0.0) or 0.0), outcome_count, 2),
-        "average_views": _catalyst_metric_average(float(data.get("outcome_views_sum", 0.0) or 0.0), outcome_count, 0),
-        "average_impressions": _catalyst_metric_average(float(data.get("outcome_impressions_sum", 0.0) or 0.0), outcome_count, 0),
-        "average_reference_overall_score": _catalyst_metric_average(float(data.get("reference_overall_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_hook_score": _catalyst_metric_average(float(data.get("reference_hook_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_pacing_score": _catalyst_metric_average(float(data.get("reference_pacing_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_visual_score": _catalyst_metric_average(float(data.get("reference_visual_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_sound_score": _catalyst_metric_average(float(data.get("reference_sound_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_packaging_score": _catalyst_metric_average(float(data.get("reference_packaging_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "average_reference_title_novelty_score": _catalyst_metric_average(float(data.get("reference_title_novelty_score_sum", 0.0) or 0.0), outcome_count, 1),
-        "reference_summary": str(data.get("last_reference_summary", "") or ""),
-        "reference_tier": str(data.get("reference_tier", "") or ""),
-        "reference_benchmark_channels": list(data.get("reference_benchmark_channels") or []),
-        "reference_hook_rewrites": reference_hook_rewrites,
-        "reference_pacing_rewrites": reference_pacing_rewrites,
-        "reference_visual_rewrites": reference_visual_rewrites,
-        "reference_sound_rewrites": reference_sound_rewrites,
-        "reference_packaging_rewrites": reference_packaging_rewrites,
-        "reference_next_video_moves": reference_next_video_moves,
-        "last_outcome_summary": str(data.get("last_outcome_summary", "") or ""),
-        "recent_source_titles": list(data.get("recent_source_titles") or []),
-        "recent_selected_titles": list(data.get("recent_selected_titles") or []),
-        "preferred_transition_style": str(data.get("preferred_transition_style", "") or ""),
-        "preferred_music_profile": str(data.get("preferred_music_profile", "") or ""),
-        "preferred_visual_engine": str(data.get("preferred_visual_engine", "") or ""),
-        "last_session_id": str(data.get("last_session_id", "") or ""),
-        "updated_at": float(data.get("updated_at", 0) or 0),
-        "series_anchors": series_catalog,
-        "series_scope_active": bool(active_series_bucket),
-    }
-    public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
-    return public
 
 
 def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_override: str = "") -> str:
@@ -1729,218 +1046,6 @@ def _render_catalyst_reference_corpus_context(format_preset: str = "documentary"
             )
         )
     return "\n".join(part for part in parts if str(part or "").strip())
-
-
-def _catalyst_metric_score(
-    value: float,
-    low: float,
-    good: float,
-    elite: float,
-    *,
-    neutral: int = 55,
-) -> int:
-    try:
-        parsed = float(value or 0.0)
-    except Exception:
-        parsed = 0.0
-    if parsed <= 0:
-        return int(neutral)
-    if parsed <= low:
-        return int(max(20, round((parsed / max(low, 0.001)) * 45.0)))
-    if parsed <= good:
-        return int(round(45.0 + ((parsed - low) / max(good - low, 0.001)) * 30.0))
-    if parsed <= elite:
-        return int(round(75.0 + ((parsed - good) / max(elite - good, 0.001)) * 20.0))
-    return 95
-
-
-def _catalyst_signal_balance_score(
-    wins: list[str] | None,
-    watchouts: list[str] | None,
-    *,
-    neutral: int = 60,
-) -> int:
-    score = int(neutral)
-    score += min(3, len([str(v).strip() for v in list(wins or []) if str(v).strip()])) * 8
-    score -= min(3, len([str(v).strip() for v in list(watchouts or []) if str(v).strip()])) * 10
-    return max(20, min(95, int(score)))
-
-
-def _catalyst_title_novelty_score(title: str, source_title: str = "", recent_titles: list[str] | None = None) -> int:
-    value = str(title or "").strip()
-    if not value:
-        return 30
-    score = 88
-    source_value = str(source_title or "").strip()
-    recent = [str(v).strip() for v in list(recent_titles or []) if str(v).strip()]
-    if source_value and _title_is_too_close_to_source(value, source_value):
-        score -= 48
-    elif recent and _title_is_too_close_to_any(value, recent):
-        score -= 34
-    if _title_reuses_opening_pattern(value, source_value, recent):
-        score -= 22
-    words = re.findall(r"[A-Za-z0-9']+", value)
-    if len(words) < 4:
-        score -= 10
-    elif len(words) > 12:
-        score -= 12
-    if len(value) > 72:
-        score -= 15
-    if re.match(r"^\s*\d+", value) and re.match(r"^\s*\d+", source_value):
-        score -= 8
-    return max(20, min(95, int(score)))
-
-
-def _catalyst_pressure_label(score: float) -> str:
-    numeric = float(score or 0.0)
-    if numeric >= 78:
-        return "critical"
-    if numeric >= 60:
-        return "high"
-    if numeric >= 42:
-        return "medium"
-    if numeric >= 24:
-        return "low"
-    return "stable"
-
-
-def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
-    public = dict(memory_public or {})
-    hook_wins = [str(v).strip() for v in list(public.get("hook_wins") or []) if str(v).strip()]
-    hook_watchouts = [str(v).strip() for v in list(public.get("hook_watchouts") or []) if str(v).strip()]
-    pacing_wins = [str(v).strip() for v in list(public.get("pacing_wins") or []) if str(v).strip()]
-    pacing_watchouts = [str(v).strip() for v in list(public.get("pacing_watchouts") or []) if str(v).strip()]
-    visual_wins = [str(v).strip() for v in list(public.get("visual_wins") or []) if str(v).strip()]
-    visual_watchouts = [str(v).strip() for v in list(public.get("visual_watchouts") or []) if str(v).strip()]
-    sound_wins = [str(v).strip() for v in list(public.get("sound_wins") or []) if str(v).strip()]
-    sound_watchouts = [str(v).strip() for v in list(public.get("sound_watchouts") or []) if str(v).strip()]
-    packaging_wins = [str(v).strip() for v in list(public.get("packaging_wins") or []) if str(v).strip()]
-    packaging_watchouts = [str(v).strip() for v in list(public.get("packaging_watchouts") or []) if str(v).strip()]
-    retention_watchouts = [str(v).strip() for v in list(public.get("retention_watchouts") or []) if str(v).strip()]
-    next_moves = [str(v).strip() for v in list(public.get("next_video_moves") or []) if str(v).strip()]
-    reference_hook_rewrites = [str(v).strip() for v in list(public.get("reference_hook_rewrites") or []) if str(v).strip()]
-    reference_pacing_rewrites = [str(v).strip() for v in list(public.get("reference_pacing_rewrites") or []) if str(v).strip()]
-    reference_visual_rewrites = [str(v).strip() for v in list(public.get("reference_visual_rewrites") or []) if str(v).strip()]
-    reference_sound_rewrites = [str(v).strip() for v in list(public.get("reference_sound_rewrites") or []) if str(v).strip()]
-    reference_packaging_rewrites = [str(v).strip() for v in list(public.get("reference_packaging_rewrites") or []) if str(v).strip()]
-
-    avg_ctr = float(public.get("average_ctr", 0.0) or 0.0)
-    avg_avp = float(public.get("average_average_percentage_viewed", 0.0) or 0.0)
-    avg_first30 = float(public.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
-    avg_first60 = float(public.get("average_first_60_sec_retention_pct", 0.0) or 0.0)
-    avg_hook = float(public.get("average_reference_hook_score", 0.0) or 0.0)
-    avg_pacing = float(public.get("average_reference_pacing_score", 0.0) or 0.0)
-    avg_visual = float(public.get("average_reference_visual_score", 0.0) or 0.0)
-    avg_sound = float(public.get("average_reference_sound_score", 0.0) or 0.0)
-    avg_packaging = float(public.get("average_reference_packaging_score", 0.0) or 0.0)
-    avg_title_novelty = float(public.get("average_reference_title_novelty_score", 0.0) or 0.0)
-
-    hook_pressure = 12.0 + max(0.0, (62.0 - avg_first30) * 1.2) + max(0.0, (76.0 - avg_hook) * 0.55) + (len(hook_watchouts) * 7.0) + (min(2, len(retention_watchouts)) * 4.0) - (len(hook_wins) * 4.0)
-    pacing_pressure = 10.0 + max(0.0, (42.0 - avg_avp) * 1.1) + max(0.0, (52.0 - avg_first60) * 0.8) + max(0.0, (76.0 - avg_pacing) * 0.5) + (len(pacing_watchouts) * 7.0) - (len(pacing_wins) * 4.0)
-    visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
-    sound_pressure = 8.0 + max(0.0, (78.0 - avg_sound) * 0.55) + max(0.0, (52.0 - avg_first60) * 0.35) + (len(sound_watchouts) * 7.0) - (len(sound_wins) * 4.0)
-    packaging_pressure = 10.0 + max(0.0, (4.5 - avg_ctr) * 12.0) + max(0.0, (76.0 - avg_packaging) * 0.65) + max(0.0, (82.0 - avg_title_novelty) * 0.35) + (len(packaging_watchouts) * 7.0) - (len(packaging_wins) * 4.0)
-
-    categories = [
-        {
-            "key": "hook",
-            "label": "Hook",
-            "score": max(8, min(100, int(round(hook_pressure)))),
-            "wins": hook_wins[:3],
-            "watchouts": hook_watchouts[:3],
-            "rewrites": reference_hook_rewrites[:3],
-        },
-        {
-            "key": "pacing",
-            "label": "Pacing",
-            "score": max(8, min(100, int(round(pacing_pressure)))),
-            "wins": pacing_wins[:3],
-            "watchouts": pacing_watchouts[:3],
-            "rewrites": reference_pacing_rewrites[:3],
-        },
-        {
-            "key": "visuals",
-            "label": "Visuals",
-            "score": max(8, min(100, int(round(visual_pressure)))),
-            "wins": visual_wins[:3],
-            "watchouts": visual_watchouts[:3],
-            "rewrites": reference_visual_rewrites[:3],
-        },
-        {
-            "key": "sound",
-            "label": "Sound",
-            "score": max(8, min(100, int(round(sound_pressure)))),
-            "wins": sound_wins[:3],
-            "watchouts": sound_watchouts[:3],
-            "rewrites": reference_sound_rewrites[:3],
-        },
-        {
-            "key": "packaging",
-            "label": "Packaging",
-            "score": max(8, min(100, int(round(packaging_pressure)))),
-            "wins": packaging_wins[:3],
-            "watchouts": packaging_watchouts[:3],
-            "rewrites": reference_packaging_rewrites[:3],
-        },
-    ]
-    categories.sort(key=lambda row: int(row.get("score", 0) or 0), reverse=True)
-    for row in categories:
-        row["severity"] = _catalyst_pressure_label(float(row.get("score", 0) or 0.0))
-
-    top = categories[0] if categories else {}
-    secondary = categories[1] if len(categories) > 1 else {}
-    priorities = _dedupe_preserve_order(
-        [
-            *(top.get("rewrites") or []),
-            *(top.get("watchouts") or []),
-            *(secondary.get("rewrites") or []),
-            *(secondary.get("watchouts") or []),
-            *next_moves[:3],
-        ],
-        max_items=8,
-        max_chars=180,
-    )
-    summary = ""
-    if top:
-        summary = (
-            f"Primary rewrite pressure is {str(top.get('label', 'Hook'))} "
-            f"({int(top.get('score', 0) or 0)}/100, {str(top.get('severity', 'medium'))}). "
-        )
-        if secondary:
-            summary += (
-                f"Secondary pressure is {str(secondary.get('label', 'Packaging'))} "
-                f"({int(secondary.get('score', 0) or 0)}/100, {str(secondary.get('severity', 'medium'))}). "
-            )
-        if priorities:
-            summary += "Next run should prioritize: " + "; ".join(priorities[:3]) + "."
-    return {
-        "summary": _clip_text(summary, 320),
-        "primary_focus": str(top.get("key", "") or ""),
-        "secondary_focus": str(secondary.get("key", "") or ""),
-        "categories": categories,
-        "next_run_priorities": priorities,
-    }
-
-
-def _catalyst_reference_score_tier(score: float) -> str:
-    numeric = float(score or 0.0)
-    if numeric >= 88:
-        return "breakout"
-    if numeric >= 75:
-        return "strong"
-    if numeric >= 60:
-        return "competitive"
-    if numeric >= 45:
-        return "developing"
-    return "early"
-
-
-def _catalyst_reference_signal_list(chosen_entries: list[dict], field_name: str, *, max_items: int = 6) -> list[str]:
-    rows: list[str] = []
-    for entry in list(chosen_entries or []):
-        memory = dict(entry.get("memory_seed") or {})
-        rows.extend(str(v).strip() for v in list(memory.get(field_name) or []) if str(v).strip())
-    return _dedupe_preserve_order(rows, max_items=max_items, max_chars=180)
 
 
 def _score_catalyst_outcome_against_reference(*, session_snapshot: dict, outcome_record: dict) -> dict:
@@ -3551,94 +2656,6 @@ def _longform_build_publish_package_candidates(
         "thumbnail_prompts": thumbnail_prompts[:3],
         "tags": tags[:16],
     }
-
-
-def _catalyst_default_visual_engine(template: str, format_preset: str) -> str:
-    fmt = str(format_preset or "").strip().lower()
-    if fmt == "documentary":
-        return "Catalyst Documentary 3D"
-    if fmt == "recap":
-        return "Catalyst Recap Cinema"
-    if fmt == "story_channel":
-        return "Catalyst Storyworld"
-    if template == "chatstory":
-        return "Catalyst Chat Hybrid"
-    return "Catalyst Explainer 3D"
-
-
-def _catalyst_default_sound_profile(topic: str, input_title: str, format_preset: str) -> tuple[str, str]:
-    text = f"{topic} {input_title} {format_preset}".lower()
-    if re.search(r"\b(kill|killed|crime|dark|secret|disturb|psychology|war|danger|fear|mind)\b", text):
-        return "dark_psychology", "cinematic_dark_tension"
-    if format_preset == "documentary":
-        return "premium_documentary", "documentary_tension"
-    if format_preset == "recap":
-        return "high_pressure_recap", "kinetic_recap_bed"
-    if format_preset == "story_channel":
-        return "story_channel_cinematic", "story_pulse_bed"
-    return "clean_explainer", "precision_explainer_bed"
-
-
-def _heuristic_catalyst_chapter_blueprints(
-    *,
-    chapter_count: int,
-    subject: str,
-    improvement_moves: list[str] | None = None,
-    retention_findings: list[str] | None = None,
-    pressure_profile: dict | None = None,
-) -> list[dict]:
-    improvement_moves = [str(v).strip() for v in list(improvement_moves or []) if str(v).strip()]
-    retention_findings = [str(v).strip() for v in list(retention_findings or []) if str(v).strip()]
-    pressure_profile = dict(pressure_profile or {})
-    pressure_scores = {
-        str(row.get("key", "") or ""): int(row.get("score", 0) or 0)
-        for row in list(pressure_profile.get("categories") or [])
-        if str(row.get("key", "") or "").strip()
-    }
-    pressure_priorities = [str(v).strip() for v in list(pressure_profile.get("next_run_priorities") or []) if str(v).strip()]
-    base_arc = [
-        ("Hook the viewer with the most concrete high-stakes reveal.", "Start on the promise and immediate consequence.", "unexpected reveal", "hero object under aggressive spotlight", "fast push-in then hard contrast cutaway", "opening hit plus sub-bass tension", "No throat-clearing. First 10 seconds must state the payoff."),
-        ("Expose the hidden mechanism that makes the topic work.", "Translate abstract theory into visible cause-and-effect.", "mechanism cutaway", "macro cross-section or exploded system view", "precise motion-graphic overlays and clean dolly move", "tight whooshes, ticks, and system sweeps", "Make the viewer feel smarter, not confused."),
-        ("Escalate with a consequence the viewer can feel immediately.", "Move from explanation into personal stakes.", "consequence illustration", "stylized human-versus-system composition", "pattern interrupt with scale change", "impact sting then low drone", "Introduce tension before the halfway point."),
-        ("Contrast myth versus reality or before versus after.", "Deliver a clean reversal that resets attention.", "contrast frame", "before-versus-after split world or timeline board", "sharp cut, wipe, or x-ray transition", "contrast hit plus quick suction transition", "Break repetition with a visual reversal."),
-        ("Prove the idea through a memorable system or case study.", "Ground the theory in something people will remember.", "proof moment", "miniature world, map room, or operating table system view", "orchestrated map or system sweep", "documentary trailer accents", "Raise trust while keeping tension alive."),
-        ("Land the payoff and set up the next obsession.", "Close the loop and leave one more open loop.", "payoff + lingering question", "symbolic final hero shot with one unsettling cue", "controlled slow pull-back with clean end-card energy", "resolve hit with trailing ambience", "End with resolution plus curiosity, not a flat summary."),
-    ]
-    blueprints: list[dict] = []
-    for idx in range(max(1, int(chapter_count or 1))):
-        base = base_arc[idx % len(base_arc)]
-        improvement = improvement_moves[idx % len(improvement_moves)] if improvement_moves else ""
-        retention = retention_findings[idx % len(retention_findings)] if retention_findings else ""
-        focus = f"{base[0]} Subject focus: {subject}."
-        hook_job = base[1]
-        shock_device = base[2]
-        visual_motif = f"{base[3]} built around {subject}."
-        motion_note = base[4]
-        sound_note = base[5]
-        retention_goal = _clip_text(retention or base[6], 180)
-        if idx == 0 and pressure_scores.get("hook", 0) >= 60:
-            hook_job = "Start directly on the consequence, contradiction, or hidden control point before any setup."
-            shock_device = "counterintuitive reveal + immediate payoff"
-            focus = f"Open on the sharpest high-stakes contradiction around {subject}. Subject focus: {subject}."
-            retention_goal = _clip_text(pressure_priorities[0] if pressure_priorities else retention_goal, 180)
-        if pressure_scores.get("pacing", 0) >= 60 and idx <= 2:
-            motion_note = _clip_text(f"{motion_note}; force a pattern interrupt within 10 to 12 seconds", 180)
-        if pressure_scores.get("visuals", 0) >= 60:
-            visual_motif = _clip_text(f"{visual_motif} Avoid repeating the same hero-object framing back-to-back.", 220)
-        if pressure_scores.get("sound", 0) >= 60:
-            sound_note = _clip_text(f"{sound_note}; add a silence pocket before the main reveal", 180)
-        blueprints.append({
-            "index": idx,
-            "focus": focus,
-            "hook_job": hook_job,
-            "shock_device": shock_device,
-            "visual_motif": visual_motif,
-            "motion_note": motion_note,
-            "sound_note": sound_note,
-            "retention_goal": retention_goal,
-            "improvement_focus": _clip_text(improvement or "Keep the promise clearer and the payoff more immediate.", 180),
-        })
-    return blueprints
 
 
 def _heuristic_catalyst_edit_blueprint(
@@ -7185,7 +6202,7 @@ _load_youtube_connections()
 _load_youtube_oauth_states()
 
 
-# ─── Auth ─────────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _is_admin_user(user: Optional[dict]) -> bool:
     if not user:
@@ -7520,7 +6537,7 @@ async def get_user_plan(user: dict) -> dict:
     return PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
 
 
-# ─── xAI Grok Script Generation ───────────────────────────────────────────────
+# â”€â”€â”€ xAI Grok Script Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 TEMPLATE_SYSTEM_PROMPTS = {
     "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where a canonical skeleton identity delivers rapid-fire comparisons. The reference channel is CrypticScience.
@@ -8183,7 +7200,7 @@ NARRATION RULES:
 - Make viewers feel smarter for watching
 
 CAPTION STYLE:
-- text_overlay: Time stamps and shocking facts ("HOUR 1", "327°F", "EXTINCT IN 8 MINUTES", "NO RETURN")
+- text_overlay: Time stamps and shocking facts ("HOUR 1", "327Â°F", "EXTINCT IN 8 MINUTES", "NO RETURN")
 
 STRUCTURE (8-10 scenes, 50-65 seconds):
 1. HOOK: "What if [scenario]? Here's what would actually happen."
@@ -8497,7 +7514,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     return best
 
 
-# ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
+# â”€â”€â”€ ElevenLabs TTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
@@ -9535,7 +8552,7 @@ def _clip_text(value: str, max_chars: int = 320) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= max_chars:
         return text
-    return text[: max(0, max_chars - 1)].rstrip() + "…"
+    return text[: max(0, max_chars - 1)].rstrip() + "â€¦"
 
 
 def _normalize_external_source_url(raw_value: str) -> str:
@@ -10332,106 +9349,6 @@ def _normalize_longform_scenes_for_render(scenes: list) -> list:
         scene["duration_sec"] = round(duration, 2)
         normalized.append(scene)
     return normalized
-
-
-def _catalyst_scene_execution_profile(
-    *,
-    edit_blueprint: dict | None = None,
-    chapter_blueprint: dict | None = None,
-    scene_index: int = 0,
-    total_scenes: int = 0,
-) -> dict:
-    edit_blueprint = dict(edit_blueprint or {})
-    chapter_blueprint = dict(chapter_blueprint or {})
-    hook_strategy = dict(edit_blueprint.get("hook_strategy") or {})
-    pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
-    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
-    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
-    format_preset = str(edit_blueprint.get("format_preset", "") or "").strip().lower()
-    niche_key = str(edit_blueprint.get("niche_key", "") or "").strip().lower()
-    series_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or ""), 120)
-    niche_execution_notes = [str(v).strip() for v in list(edit_blueprint.get("niche_execution_notes") or []) if str(v).strip()]
-    is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
-    total = max(1, int(total_scenes or 1))
-    idx = max(0, int(scene_index or 0))
-    opening_span = 2 if total >= 6 else 1
-    closing_span = 2 if total >= 5 else 1
-    interrupt_every = max(2, int(round(float(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12) / 5.0)))
-    is_opening = idx < opening_span
-    is_closer = idx >= max(0, total - closing_span)
-    is_interrupt = idx > 0 and (idx + 1) % interrupt_every == 0
-    scene_role = "build"
-    if is_opening:
-        scene_role = "hook"
-    elif is_closer:
-        scene_role = "payoff"
-    elif is_interrupt:
-        scene_role = "pattern_interrupt"
-    motion_cues = _dedupe_preserve_order([
-        str(chapter_blueprint.get("motion_note", "") or ""),
-        *list(motion_strategy.get("camera_language") or [])[:3],
-        *list(motion_strategy.get("motion_graphics") or [])[:3],
-        *list(motion_strategy.get("visual_rules") or [])[:2],
-        "Introduce a visible contrast reset in this beat." if is_interrupt else "",
-        "Land the visual claim immediately before widening context." if is_opening else "",
-        "Resolve the idea with a clear payoff image and controlled pull-back." if is_closer else "",
-    ], max_items=8, max_chars=180)
-    sound_cues = _dedupe_preserve_order([
-        str(chapter_blueprint.get("sound_note", "") or ""),
-        *list(sound_strategy.get("mix_notes") or [])[:3],
-        *list(sound_strategy.get("silence_rules") or [])[:2],
-        *list(sound_strategy.get("voice_direction") or [])[:2],
-        "Use the silence pocket right before the reveal lands." if is_interrupt or is_closer else "",
-        "Front-load one decisive sting before the explanation starts." if is_opening else "",
-    ], max_items=8, max_chars=180)
-    retention_cues = _dedupe_preserve_order([
-        str(chapter_blueprint.get("retention_goal", "") or ""),
-        str(chapter_blueprint.get("improvement_focus", "") or ""),
-        str(hook_strategy.get("promise", "") or "") if is_opening else "",
-        str(hook_strategy.get("first_30s_mission", "") or "") if is_opening else "",
-        str(hook_strategy.get("open_loop", "") or ""),
-        "Reset attention with a new contrast or consequence right now." if is_interrupt else "",
-        "Make the payoff concrete enough that the next chapter feels inevitable." if is_closer else "",
-    ], max_items=8, max_chars=180)
-    if is_recap_lane:
-        motion_cues = _dedupe_preserve_order([
-            f"Keep the visual language locked to {series_anchor}." if series_anchor else "",
-            "Use recap-grade panel energy, power hierarchy, and chapter-turn escalation.",
-            "Avoid sterile documentary staging or generic explainer objects.",
-            *niche_execution_notes[:2],
-            *motion_cues,
-        ], max_items=8, max_chars=180)
-        sound_cues = _dedupe_preserve_order([
-            "Use sharper reveal hits, energy swells, and rank-jump accents.",
-            "Push the recap trailer bed harder on betrayal, survival, or power turns.",
-            *niche_execution_notes[:1],
-            *sound_cues,
-        ], max_items=8, max_chars=180)
-        retention_cues = _dedupe_preserve_order([
-            f"Escalate the next obsession inside {series_anchor}." if series_anchor else "Escalate the next obsession inside the same recap universe.",
-            "Make every beat feel like a stronger chapter-turn, not a summary retread.",
-            *retention_cues,
-        ], max_items=8, max_chars=180)
-    return {
-        "scene_role": scene_role,
-        "is_opening": is_opening,
-        "is_closer": is_closer,
-        "is_interrupt": is_interrupt,
-        "motion_cues": motion_cues,
-        "sound_cues": sound_cues,
-        "retention_cues": retention_cues,
-        "music_profile": str(sound_strategy.get("music_profile", "") or ""),
-        "sfx_profile": str(sound_strategy.get("sfx_profile", "") or ""),
-        "transition_style": str(
-            motion_strategy.get("transition_style", "")
-            or pacing_strategy.get("transition_style", "")
-            or "smooth"
-        ),
-        "series_anchor": series_anchor,
-        "niche_execution_notes": niche_execution_notes,
-        "pattern_interrupt_interval_sec": int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12),
-        "voice_direction": _dedupe_preserve_order(list(sound_strategy.get("voice_direction") or []), max_items=6, max_chars=180),
-    }
 
 
 def _build_longform_scene_execution_prompt(
@@ -11383,7 +10300,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return output_path
 
 
-# ─── ComfyUI Image Generation with Upscaling ─────────────────────────────────
+# â”€â”€â”€ ComfyUI Image Generation with Upscaling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 
@@ -15544,7 +14461,7 @@ async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: st
     return output_clip_path
 
 
-# ─── FFmpeg Video Compositor ──────────────────────────────────────────────────
+# â”€â”€â”€ FFmpeg Video Compositor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def frames_to_clip(frame_paths: list, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
     """Convert SVD frames into a video clip, stretched/looped to fill the scene duration."""
@@ -15979,50 +14896,6 @@ async def _generate_catalyst_bgm_track(
     finally:
         Path(seed_clip).unlink(missing_ok=True)
     return ""
-
-
-def _catalyst_audio_mix_profile(
-    edit_blueprint: dict | None = None,
-    *,
-    format_preset: str = "",
-    render_horror_audio: bool = False,
-) -> dict:
-    edit_blueprint = dict(edit_blueprint or {})
-    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
-    pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
-    music_profile = str(sound_strategy.get("music_profile", "") or "").strip().lower()
-    mix_notes = " ".join(str(v).strip().lower() for v in list(sound_strategy.get("mix_notes") or []) if str(v).strip())
-    pattern_interrupt = int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12)
-    voice_speed = 1.0
-    if pattern_interrupt <= 9:
-        voice_speed = 1.08
-    elif pattern_interrupt <= 11:
-        voice_speed = 1.05
-    elif format_preset in {"documentary", "explainer", "recap"}:
-        voice_speed = 1.03
-    ambience_gain = 0.18
-    bgm_gain = 0.55
-    sfx_gain = 1.0
-    if music_profile in {"documentary_tension", "precision_explainer_bed"}:
-        ambience_gain = 0.15
-        bgm_gain = 0.42
-    elif music_profile in {"kinetic_recap_bed"}:
-        ambience_gain = 0.22
-        bgm_gain = 0.35
-    elif music_profile in {"story_pulse_bed"}:
-        ambience_gain = 0.17
-        bgm_gain = 0.46
-    if "silence" in mix_notes:
-        ambience_gain = max(0.12, ambience_gain - 0.03)
-    return {
-        "voice_speed": max(0.92, min(1.16, voice_speed)),
-        "voice_gain": 1.0,
-        "ambience_gain": ambience_gain,
-        "bgm_gain": bgm_gain,
-        "sfx_gain": sfx_gain,
-        "bgm_required": bool(render_horror_audio or format_preset in {"documentary", "explainer", "recap", "story_channel"}),
-        "music_profile": music_profile or ("cinematic_dark_tension" if render_horror_audio else "documentary_tension"),
-    }
 
 
 async def _mix_ambience_tracks(
@@ -16565,7 +15438,7 @@ async def composite_video(
     return str(output_path)
 
 
-# ─── Full Generation Pipeline ─────────────────────────────────────────────────
+# â”€â”€â”€ Full Generation Pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def _normalize_scenes_for_render(scenes: list) -> list:
@@ -17506,7 +16379,7 @@ async def run_generation_pipeline(
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
-# ─── API Endpoints ────────────────────────────────────────────────────────────
+# â”€â”€â”€ API Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def _create_or_update_project(project_id: str, data: dict):
     async with _projects_lock:
@@ -18084,14 +16957,6 @@ def _longform_generated_chapter_count(chapters: list[dict]) -> int:
 
 def _longform_approved_chapter_count(chapters: list[dict]) -> int:
     return sum(1 for chapter in list(chapters or []) if str((chapter or {}).get("status", "") or "") == "approved")
-
-
-def _catalyst_chapter_blueprint_for_index(edit_blueprint: dict | None, chapter_index: int) -> dict:
-    blueprint = dict(edit_blueprint or {})
-    chapter_blueprints = list(blueprint.get("chapter_blueprints") or [])
-    if 0 <= int(chapter_index) < len(chapter_blueprints):
-        return dict(chapter_blueprints[int(chapter_index)] or {})
-    return {}
 
 
 async def _generate_longform_chapter_for_session(session_id: str, chapter_index: int) -> None:
@@ -23103,7 +21968,7 @@ async def get_project(project_id: str, request: Request = None):
     return {"project": proj}
 
 
-# ─── Stripe Payments ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Stripe Payments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _stripe_find_customer_id_by_email(email: str) -> str:
     """Best-effort Stripe customer lookup for billing portal/checkout continuity."""
@@ -24126,7 +22991,7 @@ async def stripe_webhook(request: Request):
     return {"status": "ok"}
 
 
-# ─── Admin: set plan for a user (admin-only) ─────────────────────────────────
+# â”€â”€â”€ Admin: set plan for a user (admin-only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/admin/set-plan")
 async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
@@ -24227,7 +23092,7 @@ async def admin_cancel_subscription(body: dict, user: dict = Depends(require_aut
         raise HTTPException(500, f"Failed to cancel subscription(s): {e}")
 
 
-# ─── User Feedback Collection ─────────────────────────────────────────────────
+# â”€â”€â”€ User Feedback Collection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
@@ -24338,7 +23203,7 @@ async def get_admin_kpi(user: dict = Depends(require_auth)):
     }
 
 
-# ─── Startup: seed accounts ──────────────────────────────────────────────────
+# â”€â”€â”€ Startup: seed accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SEED_ACCOUNTS = {
     "omatic657@gmail.com": {"plan": "admin", "role": "admin"},
@@ -24390,7 +23255,7 @@ async def seed_profiles():
         log.warning(f"Profile seeding failed: {e}")
 
 
-# ─── Thumbnail System ─────────────────────────────────────────────────────────
+# â”€â”€â”€ Thumbnail System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
@@ -25719,7 +24584,7 @@ async def create_demo_video(
     return {"status": "accepted", "job_id": job_id}
 
 
-# ─── Static Files ─────────────────────────────────────────────────────────────
+# â”€â”€â”€ Static Files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
 dist_dir = Path(os.getenv("FRONTEND_DIST_DIR", str(_default_dist_dir))).resolve()
