@@ -2228,6 +2228,11 @@ def _longform_build_publish_package_candidates(
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
     cluster_follow_rule = _clip_text(str(selected_cluster.get("follow_up_rule", "") or "").strip(), 220)
     package_subject = series_anchor or cluster_label or pressure_subject
+    best_archetype_memory = dict(channel_memory.get("best_archetype_memory") or {})
+    weakest_archetype_memory = dict(channel_memory.get("weakest_archetype_memory") or {})
+    archetype_memory_summary = _clip_text(str(channel_memory.get("archetype_memory_summary", "") or "").strip(), 240)
+    promoted_archetype_keywords = [str(v).strip() for v in list(best_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
+    demoted_archetype_keywords = [str(v).strip() for v in list(weakest_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
     title_candidates: list[tuple[str, int]] = []
     for candidate in [
         *list(source_analysis.get("title_angles") or []),
@@ -2277,6 +2282,10 @@ def _longform_build_publish_package_candidates(
         keyword_bonus = 0
         if any(keyword.lower() in value.lower() for keyword in list(channel_memory.get("proven_keywords") or [])[:6]):
             keyword_bonus += 6
+        if any(keyword.lower() in value.lower() for keyword in promoted_archetype_keywords[:6]):
+            keyword_bonus += 5
+        if any(keyword.lower() in value.lower() for keyword in demoted_archetype_keywords[:6]):
+            keyword_bonus -= 6
         if not re.match(r"^\s*\d+", value) and re.match(r"^\s*\d+", source_title):
             keyword_bonus += 8
         novelty = _catalyst_title_novelty_score(value, source_title=source_title, recent_titles=channel_title_memory)
@@ -2309,6 +2318,7 @@ def _longform_build_publish_package_candidates(
         *cluster_next_moves[:2],
         *weighted_next_moves[:2],
         cluster_follow_rule,
+        archetype_memory_summary,
         archetype_hook_rule,
         archetype_packaging_rule,
         *list(channel_memory.get("packaging_learnings") or [])[:2],
@@ -2330,6 +2340,7 @@ def _longform_build_publish_package_candidates(
         *weighted_packaging_rewrites[:2],
         *cluster_next_moves[:1],
         *weighted_next_moves[:2],
+        archetype_memory_summary,
         archetype_visual_rule,
         archetype_packaging_rule,
         *list(channel_memory.get("packaging_learnings") or [])[:2],
@@ -7699,6 +7710,9 @@ def _render_source_context(
     playbook_summary = str(cluster_playbook.get("summary", "") or "").strip()
     if playbook_summary:
         parts.append("Catalyst arc playbook: " + _clip_text(playbook_summary, 280))
+    archetype_summary = str((channel_memory or {}).get("archetype_memory_summary", "") or "").strip()
+    if archetype_summary:
+        parts.append("Catalyst archetype playbook: " + _clip_text(archetype_summary, 280))
     winning_patterns = [str(v).strip() for v in list(cluster_playbook.get("winning_patterns") or []) if str(v).strip()]
     if winning_patterns:
         parts.append("Best-arc patterns: " + "; ".join(_clip_text(v, 140) for v in winning_patterns[:3]))
