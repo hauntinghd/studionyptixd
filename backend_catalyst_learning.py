@@ -3,6 +3,7 @@
 from backend_catalyst_core import (
     _clip_text,
     _dedupe_preserve_order,
+    _catalyst_archetype_memory_key,
     _catalyst_channel_memory_public_view,
     _catalyst_extract_series_anchor,
     _catalyst_infer_archetype,
@@ -1253,4 +1254,111 @@ def _apply_catalyst_outcome_to_channel_memory(
         )
         series_map[series_key] = series_bucket
         updated["series_memory_map"] = series_map
+    archetype_key = str(updated.get("archetype_key", "") or "").strip()
+    archetype_label = str(updated.get("archetype_label", "") or archetype_key or "").strip()
+    if archetype_key:
+        archetype_map = dict(updated.get("archetype_memory_map") or {})
+        archetype_memory_key = _catalyst_archetype_memory_key(archetype_key)
+        archetype_bucket = dict(archetype_map.get(archetype_memory_key) or {})
+        archetype_bucket["archetype_key"] = archetype_key
+        archetype_bucket["archetype_label"] = archetype_label
+        archetype_bucket["channel_id"] = str(updated.get("channel_id", "") or "")
+        archetype_bucket["format_preset"] = format_preset
+        archetype_bucket["run_count"] = max(int(archetype_bucket.get("run_count", 0) or 0), 1)
+        archetype_bucket["outcome_count"] = int(archetype_bucket.get("outcome_count", 0) or 0) + 1
+        archetype_bucket["updated_at"] = time.time()
+        archetype_bucket["last_session_id"] = str(session_snapshot.get("session_id", "") or "")
+        archetype_bucket["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+        archetype_bucket["recent_selected_titles"] = _dedupe_preserve_order(
+            [outcome_title, *list(archetype_bucket.get("recent_selected_titles") or [])],
+            max_items=10,
+            max_chars=160,
+        )
+        archetype_bucket["recent_source_titles"] = _dedupe_preserve_order(
+            [outcome_source_title, *list(archetype_bucket.get("recent_source_titles") or [])],
+            max_items=10,
+            max_chars=160,
+        )
+        archetype_bucket["proven_keywords"] = _dedupe_preserve_order(
+            [
+                *_extract_catalyst_keywords(outcome_title, *list(outcome_record.get("tags") or [])),
+                *list(archetype_bucket.get("proven_keywords") or []),
+            ],
+            max_items=14,
+            max_chars=80,
+        )
+        archetype_bucket["series_anchors"] = _dedupe_preserve_order(
+            [series_anchor, *list(archetype_bucket.get("series_anchors") or [])],
+            max_items=8,
+            max_chars=80,
+        )
+        for field, metric_key in (
+            ("outcome_views_sum", "views"),
+            ("outcome_impressions_sum", "impressions"),
+            ("outcome_ctr_sum", "impression_click_through_rate"),
+            ("outcome_avp_sum", "average_percentage_viewed"),
+            ("outcome_avd_sum", "average_view_duration_sec"),
+            ("outcome_first30_sum", "first_30_sec_retention_pct"),
+            ("outcome_first60_sum", "first_60_sec_retention_pct"),
+        ):
+            archetype_bucket[field] = float(archetype_bucket.get(field, 0.0) or 0.0) + float(metrics.get(metric_key, 0.0) or 0.0)
+        for field, metric_key in (
+            ("reference_overall_score_sum", "overall"),
+            ("reference_hook_score_sum", "hook"),
+            ("reference_pacing_score_sum", "pacing"),
+            ("reference_visual_score_sum", "visuals"),
+            ("reference_sound_score_sum", "sound"),
+            ("reference_packaging_score_sum", "packaging"),
+            ("reference_title_novelty_score_sum", "title_novelty"),
+        ):
+            archetype_bucket[field] = float(archetype_bucket.get(field, 0.0) or 0.0) + float(reference_scores.get(metric_key, 0.0) or 0.0)
+        archetype_bucket["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(archetype_bucket.get("hook_learnings") or [])], max_items=10, max_chars=180)
+        archetype_bucket["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(archetype_bucket.get("pacing_learnings") or [])], max_items=10, max_chars=180)
+        archetype_bucket["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(archetype_bucket.get("visual_learnings") or [])], max_items=10, max_chars=180)
+        archetype_bucket["sound_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("sound_wins") or []), *list(archetype_bucket.get("sound_learnings") or [])], max_items=10, max_chars=180)
+        archetype_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(archetype_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
+        archetype_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(archetype_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
+        archetype_bucket["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(archetype_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        archetype_bucket["reference_benchmark_channels"] = _dedupe_preserve_order(
+            [*list(reference_comparison.get("benchmark_channels") or []), *list(archetype_bucket.get("reference_benchmark_channels") or [])],
+            max_items=8,
+            max_chars=80,
+        )
+        archetype_bucket["reference_tier"] = str(reference_comparison.get("tier", "") or archetype_bucket.get("reference_tier", "") or "")
+        archetype_bucket["last_reference_summary"] = _clip_text(
+            str(reference_comparison.get("reference_summary", "") or archetype_bucket.get("last_reference_summary", "") or ""),
+            360,
+        )
+        for field, items in (
+            ("hook_wins_map", list(outcome_record.get("hook_wins") or [])),
+            ("hook_watchouts_map", list(outcome_record.get("hook_watchouts") or [])),
+            ("pacing_wins_map", list(outcome_record.get("pacing_wins") or [])),
+            ("pacing_watchouts_map", list(outcome_record.get("pacing_watchouts") or [])),
+            ("visual_wins_map", list(outcome_record.get("visual_wins") or [])),
+            ("visual_watchouts_map", list(outcome_record.get("visual_watchouts") or [])),
+            ("sound_wins_map", list(outcome_record.get("sound_wins") or [])),
+            ("sound_watchouts_map", list(outcome_record.get("sound_watchouts") or [])),
+            ("packaging_wins_map", list(outcome_record.get("packaging_wins") or [])),
+            ("packaging_watchouts_map", list(outcome_record.get("packaging_watchouts") or [])),
+            ("retention_wins_map", list(outcome_record.get("retention_wins") or [])),
+            ("retention_watchouts_map", list(outcome_record.get("retention_watchouts") or [])),
+            ("next_video_moves_map", list(outcome_record.get("next_video_moves") or [])),
+            ("reference_hook_rewrites_map", list(reference_comparison.get("hook_rewrites") or [])),
+            ("reference_pacing_rewrites_map", list(reference_comparison.get("pacing_rewrites") or [])),
+            ("reference_visual_rewrites_map", list(reference_comparison.get("visual_rewrites") or [])),
+            ("reference_sound_rewrites_map", list(reference_comparison.get("sound_rewrites") or [])),
+            ("reference_packaging_rewrites_map", list(reference_comparison.get("packaging_rewrites") or [])),
+            ("reference_next_video_moves_map", list(reference_comparison.get("next_run_moves") or [])),
+        ):
+            _catalyst_update_weighted_signals(archetype_bucket, field, items, weight)
+        _catalyst_update_weighted_signals(archetype_bucket, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+        archetype_bucket["summary"] = _clip_text(
+            f"Catalyst now has {int(archetype_bucket.get('outcome_count', 0) or 0)} measured outcome{'s' if int(archetype_bucket.get('outcome_count', 0) or 0) != 1 else ''} inside the {archetype_label} archetype. "
+            + (f"Avg CTR {(float(archetype_bucket.get('outcome_ctr_sum', 0.0) or 0.0) / max(int(archetype_bucket.get('outcome_count', 0) or 0), 1)):.2f}%. " if int(archetype_bucket.get("outcome_count", 0) or 0) > 0 else "")
+            + ("Series anchors: " + ", ".join(list(archetype_bucket.get("series_anchors") or [])[:3]) + ". " if list(archetype_bucket.get("series_anchors") or []) else "")
+            + ("Reference rewrite pressure: " + str((list(reference_comparison.get("packaging_rewrites") or list(reference_comparison.get("hook_rewrites") or [])) or [""])[0]) + "." if list(reference_comparison.get("packaging_rewrites") or list(reference_comparison.get("hook_rewrites") or [])) else ""),
+            320,
+        )
+        archetype_map[archetype_memory_key] = archetype_bucket
+        updated["archetype_memory_map"] = archetype_map
     return updated

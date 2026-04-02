@@ -48,10 +48,16 @@ def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_o
         )
     if public.get("series_memory_summary"):
         parts.append("Series-memory promotion state: " + _clip_text(str(public.get("series_memory_summary", "") or ""), 320))
+    if public.get("archetype_memory_summary"):
+        parts.append("Archetype promotion state: " + _clip_text(str(public.get("archetype_memory_summary", "") or ""), 320))
     if public.get("promoted_arcs"):
         parts.append("Promoted arcs from measured outcomes: " + ", ".join(list(public.get("promoted_arcs") or [])[:3]))
     if public.get("demoted_arcs"):
         parts.append("Demoted arcs from measured outcomes: " + ", ".join(list(public.get("demoted_arcs") or [])[:3]))
+    if public.get("promoted_archetypes"):
+        parts.append("Promoted archetypes from measured outcomes: " + ", ".join(list(public.get("promoted_archetypes") or [])[:3]))
+    if public.get("demoted_archetypes"):
+        parts.append("Demoted archetypes from measured outcomes: " + ", ".join(list(public.get("demoted_archetypes") or [])[:3]))
     if public.get("proven_keywords"):
         parts.append("Proven arena keywords: " + ", ".join(list(public.get("proven_keywords") or [])[:8]))
     if public.get("hook_wins"):

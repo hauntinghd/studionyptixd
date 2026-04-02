@@ -150,6 +150,11 @@ def _catalyst_series_memory_key(series_anchor: str) -> str:
     return normalized or "general"
 
 
+def _catalyst_archetype_memory_key(archetype_key: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(archetype_key or "").strip().lower()).strip("_")
+    return normalized or "general"
+
+
 _CATALYST_KEYWORD_STOPWORDS = {
     "the", "and", "with", "that", "this", "from", "your", "into", "what", "when", "will", "have",
     "about", "their", "them", "they", "over", "more", "than", "just", "make", "made", "make", "video",
@@ -759,6 +764,7 @@ def _build_catalyst_cluster_playbook(
     if not ranked:
         return {}
     measured_ranked = _catalyst_rank_series_memory(dict(channel_memory or {}).get("series_memory_map") or {})
+    archetype_ranked = _catalyst_rank_archetype_memory(dict(channel_memory or {}).get("archetype_memory_map") or {})
     selected_raw = dict(selected_cluster or {})
     selected_key = str(selected_raw.get("key", "") or "").strip()
     selected = next((dict(row) for row in ranked if str(row.get("key", "") or "").strip() == selected_key), dict(selected_raw))
@@ -776,6 +782,8 @@ def _build_catalyst_cluster_playbook(
         selected = dict(best)
     promoted_memory = dict(measured_ranked[0] or {}) if measured_ranked else {}
     demoted_memory = dict(measured_ranked[-1] or {}) if measured_ranked else {}
+    promoted_archetype_memory = dict(archetype_ranked[0] or {}) if archetype_ranked else {}
+    demoted_archetype_memory = dict(archetype_ranked[-1] or {}) if archetype_ranked else {}
     ctr_gap_vs_best = round(max(0.0, float(best.get("average_ctr", 0.0) or 0.0) - float(selected.get("average_ctr", 0.0) or 0.0)), 2)
     avp_gap_vs_best = round(max(0.0, float(best.get("average_avp", 0.0) or 0.0) - float(selected.get("average_avp", 0.0) or 0.0)), 2)
     winning_patterns = _dedupe_preserve_order(
@@ -791,6 +799,11 @@ def _build_catalyst_cluster_playbook(
             ("Winning arc sample titles: " + ", ".join(list(best.get("sample_titles") or [])[:3])) if list(best.get("sample_titles") or []) else "",
             _clip_text(str(best.get("follow_up_rule", "") or "").strip(), 220) if str(best.get("follow_up_rule", "") or "").strip() else "",
             _clip_text(str(best.get("archetype_hook_rule", "") or "").strip(), 180) if str(best.get("archetype_hook_rule", "") or "").strip() else "",
+            (
+                f"Measured promoted archetype is {str(promoted_archetype_memory.get('archetype_label', '') or promoted_archetype_memory.get('archetype_key', '') or '').strip()}."
+                if str(promoted_archetype_memory.get("archetype_label", "") or promoted_archetype_memory.get("archetype_key", "") or "").strip()
+                else ""
+            ),
         ],
         max_items=6,
         max_chars=180,
@@ -809,6 +822,11 @@ def _build_catalyst_cluster_playbook(
                 f"Measured demoted arc is {str(demoted_memory.get('series_anchor', '') or '').strip()} based on actual post-publish outcomes."
                 if str(demoted_memory.get("series_anchor", "") or "").strip()
                 and str(demoted_memory.get("series_anchor", "") or "").strip().lower() != str(worst.get("series_anchor", "") or "").strip().lower()
+                else ""
+            ),
+            (
+                f"Measured demoted archetype is {str(demoted_archetype_memory.get('archetype_label', '') or demoted_archetype_memory.get('archetype_key', '') or '').strip()}."
+                if str(demoted_archetype_memory.get("archetype_label", "") or demoted_archetype_memory.get("archetype_key", "") or "").strip()
                 else ""
             ),
         ],
@@ -847,6 +865,17 @@ def _build_catalyst_cluster_playbook(
                 else ""
             ),
             (
+                f"Measured outcomes currently promote the {str(promoted_archetype_memory.get('archetype_label', '') or promoted_archetype_memory.get('archetype_key', '') or '').strip()} archetype, so borrow its stronger hook/packaging grammar."
+                if str(promoted_archetype_memory.get("archetype_label", "") or promoted_archetype_memory.get("archetype_key", "") or "").strip()
+                and str(promoted_archetype_memory.get("archetype_key", "") or "").strip().lower() != str(selected.get("archetype_key", "") or "").strip().lower()
+                else ""
+            ),
+            (
+                f"Measured outcomes currently demote the {str(demoted_archetype_memory.get('archetype_label', '') or demoted_archetype_memory.get('archetype_key', '') or '').strip()} archetype, so avoid drifting into its weaker content grammar."
+                if str(demoted_archetype_memory.get("archetype_label", "") or demoted_archetype_memory.get("archetype_key", "") or "").strip()
+                else ""
+            ),
+            (
                 f"Protect the winning {str(best.get('label', '') or '').strip()} arena, but generate a fresh adjacent angle instead of recycling its exact headline structure."
                 if str(selected.get("key", "") or "").strip() == str(best.get("key", "") or "").strip()
                 and str(best.get("label", "") or "").strip()
@@ -875,6 +904,12 @@ def _build_catalyst_cluster_playbook(
                 f"Measured demoted arc: {str(demoted_memory.get('series_anchor', '') or '').strip()}."
                 if str(demoted_memory.get("series_anchor", "") or "").strip()
                 else "",
+                f"Promoted archetype: {str(promoted_archetype_memory.get('archetype_label', '') or promoted_archetype_memory.get('archetype_key', '') or '').strip()}."
+                if str(promoted_archetype_memory.get("archetype_label", "") or promoted_archetype_memory.get("archetype_key", "") or "").strip()
+                else "",
+                f"Demoted archetype: {str(demoted_archetype_memory.get('archetype_label', '') or demoted_archetype_memory.get('archetype_key', '') or '').strip()}."
+                if str(demoted_archetype_memory.get("archetype_label", "") or demoted_archetype_memory.get("archetype_key", "") or "").strip()
+                else "",
                 f"Selected arc: {str(selected.get('label', '') or '').strip()}."
                 if str(selected.get("label", "") or "").strip()
                 else "",
@@ -902,6 +937,8 @@ def _build_catalyst_cluster_playbook(
         "average_viewed_gap_to_best": avp_gap_vs_best,
         "promoted_memory_arc": dict(promoted_memory or {}),
         "demoted_memory_arc": dict(demoted_memory or {}),
+        "promoted_memory_archetype": dict(promoted_archetype_memory or {}),
+        "demoted_memory_archetype": dict(demoted_archetype_memory or {}),
     }
 
 
@@ -1034,12 +1071,38 @@ def _catalyst_series_memory_score(bucket: dict | None) -> float:
     return round(max(0.0, score), 2)
 
 
+def _catalyst_apply_outcome_averages(payload: dict | None) -> dict:
+    data = dict(payload or {})
+    outcome_count = max(0, int(data.get("outcome_count", 0) or 0))
+    if outcome_count <= 0:
+        return data
+    data["average_views"] = round(float(data.get("outcome_views_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_impressions"] = round(float(data.get("outcome_impressions_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_ctr"] = round(float(data.get("outcome_ctr_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_average_percentage_viewed"] = round(float(data.get("outcome_avp_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_view_duration_sec"] = round(float(data.get("outcome_avd_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_first_30_sec_retention_pct"] = round(float(data.get("outcome_first30_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_first_60_sec_retention_pct"] = round(float(data.get("outcome_first60_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_overall_score"] = round(float(data.get("reference_overall_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_hook_score"] = round(float(data.get("reference_hook_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_pacing_score"] = round(float(data.get("reference_pacing_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_visual_score"] = round(float(data.get("reference_visual_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_sound_score"] = round(float(data.get("reference_sound_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_packaging_score"] = round(float(data.get("reference_packaging_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_reference_title_novelty_score"] = round(float(data.get("reference_title_novelty_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    return data
+
+
+def _catalyst_archetype_memory_score(bucket: dict | None) -> float:
+    return _catalyst_series_memory_score(bucket)
+
+
 def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
     ranked: list[dict] = []
     for raw in list(dict(series_map or {}).values()):
         if not isinstance(raw, dict):
             continue
-        bucket = dict(raw or {})
+        bucket = _catalyst_apply_outcome_averages(raw)
         label = str(bucket.get("series_anchor", "") or "").strip()
         if not label:
             continue
@@ -1089,9 +1152,75 @@ def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
     return ranked[:10]
 
 
+def _catalyst_rank_archetype_memory(archetype_map: dict | None) -> list[dict]:
+    ranked: list[dict] = []
+    for raw in list(dict(archetype_map or {}).values()):
+        if not isinstance(raw, dict):
+            continue
+        bucket = _catalyst_apply_outcome_averages(raw)
+        archetype_key = str(bucket.get("archetype_key", "") or "").strip()
+        archetype_label = str(bucket.get("archetype_label", "") or archetype_key or "").strip()
+        if not archetype_key and not archetype_label:
+            continue
+        hook_wins = _catalyst_merge_signal_lists(
+            _catalyst_weighted_signal_items(bucket.get("hook_wins_map") or {}, max_items=6),
+            list(bucket.get("hook_learnings") or [])[:4],
+            max_items=10,
+            max_chars=180,
+        )
+        packaging_wins = _catalyst_merge_signal_lists(
+            _catalyst_weighted_signal_items(bucket.get("packaging_wins_map") or {}, max_items=6),
+            list(bucket.get("packaging_learnings") or [])[:4],
+            max_items=10,
+            max_chars=180,
+        )
+        retention_watchouts = _catalyst_weighted_signal_items(bucket.get("retention_watchouts_map") or {}, max_items=6)
+        memory_score = _catalyst_archetype_memory_score(
+            {
+                "outcome_count": int(bucket.get("outcome_count", 0) or 0),
+                "average_ctr": float(bucket.get("average_ctr", 0.0) or 0.0),
+                "average_average_percentage_viewed": float(bucket.get("average_average_percentage_viewed", 0.0) or 0.0),
+                "average_first_30_sec_retention_pct": float(bucket.get("average_first_30_sec_retention_pct", 0.0) or 0.0),
+                "average_reference_overall_score": float(bucket.get("average_reference_overall_score", 0.0) or 0.0),
+                "hook_wins": hook_wins,
+                "packaging_wins": packaging_wins,
+                "retention_watchouts": retention_watchouts,
+                "packaging_watchouts": _catalyst_weighted_signal_items(bucket.get("packaging_watchouts_map") or {}, max_items=6),
+                "hook_watchouts": _catalyst_weighted_signal_items(bucket.get("hook_watchouts_map") or {}, max_items=6),
+            }
+        )
+        ranked.append(
+            {
+                "archetype_key": archetype_key,
+                "archetype_label": archetype_label,
+                "outcome_count": int(bucket.get("outcome_count", 0) or 0),
+                "average_ctr": float(bucket.get("average_ctr", 0.0) or 0.0),
+                "average_average_percentage_viewed": float(bucket.get("average_average_percentage_viewed", 0.0) or 0.0),
+                "average_first_30_sec_retention_pct": float(bucket.get("average_first_30_sec_retention_pct", 0.0) or 0.0),
+                "average_reference_overall_score": float(bucket.get("average_reference_overall_score", 0.0) or 0.0),
+                "hook_wins": _dedupe_preserve_order(hook_wins, max_items=4, max_chars=180),
+                "packaging_wins": _dedupe_preserve_order(packaging_wins, max_items=4, max_chars=180),
+                "retention_watchouts": _dedupe_preserve_order(retention_watchouts, max_items=4, max_chars=180),
+                "proven_keywords": _dedupe_preserve_order(list(bucket.get("proven_keywords") or []), max_items=8, max_chars=60),
+                "series_anchors": _dedupe_preserve_order(list(bucket.get("series_anchors") or []), max_items=6, max_chars=80),
+                "next_video_moves": _dedupe_preserve_order(list(bucket.get("next_video_moves") or []), max_items=6, max_chars=180),
+                "memory_score": memory_score,
+            }
+        )
+    ranked.sort(
+        key=lambda row: (
+            -float(row.get("memory_score", 0.0) or 0.0),
+            -int(row.get("outcome_count", 0) or 0),
+            str(row.get("archetype_label", "") or row.get("archetype_key", "") or "").lower(),
+        )
+    )
+    return ranked[:10]
+
+
 def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
-    data = dict(memory or {})
+    data = _catalyst_apply_outcome_averages(memory)
     series_map = dict(data.get("series_memory_map") or {})
+    archetype_map = dict(memory or {}).get("archetype_memory_map") or {}
     series_catalog = _dedupe_preserve_order(
         [
             _clip_text(str((row or {}).get("series_anchor", "") or ""), 120)
@@ -1118,7 +1247,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
                 {},
             )
     if active_series_bucket:
-        data = {**data, **active_series_bucket}
+        data = {**data, **_catalyst_apply_outcome_averages(active_series_bucket)}
         data["series_anchor"] = active_series_anchor or str(active_series_bucket.get("series_anchor", "") or "")
     for field in (
         "hook_wins_map", "hook_watchouts_map", "pacing_wins_map", "pacing_watchouts_map",
@@ -1237,6 +1366,51 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         )
     else:
         public["series_memory_summary"] = ""
+    ranked_archetype_memory = _catalyst_rank_archetype_memory(archetype_map)
+    public["archetype_rankings"] = ranked_archetype_memory
+    public["promoted_archetypes"] = [
+        str(row.get("archetype_label", "") or row.get("archetype_key", "") or "").strip()
+        for row in ranked_archetype_memory[:3]
+        if str(row.get("archetype_label", "") or row.get("archetype_key", "") or "").strip()
+    ]
+    public["demoted_archetypes"] = [
+        str(row.get("archetype_label", "") or row.get("archetype_key", "") or "").strip()
+        for row in list(reversed(ranked_archetype_memory[-3:]))
+        if str(row.get("archetype_label", "") or row.get("archetype_key", "") or "").strip()
+    ]
+    public["promoted_archetype_keys"] = [
+        str(row.get("archetype_key", "") or "").strip()
+        for row in ranked_archetype_memory[:3]
+        if str(row.get("archetype_key", "") or "").strip()
+    ]
+    public["demoted_archetype_keys"] = [
+        str(row.get("archetype_key", "") or "").strip()
+        for row in list(reversed(ranked_archetype_memory[-3:]))
+        if str(row.get("archetype_key", "") or "").strip()
+    ]
+    public["best_archetype_memory"] = dict(ranked_archetype_memory[0] or {}) if ranked_archetype_memory else {}
+    public["weakest_archetype_memory"] = dict(ranked_archetype_memory[-1] or {}) if ranked_archetype_memory else {}
+    if ranked_archetype_memory:
+        best_arch = dict(ranked_archetype_memory[0] or {})
+        weak_arch = dict(ranked_archetype_memory[-1] or {})
+        public["archetype_memory_summary"] = _clip_text(
+            " ".join(
+                part
+                for part in [
+                    f"Promoted archetype: {str(best_arch.get('archetype_label', '') or best_arch.get('archetype_key', '') or '').strip()} ({float(best_arch.get('average_ctr', 0.0) or 0.0):.2f}% CTR, {float(best_arch.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}% viewed)."
+                    if str(best_arch.get("archetype_label", "") or best_arch.get("archetype_key", "") or "").strip()
+                    else "",
+                    f"Demoted archetype: {str(weak_arch.get('archetype_label', '') or weak_arch.get('archetype_key', '') or '').strip()} ({float(weak_arch.get('average_ctr', 0.0) or 0.0):.2f}% CTR, {float(weak_arch.get('average_average_percentage_viewed', 0.0) or 0.0):.2f}% viewed)."
+                    if str(weak_arch.get("archetype_label", "") or weak_arch.get("archetype_key", "") or "").strip()
+                    and str(weak_arch.get("archetype_key", "") or "").strip() != str(best_arch.get("archetype_key", "") or "").strip()
+                    else "",
+                ]
+                if part
+            ),
+            320,
+        )
+    else:
+        public["archetype_memory_summary"] = ""
     public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
     return public
 
@@ -1323,6 +1497,10 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     reference_packaging_rewrites = [str(v).strip() for v in list(public.get("reference_packaging_rewrites") or []) if str(v).strip()]
     promoted_arcs = [str(v).strip() for v in list(public.get("promoted_arcs") or []) if str(v).strip()]
     demoted_arcs = [str(v).strip() for v in list(public.get("demoted_arcs") or []) if str(v).strip()]
+    promoted_archetypes = [str(v).strip() for v in list(public.get("promoted_archetypes") or []) if str(v).strip()]
+    demoted_archetypes = [str(v).strip() for v in list(public.get("demoted_archetypes") or []) if str(v).strip()]
+    promoted_archetype_keys = [str(v).strip().lower() for v in list(public.get("promoted_archetype_keys") or []) if str(v).strip()]
+    demoted_archetype_keys = [str(v).strip().lower() for v in list(public.get("demoted_archetype_keys") or []) if str(v).strip()]
     active_series_anchor = str(public.get("series_anchor", "") or "").strip()
     archetype_key = str(public.get("archetype_key", "") or "").strip().lower()
     archetype_label = str(public.get("archetype_label", "") or "").strip()
@@ -1355,6 +1533,16 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         if any(lowered_anchor == arc.lower() for arc in promoted_arcs[:2]):
             packaging_pressure += 3.0
             hook_pressure += 2.0
+    if archetype_key and archetype_key in demoted_archetype_keys[:2]:
+        hook_pressure += 4.0
+        pacing_pressure += 4.0
+        visuals_pressure_bonus = 3.0
+        packaging_pressure += 5.0
+        visual_pressure += visuals_pressure_bonus
+    elif archetype_key and archetype_key in promoted_archetype_keys[:2]:
+        hook_pressure += 1.5
+        packaging_pressure += 2.5
+        visual_pressure += 1.0
     if archetype_key == "dark_psychology":
         hook_pressure += 3.0
         sound_pressure += 2.0
@@ -1385,6 +1573,12 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     arc_moves: list[str] = []
     if archetype_label:
         arc_moves.append(f"Current Catalyst archetype is {archetype_label}, so the next run should preserve that content grammar instead of drifting across niches.")
+    if archetype_key and archetype_key in demoted_archetype_keys[:2]:
+        demoted_label = archetype_label or next((label for label in demoted_archetypes if label), "")
+        arc_moves.append(f"{demoted_label or 'This archetype'} is currently demoted from measured outcomes, so the next run must sharpen execution instead of coasting on the same grammar.")
+    elif archetype_key and archetype_key in promoted_archetype_keys[:2]:
+        promoted_label = archetype_label or next((label for label in promoted_archetypes if label), "")
+        arc_moves.append(f"{promoted_label or 'This archetype'} is promoted from measured outcomes, so preserve the grammar but force fresher hooks, pacing turns, and packaging.")
     if active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in demoted_arcs[:2]):
         arc_moves.append(f"{active_series_anchor} is currently a demoted arc from measured outcomes, so the next run must sharpen hook, pacing, and package execution aggressively.")
     elif active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in promoted_arcs[:2]):
