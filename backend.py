@@ -166,6 +166,7 @@ from backend_image_prompts import (
 )
 from backend_catalyst_core import (
     _CATALYST_NICHE_RULES,
+    _build_catalyst_cluster_playbook,
     _catalyst_build_channel_series_clusters,
     _catalyst_channel_memory_key,
     _catalyst_channel_memory_public_view,
@@ -2199,7 +2200,9 @@ def _longform_build_publish_package_candidates(
     series_anchor_override = str(series_context.get("series_anchor_override", "") or "").strip()
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     channel_memory = dict(series_context.get("memory_view") or {})
+    cluster_playbook = dict(series_context.get("cluster_playbook") or {})
     rewrite_pressure = dict(channel_memory.get("rewrite_pressure") or {})
+    best_cluster = dict(cluster_playbook.get("best_cluster") or {})
     series_anchor = _clip_text(str(channel_memory.get("series_anchor", "") or series_anchor_override or ""), 120)
     channel_title_memory = [
         str(v).strip()
@@ -2213,6 +2216,9 @@ def _longform_build_publish_package_candidates(
     ]
     weighted_packaging_rewrites = [str(v).strip() for v in list(channel_memory.get("reference_packaging_rewrites") or []) if str(v).strip()]
     weighted_next_moves = [str(v).strip() for v in list(channel_memory.get("reference_next_video_moves") or channel_memory.get("next_video_moves") or []) if str(v).strip()]
+    cluster_next_moves = [str(v).strip() for v in list(cluster_playbook.get("next_run_moves") or []) if str(v).strip()]
+    cluster_winning_patterns = [str(v).strip() for v in list(cluster_playbook.get("winning_patterns") or []) if str(v).strip()]
+    best_cluster_keywords = [str(v).strip() for v in list(best_cluster.get("keywords") or []) if str(v).strip()]
     pressure_primary_focus = str(rewrite_pressure.get("primary_focus", "") or "").strip()
     pressure_subject = _same_arena_subject(source_bundle or {"title": effective_topic}, topic=effective_topic) or effective_topic
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
@@ -2234,6 +2240,11 @@ def _longform_build_publish_package_candidates(
             if pressure_primary_focus in {"hook", "packaging"} or weighted_packaging_rewrites
             else []
         ),
+        *[
+            f"{package_subject} {keyword}"
+            for keyword in best_cluster_keywords[:2]
+            if keyword and keyword.lower() not in package_subject.lower()
+        ],
         *_same_arena_title_variants(
             source_bundle or {"title": effective_topic},
             topic=effective_topic,
@@ -2283,6 +2294,7 @@ def _longform_build_publish_package_candidates(
     for candidate in [
         input_description,
         *list(source_analysis.get("description_angles") or []),
+        *cluster_next_moves[:2],
         *weighted_next_moves[:2],
         cluster_follow_rule,
         *list(channel_memory.get("packaging_learnings") or [])[:2],
@@ -2300,7 +2312,9 @@ def _longform_build_publish_package_candidates(
     thumbnail_prompts: list[str] = []
     for candidate in [
         *list(source_analysis.get("thumbnail_angles") or []),
+        *cluster_winning_patterns[:2],
         *weighted_packaging_rewrites[:2],
+        *cluster_next_moves[:1],
         *weighted_next_moves[:2],
         *list(channel_memory.get("packaging_learnings") or [])[:2],
         *_same_arena_thumbnail_angles(
@@ -6642,6 +6656,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         [*list(recent_uploads or []), *list(popular_uploads or [])],
         top_videos=top_videos,
     )
+    series_cluster_playbook = _build_catalyst_cluster_playbook(series_clusters)
     title_tokens = _packaging_tokens(" ".join(popular_titles), max_items=18)
     title_pattern_hints = []
     if title_tokens:
@@ -6676,6 +6691,14 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         lead_label = str(lead_cluster.get("label", "") or "").strip()
         if lead_label:
             packaging_learnings.append(f"One strong active content arc right now is {lead_label}; Catalyst should stay in that arena when building follow-ups.")
+    if str(series_cluster_playbook.get("summary", "") or "").strip():
+        packaging_learnings.append(str(series_cluster_playbook.get("summary", "") or "").strip())
+    winning_patterns = [str(v).strip() for v in list(series_cluster_playbook.get("winning_patterns") or []) if str(v).strip()]
+    losing_patterns = [str(v).strip() for v in list(series_cluster_playbook.get("losing_patterns") or []) if str(v).strip()]
+    if winning_patterns:
+        title_pattern_hints.append("Best-performing arc playbook: " + "; ".join(winning_patterns[:2]))
+    if losing_patterns:
+        retention_learnings.append("Weak-arc watchouts: " + "; ".join(losing_patterns[:2]))
 
     summary_parts = [
         f"Connected channel recent views: {int(summary_map.get('views', 0) or 0):,}" if summary_map.get("views") else "",
@@ -6683,6 +6706,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         f"Average viewed: {avp:.2f}%" if avp else "",
         f"Top titles: {', '.join(popular_titles[:3])}" if popular_titles else "",
         f"Active arcs: {', '.join(str((cluster or {}).get('label', '') or '').strip() for cluster in list(series_clusters)[:3] if str((cluster or {}).get('label', '') or '').strip())}" if series_clusters else "",
+        _clip_text(str(series_cluster_playbook.get("summary", "") or "").strip(), 220) if str(series_cluster_playbook.get("summary", "") or "").strip() else "",
     ]
     return {
         "channel_summary": " | ".join(part for part in summary_parts if part),
@@ -6693,6 +6717,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         "retention_learnings": _dedupe_clip_list(retention_learnings, max_items=6),
         "title_pattern_hints": _dedupe_clip_list(title_pattern_hints, max_items=6),
         "series_clusters": list(series_clusters),
+        "series_cluster_playbook": series_cluster_playbook,
     }
 
 
@@ -6779,6 +6804,7 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
         "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
         "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
+        "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
         "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
     }
 
@@ -7354,6 +7380,8 @@ async def _build_source_performance_analysis(
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 1200)
     memory_view = dict(series_context.get("memory_view") or {})
+    cluster_playbook = dict(series_context.get("cluster_playbook") or {})
+    cluster_playbook = dict(series_context.get("cluster_playbook") or {})
     heuristic = _heuristic_source_performance_analysis(
         source_bundle=source_bundle,
         analytics_notes=analytics_notes,
@@ -7385,6 +7413,7 @@ async def _build_source_performance_analysis(
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
         f"Matched channel series cluster: {json.dumps(selected_cluster, ensure_ascii=True)}\n"
         f"Matched channel series cluster context: {cluster_context}\n"
+        f"Catalyst cluster playbook: {json.dumps(cluster_playbook, ensure_ascii=True)}\n"
         f"Catalyst channel memory: {json.dumps(memory_view, ensure_ascii=True)}\n"
         f"Reference documentary corpus: {_clip_text(reference_corpus_context, 3000)}\n"
         f"Private analytics/operator notes: {_clip_text(analytics_notes, 1800)}\n"
@@ -7458,6 +7487,7 @@ async def _derive_longform_seed_from_source(
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
         f"Matched channel series cluster: {json.dumps(selected_cluster, ensure_ascii=True)}\n"
         f"Matched channel series cluster context: {cluster_context}\n"
+        f"Catalyst cluster playbook: {json.dumps(cluster_playbook, ensure_ascii=True)}\n"
         f"Catalyst channel memory: {json.dumps(memory_view, ensure_ascii=True)}\n"
         f"Reference documentary corpus: {_clip_text(reference_corpus_context, 3000)}\n"
         "Use this marketing doctrine as operating context:\n"
@@ -7616,6 +7646,7 @@ def _render_source_context(
     channel_context: dict | None = None,
     channel_memory: dict | None = None,
     selected_cluster: dict | None = None,
+    cluster_playbook: dict | None = None,
 ) -> str:
     parts: list[str] = []
     if source_bundle:
@@ -7635,6 +7666,19 @@ def _render_source_context(
     cluster_context = _render_catalyst_series_cluster_context(selected_cluster)
     if cluster_context:
         parts.append(cluster_context)
+    cluster_playbook = dict(cluster_playbook or {})
+    playbook_summary = str(cluster_playbook.get("summary", "") or "").strip()
+    if playbook_summary:
+        parts.append("Catalyst arc playbook: " + _clip_text(playbook_summary, 280))
+    winning_patterns = [str(v).strip() for v in list(cluster_playbook.get("winning_patterns") or []) if str(v).strip()]
+    if winning_patterns:
+        parts.append("Best-arc patterns: " + "; ".join(_clip_text(v, 140) for v in winning_patterns[:3]))
+    losing_patterns = [str(v).strip() for v in list(cluster_playbook.get("losing_patterns") or []) if str(v).strip()]
+    if losing_patterns:
+        parts.append("Weak-arc watchouts: " + "; ".join(_clip_text(v, 140) for v in losing_patterns[:3]))
+    next_run_moves = [str(v).strip() for v in list(cluster_playbook.get("next_run_moves") or []) if str(v).strip()]
+    if next_run_moves:
+        parts.append("Arc rewrite moves: " + "; ".join(_clip_text(v, 140) for v in next_run_moves[:3]))
     memory_context = _render_catalyst_channel_memory_context(channel_memory)
     if memory_context:
         parts.append(memory_context)
@@ -16199,6 +16243,7 @@ async def _create_longform_session_internal(
     selected_series_cluster = dict(selected_series_context.get("selected_cluster") or {})
     selected_series_anchor = str(selected_series_context.get("series_anchor_override", "") or "").strip()
     channel_memory = dict(selected_series_context.get("memory_view") or channel_memory or {})
+    selected_cluster_playbook = dict(selected_series_context.get("cluster_playbook") or {})
     source_context = _render_source_context(
         source_bundle,
         source_analysis,
@@ -16206,6 +16251,7 @@ async def _create_longform_session_internal(
         channel_context=channel_context,
         channel_memory=channel_memory,
         selected_cluster=selected_series_cluster,
+        cluster_playbook=selected_cluster_playbook,
     )
 
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)

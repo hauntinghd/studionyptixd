@@ -473,6 +473,28 @@ def _render_catalyst_series_cluster_context(cluster: dict | None) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
+def _catalyst_compact_cluster_snapshot(cluster: dict | None) -> dict:
+    payload = dict(cluster or {})
+    if not payload:
+        return {}
+    return {
+        "key": str(payload.get("key", "") or "").strip(),
+        "label": str(payload.get("label", "") or "").strip(),
+        "series_anchor": str(payload.get("series_anchor", "") or "").strip(),
+        "niche_key": str(payload.get("niche_key", "") or "").strip(),
+        "niche_label": str(payload.get("niche_label", "") or "").strip(),
+        "video_count": int(payload.get("video_count", 0) or 0),
+        "average_views": float(payload.get("average_views", 0.0) or 0.0),
+        "average_ctr": float(payload.get("average_ctr", 0.0) or 0.0),
+        "average_avp": float(payload.get("average_avp", 0.0) or 0.0),
+        "keywords": _dedupe_preserve_order(list(payload.get("keywords") or []), max_items=8, max_chars=60),
+        "sample_titles": _dedupe_preserve_order(list(payload.get("sample_titles") or []), max_items=4, max_chars=160),
+        "follow_up_rule": _clip_text(str(payload.get("follow_up_rule", "") or "").strip(), 220),
+        "ranked_score": round(float(payload.get("ranked_score", payload.get("score", 0.0)) or 0.0), 2),
+        "memory_adjustment": round(float(payload.get("memory_adjustment", 0.0) or 0.0), 2),
+    }
+
+
 def _catalyst_cluster_memory_adjustment(channel_memory: dict | None, cluster: dict | None) -> float:
     raw_memory = dict(channel_memory or {})
     cluster = dict(cluster or {})
@@ -503,10 +525,148 @@ def _catalyst_cluster_memory_adjustment(channel_memory: dict | None, cluster: di
     return round(adjustment, 2)
 
 
+def _rank_catalyst_channel_series_clusters(clusters: list[dict] | None, *, channel_memory: dict | None = None) -> list[dict]:
+    ranked: list[dict] = []
+    for raw in list(clusters or []):
+        if not isinstance(raw, dict):
+            continue
+        cluster = dict(raw or {})
+        memory_adjustment = _catalyst_cluster_memory_adjustment(channel_memory, cluster)
+        base_score = float(cluster.get("score", 0.0) or 0.0)
+        cluster["memory_adjustment"] = round(memory_adjustment, 2)
+        cluster["ranked_score"] = round(base_score + memory_adjustment, 2)
+        ranked.append(cluster)
+    ranked.sort(
+        key=lambda row: (
+            -float(row.get("ranked_score", row.get("score", 0.0)) or 0.0),
+            -int(row.get("video_count", 0) or 0),
+            str(row.get("label", "") or "").lower(),
+        )
+    )
+    return ranked[:12]
+
+
+def _build_catalyst_cluster_playbook(
+    clusters: list[dict] | None,
+    *,
+    channel_memory: dict | None = None,
+    selected_cluster: dict | None = None,
+) -> dict:
+    ranked = _rank_catalyst_channel_series_clusters(clusters, channel_memory=channel_memory)
+    if not ranked:
+        return {}
+    selected_raw = dict(selected_cluster or {})
+    selected_key = str(selected_raw.get("key", "") or "").strip()
+    selected = next((dict(row) for row in ranked if str(row.get("key", "") or "").strip() == selected_key), dict(selected_raw))
+    best = dict(ranked[0] or {})
+    worst = next(
+        (
+            dict(row)
+            for row in reversed(ranked)
+            if str(row.get("key", "") or "").strip()
+            and str(row.get("key", "") or "").strip() != str(best.get("key", "") or "").strip()
+        ),
+        {},
+    )
+    if not selected:
+        selected = dict(best)
+    ctr_gap_vs_best = round(max(0.0, float(best.get("average_ctr", 0.0) or 0.0) - float(selected.get("average_ctr", 0.0) or 0.0)), 2)
+    avp_gap_vs_best = round(max(0.0, float(best.get("average_avp", 0.0) or 0.0) - float(selected.get("average_avp", 0.0) or 0.0)), 2)
+    winning_patterns = _dedupe_preserve_order(
+        [
+            f"Best-performing arc is {str(best.get('label', '') or '').strip()} with avg CTR {float(best.get('average_ctr', 0.0) or 0.0):.2f}% and avg viewed {float(best.get('average_avp', 0.0) or 0.0):.2f}%."
+            if str(best.get("label", "") or "").strip()
+            else "",
+            ("Winning arc keywords: " + ", ".join(list(best.get("keywords") or [])[:6])) if list(best.get("keywords") or []) else "",
+            ("Winning arc sample titles: " + ", ".join(list(best.get("sample_titles") or [])[:3])) if list(best.get("sample_titles") or []) else "",
+            _clip_text(str(best.get("follow_up_rule", "") or "").strip(), 220) if str(best.get("follow_up_rule", "") or "").strip() else "",
+        ],
+        max_items=6,
+        max_chars=180,
+    )
+    losing_patterns = _dedupe_preserve_order(
+        [
+            f"Underperforming arc is {str(worst.get('label', '') or '').strip()} with avg CTR {float(worst.get('average_ctr', 0.0) or 0.0):.2f}% and avg viewed {float(worst.get('average_avp', 0.0) or 0.0):.2f}%."
+            if str(worst.get("label", "") or "").strip()
+            else "",
+            ("Weak arc keywords to avoid overusing: " + ", ".join(list(worst.get("keywords") or [])[:6])) if list(worst.get("keywords") or []) else "",
+            ("Weak arc sample titles: " + ", ".join(list(worst.get("sample_titles") or [])[:3])) if list(worst.get("sample_titles") or []) else "",
+        ],
+        max_items=5,
+        max_chars=180,
+    )
+    next_run_moves = _dedupe_preserve_order(
+        [
+            (
+                f"Keep the next run in {str(selected.get('label', '') or '').strip()}, but borrow the stronger package discipline from {str(best.get('label', '') or '').strip()}."
+                if str(selected.get("key", "") or "").strip() != str(best.get("key", "") or "").strip()
+                and str(selected.get("label", "") or "").strip()
+                and str(best.get("label", "") or "").strip()
+                else ""
+            ),
+            f"Increase hook curiosity and first-frame clarity until {str(selected.get('label', '') or '').strip()} closes a {ctr_gap_vs_best:.2f}% CTR gap versus the best arc."
+            if ctr_gap_vs_best >= 0.4 and str(selected.get("label", "") or "").strip()
+            else "",
+            f"Increase reveal cadence and consequence pacing until {str(selected.get('label', '') or '').strip()} closes a {avp_gap_vs_best:.2f}% average-viewed gap versus the best arc."
+            if avp_gap_vs_best >= 3.0 and str(selected.get("label", "") or "").strip()
+            else "",
+            ("Favor these winning arc keywords: " + ", ".join(list(best.get("keywords") or [])[:5])) if list(best.get("keywords") or []) else "",
+            ("Avoid drifting toward these weaker arc cues: " + ", ".join(list(worst.get("keywords") or [])[:5])) if list(worst.get("keywords") or []) else "",
+            (
+                f"Protect the winning {str(best.get('label', '') or '').strip()} arena, but generate a fresh adjacent angle instead of recycling its exact headline structure."
+                if str(selected.get("key", "") or "").strip() == str(best.get("key", "") or "").strip()
+                and str(best.get("label", "") or "").strip()
+                else ""
+            ),
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    summary = _clip_text(
+        " ".join(
+            part
+            for part in [
+                f"Best arc: {str(best.get('label', '') or '').strip()}."
+                if str(best.get("label", "") or "").strip()
+                else "",
+                f"Weak arc: {str(worst.get('label', '') or '').strip()}."
+                if str(worst.get("label", "") or "").strip()
+                else "",
+                f"Selected arc: {str(selected.get('label', '') or '').strip()}."
+                if str(selected.get("label", "") or "").strip()
+                else "",
+                f"CTR gap to beat: {ctr_gap_vs_best:.2f}%."
+                if ctr_gap_vs_best >= 0.4
+                else "",
+                f"Viewed gap to beat: {avp_gap_vs_best:.2f}%."
+                if avp_gap_vs_best >= 3.0
+                else "",
+                ("Next move: " + next_run_moves[0] + ".") if next_run_moves else "",
+            ]
+            if part
+        ),
+        320,
+    )
+    return {
+        "summary": summary,
+        "best_cluster": _catalyst_compact_cluster_snapshot(best),
+        "worst_cluster": _catalyst_compact_cluster_snapshot(worst),
+        "selected_cluster": _catalyst_compact_cluster_snapshot(selected),
+        "winning_patterns": winning_patterns,
+        "losing_patterns": losing_patterns,
+        "next_run_moves": next_run_moves,
+        "ctr_gap_to_best": ctr_gap_vs_best,
+        "average_viewed_gap_to_best": avp_gap_vs_best,
+    }
+
+
 def _select_catalyst_channel_series_cluster(channel_context: dict | None, *, topic: str = "", source_title: str = "", channel_memory: dict | None = None, format_preset: str = "") -> dict:
     channel_context = dict(channel_context or {})
     clusters = [dict(row or {}) for row in list(channel_context.get("series_clusters") or []) if isinstance(row, dict)]
     if not clusters:
+        return {}
+    ranked_clusters = _rank_catalyst_channel_series_clusters(clusters, channel_memory=channel_memory)
+    if not ranked_clusters:
         return {}
     memory_public = _catalyst_channel_memory_public_view(channel_memory)
     memory_anchor = str(memory_public.get("series_anchor", "") or "").strip().lower()
@@ -516,12 +676,11 @@ def _select_catalyst_channel_series_cluster(channel_context: dict | None, *, top
     ref_text = f"{topic} {source_title}".strip()
     best_score = -1.0
     best_cluster: dict = {}
-    for cluster in clusters:
-        score = float(cluster.get("score", 0.0) or 0.0)
+    for cluster in ranked_clusters:
+        score = float(cluster.get("ranked_score", cluster.get("score", 0.0)) or 0.0)
         anchor = str(cluster.get("series_anchor", "") or "").strip()
         niche_key = str(cluster.get("niche_key", "") or "").strip().lower()
         label = str(cluster.get("label", "") or "").strip()
-        score += _catalyst_cluster_memory_adjustment(channel_memory, cluster)
         if memory_anchor and anchor and anchor.lower() == memory_anchor:
             score += 80.0
         if memory_niche and niche_key and niche_key == memory_niche:
@@ -722,11 +881,17 @@ def _resolve_catalyst_series_context(channel_context: dict | None, *, channel_me
     cluster_anchor = str((selected_cluster or {}).get("series_anchor", "") or "").strip()
     series_anchor_override = cluster_anchor or extracted_anchor
     memory_view = _catalyst_channel_memory_public_view(channel_memory_raw, series_anchor_override=series_anchor_override)
+    cluster_playbook = _build_catalyst_cluster_playbook(
+        list(channel_context.get("series_clusters") or []),
+        channel_memory=channel_memory_raw,
+        selected_cluster=selected_cluster,
+    )
     return {
         "selected_cluster": dict(selected_cluster or {}),
         "series_anchor_override": series_anchor_override,
         "cluster_context": _render_catalyst_series_cluster_context(selected_cluster),
         "memory_view": memory_view,
+        "cluster_playbook": cluster_playbook,
     }
 
 
