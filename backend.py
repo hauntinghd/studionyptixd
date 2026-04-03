@@ -15470,6 +15470,104 @@ def _force_template_scene_duration(scenes: list, template: str) -> list:
     return forced
 
 
+def _estimate_spoken_duration_seconds(text: str, voice_speed: float = 1.0) -> float:
+    words = [w for w in str(text or "").split() if w.strip()]
+    if not words:
+        return 0.0
+    base_wps = 2.45 * max(0.8, min(1.35, float(voice_speed or 1.0)))
+    pauses = 0.12 * max(0, len(re.findall(r"[,.!?;:]", str(text or ""))))
+    return max(0.2, (len(words) / base_wps) + pauses)
+
+
+def _short_template_narration_fit_enabled(template: str) -> bool:
+    return str(template or "").strip().lower() in {"story", "motivation", "skeleton", "daytrading", "chatstory"}
+
+
+def _build_short_narration_fit_clauses(scene: dict, template: str, scene_index: int, total_scenes: int) -> list[str]:
+    template_key = str(template or "").strip().lower()
+    visual = str((scene or {}).get("visual_description", "") or "").strip()
+    purpose = str((scene or {}).get("engagement_purpose", "") or "").strip()
+    base_clauses: list[str] = []
+
+    if template_key == "skeleton":
+        base_clauses = [
+            "And that damage keeps compounding the longer those bones stay exposed.",
+            "That is exactly where the next part starts getting darker.",
+            "And that slow breakdown is what most people never think about.",
+        ]
+    elif template_key == "daytrading":
+        base_clauses = [
+            "And that single move is usually where traders either lock in or lose control.",
+            "That is the exact moment the setup either confirms or completely falls apart.",
+            "And if you miss that signal, the rest of the trade gets harder fast.",
+        ]
+    elif template_key == "motivation":
+        base_clauses = [
+            "And that is usually the exact moment most people give up too early.",
+            "That is where discipline matters more than motivation ever will.",
+            "And the people who keep going are the ones who actually separate themselves.",
+        ]
+    elif template_key == "chatstory":
+        base_clauses = [
+            "And that is where the whole situation suddenly shifts.",
+            "That single message is what changes everything next.",
+            "And that is the moment the tension really starts climbing.",
+        ]
+    else:
+        base_clauses = [
+            "And that is what pushes the next part of the story forward.",
+            "That is the point where the stakes start feeling more real.",
+            "And that is why the next reveal hits harder than the first one.",
+        ]
+
+    visual_lower = visual.lower()
+    purpose_lower = purpose.lower()
+    contextual: list[str] = []
+    if any(token in visual_lower for token in ["before", "after", "compare", "contrast"]):
+        contextual.append("And once you see the contrast, the difference becomes impossible to ignore.")
+    if any(token in visual_lower for token in ["system", "mechanism", "process", "inside", "cutaway"]):
+        contextual.append("And that hidden process is what quietly drives everything that happens next.")
+    if any(token in visual_lower for token in ["danger", "dark", "mystery", "betray", "secret", "fear"]):
+        contextual.append("And that is exactly where the tension starts getting heavier.")
+    if any(token in purpose_lower for token in ["hook", "reveal", "interrupt", "contrast", "payoff"]):
+        contextual.append("And that is the beat that keeps the viewer locked in for the next reveal.")
+    if scene_index == 0:
+        contextual.insert(0, "And that opening hit is what makes people keep watching.")
+    elif scene_index >= max(0, total_scenes - 2):
+        contextual.insert(0, "And that payoff is what makes the whole point finally land.")
+    return contextual + base_clauses
+
+
+def _apply_short_scene_narration_fit(scenes: list, template: str, voice_speed: float = 1.0) -> list:
+    if not _short_template_narration_fit_enabled(template):
+        return scenes
+    fitted: list[dict] = []
+    total = len(scenes or [])
+    for index, raw in enumerate(scenes or []):
+        scene = dict(raw or {})
+        narration = str(scene.get("narration", "") or "").strip()
+        duration = max(3.5, float(scene.get("duration_sec", 5.0) or 5.0))
+        estimate = _estimate_spoken_duration_seconds(narration, voice_speed=voice_speed)
+        target_floor = max(3.9, duration - 0.45)
+        if narration and estimate < target_floor:
+            clauses = _build_short_narration_fit_clauses(scene, template, index, total)
+            for clause in clauses:
+                candidate = narration.rstrip(".!? ")
+                if clause.lower() in candidate.lower():
+                    continue
+                candidate = f"{candidate}. {clause}".strip()
+                candidate_estimate = _estimate_spoken_duration_seconds(candidate, voice_speed=voice_speed)
+                narration = candidate
+                estimate = candidate_estimate
+                if estimate >= target_floor:
+                    break
+            scene["narration"] = narration
+            scene["_narration_fit_adjusted"] = True
+            scene["_narration_fit_estimate_sec"] = round(estimate, 2)
+        fitted.append(scene)
+    return fitted
+
+
 def _job_diag_init(job_id: str, mode: str):
     _prune_in_memory_jobs()
     job = jobs.get(job_id)
@@ -15666,6 +15764,7 @@ async def run_generation_pipeline(
         if not (template == "story" and pacing_mode != "standard"):
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
+        scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
@@ -19592,6 +19691,7 @@ async def _run_creative_pipeline(
         if not (template == "story" and pacing_mode != "standard"):
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
+        scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
