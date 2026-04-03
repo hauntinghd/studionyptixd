@@ -20,7 +20,50 @@ COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudfl
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", os.getenv("GOOGLE_YOUTUBE_API_KEY", ""))
+
+
+def _split_env_values(raw: str) -> list[str]:
+    values: list[str] = []
+    for chunk in str(raw or "").replace("\r", "\n").replace(";", ",").split("\n"):
+        for value in str(chunk or "").split(","):
+            cleaned = str(value or "").strip().strip('"').strip("'")
+            if cleaned:
+                values.append(cleaned)
+    return values
+
+
+def _collect_youtube_api_keys() -> list[str]:
+    seen: set[str] = set()
+    keys: list[str] = []
+
+    def _append(raw: str) -> None:
+        cleaned = str(raw or "").strip().strip('"').strip("'")
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        keys.append(cleaned)
+
+    for env_name in ("YOUTUBE_API_KEYS", "GOOGLE_YOUTUBE_API_KEYS"):
+        for value in _split_env_values(os.getenv(env_name, "")):
+            _append(value)
+    for env_name in (
+        "YOUTUBE_API_KEY",
+        "GOOGLE_YOUTUBE_API_KEY",
+        "YOUTUBE_API_KEY_1",
+        "YOUTUBE_API_KEY_2",
+        "YOUTUBE_API_KEY_3",
+        "YOUTUBE_API_KEY_4",
+        "YOUTUBE_API_KEY_5",
+        "GOOGLE_YOUTUBE_API_KEY_1",
+        "GOOGLE_YOUTUBE_API_KEY_2",
+        "GOOGLE_YOUTUBE_API_KEY_3",
+    ):
+        _append(os.getenv(env_name, ""))
+    return keys
+
+
+YOUTUBE_API_KEYS = _collect_youtube_api_keys()
+YOUTUBE_API_KEY = YOUTUBE_API_KEYS[0] if YOUTUBE_API_KEYS else ""
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv(

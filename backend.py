@@ -36,6 +36,7 @@ from backend_settings import (
     SUPABASE_ANON_KEY,
     SUPABASE_JWT_SECRET,
     YOUTUBE_API_KEY,
+    YOUTUBE_API_KEYS,
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REDIRECT_URI,
@@ -6755,22 +6756,53 @@ def _parse_youtube_iso8601_duration(raw_duration: str) -> int:
     return (hours * 3600) + (minutes * 60) + seconds
 
 
+def _youtube_public_api_key_candidates() -> list[str]:
+    keys = [str(value or "").strip() for value in list(YOUTUBE_API_KEYS or []) if str(value or "").strip()]
+    if YOUTUBE_API_KEY and YOUTUBE_API_KEY not in keys:
+        keys.insert(0, YOUTUBE_API_KEY)
+    return keys
+
+
+async def _youtube_public_api_get(path: str, *, params: dict | None = None, timeout_sec: int = 30) -> tuple[dict, str]:
+    keys = _youtube_public_api_key_candidates()
+    if not keys:
+        raise RuntimeError("YouTube API key not configured")
+    url = path if str(path or "").startswith("http") else f"{YOUTUBE_DATA_API_BASE}{path}"
+    last_error: str = ""
+    async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
+        for key in keys:
+            query = dict(params or {})
+            query["key"] = key
+            try:
+                resp = await client.get(url, params=query)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+            if resp.status_code == 200:
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("YouTube public API returned an invalid payload")
+                return payload, key
+            last_error = f"{resp.status_code}: {_clip_text(resp.text, 220)}"
+            if resp.status_code in {400, 401, 403, 404, 429, 500, 502, 503, 504}:
+                continue
+    raise RuntimeError(_clip_text(last_error or "YouTube public API request failed", 220))
+
+
 async def _youtube_fetch_public_video_bundle_api_key(source_url: str) -> dict:
     video_id = _source_url_video_id(source_url)
-    if not video_id or not YOUTUBE_API_KEY:
+    if not video_id:
         return {}
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(
-            f"{YOUTUBE_DATA_API_BASE}/videos",
+    try:
+        payload, _active_key = await _youtube_public_api_get(
+            "/videos",
             params={
                 "part": "snippet,contentDetails,statistics",
                 "id": video_id,
-                "key": YOUTUBE_API_KEY,
             },
         )
-    if resp.status_code != 200:
+    except Exception:
         return {}
-    payload = resp.json()
     items = list(payload.get("items") or [])
     if not items:
         return {}
@@ -7320,25 +7352,283 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
     }
 
 
+SHORTS_PUBLIC_REFERENCE_QUERY_SEEDS = {
+    "skeleton": [
+        "viral skeleton shorts",
+        "skeleton comparison shorts",
+        "dark facts skeleton shorts",
+    ],
+    "story": [
+        "faceless story shorts",
+        "cinematic ai story shorts",
+        "viral ai story shorts",
+    ],
+    "motivation": [
+        "motivation shorts",
+        "self improvement shorts",
+        "discipline shorts",
+    ],
+    "daytrading": [
+        "day trading shorts",
+        "trading psychology shorts",
+        "stock market shorts",
+    ],
+    "chatstory": [
+        "chat story shorts",
+        "text story shorts",
+        "dramatic chat shorts",
+    ],
+}
+
+SHORTS_REFERENCE_STOPWORDS = {
+    "the", "and", "with", "your", "that", "from", "this", "what", "when", "have", "into", "about", "just",
+    "they", "them", "their", "there", "then", "than", "will", "would", "could", "shorts", "short", "viral",
+    "story", "video", "videos", "you", "how", "why", "for", "are", "not", "was", "his", "her", "our", "out",
+    "new", "top", "best", "make", "made", "using", "used",
+}
+
+
+def _youtube_title_keywords(title: str, max_items: int = 6) -> list[str]:
+    tokens = re.findall(r"[A-Za-z0-9']+", str(title or "").lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if len(token) < 3 or token in SHORTS_REFERENCE_STOPWORDS:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _summarize_public_shorts_reference_playbook(template: str, reference_rows: list[dict], queries: list[str]) -> dict:
+    rows = [dict(row or {}) for row in list(reference_rows or []) if isinstance(row, dict)]
+    if not rows:
+        return {}
+    titles = [str(row.get("title", "") or "").strip() for row in rows if str(row.get("title", "") or "").strip()]
+    channels = _dedupe_preserve_order(
+        [str(row.get("channel_title", "") or "").strip() for row in rows if str(row.get("channel_title", "") or "").strip()],
+        max_items=6,
+        max_chars=80,
+    )
+    avg_title_chars = round(sum(len(title) for title in titles) / max(len(titles), 1), 1)
+    avg_duration_sec = round(
+        sum(max(0, int(row.get("duration_sec", 0) or 0)) for row in rows) / max(len(rows), 1),
+        1,
+    )
+    strong_keywords: list[str] = []
+    keyword_scores: dict[str, int] = {}
+    for title in titles:
+        for keyword in _youtube_title_keywords(title, max_items=8):
+            keyword_scores[keyword] = int(keyword_scores.get(keyword, 0)) + 1
+    for keyword, _score in sorted(keyword_scores.items(), key=lambda item: (-item[1], item[0]))[:6]:
+        strong_keywords.append(keyword)
+    number_lead_count = sum(1 for title in titles if re.match(r"^\s*(\d+|top\s+\d+)", title, flags=re.IGNORECASE))
+    contrast_count = sum(1 for title in titles if re.search(r"\b(vs\.?|versus|instead of|before|after)\b", title, flags=re.IGNORECASE))
+    emotion_count = sum(1 for title in titles if re.search(r"\b(shocking|crazy|insane|worst|best|deadly|dark|secret|hidden|broke|ruined)\b", title, flags=re.IGNORECASE))
+    hook_moves: list[str] = []
+    packaging_moves: list[str] = []
+    visual_moves: list[str] = []
+    if number_lead_count >= max(2, len(titles) // 3):
+        hook_moves.append("Use a number-led or measurable hook when it sharpens curiosity instantly.")
+    if contrast_count >= max(2, len(titles) // 3):
+        hook_moves.append("Lead with a clear contrast or before-versus-after premise instead of a vague summary.")
+    if emotion_count >= max(2, len(titles) // 4):
+        packaging_moves.append("Bias toward stronger emotional words only when the contrast is obvious in the first second.")
+    if avg_title_chars > 54:
+        packaging_moves.append("Keep titles tighter than the current public benchmark and avoid over-explaining the premise.")
+    else:
+        packaging_moves.append("Stay concise and immediately readable; winning shorts here are not premise-dense.")
+    normalized = str(template or "").strip().lower()
+    if normalized == "skeleton":
+        visual_moves.extend([
+            "Use one dominant skeleton subject with one instantly readable comparison or contradiction.",
+            "Avoid cluttered lore, extra characters, or abstract filler props that weaken the first-second read.",
+        ])
+        hook_moves.append("Push a fresher skeleton angle that feels shareable, not another recycled profession matchup.")
+    elif normalized == "daytrading":
+        visual_moves.extend([
+            "Keep the frame anchored to realistic trading screens, chart hierarchy, and execution stakes.",
+            "Avoid generic wealth flexing or abstract sci-fi props that break credibility.",
+        ])
+        hook_moves.append("Favor consequence-led trading hooks: mistakes, traps, hidden costs, or asymmetric upside.")
+    elif normalized == "motivation":
+        visual_moves.append("Favor one strong action or obstacle per scene instead of generic cinematic filler.")
+    elif normalized == "chatstory":
+        visual_moves.append("Make the conflict legible as text-message drama in the first second.")
+    elif normalized == "story":
+        visual_moves.append("Favor one emotionally charged visual turn per beat with clear subject continuity.")
+    benchmark_titles = _dedupe_preserve_order(titles, max_items=6, max_chars=120)
+    summary = (
+        f"Public shorts benchmark from {len(rows)} fresh references across queries "
+        f"{', '.join(_dedupe_preserve_order(list(queries or []), max_items=3, max_chars=60))}: "
+        f"avg title length {avg_title_chars} chars, avg duration {avg_duration_sec}s. "
+        f"Repeated keywords: {', '.join(strong_keywords[:4]) or 'none'}."
+    )
+    return {
+        "summary": _clip_text(summary, 320),
+        "benchmark_titles": benchmark_titles,
+        "benchmark_channels": channels,
+        "hook_moves": _dedupe_preserve_order(hook_moves, max_items=5, max_chars=180),
+        "packaging_moves": _dedupe_preserve_order(packaging_moves, max_items=5, max_chars=180),
+        "visual_moves": _dedupe_preserve_order(visual_moves, max_items=5, max_chars=180),
+        "keyword_moves": strong_keywords[:6],
+    }
+
+
+def _build_shorts_reference_queries(
+    template: str,
+    topic: str,
+    channel_context: dict,
+    selected_cluster: dict,
+    trend_hunt_enabled: bool = False,
+) -> list[str]:
+    normalized = str(template or "").strip().lower()
+    queries: list[str] = []
+    raw_topic = re.sub(r"\s+", " ", str(topic or "").strip())
+    if raw_topic:
+        queries.append(_clip_text(raw_topic, 100))
+    cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
+    if cluster_keywords:
+        queries.append(_clip_text(" ".join(cluster_keywords[:4]), 100))
+    channel_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    if channel_titles:
+        queries.append(_clip_text(re.sub(r"\s*\|.*$", "", channel_titles[0]).strip(), 100))
+    queries.extend(list(SHORTS_PUBLIC_REFERENCE_QUERY_SEEDS.get(normalized, [])))
+    if trend_hunt_enabled and normalized == "skeleton":
+        queries.extend([
+            "viral skeleton trend shorts",
+            "skeleton facts shorts trend",
+        ])
+    return _dedupe_preserve_order([q for q in queries if q], max_items=5, max_chars=100)
+
+
+async def _youtube_fetch_public_reference_shorts(query: str, max_results: int = 8) -> list[dict]:
+    search_query = re.sub(r"\s+", " ", str(query or "").strip())
+    if not search_query:
+        return []
+    published_after = datetime.now(timezone.utc) - timedelta(days=120)
+    try:
+        payload, _active_key = await _youtube_public_api_get(
+            "/search",
+            params={
+                "part": "snippet",
+                "type": "video",
+                "q": search_query,
+                "order": "viewCount",
+                "maxResults": max(3, min(int(max_results or 8), 12)),
+                "publishedAfter": published_after.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            },
+            timeout_sec=25,
+        )
+    except Exception:
+        return []
+    raw_items = [dict(item or {}) for item in list(payload.get("items") or []) if isinstance(item, dict)]
+    video_ids = [str(((item.get("id") or {}).get("videoId")) or "").strip() for item in raw_items]
+    video_ids = [video_id for video_id in video_ids if video_id]
+    if not video_ids:
+        return []
+    try:
+        video_payload, _active_key = await _youtube_public_api_get(
+            "/videos",
+            params={
+                "part": "snippet,contentDetails,statistics",
+                "id": ",".join(video_ids[:12]),
+                "maxResults": min(12, len(video_ids)),
+            },
+            timeout_sec=25,
+        )
+    except Exception:
+        return []
+    rows_by_id: dict[str, dict] = {}
+    for raw in list(video_payload.get("items") or []):
+        if not isinstance(raw, dict):
+            continue
+        video_id = str(raw.get("id", "") or "").strip()
+        if not video_id:
+            continue
+        snippet = dict(raw.get("snippet") or {})
+        stats = dict(raw.get("statistics") or {})
+        title = _clip_text(str(snippet.get("title", "") or "").strip(), 120)
+        duration_sec = _parse_youtube_iso8601_duration(str((raw.get("contentDetails") or {}).get("duration", "") or ""))
+        if duration_sec <= 0 or duration_sec > 180:
+            continue
+        rows_by_id[video_id] = {
+            "video_id": video_id,
+            "title": title,
+            "channel_title": str(snippet.get("channelTitle", "") or "").strip(),
+            "published_at": str(snippet.get("publishedAt", "") or "").strip(),
+            "description": _clip_text(str(snippet.get("description", "") or "").strip(), 220),
+            "duration_sec": duration_sec,
+            "views": int(float(stats.get("viewCount", 0) or 0)),
+            "likes": int(float(stats.get("likeCount", 0) or 0)),
+            "query": search_query,
+        }
+    rows = list(rows_by_id.values())
+    rows.sort(
+        key=lambda row: (
+            -int(row.get("views", 0) or 0),
+            int(row.get("duration_sec", 0) or 0),
+            str(row.get("published_at", "") or ""),
+        )
+    )
+    return rows[: max(3, min(int(max_results or 8), 10))]
+
+
+async def _build_shorts_public_reference_playbook(
+    template: str,
+    topic: str,
+    channel_context: dict,
+    selected_cluster: dict,
+    trend_hunt_enabled: bool = False,
+) -> dict:
+    queries = _build_shorts_reference_queries(
+        template,
+        topic,
+        channel_context,
+        selected_cluster,
+        trend_hunt_enabled=trend_hunt_enabled,
+    )
+    if not queries:
+        return {}
+    rows: list[dict] = []
+    seen_ids: set[str] = set()
+    for query in queries:
+        query_rows = await _youtube_fetch_public_reference_shorts(query, max_results=6)
+        for row in query_rows:
+            video_id = str(row.get("video_id", "") or "").strip()
+            if not video_id or video_id in seen_ids:
+                continue
+            seen_ids.add(video_id)
+            rows.append(dict(row))
+        if len(rows) >= 12:
+            break
+    if not rows:
+        return {}
+    return _summarize_public_shorts_reference_playbook(template, rows, queries)
+
+
 async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -> list[str]:
     search_query = re.sub(r"\s+", " ", str(query or "").strip())
-    if not search_query or not YOUTUBE_API_KEY:
+    if not search_query:
         return []
     published_after = datetime.now(timezone.utc) - timedelta(days=45)
-    params = {
-        "part": "snippet",
-        "type": "video",
-        "q": search_query,
-        "order": "date",
-        "maxResults": max(1, min(int(max_results or 6), 10)),
-        "publishedAfter": published_after.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "key": YOUTUBE_API_KEY,
-    }
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{YOUTUBE_DATA_API_BASE}/search", params=params)
-            resp.raise_for_status()
-            payload = resp.json()
+        payload, _active_key = await _youtube_public_api_get(
+            "/search",
+            params={
+                "part": "snippet",
+                "type": "video",
+                "q": search_query,
+                "order": "date",
+                "maxResults": max(1, min(int(max_results or 6), 10)),
+                "publishedAfter": published_after.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            },
+            timeout_sec=20,
+        )
     except Exception:
         return []
     titles: list[str] = []
@@ -7424,11 +7714,13 @@ def _build_skeleton_shorts_local_fallback(
     source_text: str,
     channel_context: dict | None = None,
     trend_titles: list[str] | None = None,
+    public_shorts_playbook: dict | None = None,
     script_to_short_mode: bool = False,
     trend_hunt_enabled: bool = False,
 ) -> dict:
     channel_context = dict(channel_context or {})
     trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
+    public_shorts_playbook = dict(public_shorts_playbook or {})
     source = re.sub(r"\s+", " ", str(source_text or "").strip())
     if not source:
         source = "viral skeleton comparison"
@@ -7436,6 +7728,9 @@ def _build_skeleton_shorts_local_fallback(
     comparison_mode = len(comparison_match) == 2
     compact_topic = _clip_text(source, 180)
     trend_hint = trend_titles[0] if trend_titles else ""
+    public_hook_hint = str((list(public_shorts_playbook.get("hook_moves") or [""])[:1] or [""])[0] or "").strip()
+    public_visual_hint = str((list(public_shorts_playbook.get("visual_moves") or [""])[:1] or [""])[0] or "").strip()
+    keyword_moves = [str(v).strip() for v in list(public_shorts_playbook.get("keyword_moves") or []) if str(v).strip()]
 
     if script_to_short_mode:
         beats = _split_text_into_fallback_beats(source, min_count=10, max_count=14)
@@ -7468,6 +7763,10 @@ def _build_skeleton_shorts_local_fallback(
     if trend_hunt_enabled and trend_hint:
         beats[0] = f"Open with a fresher breakout angle on {compact_topic}, not a recycled take. Trend cue: {trend_hint}."
         beats[min(2, len(beats) - 1)] = f"Introduce a surprising, shareable angle that could become a new comparison trend around {compact_topic}."
+    if public_hook_hint:
+        beats[0] = _clip_text((beats[0].rstrip(". ") + f". Public benchmark move: {public_hook_hint}"), 220)
+    if public_visual_hint and len(beats) > 1:
+        beats[1] = _clip_text((beats[1].rstrip(". ") + f". Visual benchmark: {public_visual_hint}"), 220)
 
     scenes: list[dict] = []
     base_duration = 50.0
@@ -7479,6 +7778,8 @@ def _build_skeleton_shorts_local_fallback(
             "Same ivory-white anatomical skeleton with realistic eyes and translucent body shell, "
             "hyper-real 3D materials, topic-matched props, premium vertical framing, and instantly readable contrast."
         )
+        if public_visual_hint:
+            visual_description = visual_description.rstrip(". ") + f". Benchmark visual cue: {public_visual_hint}"
         scenes.append(
             {
                 "scene_num": idx,
@@ -7496,6 +7797,9 @@ def _build_skeleton_shorts_local_fallback(
     else:
         title = _clip_text(compact_topic if len(compact_topic) <= 70 else f"The Hidden Truth About {compact_topic[:48].rstrip()}", 80)
         tags = [compact_topic.lower(), "skeleton ai", "viral shorts", "3d comparison", "shorts"]
+    if keyword_moves and not comparison_mode:
+        title = _clip_text(f"{keyword_moves[0].title()} Truth: {compact_topic}", 80)
+        tags = [*tags, *keyword_moves[:3]]
     if trend_hunt_enabled:
         tags.append("trend hunt")
 
@@ -7561,6 +7865,17 @@ async def _build_shorts_catalyst_extra_instructions(
     except Exception as e:
         log.warning(f"Catalyst reference playbook failed for template={template}: {e}")
         reference_playbook = {}
+    try:
+        public_shorts_playbook = await _build_shorts_public_reference_playbook(
+            template,
+            topic,
+            channel_context,
+            selected_cluster,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Catalyst public shorts playbook failed for template={template}: {e}")
+        public_shorts_playbook = {}
     trend_titles: list[str] = []
     if trend_hunt_enabled:
         trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
@@ -7622,6 +7937,20 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Reference packaging moves: " + "; ".join(list(reference_playbook.get("packaging_rewrites") or [])[:3]))
     if list(reference_playbook.get("next_video_moves") or []):
         parts.append("Reference next-video moves: " + "; ".join(list(reference_playbook.get("next_video_moves") or [])[:3]))
+    if str(public_shorts_playbook.get("summary", "") or "").strip():
+        parts.append("Public shorts benchmark: " + _clip_text(str(public_shorts_playbook.get("summary", "") or ""), 280))
+    if list(public_shorts_playbook.get("benchmark_channels") or []):
+        parts.append("Public shorts channels to beat: " + ", ".join(list(public_shorts_playbook.get("benchmark_channels") or [])[:4]))
+    if list(public_shorts_playbook.get("benchmark_titles") or []):
+        parts.append("Public shorts reference titles: " + "; ".join(list(public_shorts_playbook.get("benchmark_titles") or [])[:4]))
+    if list(public_shorts_playbook.get("hook_moves") or []):
+        parts.append("Public shorts hook moves: " + "; ".join(list(public_shorts_playbook.get("hook_moves") or [])[:4]))
+    if list(public_shorts_playbook.get("packaging_moves") or []):
+        parts.append("Public shorts packaging moves: " + "; ".join(list(public_shorts_playbook.get("packaging_moves") or [])[:4]))
+    if list(public_shorts_playbook.get("visual_moves") or []):
+        parts.append("Public shorts visual moves: " + "; ".join(list(public_shorts_playbook.get("visual_moves") or [])[:4]))
+    if list(public_shorts_playbook.get("keyword_moves") or []):
+        parts.append("Public shorts recurring keywords: " + ", ".join(list(public_shorts_playbook.get("keyword_moves") or [])[:6]))
     if trend_titles:
         parts.append("Fresh public YouTube trend signals: " + "; ".join(trend_titles[:4]))
     if memory_context:
@@ -15862,9 +16191,21 @@ async def run_generation_pipeline(
             if template == "skeleton":
                 channel_context = {}
                 trend_titles: list[str] = []
+                public_shorts_playbook: dict = {}
                 user_id = str(job_state.get("user_id", "") or "").strip()
                 if user_id and (youtube_channel_id or trend_hunt_enabled):
                     channel_context = await _youtube_selected_channel_context({"id": user_id}, youtube_channel_id)
+                try:
+                    public_shorts_playbook = await _build_shorts_public_reference_playbook(
+                        template,
+                        topic,
+                        channel_context,
+                        {},
+                        trend_hunt_enabled=trend_hunt_enabled,
+                    )
+                except Exception as inner_exc:
+                    log.warning(f"Skeleton public shorts playbook fallback failed: {inner_exc}")
+                    public_shorts_playbook = {}
                 if trend_hunt_enabled:
                     trend_query = _build_shorts_trend_query(template, topic, channel_context, {})
                     trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
@@ -15876,6 +16217,7 @@ async def run_generation_pipeline(
                     topic,
                     channel_context=channel_context,
                     trend_titles=trend_titles,
+                    public_shorts_playbook=public_shorts_playbook,
                     script_to_short_mode=False,
                     trend_hunt_enabled=trend_hunt_enabled,
                 )
@@ -18830,6 +19172,18 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     except Exception as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
         if req.template == "skeleton":
+            public_shorts_playbook: dict = {}
+            try:
+                public_shorts_playbook = await _build_shorts_public_reference_playbook(
+                    req.template,
+                    req.prompt,
+                    channel_context,
+                    {},
+                    trend_hunt_enabled=trend_hunt_enabled,
+                )
+            except Exception as inner_exc:
+                log.warning(f"Skeleton public shorts playbook build failed during creative fallback: {inner_exc}")
+                public_shorts_playbook = {}
             log.warning(
                 "Skeleton script generation failed, using local Catalyst fallback "
                 f"(status={status_code}, trend_hunt={trend_hunt_enabled}): {e}"
@@ -18838,6 +19192,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
                 req.prompt,
                 channel_context=channel_context,
                 trend_titles=trend_titles,
+                public_shorts_playbook=public_shorts_playbook,
                 script_to_short_mode=script_to_short_mode,
                 trend_hunt_enabled=trend_hunt_enabled,
             )
@@ -20561,6 +20916,7 @@ async def public_config():
         "youtube_integration": {
             "oauth_configured": _youtube_auth_configured(),
             "api_key_configured": bool(YOUTUBE_API_KEY),
+            "api_key_pool_size": len(_youtube_public_api_key_candidates()),
             "redirect_uri": GOOGLE_REDIRECT_URI,
             "multiple_channels_supported": True,
         },
