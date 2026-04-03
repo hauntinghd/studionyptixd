@@ -208,6 +208,7 @@ from backend_catalyst_learning import (
     _apply_catalyst_outcome_to_channel_memory,
     _build_catalyst_outcome_record,
     _heuristic_catalyst_learning_record,
+    _heuristic_catalyst_short_learning_record,
     _update_catalyst_channel_memory,
 )
 from backend_catalyst_reference import (
@@ -16185,6 +16186,130 @@ def _apply_short_execution_pacing_profile(
     return profiled
 
 
+async def _persist_catalyst_short_learning_for_render(
+    *,
+    user_id: str,
+    job_id: str,
+    template: str,
+    topic: str,
+    youtube_channel_id: str = "",
+    script_data: dict | None = None,
+    scenes: list | None = None,
+    word_timings: list | None = None,
+    sound_mix_profile: dict | None = None,
+    transition_style: str = "smooth",
+    pacing_mode: str = "standard",
+    voice_speed: float = 1.0,
+    sfx_paths: list[str] | None = None,
+    bgm_track: str = "",
+    subtitle_path: str = "",
+    animation_enabled: bool = True,
+) -> dict:
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return {}
+    template_key = str(template or "").strip().lower() or "shorts"
+    script_data = dict(script_data or {})
+    scenes = [dict(scene or {}) for scene in list(scenes or [])]
+    memory_channel_id = str(youtube_channel_id or "").strip()
+    channel_context = {}
+    if memory_channel_id:
+        try:
+            channel_context = await _youtube_selected_channel_context({"id": user_id}, preferred_channel_id=memory_channel_id)
+            memory_channel_id = str((channel_context or {}).get("channel_id", "") or memory_channel_id or "").strip()
+        except Exception as e:
+            log.warning(f"[{job_id}] Catalyst short learning channel context failed: {e}")
+    channel_memory_key = _catalyst_channel_memory_key(user_id, memory_channel_id, template_key)
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        existing_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or {})
+    selected_series_context = _resolve_catalyst_series_context(
+        channel_context,
+        channel_memory=existing_memory,
+        topic=topic,
+        source_title=str(script_data.get("title", "") or ""),
+        input_title=str(script_data.get("title", "") or ""),
+        input_description=str(script_data.get("description", "") or ""),
+        format_preset=template_key,
+    )
+    memory_view = dict(selected_series_context.get("memory_view") or existing_memory or {})
+    selected_cluster = dict(selected_series_context.get("selected_cluster") or {})
+    package_payload = {
+        "selected_title": str(script_data.get("title", "") or topic or "").strip(),
+        "selected_description": str(script_data.get("description", "") or "").strip(),
+        "selected_tags": [str(v).strip() for v in list(script_data.get("tags") or []) if str(v).strip()],
+    }
+    session_snapshot = {
+        "session_id": job_id,
+        "user_id": user_id,
+        "template": template_key,
+        "topic": topic,
+        "format_preset": template_key,
+        "youtube_channel_id": memory_channel_id,
+        "channel_memory_key": channel_memory_key,
+        "metadata_pack": {
+            "youtube_channel": dict(channel_context or {}),
+            "selected_series_cluster": dict(selected_cluster or {}),
+        },
+    }
+    learning_record = _heuristic_catalyst_short_learning_record(
+        session_snapshot=session_snapshot,
+        scenes=scenes,
+        word_timings=[dict(item or {}) for item in list(word_timings or []) if isinstance(item, dict)],
+        package=package_payload,
+        sound_mix_profile=dict(sound_mix_profile or {}),
+        transition_style=transition_style,
+        pacing_mode=pacing_mode,
+        voice_speed=voice_speed,
+        sfx_paths=list(sfx_paths or []),
+        bgm_track=bgm_track,
+        subtitle_path=subtitle_path,
+        animation_enabled=animation_enabled,
+    )
+    timeline_qa = dict(learning_record.get("timeline_qa") or {})
+    execution_strategy = dict(learning_record.get("execution_strategy") or {})
+    edit_blueprint = {
+        "visual_engine": f"{template_key}_shorts",
+        "motion_strategy": {
+            "transition_style": _normalize_transition_style(transition_style),
+            "visual_rules": list(learning_record.get("visual_adjustments") or [])[:4],
+        },
+        "sound_strategy": {
+            "music_profile": str((dict(sound_mix_profile or {})).get("music_profile", "") or ""),
+            "mix_notes": list(learning_record.get("sound_adjustments") or [])[:4],
+            "voice_direction": [f"Voice pacing bias: {str(execution_strategy.get('voice_pacing_bias', '') or '').strip()}"] if str(execution_strategy.get("voice_pacing_bias", "") or "").strip() else [],
+        },
+        "execution_strategy": execution_strategy,
+    }
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        latest_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or memory_view or {})
+        updated_channel_memory = _update_catalyst_channel_memory(
+            existing=latest_memory,
+            session_snapshot=session_snapshot,
+            learning_record=learning_record,
+            edit_blueprint=edit_blueprint,
+            package=package_payload,
+        )
+        updated_channel_memory["key"] = channel_memory_key
+        _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
+        existing_learning_entry = _catalyst_learning_records.get(job_id)
+        if isinstance(existing_learning_entry, dict):
+            learning_entry = dict(existing_learning_entry)
+        else:
+            learning_entry = {}
+        learning_entry["prepublish"] = dict(learning_record)
+        learning_entry["latest_short_timeline_qa"] = timeline_qa
+        _catalyst_learning_records[job_id] = learning_entry
+        _save_catalyst_memory()
+    jobs[job_id]["catalyst_short_learning"] = {
+        "summary": str(learning_record.get("outcome_summary", "") or "").strip(),
+        "timeline_qa": timeline_qa,
+        "channel_memory": _catalyst_channel_memory_public_view(updated_channel_memory),
+    }
+    return jobs[job_id]["catalyst_short_learning"]
+
+
 def _job_diag_init(job_id: str, mode: str):
     _prune_in_memory_jobs()
     job = jobs.get(job_id)
@@ -16606,6 +16731,28 @@ async def run_generation_pipeline(
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
+
+        try:
+            await _persist_catalyst_short_learning_for_render(
+                user_id=str(job_state.get("user_id", "") or ""),
+                job_id=job_id,
+                template=template,
+                topic=topic,
+                youtube_channel_id=str(job_state.get("youtube_channel_id", "") or ""),
+                script_data=script_data,
+                scenes=scenes,
+                word_timings=word_timings,
+                sound_mix_profile=sound_mix_profile,
+                transition_style=transition_style,
+                pacing_mode=pacing_mode,
+                voice_speed=voice_speed,
+                sfx_paths=sfx_paths,
+                bgm_track=bgm_track,
+                subtitle_path=subtitle_path or "",
+                animation_enabled=animation_enabled,
+            )
+        except Exception as learning_err:
+            log.warning(f"[{job_id}] Catalyst short learning persistence failed: {learning_err}")
 
         for sfx in sfx_paths:
             if sfx:
@@ -20569,6 +20716,28 @@ async def _run_creative_pipeline(
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
+
+        try:
+            await _persist_catalyst_short_learning_for_render(
+                user_id=str(session.get("user_id", "") or ""),
+                job_id=job_id,
+                template=template,
+                topic=str(session.get("topic", "") or ""),
+                youtube_channel_id=str(session.get("youtube_channel_id", "") or ""),
+                script_data=script_data,
+                scenes=scenes,
+                word_timings=word_timings,
+                sound_mix_profile=sound_mix_profile,
+                transition_style=transition_style,
+                pacing_mode=pacing_mode,
+                voice_speed=voice_speed,
+                sfx_paths=sfx_paths,
+                bgm_track=bgm_track,
+                subtitle_path=subtitle_path or "",
+                animation_enabled=animation_enabled,
+            )
+        except Exception as learning_err:
+            log.warning(f"[{job_id}] Creative Catalyst short learning persistence failed: {learning_err}")
 
         for sfx in sfx_paths:
             if sfx:

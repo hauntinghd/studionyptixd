@@ -1,5 +1,7 @@
 ﻿import time
 from datetime import datetime
+import re
+from pathlib import Path
 
 from backend_catalyst_core import (
     _clip_text,
@@ -387,6 +389,270 @@ def _heuristic_catalyst_learning_record(
         "selected_description": selected_description,
         "selected_tags": list(package.get("selected_tags") or []),
         "chapter_markers": list(chapter_markers or []),
+    }
+
+
+def _heuristic_catalyst_short_learning_record(
+    *,
+    session_snapshot: dict,
+    scenes: list[dict] | None = None,
+    word_timings: list[dict] | None = None,
+    package: dict | None = None,
+    sound_mix_profile: dict | None = None,
+    transition_style: str = "smooth",
+    pacing_mode: str = "standard",
+    voice_speed: float = 1.0,
+    sfx_paths: list[str] | None = None,
+    bgm_track: str = "",
+    subtitle_path: str = "",
+    animation_enabled: bool = True,
+) -> dict:
+    session_snapshot = dict(session_snapshot or {})
+    package = dict(package or {})
+    sound_mix_profile = dict(sound_mix_profile or {})
+    scenes = [dict(scene or {}) for scene in list(scenes or [])]
+    word_timings = [dict(item or {}) for item in list(word_timings or []) if isinstance(item, dict)]
+    template = str(session_snapshot.get("template", "") or session_snapshot.get("format_preset", "") or "").strip().lower()
+    topic = str(session_snapshot.get("topic", "") or "").strip()
+    title = str(package.get("selected_title", "") or topic or "").strip()
+    description = str(package.get("selected_description", "") or "").strip()
+    tags = [str(v).strip() for v in list(package.get("selected_tags") or []) if str(v).strip()]
+    scene_count = len(scenes)
+
+    def _spoken_word_count(text: str) -> int:
+        return len(re.findall(r"[A-Za-z0-9']+", str(text or "")))
+
+    def _estimate_spoken_duration_seconds(text: str, speed: float = 1.0) -> float:
+        word_count = _spoken_word_count(text)
+        if word_count <= 0:
+            return 0.0
+        base_wps = 2.45 * max(0.8, min(1.35, float(speed or 1.0)))
+        pauses = 0.12 * max(0, len(re.findall(r"[,.!?;:]", str(text or ""))))
+        return max(0.2, (word_count / base_wps) + pauses)
+
+    normalized_timings: list[dict] = []
+    for raw in word_timings:
+        start = float(raw.get("start", raw.get("start_sec", 0.0)) or 0.0)
+        end = float(raw.get("end", raw.get("end_sec", start)) or start)
+        if end <= start:
+            continue
+        normalized_timings.append({"start": start, "end": end})
+
+    total_timed_words = len(normalized_timings)
+    cursor = 0
+    scene_metrics: list[dict] = []
+    duplicate_visual_hits = 0
+    prior_visual_signatures: list[str] = []
+    for index, scene in enumerate(scenes):
+        narration = str(scene.get("narration", "") or "").strip()
+        duration = max(3.5, float(scene.get("duration_sec", 5.0) or 5.0))
+        word_count = _spoken_word_count(narration)
+        estimated_duration = float(scene.get("_narration_fit_estimate_sec", 0.0) or 0.0)
+        if estimated_duration <= 0:
+            estimated_duration = _estimate_spoken_duration_seconds(narration, speed=voice_speed)
+        timed_duration = 0.0
+        if word_count > 0 and total_timed_words > 0 and cursor < total_timed_words:
+            take = normalized_timings[cursor: min(total_timed_words, cursor + word_count)]
+            cursor += len(take)
+            if take:
+                timed_duration = max(0.0, float(take[-1]["end"]) - float(take[0]["start"]))
+        voice_duration = timed_duration if timed_duration > 0 else estimated_duration
+        fill_ratio = max(0.0, min(1.8, voice_duration / max(duration, 0.1)))
+        dead_air_sec = max(0.0, duration - voice_duration)
+        overfill_sec = max(0.0, voice_duration - duration)
+        visual_signature = re.sub(r"\s+", " ", str(scene.get("visual_description", "") or "").strip().lower())[:140]
+        if visual_signature and visual_signature in prior_visual_signatures[-2:]:
+            duplicate_visual_hits += 1
+        if visual_signature:
+            prior_visual_signatures.append(visual_signature)
+        scene_metrics.append({
+            "scene_num": index + 1,
+            "duration_sec": round(duration, 2),
+            "voice_duration_sec": round(voice_duration, 2),
+            "fill_ratio": round(fill_ratio, 2),
+            "dead_air_sec": round(dead_air_sec, 2),
+            "overfill_sec": round(overfill_sec, 2),
+            "word_count": word_count,
+            "execution_intensity": str(scene.get("_execution_intensity", "") or ""),
+            "interrupt_strength": str(scene.get("_interrupt_strength", "") or ""),
+            "cut_profile": str(scene.get("_cut_profile", "") or ""),
+            "payoff_hold_sec": round(float(scene.get("_payoff_hold_sec", 0.0) or 0.0), 2),
+        })
+
+    avg_fill_ratio = round(sum(float(item.get("fill_ratio", 0.0) or 0.0) for item in scene_metrics) / max(1, len(scene_metrics)), 2)
+    max_dead_air_sec = round(max((float(item.get("dead_air_sec", 0.0) or 0.0) for item in scene_metrics), default=0.0), 2)
+    avg_dead_air_sec = round(sum(float(item.get("dead_air_sec", 0.0) or 0.0) for item in scene_metrics) / max(1, len(scene_metrics)), 2)
+    avg_overfill_sec = round(sum(float(item.get("overfill_sec", 0.0) or 0.0) for item in scene_metrics) / max(1, len(scene_metrics)), 2)
+    underfilled_scenes = [item for item in scene_metrics if float(item.get("dead_air_sec", 0.0) or 0.0) >= 0.85 or float(item.get("fill_ratio", 0.0) or 0.0) < 0.78]
+    overfilled_scenes = [item for item in scene_metrics if float(item.get("overfill_sec", 0.0) or 0.0) >= 0.3 or float(item.get("fill_ratio", 0.0) or 0.0) > 1.05]
+    beat_density_score = round(max(0.0, min(100.0, 100.0 - (max_dead_air_sec * 22.0) - (len(underfilled_scenes) * 5.5) - (duplicate_visual_hits * 4.0))), 1)
+
+    def _existing_audio_track(path: str) -> bool:
+        return bool(str(path or "").strip() and Path(str(path)).exists())
+
+    sfx_count = sum(1 for p in list(sfx_paths or []) if _existing_audio_track(str(p)))
+    sfx_scene_coverage_pct = round((sfx_count / max(1, scene_count)) * 100.0, 2)
+    bgm_enabled = _existing_audio_track(bgm_track)
+    captions_enabled = bool(str(subtitle_path or "").strip() and Path(str(subtitle_path)).exists())
+
+    opening_scene = dict(scene_metrics[0] or {}) if scene_metrics else {}
+    strongest_intensity = str(opening_scene.get("execution_intensity", "") or "") or "medium"
+    interrupt_choices = [str(item.get("interrupt_strength", "") or "").strip() for item in scene_metrics if str(item.get("interrupt_strength", "") or "").strip()]
+    cut_choices = [str(item.get("cut_profile", "") or "").strip() for item in scene_metrics if str(item.get("cut_profile", "") or "").strip()]
+
+    def _most_common(values: list[str], default: str = "") -> str:
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        if not cleaned:
+            return default
+        scores: dict[str, int] = {}
+        for value in cleaned:
+            scores[value] = int(scores.get(value, 0) or 0) + 1
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+    voice_pacing_bias = "tight sync" if avg_fill_ratio >= 0.9 else ("denser narration" if avg_fill_ratio < 0.82 else "slightly faster mid-beat")
+    caption_rhythm = "tight word-lock" if avg_fill_ratio >= 0.88 else ("denser pulse captions" if avg_fill_ratio < 0.82 else "pulse-synced captions")
+    sound_density = "layered" if bgm_enabled and sfx_scene_coverage_pct >= 75.0 else ("accent-led" if sfx_scene_coverage_pct >= 45.0 else "light")
+    visual_variation_rule = (
+        "Do not repeat nearly identical framing in adjacent scenes; force a new camera angle, location, or composition every beat."
+        if duplicate_visual_hits > 0
+        else "Keep one clear new angle or composition change on every scene so the short never looks visually parked."
+    )
+    execution_strategy = {
+        "opening_intensity": strongest_intensity if strongest_intensity else ("attack" if animation_enabled else "high"),
+        "interrupt_strength": _most_common(interrupt_choices, default="medium"),
+        "caption_rhythm": caption_rhythm,
+        "sound_density": sound_density,
+        "cut_profile": _most_common(cut_choices, default="dynamic-cut"),
+        "voice_pacing_bias": voice_pacing_bias,
+        "payoff_hold_sec": round(max((float(item.get("payoff_hold_sec", 0.0) or 0.0) for item in scene_metrics), default=1.05), 2),
+        "visual_variation_rule": visual_variation_rule,
+    }
+
+    wins_to_keep = []
+    if sfx_scene_coverage_pct >= 75.0:
+        wins_to_keep.append("Keep scene-locked SFX on nearly every beat so the short never feels visually silent.")
+    if bgm_enabled:
+        wins_to_keep.append("Keep a subtle background music bed under narration instead of leaving the timeline sonically empty.")
+    if captions_enabled:
+        wins_to_keep.append("Keep burned captions synced after the final audio mix so pacing stays readable.")
+    if avg_fill_ratio >= 0.9:
+        wins_to_keep.append("Narration fit is close to the scene holds, so keep that denser pacing baseline.")
+    if beat_density_score >= 78.0:
+        wins_to_keep.append("Beat density is strong enough to preserve the current cut aggression.")
+
+    mistakes_to_avoid = []
+    if max_dead_air_sec > 0.85:
+        mistakes_to_avoid.append(f"Do not leave more than {max_dead_air_sec:.1f}s of dead air after narration lands.")
+    if len(underfilled_scenes) > 0:
+        mistakes_to_avoid.append(f"Do not let {len(underfilled_scenes)} underfilled scene(s) coast without a stronger follow-through line or earlier cut.")
+    if len(overfilled_scenes) > 0:
+        mistakes_to_avoid.append(f"Do not let narration outrun scene timing on {len(overfilled_scenes)} beat(s).")
+    if duplicate_visual_hits > 0:
+        mistakes_to_avoid.append("Do not reuse nearly identical framing in back-to-back scenes.")
+    if sfx_scene_coverage_pct < 55.0:
+        mistakes_to_avoid.append("Do not leave major beats without sound accents.")
+
+    hook_adjustments = [
+        "Make the first line land faster and cut sooner if the opening beat still leaves air."
+        if float(opening_scene.get("dead_air_sec", 0.0) or 0.0) > 0.6
+        else "Keep the opening beat immediate and high-pressure so the hook lands before the viewer scrolls."
+    ]
+    if avg_fill_ratio < 0.82:
+        hook_adjustments.append("Front-load one more concrete reveal into the first two scenes so the short accelerates sooner.")
+
+    pacing_adjustments = []
+    if underfilled_scenes:
+        pacing_adjustments.append("Shorten holds or add tighter follow-through clauses on underfilled scenes to remove dead air.")
+    if overfilled_scenes:
+        pacing_adjustments.append("Trim narration density slightly where the voice is overrunning the visual beat.")
+    pacing_adjustments.append(f"Default to {execution_strategy['cut_profile']} cuts with {execution_strategy['interrupt_strength']} interrupts for this lane.")
+    pacing_adjustments.append(f"Keep average scene fill above 0.90; current run landed at {avg_fill_ratio:.2f}.")
+
+    visual_adjustments = [
+        visual_variation_rule,
+        f"Transition style used: {str(transition_style or 'smooth').strip()}. Preserve that only if the next run stays visually readable.",
+    ]
+    if duplicate_visual_hits > 0:
+        visual_adjustments.append("Force a stronger environment or framing change in the middle third of the short.")
+
+    sound_adjustments = [
+        f"Keep sound density at {execution_strategy['sound_density']} for this template."
+    ]
+    if sfx_scene_coverage_pct < 100.0:
+        sound_adjustments.append("Raise scene-level SFX coverage so every major beat has a clean accent.")
+    if bgm_enabled:
+        bgm_gain = float(sound_mix_profile.get("bgm_gain", 0.0) or 0.0)
+        sound_adjustments.append(
+            f"Keep background music subtle under narration; current mix target is {round(bgm_gain * 100.0, 1):g}%."
+            if bgm_gain > 0
+            else "Keep the music bed subtle under narration."
+        )
+    else:
+        sound_adjustments.append("Do not leave the timeline without a subtle music bed.")
+
+    packaging_adjustments = [
+        "Keep the title promise aligned with the strongest visual beat in the short.",
+        f"Use this short lane title as the package baseline: {title}" if title else "",
+    ]
+    if tags:
+        packaging_adjustments.append("Keep tags centered on the same angle: " + ", ".join(tags[:6]))
+
+    next_video_moves = []
+    if len(underfilled_scenes) > 0:
+        next_video_moves.append("Generate denser scene narration so the middle beats never lose momentum.")
+    if duplicate_visual_hits > 0:
+        next_video_moves.append("Increase visual contrast between adjacent scenes.")
+    next_video_moves.append(f"Favor {execution_strategy['cut_profile']} cuts with {execution_strategy['caption_rhythm']} captions on the next run.")
+    next_video_moves.append("Preserve the stronger scene-locked SFX baseline on every major beat.")
+
+    outcome_summary = (
+        f"Catalyst rendered a {template or 'short'} short with {scene_count} scenes. "
+        f"Average scene fill landed at {avg_fill_ratio:.2f}, max dead air at {max_dead_air_sec:.2f}s, "
+        f"and SFX coverage at {sfx_scene_coverage_pct:.1f}%."
+    )
+
+    return {
+        "session_id": str(session_snapshot.get("session_id", "") or ""),
+        "channel_id": str(session_snapshot.get("youtube_channel_id", "") or ""),
+        "format_preset": str(session_snapshot.get("format_preset", "") or template or "shorts"),
+        "mode": "short_postrender_learning_record",
+        "created_at": time.time(),
+        "outcome_summary": outcome_summary,
+        "wins_to_keep": _dedupe_preserve_order(wins_to_keep, max_items=6, max_chars=180),
+        "mistakes_to_avoid": _dedupe_preserve_order(mistakes_to_avoid, max_items=6, max_chars=180),
+        "hook_adjustments": _dedupe_preserve_order(hook_adjustments, max_items=6, max_chars=180),
+        "pacing_adjustments": _dedupe_preserve_order(pacing_adjustments, max_items=8, max_chars=180),
+        "visual_adjustments": _dedupe_preserve_order(visual_adjustments, max_items=8, max_chars=180),
+        "sound_adjustments": _dedupe_preserve_order(sound_adjustments, max_items=8, max_chars=180),
+        "packaging_adjustments": _dedupe_preserve_order(packaging_adjustments, max_items=8, max_chars=180),
+        "next_video_moves": _dedupe_preserve_order(next_video_moves, max_items=8, max_chars=180),
+        "memory_updates": _dedupe_preserve_order([
+            title,
+            description,
+            f"Transition style: {str(transition_style or '').strip()}",
+            f"Average fill ratio: {avg_fill_ratio:.2f}",
+            f"SFX coverage: {sfx_scene_coverage_pct:.1f}%",
+            f"Beat density: {beat_density_score:.1f}/100",
+        ], max_items=8, max_chars=180),
+        "execution_strategy": execution_strategy,
+        "selected_title": title,
+        "selected_description": description,
+        "selected_tags": tags,
+        "timeline_qa": {
+            "scene_count": scene_count,
+            "average_scene_fill_ratio": avg_fill_ratio,
+            "average_dead_air_sec": avg_dead_air_sec,
+            "max_dead_air_sec": max_dead_air_sec,
+            "average_overfill_sec": avg_overfill_sec,
+            "underfilled_scene_count": len(underfilled_scenes),
+            "overfilled_scene_count": len(overfilled_scenes),
+            "sfx_scene_coverage_pct": sfx_scene_coverage_pct,
+            "bgm_enabled": bool(bgm_enabled),
+            "captions_enabled": bool(captions_enabled),
+            "duplicate_visual_hits": int(duplicate_visual_hits),
+            "beat_density_score": beat_density_score,
+            "scene_metrics": scene_metrics[:14],
+        },
     }
 
 
