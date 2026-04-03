@@ -10,6 +10,7 @@ from backend_catalyst_core import (
     _catalyst_infer_archetype,
     _catalyst_infer_niche,
     _catalyst_outcome_weight,
+    _catalyst_pick_preferred_choice,
     _catalyst_series_memory_key,
     _catalyst_update_weighted_signals,
     _extract_catalyst_keywords,
@@ -977,6 +978,131 @@ async def _mark_longform_waiting_for_shortform_capacity(
         _save_longform_sessions()
 
 
+def _catalyst_normalize_execution_metric(value: float, *, scale: float = 1.0, maximum: float = 100.0) -> float:
+    numeric = float(value or 0.0) * float(scale or 1.0)
+    return max(0.0, min(float(maximum or 100.0), numeric))
+
+
+def _catalyst_execution_scorecard(
+    execution_strategy: dict | None,
+    metrics: dict | None,
+    reference_scores: dict | None,
+) -> dict:
+    execution_strategy = dict(execution_strategy or {})
+    metrics = dict(metrics or {})
+    reference_scores = dict(reference_scores or {})
+
+    hook_inputs = [
+        _catalyst_normalize_execution_metric(metrics.get("first_30_sec_retention_pct", 0.0)),
+        _catalyst_normalize_execution_metric(reference_scores.get("hook", 0.0)),
+    ]
+    pacing_inputs = [
+        _catalyst_normalize_execution_metric(metrics.get("average_percentage_viewed", 0.0)),
+        _catalyst_normalize_execution_metric(metrics.get("first_60_sec_retention_pct", 0.0)),
+        _catalyst_normalize_execution_metric(reference_scores.get("pacing", 0.0)),
+    ]
+    visual_inputs = [
+        _catalyst_normalize_execution_metric(reference_scores.get("visuals", 0.0)),
+    ]
+    sound_inputs = [
+        _catalyst_normalize_execution_metric(reference_scores.get("sound", 0.0)),
+        _catalyst_normalize_execution_metric(metrics.get("first_60_sec_retention_pct", 0.0), scale=0.7),
+    ]
+    packaging_inputs = [
+        _catalyst_normalize_execution_metric(metrics.get("impression_click_through_rate", 0.0), scale=15.0),
+        _catalyst_normalize_execution_metric(reference_scores.get("packaging", 0.0)),
+        _catalyst_normalize_execution_metric(reference_scores.get("title_novelty", 0.0)),
+    ]
+
+    def _avg(values: list[float]) -> float:
+        filtered = [float(v) for v in values if float(v) > 0]
+        if not filtered:
+            return 0.0
+        return round(sum(filtered) / len(filtered), 2)
+
+    hook_score = _avg(hook_inputs)
+    pacing_score = _avg(pacing_inputs)
+    visual_score = _avg(visual_inputs)
+    sound_score = _avg(sound_inputs)
+    packaging_score = _avg(packaging_inputs)
+    overall_inputs = [hook_score, pacing_score, visual_score, sound_score, packaging_score]
+    overall_score = _avg(overall_inputs)
+
+    return {
+        "overall": overall_score,
+        "hook": hook_score,
+        "pacing": pacing_score,
+        "visuals": visual_score,
+        "sound": sound_score,
+        "packaging": packaging_score,
+        "signature": _clip_text(
+            " | ".join(
+                part for part in [
+                    str(execution_strategy.get("opening_intensity", "") or "").strip(),
+                    str(execution_strategy.get("cut_profile", "") or "").strip(),
+                    str(execution_strategy.get("caption_rhythm", "") or "").strip(),
+                    str(execution_strategy.get("sound_density", "") or "").strip(),
+                    str(execution_strategy.get("voice_pacing_bias", "") or "").strip(),
+                ] if part
+            ),
+            180,
+        ),
+    }
+
+
+def _catalyst_execution_signal_payloads(execution_strategy: dict | None, execution_scores: dict | None) -> dict:
+    execution_strategy = dict(execution_strategy or {})
+    execution_scores = dict(execution_scores or {})
+
+    def _bucket(score: float) -> str:
+        numeric = float(score or 0.0)
+        if numeric >= 68:
+            return "win"
+        if numeric <= 54:
+            return "watchout"
+        return "neutral"
+
+    payload = {
+        "opening_intensity": {"wins": [], "watchouts": []},
+        "interrupt_strength": {"wins": [], "watchouts": []},
+        "caption_rhythm": {"wins": [], "watchouts": []},
+        "sound_density": {"wins": [], "watchouts": []},
+        "cut_profile": {"wins": [], "watchouts": []},
+        "voice_pacing_bias": {"wins": [], "watchouts": []},
+        "visual_variation_rule": {"wins": [], "watchouts": []},
+        "execution_profile": {"wins": [], "watchouts": []},
+    }
+
+    mapping = {
+        "opening_intensity": ("hook", 40),
+        "interrupt_strength": ("pacing", 40),
+        "caption_rhythm": ("pacing", 40),
+        "sound_density": ("sound", 40),
+        "cut_profile": ("pacing", 60),
+        "voice_pacing_bias": ("hook", 60),
+        "visual_variation_rule": ("visuals", 160),
+    }
+    for field_name, (score_key, max_chars) in mapping.items():
+        value = _clip_text(str(execution_strategy.get(field_name, "") or "").strip(), max_chars)
+        if not value:
+            continue
+        bucket = _bucket(float(execution_scores.get(score_key, 0.0) or 0.0))
+        if bucket == "win":
+            payload[field_name]["wins"].append(value)
+        elif bucket == "watchout":
+            payload[field_name]["watchouts"].append(value)
+
+    signature = _clip_text(str(execution_scores.get("signature", "") or "").strip(), 180)
+    if signature:
+        bucket = _bucket(float(execution_scores.get("overall", 0.0) or 0.0))
+        if bucket == "win":
+            payload["execution_profile"]["wins"].append(signature)
+        elif bucket == "watchout":
+            payload["execution_profile"]["watchouts"].append(signature)
+
+    return payload
+
+
 def _build_catalyst_outcome_record(
     *,
     session_snapshot: dict,
@@ -992,6 +1118,7 @@ def _build_catalyst_outcome_record(
     metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
     source_analysis = dict(metadata_pack.get("source_analysis") or {})
     channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
     video_meta = dict(video_meta or {})
     analytics_metrics = dict(analytics_metrics or {})
     selected_title = str(outcome_req.title_used or package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
@@ -1020,6 +1147,7 @@ def _build_catalyst_outcome_record(
         "first_60_sec_retention_pct": round(float(outcome_req.first_60_sec_retention_pct or 0.0), 2),
     }
     weight = _catalyst_outcome_weight(metrics)
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     strongest_signals = _dedupe_preserve_order([
         *list(outcome_req.strongest_signals or []),
         *list(source_analysis.get("strongest_signals") or [])[:2],
@@ -1078,6 +1206,24 @@ def _build_catalyst_outcome_record(
         session_snapshot=session_snapshot,
         outcome_record=outcome_record,
     ) if score_against_reference_fn else {}
+    execution_scores = _catalyst_execution_scorecard(
+        execution_strategy=execution_strategy,
+        metrics=metrics,
+        reference_scores=dict(reference_comparison.get("scores") or {}),
+    )
+    if execution_strategy:
+        outcome_record["execution_strategy"] = {
+            "opening_intensity": str(execution_strategy.get("opening_intensity", "") or ""),
+            "interrupt_strength": str(execution_strategy.get("interrupt_strength", "") or ""),
+            "caption_rhythm": str(execution_strategy.get("caption_rhythm", "") or ""),
+            "sound_density": str(execution_strategy.get("sound_density", "") or ""),
+            "cut_profile": str(execution_strategy.get("cut_profile", "") or ""),
+            "voice_pacing_bias": str(execution_strategy.get("voice_pacing_bias", "") or ""),
+            "payoff_hold_sec": round(float(execution_strategy.get("payoff_hold_sec", 0.0) or 0.0), 2),
+            "visual_variation_rule": _clip_text(str(execution_strategy.get("visual_variation_rule", "") or ""), 180),
+        }
+    if execution_scores:
+        outcome_record["execution_scores"] = execution_scores
     if reference_comparison:
         outcome_record["reference_comparison"] = reference_comparison
     return outcome_record
@@ -1098,6 +1244,9 @@ def _apply_catalyst_outcome_to_channel_memory(
     weight = float(outcome_record.get("weight", 1.0) or 1.0)
     reference_comparison = dict(outcome_record.get("reference_comparison") or {})
     reference_scores = dict(reference_comparison.get("scores") or {})
+    execution_strategy = dict(outcome_record.get("execution_strategy") or {})
+    execution_scores = dict(outcome_record.get("execution_scores") or {})
+    execution_signals = _catalyst_execution_signal_payloads(execution_strategy, execution_scores)
     format_preset = str(session_snapshot.get("format_preset", "") or updated.get("format_preset", "") or "documentary")
     updated["key"] = str(updated.get("key", "") or session_snapshot.get("channel_memory_key", "") or "")
     updated["channel_id"] = str(updated.get("channel_id", "") or session_snapshot.get("youtube_channel_id", "") or outcome_record.get("channel_id", "") or "")
@@ -1139,6 +1288,12 @@ def _apply_catalyst_outcome_to_channel_memory(
     updated["reference_sound_score_sum"] = float(updated.get("reference_sound_score_sum", 0.0) or 0.0) + float(reference_scores.get("sound", 0.0) or 0.0)
     updated["reference_packaging_score_sum"] = float(updated.get("reference_packaging_score_sum", 0.0) or 0.0) + float(reference_scores.get("packaging", 0.0) or 0.0)
     updated["reference_title_novelty_score_sum"] = float(updated.get("reference_title_novelty_score_sum", 0.0) or 0.0) + float(reference_scores.get("title_novelty", 0.0) or 0.0)
+    updated["execution_overall_score_sum"] = float(updated.get("execution_overall_score_sum", 0.0) or 0.0) + float(execution_scores.get("overall", 0.0) or 0.0)
+    updated["execution_hook_score_sum"] = float(updated.get("execution_hook_score_sum", 0.0) or 0.0) + float(execution_scores.get("hook", 0.0) or 0.0)
+    updated["execution_pacing_score_sum"] = float(updated.get("execution_pacing_score_sum", 0.0) or 0.0) + float(execution_scores.get("pacing", 0.0) or 0.0)
+    updated["execution_visual_score_sum"] = float(updated.get("execution_visual_score_sum", 0.0) or 0.0) + float(execution_scores.get("visuals", 0.0) or 0.0)
+    updated["execution_sound_score_sum"] = float(updated.get("execution_sound_score_sum", 0.0) or 0.0) + float(execution_scores.get("sound", 0.0) or 0.0)
+    updated["execution_packaging_score_sum"] = float(updated.get("execution_packaging_score_sum", 0.0) or 0.0) + float(execution_scores.get("packaging", 0.0) or 0.0)
     updated["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(updated.get("hook_learnings") or [])], max_items=10, max_chars=180)
     updated["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(updated.get("pacing_learnings") or [])], max_items=10, max_chars=180)
     updated["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(updated.get("visual_learnings") or [])], max_items=10, max_chars=180)
@@ -1172,6 +1327,60 @@ def _apply_catalyst_outcome_to_channel_memory(
     _catalyst_update_weighted_signals(updated, "reference_packaging_rewrites_map", list(reference_comparison.get("packaging_rewrites") or []), weight)
     _catalyst_update_weighted_signals(updated, "reference_next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight)
     _catalyst_update_weighted_signals(updated, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+    for field_name, payload in (
+        ("opening_intensity", execution_signals.get("opening_intensity") or {}),
+        ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),
+        ("caption_rhythm", execution_signals.get("caption_rhythm") or {}),
+        ("sound_density", execution_signals.get("sound_density") or {}),
+        ("cut_profile", execution_signals.get("cut_profile") or {}),
+        ("voice_pacing_bias", execution_signals.get("voice_pacing_bias") or {}),
+        ("visual_variation_rule", execution_signals.get("visual_variation_rule") or {}),
+        ("execution_profile", execution_signals.get("execution_profile") or {}),
+    ):
+        _catalyst_update_weighted_signals(updated, f"{field_name}_wins_map", list(payload.get("wins") or []), weight)
+        _catalyst_update_weighted_signals(updated, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), weight)
+    updated["preferred_cut_profile"] = _catalyst_pick_preferred_choice(
+        updated.get("cut_profile_wins_map") or {},
+        updated.get("cut_profile_watchouts_map") or {},
+        str(updated.get("preferred_cut_profile", "") or ""),
+        max_chars=60,
+    )
+    updated["preferred_caption_rhythm"] = _catalyst_pick_preferred_choice(
+        updated.get("caption_rhythm_wins_map") or {},
+        updated.get("caption_rhythm_watchouts_map") or {},
+        str(updated.get("preferred_caption_rhythm", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_opening_intensity"] = _catalyst_pick_preferred_choice(
+        updated.get("opening_intensity_wins_map") or {},
+        updated.get("opening_intensity_watchouts_map") or {},
+        str(updated.get("preferred_opening_intensity", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_interrupt_strength"] = _catalyst_pick_preferred_choice(
+        updated.get("interrupt_strength_wins_map") or {},
+        updated.get("interrupt_strength_watchouts_map") or {},
+        str(updated.get("preferred_interrupt_strength", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_sound_density"] = _catalyst_pick_preferred_choice(
+        updated.get("sound_density_wins_map") or {},
+        updated.get("sound_density_watchouts_map") or {},
+        str(updated.get("preferred_sound_density", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_voice_pacing_bias"] = _catalyst_pick_preferred_choice(
+        updated.get("voice_pacing_bias_wins_map") or {},
+        updated.get("voice_pacing_bias_watchouts_map") or {},
+        str(updated.get("preferred_voice_pacing_bias", "") or ""),
+        max_chars=60,
+    )
+    updated["preferred_visual_variation_rule"] = _catalyst_pick_preferred_choice(
+        updated.get("visual_variation_rule_wins_map") or {},
+        updated.get("visual_variation_rule_watchouts_map") or {},
+        str(updated.get("preferred_visual_variation_rule", "") or ""),
+        max_chars=180,
+    )
     public = _catalyst_channel_memory_public_view(updated)
     updated["summary"] = _clip_text(
         "Catalyst now has "
@@ -1236,6 +1445,15 @@ def _apply_catalyst_outcome_to_channel_memory(
             ("reference_title_novelty_score_sum", "title_novelty"),
         ):
             series_bucket[field] = float(series_bucket.get(field, 0.0) or 0.0) + float(reference_scores.get(metric_key, 0.0) or 0.0)
+        for field, metric_key in (
+            ("execution_overall_score_sum", "overall"),
+            ("execution_hook_score_sum", "hook"),
+            ("execution_pacing_score_sum", "pacing"),
+            ("execution_visual_score_sum", "visuals"),
+            ("execution_sound_score_sum", "sound"),
+            ("execution_packaging_score_sum", "packaging"),
+        ):
+            series_bucket[field] = float(series_bucket.get(field, 0.0) or 0.0) + float(execution_scores.get(metric_key, 0.0) or 0.0)
         series_bucket["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(series_bucket.get("hook_learnings") or [])], max_items=10, max_chars=180)
         series_bucket["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(series_bucket.get("pacing_learnings") or [])], max_items=10, max_chars=180)
         series_bucket["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(series_bucket.get("visual_learnings") or [])], max_items=10, max_chars=180)
@@ -1272,6 +1490,18 @@ def _apply_catalyst_outcome_to_channel_memory(
         ):
             _catalyst_update_weighted_signals(series_bucket, field, items, weight)
         _catalyst_update_weighted_signals(series_bucket, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+        for field_name, payload in (
+            ("opening_intensity", execution_signals.get("opening_intensity") or {}),
+            ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),
+            ("caption_rhythm", execution_signals.get("caption_rhythm") or {}),
+            ("sound_density", execution_signals.get("sound_density") or {}),
+            ("cut_profile", execution_signals.get("cut_profile") or {}),
+            ("voice_pacing_bias", execution_signals.get("voice_pacing_bias") or {}),
+            ("visual_variation_rule", execution_signals.get("visual_variation_rule") or {}),
+            ("execution_profile", execution_signals.get("execution_profile") or {}),
+        ):
+            _catalyst_update_weighted_signals(series_bucket, f"{field_name}_wins_map", list(payload.get("wins") or []), weight)
+            _catalyst_update_weighted_signals(series_bucket, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), weight)
         series_public = _catalyst_channel_memory_public_view(series_bucket, series_anchor_override=series_anchor)
         series_bucket["summary"] = _clip_text(
             f"Catalyst now has {int(series_public.get('outcome_count', 0) or 0)} measured outcome{'s' if int(series_public.get('outcome_count', 0) or 0) != 1 else ''} inside {series_anchor}. "
@@ -1341,6 +1571,15 @@ def _apply_catalyst_outcome_to_channel_memory(
             ("reference_title_novelty_score_sum", "title_novelty"),
         ):
             archetype_bucket[field] = float(archetype_bucket.get(field, 0.0) or 0.0) + float(reference_scores.get(metric_key, 0.0) or 0.0)
+        for field, metric_key in (
+            ("execution_overall_score_sum", "overall"),
+            ("execution_hook_score_sum", "hook"),
+            ("execution_pacing_score_sum", "pacing"),
+            ("execution_visual_score_sum", "visuals"),
+            ("execution_sound_score_sum", "sound"),
+            ("execution_packaging_score_sum", "packaging"),
+        ):
+            archetype_bucket[field] = float(archetype_bucket.get(field, 0.0) or 0.0) + float(execution_scores.get(metric_key, 0.0) or 0.0)
         archetype_bucket["hook_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("hook_wins") or []), *list(archetype_bucket.get("hook_learnings") or [])], max_items=10, max_chars=180)
         archetype_bucket["pacing_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("pacing_wins") or []), *list(archetype_bucket.get("pacing_learnings") or [])], max_items=10, max_chars=180)
         archetype_bucket["visual_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("visual_wins") or []), *list(archetype_bucket.get("visual_learnings") or [])], max_items=10, max_chars=180)
@@ -1381,6 +1620,18 @@ def _apply_catalyst_outcome_to_channel_memory(
         ):
             _catalyst_update_weighted_signals(archetype_bucket, field, items, weight)
         _catalyst_update_weighted_signals(archetype_bucket, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+        for field_name, payload in (
+            ("opening_intensity", execution_signals.get("opening_intensity") or {}),
+            ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),
+            ("caption_rhythm", execution_signals.get("caption_rhythm") or {}),
+            ("sound_density", execution_signals.get("sound_density") or {}),
+            ("cut_profile", execution_signals.get("cut_profile") or {}),
+            ("voice_pacing_bias", execution_signals.get("voice_pacing_bias") or {}),
+            ("visual_variation_rule", execution_signals.get("visual_variation_rule") or {}),
+            ("execution_profile", execution_signals.get("execution_profile") or {}),
+        ):
+            _catalyst_update_weighted_signals(archetype_bucket, f"{field_name}_wins_map", list(payload.get("wins") or []), weight)
+            _catalyst_update_weighted_signals(archetype_bucket, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), weight)
         archetype_bucket["summary"] = _clip_text(
             f"Catalyst now has {int(archetype_bucket.get('outcome_count', 0) or 0)} measured outcome{'s' if int(archetype_bucket.get('outcome_count', 0) or 0) != 1 else ''} inside the {archetype_label} archetype. "
             + (f"Avg CTR {(float(archetype_bucket.get('outcome_ctr_sum', 0.0) or 0.0) / max(int(archetype_bucket.get('outcome_count', 0) or 0), 1)):.2f}%. " if int(archetype_bucket.get("outcome_count", 0) or 0) > 0 else "")

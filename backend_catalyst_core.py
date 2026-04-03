@@ -634,6 +634,58 @@ def _catalyst_update_weighted_signals(target: dict, field_name: str, signals: li
     )
 
 
+def _catalyst_rank_weighted_choices(
+    wins_map: dict | None,
+    watchouts_map: dict | None = None,
+    *,
+    max_items: int = 5,
+    max_chars: int = 120,
+) -> list[dict]:
+    rows: list[dict] = []
+    choices: set[str] = set()
+    for mapping in (dict(wins_map or {}), dict(watchouts_map or {})):
+        for raw in mapping.keys():
+            value = _clip_text(str(raw or "").strip(), max_chars)
+            if value:
+                choices.add(value)
+    for value in choices:
+        wins = float(dict(wins_map or {}).get(value, 0.0) or 0.0)
+        watchouts = float(dict(watchouts_map or {}).get(value, 0.0) or 0.0)
+        score = wins - (watchouts * 0.9)
+        rows.append(
+            {
+                "value": value,
+                "wins": round(wins, 3),
+                "watchouts": round(watchouts, 3),
+                "score": round(score, 3),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("score", 0.0) or 0.0),
+            -float(row.get("wins", 0.0) or 0.0),
+            float(row.get("watchouts", 0.0) or 0.0),
+            str(row.get("value", "") or "").lower(),
+        )
+    )
+    return rows[:max_items]
+
+
+def _catalyst_pick_preferred_choice(
+    wins_map: dict | None,
+    watchouts_map: dict | None = None,
+    fallback: str = "",
+    *,
+    max_chars: int = 120,
+) -> str:
+    ranked = _catalyst_rank_weighted_choices(wins_map, watchouts_map, max_items=1, max_chars=max_chars)
+    if ranked:
+        top = dict(ranked[0] or {})
+        if float(top.get("score", 0.0) or 0.0) > 0:
+            return _clip_text(str(top.get("value", "") or "").strip(), max_chars)
+    return _clip_text(str(fallback or "").strip(), max_chars)
+
+
 def _catalyst_outcome_weight(metrics: dict | None) -> float:
     payload = dict(metrics or {})
     views = float(payload.get("views", 0.0) or 0.0)
@@ -1090,6 +1142,12 @@ def _catalyst_apply_outcome_averages(payload: dict | None) -> dict:
     data["average_reference_sound_score"] = round(float(data.get("reference_sound_score_sum", 0.0) or 0.0) / outcome_count, 2)
     data["average_reference_packaging_score"] = round(float(data.get("reference_packaging_score_sum", 0.0) or 0.0) / outcome_count, 2)
     data["average_reference_title_novelty_score"] = round(float(data.get("reference_title_novelty_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_overall_score"] = round(float(data.get("execution_overall_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_hook_score"] = round(float(data.get("execution_hook_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_pacing_score"] = round(float(data.get("execution_pacing_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_visual_score"] = round(float(data.get("execution_visual_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_sound_score"] = round(float(data.get("execution_sound_score_sum", 0.0) or 0.0) / outcome_count, 2)
+    data["average_execution_packaging_score"] = round(float(data.get("execution_packaging_score_sum", 0.0) or 0.0) / outcome_count, 2)
     return data
 
 
@@ -1269,6 +1327,14 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
     sound_watchouts = _catalyst_weighted_signal_items(data.get("sound_watchouts_map") or {}, max_items=6)
     packaging_watchouts = _catalyst_weighted_signal_items(data.get("packaging_watchouts_map") or {}, max_items=6)
     retention_watchouts = _catalyst_weighted_signal_items(data.get("retention_watchouts_map") or {}, max_items=6)
+    opening_intensity_rankings = _catalyst_rank_weighted_choices(data.get("opening_intensity_wins_map") or {}, data.get("opening_intensity_watchouts_map") or {}, max_items=4, max_chars=40)
+    interrupt_strength_rankings = _catalyst_rank_weighted_choices(data.get("interrupt_strength_wins_map") or {}, data.get("interrupt_strength_watchouts_map") or {}, max_items=4, max_chars=40)
+    caption_rhythm_rankings = _catalyst_rank_weighted_choices(data.get("caption_rhythm_wins_map") or {}, data.get("caption_rhythm_watchouts_map") or {}, max_items=4, max_chars=40)
+    sound_density_rankings = _catalyst_rank_weighted_choices(data.get("sound_density_wins_map") or {}, data.get("sound_density_watchouts_map") or {}, max_items=4, max_chars=40)
+    cut_profile_rankings = _catalyst_rank_weighted_choices(data.get("cut_profile_wins_map") or {}, data.get("cut_profile_watchouts_map") or {}, max_items=4, max_chars=60)
+    voice_pacing_rankings = _catalyst_rank_weighted_choices(data.get("voice_pacing_bias_wins_map") or {}, data.get("voice_pacing_bias_watchouts_map") or {}, max_items=4, max_chars=60)
+    visual_variation_rankings = _catalyst_rank_weighted_choices(data.get("visual_variation_rule_wins_map") or {}, data.get("visual_variation_rule_watchouts_map") or {}, max_items=4, max_chars=120)
+    execution_profile_rankings = _catalyst_rank_weighted_choices(data.get("execution_profile_wins_map") or {}, data.get("execution_profile_watchouts_map") or {}, max_items=4, max_chars=140)
     public = {
         "channel_id": str(data.get("channel_id", "") or ""),
         "series_anchor": str(data.get("series_anchor", "") or ""),
@@ -1302,6 +1368,12 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "average_reference_sound_score": float(data.get("average_reference_sound_score", 0.0) or 0.0),
         "average_reference_packaging_score": float(data.get("average_reference_packaging_score", 0.0) or 0.0),
         "average_reference_title_novelty_score": float(data.get("average_reference_title_novelty_score", 0.0) or 0.0),
+        "average_execution_overall_score": float(data.get("average_execution_overall_score", 0.0) or 0.0),
+        "average_execution_hook_score": float(data.get("average_execution_hook_score", 0.0) or 0.0),
+        "average_execution_pacing_score": float(data.get("average_execution_pacing_score", 0.0) or 0.0),
+        "average_execution_visual_score": float(data.get("average_execution_visual_score", 0.0) or 0.0),
+        "average_execution_sound_score": float(data.get("average_execution_sound_score", 0.0) or 0.0),
+        "average_execution_packaging_score": float(data.get("average_execution_packaging_score", 0.0) or 0.0),
         "proven_keywords": list(data.get("proven_keywords") or []),
         "hook_learnings": hook_wins,
         "pacing_learnings": pacing_wins,
@@ -1345,6 +1417,22 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "preferred_voice_pacing_bias": str(data.get("preferred_voice_pacing_bias", "") or ""),
         "preferred_payoff_hold_sec": round(float(data.get("preferred_payoff_hold_sec", 0.0) or 0.0), 2),
         "preferred_visual_variation_rule": _clip_text(str(data.get("preferred_visual_variation_rule", "") or ""), 180),
+        "execution_profile_rankings": execution_profile_rankings,
+        "opening_intensity_rankings": opening_intensity_rankings,
+        "interrupt_strength_rankings": interrupt_strength_rankings,
+        "caption_rhythm_rankings": caption_rhythm_rankings,
+        "sound_density_rankings": sound_density_rankings,
+        "cut_profile_rankings": cut_profile_rankings,
+        "voice_pacing_bias_rankings": voice_pacing_rankings,
+        "visual_variation_rankings": visual_variation_rankings,
+        "promoted_execution_profiles": [str(row.get("value", "") or "").strip() for row in execution_profile_rankings[:2] if str(row.get("value", "") or "").strip()],
+        "demoted_execution_profiles": [str(row.get("value", "") or "").strip() for row in list(reversed(execution_profile_rankings[-2:])) if str(row.get("value", "") or "").strip()],
+        "promoted_cut_profiles": [str(row.get("value", "") or "").strip() for row in cut_profile_rankings[:2] if str(row.get("value", "") or "").strip()],
+        "demoted_cut_profiles": [str(row.get("value", "") or "").strip() for row in list(reversed(cut_profile_rankings[-2:])) if str(row.get("value", "") or "").strip()],
+        "promoted_caption_rhythms": [str(row.get("value", "") or "").strip() for row in caption_rhythm_rankings[:2] if str(row.get("value", "") or "").strip()],
+        "demoted_caption_rhythms": [str(row.get("value", "") or "").strip() for row in list(reversed(caption_rhythm_rankings[-2:])) if str(row.get("value", "") or "").strip()],
+        "promoted_sound_densities": [str(row.get("value", "") or "").strip() for row in sound_density_rankings[:2] if str(row.get("value", "") or "").strip()],
+        "demoted_sound_densities": [str(row.get("value", "") or "").strip() for row in list(reversed(sound_density_rankings[-2:])) if str(row.get("value", "") or "").strip()],
     }
     ranked_series_memory = _catalyst_rank_series_memory(series_map)
     public["series_rankings"] = ranked_series_memory
@@ -1512,6 +1600,14 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     demoted_archetypes = [str(v).strip() for v in list(public.get("demoted_archetypes") or []) if str(v).strip()]
     promoted_archetype_keys = [str(v).strip().lower() for v in list(public.get("promoted_archetype_keys") or []) if str(v).strip()]
     demoted_archetype_keys = [str(v).strip().lower() for v in list(public.get("demoted_archetype_keys") or []) if str(v).strip()]
+    promoted_execution_profiles = [str(v).strip() for v in list(public.get("promoted_execution_profiles") or []) if str(v).strip()]
+    demoted_execution_profiles = [str(v).strip() for v in list(public.get("demoted_execution_profiles") or []) if str(v).strip()]
+    promoted_cut_profiles = [str(v).strip().lower() for v in list(public.get("promoted_cut_profiles") or []) if str(v).strip()]
+    demoted_cut_profiles = [str(v).strip().lower() for v in list(public.get("demoted_cut_profiles") or []) if str(v).strip()]
+    promoted_caption_rhythms = [str(v).strip().lower() for v in list(public.get("promoted_caption_rhythms") or []) if str(v).strip()]
+    demoted_caption_rhythms = [str(v).strip().lower() for v in list(public.get("demoted_caption_rhythms") or []) if str(v).strip()]
+    promoted_sound_densities = [str(v).strip().lower() for v in list(public.get("promoted_sound_densities") or []) if str(v).strip()]
+    demoted_sound_densities = [str(v).strip().lower() for v in list(public.get("demoted_sound_densities") or []) if str(v).strip()]
     active_series_anchor = str(public.get("series_anchor", "") or "").strip()
     archetype_key = str(public.get("archetype_key", "") or "").strip().lower()
     archetype_label = str(public.get("archetype_label", "") or "").strip()
@@ -1530,11 +1626,38 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     avg_sound = float(public.get("average_reference_sound_score", 0.0) or 0.0)
     avg_packaging = float(public.get("average_reference_packaging_score", 0.0) or 0.0)
     avg_title_novelty = float(public.get("average_reference_title_novelty_score", 0.0) or 0.0)
+    avg_exec_overall = float(public.get("average_execution_overall_score", 0.0) or 0.0)
+    avg_exec_hook = float(public.get("average_execution_hook_score", 0.0) or 0.0)
+    avg_exec_pacing = float(public.get("average_execution_pacing_score", 0.0) or 0.0)
+    avg_exec_visual = float(public.get("average_execution_visual_score", 0.0) or 0.0)
+    avg_exec_sound = float(public.get("average_execution_sound_score", 0.0) or 0.0)
+    avg_exec_packaging = float(public.get("average_execution_packaging_score", 0.0) or 0.0)
+    preferred_cut_profile = str(public.get("preferred_cut_profile", "") or "").strip().lower()
+    preferred_caption_rhythm = str(public.get("preferred_caption_rhythm", "") or "").strip().lower()
+    preferred_sound_density = str(public.get("preferred_sound_density", "") or "").strip().lower()
     hook_pressure = 12.0 + max(0.0, (62.0 - avg_first30) * 1.2) + max(0.0, (76.0 - avg_hook) * 0.55) + (len(hook_watchouts) * 7.0) + (min(2, len(retention_watchouts)) * 4.0) - (len(hook_wins) * 4.0)
     pacing_pressure = 10.0 + max(0.0, (42.0 - avg_avp) * 1.1) + max(0.0, (52.0 - avg_first60) * 0.8) + max(0.0, (76.0 - avg_pacing) * 0.5) + (len(pacing_watchouts) * 7.0) - (len(pacing_wins) * 4.0)
     visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
     sound_pressure = 8.0 + max(0.0, (78.0 - avg_sound) * 0.55) + max(0.0, (52.0 - avg_first60) * 0.35) + (len(sound_watchouts) * 7.0) - (len(sound_wins) * 4.0)
     packaging_pressure = 10.0 + max(0.0, (4.5 - avg_ctr) * 12.0) + max(0.0, (76.0 - avg_packaging) * 0.65) + max(0.0, (82.0 - avg_title_novelty) * 0.35) + (len(packaging_watchouts) * 7.0) - (len(packaging_wins) * 4.0)
+    hook_pressure += max(0.0, (76.0 - avg_exec_hook) * 0.2)
+    pacing_pressure += max(0.0, (76.0 - avg_exec_pacing) * 0.22)
+    visual_pressure += max(0.0, (78.0 - avg_exec_visual) * 0.2)
+    sound_pressure += max(0.0, (78.0 - avg_exec_sound) * 0.22)
+    packaging_pressure += max(0.0, (78.0 - avg_exec_packaging) * 0.18)
+    if preferred_cut_profile and preferred_cut_profile in demoted_cut_profiles[:2]:
+        pacing_pressure += 5.0
+    elif preferred_cut_profile and preferred_cut_profile in promoted_cut_profiles[:2]:
+        pacing_pressure -= 1.5
+    if preferred_caption_rhythm and preferred_caption_rhythm in demoted_caption_rhythms[:2]:
+        pacing_pressure += 3.5
+        hook_pressure += 1.5
+    elif preferred_caption_rhythm and preferred_caption_rhythm in promoted_caption_rhythms[:2]:
+        pacing_pressure -= 1.0
+    if preferred_sound_density and preferred_sound_density in demoted_sound_densities[:2]:
+        sound_pressure += 4.0
+    elif preferred_sound_density and preferred_sound_density in promoted_sound_densities[:2]:
+        sound_pressure -= 1.2
     if active_series_anchor:
         lowered_anchor = active_series_anchor.lower()
         if any(lowered_anchor == arc.lower() for arc in demoted_arcs[:2]):
@@ -1594,6 +1717,10 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         arc_moves.append(f"{active_series_anchor} is currently a demoted arc from measured outcomes, so the next run must sharpen hook, pacing, and package execution aggressively.")
     elif active_series_anchor and any(active_series_anchor.lower() == arc.lower() for arc in promoted_arcs[:2]):
         arc_moves.append(f"{active_series_anchor} is a promoted arc, so preserve its winning arena but force a fresher adjacent angle to avoid repetition.")
+    if promoted_execution_profiles:
+        arc_moves.append(f"Promoted execution profile from measured outcomes: {promoted_execution_profiles[0]}.")
+    if demoted_execution_profiles:
+        arc_moves.append(f"Demoted execution profile to avoid repeating: {demoted_execution_profiles[0]}.")
     priorities = _dedupe_preserve_order(
         [
             *arc_moves,
