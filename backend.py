@@ -2551,7 +2551,12 @@ async def _persist_catalyst_outcome_for_session(
         session_live = _longform_sessions.get(session_id)
         if not isinstance(session_live, dict):
             raise HTTPException(404, "Long-form session not found")
+        if channel_id:
+            session_live["youtube_channel_id"] = channel_id
         metadata_pack = dict(session_live.get("metadata_pack") or {})
+        youtube_channel_context = dict((dict(session.get("metadata_pack") or {})).get("youtube_channel") or {})
+        if youtube_channel_context:
+            metadata_pack["youtube_channel"] = youtube_channel_context
         metadata_pack["catalyst_channel_memory"] = _catalyst_channel_memory_public_view(updated_channel_memory)
         session_live["metadata_pack"] = metadata_pack
         session_live["latest_outcome"] = outcome_record
@@ -2623,6 +2628,23 @@ async def _harvest_catalyst_outcomes_for_channel(
             raise HTTPException(404, "Connected YouTube channel not found")
 
         access_token, refreshed = await _youtube_ensure_access_token(record)
+        analytics_snapshot = dict(refreshed.get("analytics_snapshot") or {})
+        selected_channel_context = {
+            "channel_id": channel_key,
+            "channel_title": str(refreshed.get("title", "") or "").strip(),
+            "channel_handle": str(refreshed.get("channel_handle", "") or "").strip(),
+            "channel_url": str(refreshed.get("channel_url", "") or "").strip(),
+            "summary": str(analytics_snapshot.get("channel_summary", "") or "").strip(),
+            "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+            "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
+            "top_videos": list(analytics_snapshot.get("top_videos") or []),
+            "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
+            "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
+            "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
+            "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
+            "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
+            "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
+        }
         recent_candidates = await _youtube_fetch_channel_search(access_token, channel_key, order="date", max_results=candidate_limit)
         popular_candidates = await _youtube_fetch_channel_search(access_token, channel_key, order="viewCount", max_results=candidate_limit)
         deduped_candidates: list[dict] = []
@@ -2637,13 +2659,25 @@ async def _harvest_catalyst_outcomes_for_channel(
 
         async with _longform_sessions_lock:
             _load_longform_sessions()
-            sessions = [
-                dict(value or {})
-                for value in _longform_sessions.values()
-                if str((value or {}).get("user_id", "") or "").strip() == user_key
-                and str((value or {}).get("youtube_channel_id", "") or "").strip() == channel_key
-                and (not session_filter or str((value or {}).get("session_id", "") or "").strip() == session_filter)
-            ]
+            if session_filter:
+                session_live = dict(_longform_sessions.get(session_filter) or {})
+                if session_live and str(session_live.get("user_id", "") or "").strip() == user_key:
+                    session_live["youtube_channel_id"] = channel_key
+                    metadata_pack = dict(session_live.get("metadata_pack") or {})
+                    metadata_pack["youtube_channel"] = dict(selected_channel_context)
+                    session_live["metadata_pack"] = metadata_pack
+                    _longform_sessions[session_filter] = session_live
+                    _save_longform_sessions()
+                    sessions = [dict(session_live)]
+                else:
+                    sessions = []
+            else:
+                sessions = [
+                    dict(value or {})
+                    for value in _longform_sessions.values()
+                    if str((value or {}).get("user_id", "") or "").strip() == user_key
+                    and str((value or {}).get("youtube_channel_id", "") or "").strip() == channel_key
+                ]
 
         sessions.sort(key=lambda row: float(row.get("updated_at", 0.0) or 0.0), reverse=True)
         synced_sessions: list[dict] = []

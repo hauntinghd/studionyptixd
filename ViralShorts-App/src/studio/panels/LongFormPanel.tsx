@@ -339,7 +339,7 @@ export default function LongFormPanel() {
         return payload;
     }, [authOnlyHeaders]);
 
-    const loadYouTubeChannels = useCallback(async (silent = false) => {
+    const loadYouTubeChannels = useCallback(async (silent = false, preferredChannelId = '') => {
         if (!session) return;
         if (!silent) setYoutubeLoading(true);
         setYoutubeError('');
@@ -352,11 +352,21 @@ export default function LongFormPanel() {
             const rows = Array.isArray((payload as any).channels) ? (payload as any).channels as ConnectedYouTubeChannel[] : [];
             setYoutubeChannels(rows);
             const defaultId = String((payload as any).default_channel_id || '').trim();
-            if (defaultId) {
-                setYoutubeChannelId(defaultId);
-            } else if (rows.length > 0) {
-                setYoutubeChannelId(String(rows[0]?.channel_id || '').trim());
-            }
+            const preferredId = String(preferredChannelId || '').trim();
+            setYoutubeChannelId((current) => {
+                const currentId = String(current || '').trim();
+                const keepId = preferredId || currentId;
+                if (keepId && rows.some((row) => String(row.channel_id || '').trim() === keepId)) {
+                    return keepId;
+                }
+                if (defaultId && rows.some((row) => String(row.channel_id || '').trim() === defaultId)) {
+                    return defaultId;
+                }
+                if (rows.length > 0) {
+                    return String(rows[0]?.channel_id || '').trim();
+                }
+                return '';
+            });
         } catch (e: any) {
             setYoutubeChannels([]);
             setYoutubeError(e?.message || 'Failed to load connected YouTube channels');
@@ -364,6 +374,36 @@ export default function LongFormPanel() {
             if (!silent) setYoutubeLoading(false);
         }
     }, [authOnlyHeaders, session]);
+
+    const persistSelectedYouTubeChannel = useCallback(async (nextChannelId: string) => {
+        const normalizedId = String(nextChannelId || '').trim();
+        setYoutubeChannelId(normalizedId);
+        if (!session || !normalizedId) return;
+        setYoutubeError('');
+        try {
+            const payload = await apiCall('/api/youtube/channels/select', {
+                method: 'POST',
+                body: JSON.stringify({ channel_id: normalizedId }),
+            });
+            const updatedChannel = (payload as any).channel as ConnectedYouTubeChannel | undefined;
+            if (updatedChannel && String(updatedChannel.channel_id || '').trim()) {
+                setYoutubeChannels((current) => {
+                    const nextRows = [...current];
+                    const existingIndex = nextRows.findIndex(
+                        (row) => String(row.channel_id || '').trim() === String(updatedChannel.channel_id || '').trim(),
+                    );
+                    if (existingIndex >= 0) {
+                        nextRows[existingIndex] = updatedChannel;
+                    } else {
+                        nextRows.unshift(updatedChannel);
+                    }
+                    return nextRows;
+                });
+            }
+        } catch (e: any) {
+            setYoutubeError(e?.message || 'Failed to save connected YouTube channel selection');
+        }
+    }, [apiCall, session]);
 
     const startYouTubeConnect = useCallback(async () => {
         if (!session) return;
@@ -410,11 +450,12 @@ export default function LongFormPanel() {
     }, [apiCall, lfSession?.session_id, persistSessionId]);
 
     const syncConnectedChannelOutcomes = useCallback(async (sessionScoped = false) => {
-        if (!session || !youtubeChannelId.trim()) return;
+        const selectedChannelId = String(youtubeChannelId || '').trim();
+        if (!session || !selectedChannelId) return;
         setYoutubeOutcomeSyncing(true);
         setYoutubeError('');
         try {
-            const payload = await apiCall(`/api/youtube/channels/${youtubeChannelId}/sync-outcomes`, {
+            const payload = await apiCall(`/api/youtube/channels/${selectedChannelId}/sync-outcomes`, {
                 method: 'POST',
                 body: JSON.stringify({
                     session_id: sessionScoped ? String(lfSession?.session_id || '').trim() : '',
@@ -429,7 +470,7 @@ export default function LongFormPanel() {
             } else if (lfSession?.session_id && sessionScoped) {
                 await refreshStatus(lfSession.session_id, true);
             }
-            await loadYouTubeChannels(true);
+            await loadYouTubeChannels(true, selectedChannelId);
         } catch (e: any) {
             setYoutubeError(e?.message || 'Failed to sync published channel outcomes');
         } finally {
@@ -923,7 +964,7 @@ export default function LongFormPanel() {
                         <div className="mt-1 flex flex-col gap-3 md:flex-row md:items-start">
                             <select
                                 value={youtubeChannelId}
-                                onChange={(e) => setYoutubeChannelId(e.target.value)}
+                                onChange={(e) => void persistSelectedYouTubeChannel(e.target.value)}
                                 disabled={!canUseDeepAnalysis}
                                 className="w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white md:max-w-xl"
                             >
