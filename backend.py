@@ -8991,10 +8991,11 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
 
 
 async def generate_scene_sfx(visual_description: str, duration_sec: float,
-                              output_path: str, template: str = "", scene_index: int = -1, total_scenes: int = 0) -> str:
+                              output_path: str, template: str = "", scene_index: int = -1, total_scenes: int = 0,
+                              force: bool = False) -> str:
     """Generate a sound effect for a scene using ElevenLabs Sound Effects API.
     Returns the path to the generated SFX audio file, or empty string on failure."""
-    if not _sfx_enabled() or not ELEVENLABS_API_KEY:
+    if ((not force) and (not _sfx_enabled())) or not ELEVENLABS_API_KEY:
         return ""
 
     style_hint = TEMPLATE_SFX_STYLES.get(template, "cinematic ambient atmosphere")
@@ -9178,6 +9179,85 @@ def _normalize_micro_escalation_mode(value, template: str = "") -> bool:
     if value is None:
         return template in {"skeleton", "story", "motivation", "daytrading"}
     return _bool_from_any(value, template in {"skeleton", "story", "motivation", "daytrading"})
+
+
+CREATIVE_SHORT_BGM_PROFILES = {
+    "story": "story_pulse_bed",
+    "motivation": "story_pulse_bed",
+    "skeleton": "cinematic_dark_tension",
+    "daytrading": "documentary_tension",
+    "chatstory": "story_pulse_bed",
+    "reddit": "precision_explainer_bed",
+}
+
+CREATIVE_SHORT_SOUND_MIX = {
+    "default": {
+        "bgm_required": True,
+        "music_profile": "story_pulse_bed",
+        "voice_gain": 1.02,
+        "ambience_gain": 0.24,
+        "sfx_gain": 1.05,
+        "bgm_gain": 0.06,
+        "whisper_mode": "off",
+    },
+    "story": {
+        "music_profile": "story_pulse_bed",
+        "voice_gain": 1.03,
+        "ambience_gain": 0.26,
+        "sfx_gain": 1.08,
+        "bgm_gain": 0.05,
+    },
+    "motivation": {
+        "music_profile": "story_pulse_bed",
+        "voice_gain": 1.04,
+        "ambience_gain": 0.2,
+        "sfx_gain": 0.95,
+        "bgm_gain": 0.05,
+    },
+    "skeleton": {
+        "music_profile": "cinematic_dark_tension",
+        "voice_gain": 1.05,
+        "ambience_gain": 0.34,
+        "sfx_gain": 1.25,
+        "bgm_gain": 0.06,
+    },
+    "daytrading": {
+        "music_profile": "documentary_tension",
+        "voice_gain": 1.03,
+        "ambience_gain": 0.22,
+        "sfx_gain": 1.08,
+        "bgm_gain": 0.06,
+    },
+    "chatstory": {
+        "music_profile": "story_pulse_bed",
+        "voice_gain": 1.02,
+        "ambience_gain": 0.18,
+        "sfx_gain": 0.92,
+        "bgm_gain": 0.04,
+    },
+    "reddit": {
+        "bgm_required": False,
+        "music_profile": "precision_explainer_bed",
+        "voice_gain": 1.0,
+        "ambience_gain": 0.12,
+        "sfx_gain": 0.9,
+        "bgm_gain": 0.04,
+    },
+}
+
+
+def _creative_template_sound_mix_profile(template: str) -> dict:
+    normalized = str(template or "").strip().lower()
+    profile = dict(CREATIVE_SHORT_SOUND_MIX.get("default", {}))
+    profile.update(CREATIVE_SHORT_SOUND_MIX.get(normalized, {}))
+    if not profile.get("music_profile"):
+        profile["music_profile"] = CREATIVE_SHORT_BGM_PROFILES.get(normalized, "story_pulse_bed")
+    return profile
+
+
+def _creative_template_force_sfx(template: str) -> bool:
+    normalized = str(template or "").strip().lower()
+    return normalized in {"story", "motivation", "skeleton", "daytrading", "chatstory"}
 
 
 def _creative_template_supports_voice_controls(template: str) -> bool:
@@ -14785,16 +14865,30 @@ async def composite_video(
     if proc.returncode != 0:
         if subtitle_path:
             log.warning(f"Subtitle burn-in failed, retrying without: {stderr_merge.decode()[-300:]}")
-            cmd_fallback = [
-                "ffmpeg", "-y",
-                "-i", str(merged_video),
-                "-i", audio_path,
-                "-af", "apad=pad_dur=0.8",
-                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-shortest",
-                str(output_path),
-            ]
+            if has_sfx:
+                cmd_fallback = [
+                    "ffmpeg", "-y",
+                    "-i", str(merged_video),
+                    "-i", audio_path,
+                    "-i", ambience_track,
+                    "-filter_complex", f"[1:a]volume={max(0.6, float(voice_gain or 1.0)):.3f}[voice];[2:a]volume={max(0.08, float(ambience_gain or 0.18)):.3f}[sfx];[voice][sfx]amix=inputs=2:duration=first:dropout_transition=2,apad=pad_dur=0.8[aout]",
+                    "-map", "0:v", "-map", "[aout]",
+                    "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-shortest",
+                    str(output_path),
+                ]
+            else:
+                cmd_fallback = [
+                    "ffmpeg", "-y",
+                    "-i", str(merged_video),
+                    "-i", audio_path,
+                    "-af", "apad=pad_dur=0.8",
+                    "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-shortest",
+                    str(output_path),
+                ]
             proc = await asyncio.create_subprocess_exec(
                 *cmd_fallback, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
@@ -15721,19 +15815,41 @@ async def run_generation_pipeline(
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
 
+        sound_mix_profile = _creative_template_sound_mix_profile(template)
         sfx_paths = []
-        if _sfx_enabled():
+        if (_sfx_enabled() or _creative_template_force_sfx(template)) and ELEVENLABS_API_KEY:
             _job_set_stage(job_id, "generating_sfx", 78)
             for i, scene in enumerate(scenes):
                 sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
                 desc = scene.get("visual_description", "")
                 dur = scene.get("duration_sec", 5)
-                sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
+                sfx_file = await generate_scene_sfx(
+                    desc,
+                    dur,
+                    sfx_out,
+                    template=template,
+                    scene_index=i,
+                    total_scenes=len(scenes),
+                    force=_creative_template_force_sfx(template),
+                )
                 sfx_paths.append(sfx_file)
             sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
             log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
         else:
             log.info(f"[{job_id}] SFX disabled globally; skipping generation/mix")
+
+        bgm_track = ""
+        if bool(sound_mix_profile.get("bgm_required")):
+            _job_set_stage(job_id, "generating_sfx", 80)
+            bgm_path = str(TEMP_DIR / f"{job_id}_short_bgm.mp3")
+            total_duration = sum(float((s or {}).get("duration_sec", 5.0) or 5.0) for s in scenes) + 0.8
+            bgm_track = await _generate_catalyst_bgm_track(
+                total_duration,
+                bgm_path,
+                music_profile=str(sound_mix_profile.get("music_profile", "") or ""),
+                whisper_mode=str(sound_mix_profile.get("whisper_mode", "off") or "off"),
+                format_preset="shorts",
+            )
 
         _job_set_stage(job_id, "compositing", 82)
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
@@ -15749,8 +15865,13 @@ async def run_generation_pipeline(
             use_svd=use_video,
             subtitle_path=subtitle_path,
             sfx_paths=sfx_paths,
+            bgm_track=bgm_track,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            voice_gain=float(sound_mix_profile.get("voice_gain", 1.0) or 1.0),
+            ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
+            sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
+            bgm_gain=float(sound_mix_profile.get("bgm_gain", 0.55) or 0.55),
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
@@ -15758,6 +15879,8 @@ async def run_generation_pipeline(
         for sfx in sfx_paths:
             if sfx:
                 Path(sfx).unlink(missing_ok=True)
+        if bgm_track:
+            Path(bgm_track).unlink(missing_ok=True)
         for asset in scene_assets:
             Path(asset["image"]).unlink(missing_ok=True)
             if asset.get("kling_clip"):
@@ -19616,19 +19739,41 @@ async def _run_creative_pipeline(
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
 
+        sound_mix_profile = _creative_template_sound_mix_profile(template)
         sfx_paths = []
-        if _sfx_enabled():
+        if (_sfx_enabled() or _creative_template_force_sfx(template)) and ELEVENLABS_API_KEY:
             _job_set_stage(job_id, "generating_sfx", 78)
             for i, scene in enumerate(scenes):
                 sfx_out = str(TEMP_DIR / (job_id + "_sfx_" + str(i) + ".mp3"))
                 desc = scene.get("visual_description", "")
                 dur = scene.get("duration_sec", 5)
-                sfx_file = await generate_scene_sfx(desc, dur, sfx_out, template=template, scene_index=i, total_scenes=len(scenes))
+                sfx_file = await generate_scene_sfx(
+                    desc,
+                    dur,
+                    sfx_out,
+                    template=template,
+                    scene_index=i,
+                    total_scenes=len(scenes),
+                    force=_creative_template_force_sfx(template),
+                )
                 sfx_paths.append(sfx_file)
             sfx_paths = await _quintuple_check_scene_sfx(scenes, sfx_paths, template, job_id=job_id)
             log.info(f"[{job_id}] SFX generated: {sum(1 for s in sfx_paths if s)}/{len(scenes)} scenes")
         else:
             log.info(f"[{job_id}] SFX disabled globally; skipping generation/mix")
+
+        bgm_track = ""
+        if bool(sound_mix_profile.get("bgm_required")):
+            _job_set_stage(job_id, "generating_sfx", 80)
+            bgm_path = str(TEMP_DIR / f"{job_id}_creative_bgm.mp3")
+            total_duration = sum(float((s or {}).get("duration_sec", 5.0) or 5.0) for s in scenes) + 0.8
+            bgm_track = await _generate_catalyst_bgm_track(
+                total_duration,
+                bgm_path,
+                music_profile=str(sound_mix_profile.get("music_profile", "") or ""),
+                whisper_mode=str(sound_mix_profile.get("whisper_mode", "off") or "off"),
+                format_preset="shorts",
+            )
 
         _job_set_stage(job_id, "compositing", 82)
         output_filename = template + "_" + job_id + ".mp4"
@@ -19642,8 +19787,13 @@ async def _run_creative_pipeline(
             use_svd=use_video,
             subtitle_path=subtitle_path,
             sfx_paths=sfx_paths,
+            bgm_track=bgm_track,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            voice_gain=float(sound_mix_profile.get("voice_gain", 1.0) or 1.0),
+            ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
+            sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
+            bgm_gain=float(sound_mix_profile.get("bgm_gain", 0.55) or 0.55),
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
@@ -19651,6 +19801,8 @@ async def _run_creative_pipeline(
         for sfx in sfx_paths:
             if sfx:
                 Path(sfx).unlink(missing_ok=True)
+        if bgm_track:
+            Path(bgm_track).unlink(missing_ok=True)
         for asset in scene_assets:
             Path(asset["image"]).unlink(missing_ok=True)
             if asset.get("kling_clip"):
