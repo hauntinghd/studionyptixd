@@ -204,6 +204,7 @@ from backend_catalyst_profiles import (
 )
 from backend_catalyst_blueprint import _build_catalyst_edit_blueprint
 from backend_catalyst_learning import (
+    _apply_catalyst_public_shorts_playbook_to_channel_memory,
     _apply_catalyst_outcome_to_channel_memory,
     _build_catalyst_outcome_record,
     _heuristic_catalyst_learning_record,
@@ -7611,6 +7612,108 @@ async def _build_shorts_public_reference_playbook(
     return _summarize_public_shorts_reference_playbook(template, rows, queries)
 
 
+def _public_shorts_playbook_from_memory_view(memory_public: dict | None) -> dict:
+    public = dict(memory_public or {})
+    playbook = {
+        "summary": _clip_text(str(public.get("public_shorts_summary", "") or "").strip(), 320),
+        "benchmark_titles": [
+            str(v).strip() for v in list(public.get("public_shorts_benchmark_titles") or []) if str(v).strip()
+        ],
+        "benchmark_channels": [
+            str(v).strip() for v in list(public.get("public_shorts_benchmark_channels") or []) if str(v).strip()
+        ],
+        "hook_moves": [str(v).strip() for v in list(public.get("public_shorts_hook_moves") or []) if str(v).strip()],
+        "packaging_moves": [
+            str(v).strip() for v in list(public.get("public_shorts_packaging_moves") or []) if str(v).strip()
+        ],
+        "visual_moves": [str(v).strip() for v in list(public.get("public_shorts_visual_moves") or []) if str(v).strip()],
+        "keyword_moves": [str(v).strip() for v in list(public.get("public_shorts_keyword_moves") or []) if str(v).strip()],
+    }
+    if not any(playbook.values()):
+        return {}
+    return playbook
+
+
+async def _persist_public_shorts_playbook_memory(
+    *,
+    user: dict | None,
+    template: str,
+    topic: str = "",
+    preferred_channel_id: str = "",
+    trend_hunt_enabled: bool = False,
+    channel_context: dict | None = None,
+) -> dict:
+    if not isinstance(user, dict):
+        return {}
+    channel_context = dict(channel_context or {})
+    try:
+        if not channel_context and (preferred_channel_id or trend_hunt_enabled):
+            channel_context = await _youtube_selected_channel_context(user, preferred_channel_id)
+    except Exception as e:
+        log.warning(f"Persist shorts benchmark channel context failed for template={template}: {e}")
+        return {}
+    channel_id = str(channel_context.get("channel_id", "") or preferred_channel_id or "").strip()
+    if not channel_id:
+        return {}
+    memory_key = _catalyst_channel_memory_key(
+        str(user.get("id", "") or ""),
+        channel_id,
+        str(template or "story").strip().lower() or "story",
+    )
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        base_memory = dict(_catalyst_channel_memory.get(memory_key) or {})
+    series_context = _resolve_catalyst_series_context(
+        channel_context,
+        channel_memory=base_memory,
+        topic=topic,
+        source_title="",
+        input_title="",
+        input_description="",
+        format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
+    )
+    selected_cluster = dict(series_context.get("selected_cluster") or {})
+    try:
+        public_shorts_playbook = await _build_shorts_public_reference_playbook(
+            template,
+            topic,
+            channel_context,
+            selected_cluster,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Persist shorts benchmark playbook failed for template={template}: {e}")
+        public_shorts_playbook = {}
+    if not public_shorts_playbook:
+        return {
+            "channel_context": channel_context,
+            "selected_cluster": selected_cluster,
+            "playbook": {},
+            "memory_key": memory_key,
+        }
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        latest_memory = dict(_catalyst_channel_memory.get(memory_key) or {})
+        updated_memory = _apply_catalyst_public_shorts_playbook_to_channel_memory(
+            existing=latest_memory,
+            template=template,
+            topic=topic,
+            channel_id=channel_id,
+            channel_context=channel_context,
+            selected_cluster=selected_cluster,
+            public_shorts_playbook=public_shorts_playbook,
+        )
+        updated_memory["key"] = memory_key
+        _catalyst_channel_memory[memory_key] = updated_memory
+        _save_catalyst_memory()
+    return {
+        "channel_context": channel_context,
+        "selected_cluster": selected_cluster,
+        "playbook": public_shorts_playbook,
+        "memory_key": memory_key,
+    }
+
+
 async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -> list[str]:
     search_query = re.sub(r"\s+", " ", str(query or "").strip())
     if not search_query:
@@ -7865,6 +7968,7 @@ async def _build_shorts_catalyst_extra_instructions(
     except Exception as e:
         log.warning(f"Catalyst reference playbook failed for template={template}: {e}")
         reference_playbook = {}
+    stored_public_shorts_playbook = _public_shorts_playbook_from_memory_view(memory_public)
     try:
         public_shorts_playbook = await _build_shorts_public_reference_playbook(
             template,
@@ -7876,6 +7980,64 @@ async def _build_shorts_catalyst_extra_instructions(
     except Exception as e:
         log.warning(f"Catalyst public shorts playbook failed for template={template}: {e}")
         public_shorts_playbook = {}
+    if public_shorts_playbook and stored_public_shorts_playbook:
+        public_shorts_playbook = {
+            "summary": _clip_text(
+                str(public_shorts_playbook.get("summary", "") or "")
+                or str(stored_public_shorts_playbook.get("summary", "") or ""),
+                320,
+            ),
+            "benchmark_titles": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("benchmark_titles") or []),
+                    *list(stored_public_shorts_playbook.get("benchmark_titles") or []),
+                ],
+                max_items=6,
+                max_chars=120,
+            ),
+            "benchmark_channels": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("benchmark_channels") or []),
+                    *list(stored_public_shorts_playbook.get("benchmark_channels") or []),
+                ],
+                max_items=6,
+                max_chars=80,
+            ),
+            "hook_moves": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("hook_moves") or []),
+                    *list(stored_public_shorts_playbook.get("hook_moves") or []),
+                ],
+                max_items=6,
+                max_chars=180,
+            ),
+            "packaging_moves": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("packaging_moves") or []),
+                    *list(stored_public_shorts_playbook.get("packaging_moves") or []),
+                ],
+                max_items=6,
+                max_chars=180,
+            ),
+            "visual_moves": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("visual_moves") or []),
+                    *list(stored_public_shorts_playbook.get("visual_moves") or []),
+                ],
+                max_items=6,
+                max_chars=180,
+            ),
+            "keyword_moves": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("keyword_moves") or []),
+                    *list(stored_public_shorts_playbook.get("keyword_moves") or []),
+                ],
+                max_items=6,
+                max_chars=40,
+            ),
+        }
+    elif not public_shorts_playbook:
+        public_shorts_playbook = stored_public_shorts_playbook
     trend_titles: list[str] = []
     if trend_hunt_enabled:
         trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
@@ -19162,6 +19324,19 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         log.warning(f"Creative script YouTube trend setup failed for template={req.template}: {e}")
         channel_context = {}
         trend_titles = []
+    try:
+        persisted_public_shorts = await _persist_public_shorts_playbook_memory(
+            user=user,
+            template=req.template,
+            topic=req.prompt,
+            preferred_channel_id=youtube_channel_id,
+            trend_hunt_enabled=trend_hunt_enabled,
+            channel_context=channel_context,
+        )
+        if not channel_context:
+            channel_context = dict(persisted_public_shorts.get("channel_context") or {})
+    except Exception as e:
+        log.warning(f"Creative script shorts benchmark persistence failed for template={req.template}: {e}")
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     try:
         script_data = await generate_script(
@@ -19331,6 +19506,16 @@ async def creative_create_session(body: dict, request: Request = None):
     except Exception as e:
         log.warning(f"Creative session Catalyst setup failed for template={template}: {e}")
         catalyst_shorts_instructions = ""
+    try:
+        await _persist_public_shorts_playbook_memory(
+            user=user,
+            template=template,
+            topic=str(body.get("topic", "") or ""),
+            preferred_channel_id=youtube_channel_id,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Creative session shorts benchmark persistence failed for template={template}: {e}")
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     default_reference_url = _default_reference_for_template(template)
     reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, template, reference_lock_mode)
@@ -21280,6 +21465,16 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
     except Exception as e:
         log.warning(f"Generate short Catalyst setup failed for template={req.template}: {e}")
         catalyst_shorts_instructions = ""
+    try:
+        await _persist_public_shorts_playbook_memory(
+            user=user,
+            template=req.template,
+            topic=req.prompt,
+            preferred_channel_id=youtube_channel_id,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Generate short shorts benchmark persistence failed for template={req.template}: {e}")
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
     reference_dna, reference_quality = await _extract_reference_profile(reference_image_url, req.template, reference_lock_mode)

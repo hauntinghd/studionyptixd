@@ -1537,7 +1537,8 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         }
         for row in _catalyst_rank_weighted_choices(data.get("failure_mode_counts_map") or {}, {}, max_items=5, max_chars=32)
     ]
-    dominant_failure_mode_key = str((failure_mode_rankings[0] or {}).get("value", "") or data.get("last_failure_mode_key", "") or "").strip()
+    dominant_failure_mode_row = dict(failure_mode_rankings[0] or {}) if failure_mode_rankings else {}
+    dominant_failure_mode_key = str(dominant_failure_mode_row.get("value", "") or data.get("last_failure_mode_key", "") or "").strip()
     dominant_failure_mode_label = _catalyst_failure_mode_label(dominant_failure_mode_key)
     public = {
         "channel_id": str(data.get("channel_id", "") or ""),
@@ -1605,6 +1606,14 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "reference_sound_rewrites": list(data.get("reference_sound_rewrites") or []),
         "reference_packaging_rewrites": list(data.get("reference_packaging_rewrites") or []),
         "reference_next_video_moves": list(data.get("reference_next_video_moves") or []),
+        "public_shorts_summary": _clip_text(str(data.get("public_shorts_summary", "") or ""), 320),
+        "public_shorts_benchmark_titles": list(data.get("public_shorts_benchmark_titles") or []),
+        "public_shorts_benchmark_channels": list(data.get("public_shorts_benchmark_channels") or []),
+        "public_shorts_hook_moves": list(data.get("public_shorts_hook_moves") or []),
+        "public_shorts_packaging_moves": list(data.get("public_shorts_packaging_moves") or []),
+        "public_shorts_visual_moves": list(data.get("public_shorts_visual_moves") or []),
+        "public_shorts_keyword_moves": list(data.get("public_shorts_keyword_moves") or []),
+        "public_shorts_updated_at": float(data.get("public_shorts_updated_at", 0.0) or 0.0),
         "last_outcome_summary": _clip_text(str(data.get("last_outcome_summary", "") or ""), 220),
         "last_failure_mode_key": str(data.get("last_failure_mode_key", "") or ""),
         "last_failure_mode_label": _catalyst_failure_mode_label(str(data.get("last_failure_mode_key", "") or "")),

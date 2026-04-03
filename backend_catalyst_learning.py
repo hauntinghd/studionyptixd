@@ -53,6 +53,210 @@ def _catalyst_classify_outcome_failure_mode(metrics: dict | None) -> dict:
         "enough_viewer_signal": has_distribution_signal or has_retention_signal,
     }
 
+
+def _apply_catalyst_public_shorts_playbook_to_channel_memory(
+    *,
+    existing: dict | None,
+    template: str,
+    topic: str = "",
+    channel_id: str = "",
+    channel_context: dict | None = None,
+    selected_cluster: dict | None = None,
+    public_shorts_playbook: dict | None = None,
+) -> dict:
+    updated = dict(existing or {})
+    playbook = dict(public_shorts_playbook or {})
+    if not playbook:
+        return updated
+    channel_context = dict(channel_context or {})
+    selected_cluster = dict(selected_cluster or {})
+    benchmark_titles = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("benchmark_titles") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=120,
+    )
+    benchmark_channels = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("benchmark_channels") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=80,
+    )
+    hook_moves = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("hook_moves") or []) if str(v).strip()],
+        max_items=6,
+        max_chars=180,
+    )
+    packaging_moves = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("packaging_moves") or []) if str(v).strip()],
+        max_items=6,
+        max_chars=180,
+    )
+    visual_moves = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("visual_moves") or []) if str(v).strip()],
+        max_items=6,
+        max_chars=180,
+    )
+    keyword_moves = _dedupe_preserve_order(
+        [str(v).strip() for v in list(playbook.get("keyword_moves") or []) if str(v).strip()],
+        max_items=10,
+        max_chars=40,
+    )
+    benchmark_summary = _clip_text(str(playbook.get("summary", "") or "").strip(), 320)
+    if not any([benchmark_summary, benchmark_titles, benchmark_channels, hook_moves, packaging_moves, visual_moves, keyword_moves]):
+        return updated
+
+    format_preset = str(updated.get("format_preset", "") or template or "story").strip().lower() or "story"
+    channel_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
+    niche = _catalyst_infer_niche(
+        topic,
+        " ".join(benchmark_titles[:3]),
+        " ".join(channel_titles[:4]),
+        " ".join(keyword_moves[:6]),
+        " ".join(cluster_keywords[:4]),
+        format_preset="documentary" if format_preset == "daytrading" else format_preset,
+    )
+    archetype = _catalyst_infer_archetype(
+        topic,
+        " ".join(benchmark_titles[:3]),
+        " ".join(channel_titles[:4]),
+        " ".join(keyword_moves[:6]),
+        " ".join(cluster_keywords[:4]),
+        niche_key=str(niche.get("key", "") or updated.get("niche_key", "") or ""),
+        format_preset="documentary" if format_preset == "daytrading" else format_preset,
+    )
+    series_anchor = (
+        str(selected_cluster.get("series_anchor", "") or "").strip()
+        or _catalyst_extract_series_anchor(
+            topic,
+            " ".join(benchmark_titles[:2]),
+            " ".join(channel_titles[:4]),
+            niche_key=str(niche.get("key", "") or updated.get("niche_key", "") or ""),
+        )
+        or str(updated.get("series_anchor", "") or "").strip()
+    )
+    extracted_keywords = _extract_catalyst_keywords(
+        topic,
+        *benchmark_titles[:4],
+        *channel_titles[:4],
+        *keyword_moves[:8],
+    )
+    updated.update({
+        "channel_id": str(channel_id or updated.get("channel_id", "") or ""),
+        "format_preset": format_preset,
+        "niche_key": str(niche.get("key", "") or updated.get("niche_key", "") or ""),
+        "niche_label": str(niche.get("label", "") or updated.get("niche_label", "") or ""),
+        "niche_confidence": round(float(niche.get("confidence", 0.0) or updated.get("niche_confidence", 0.0) or 0.0), 2),
+        "niche_keywords": _dedupe_preserve_order(
+            [*list(niche.get("keywords") or []), *list(updated.get("niche_keywords") or []), *keyword_moves[:4]],
+            max_items=10,
+            max_chars=40,
+        ),
+        "niche_follow_up_rule": str(niche.get("follow_up_rule", "") or updated.get("niche_follow_up_rule", "") or ""),
+        "archetype_key": str(archetype.get("key", "") or updated.get("archetype_key", "") or ""),
+        "archetype_label": str(archetype.get("label", "") or updated.get("archetype_label", "") or ""),
+        "archetype_confidence": round(float(archetype.get("confidence", 0.0) or updated.get("archetype_confidence", 0.0) or 0.0), 2),
+        "archetype_keywords": _dedupe_preserve_order(
+            [*list(archetype.get("keywords") or []), *list(updated.get("archetype_keywords") or []), *keyword_moves[:4]],
+            max_items=10,
+            max_chars=40,
+        ),
+        "archetype_hook_rule": str(archetype.get("hook_rule", "") or updated.get("archetype_hook_rule", "") or ""),
+        "archetype_pace_rule": str(archetype.get("pace_rule", "") or updated.get("archetype_pace_rule", "") or ""),
+        "archetype_visual_rule": str(archetype.get("visual_rule", "") or updated.get("archetype_visual_rule", "") or ""),
+        "archetype_sound_rule": str(archetype.get("sound_rule", "") or updated.get("archetype_sound_rule", "") or ""),
+        "archetype_packaging_rule": str(archetype.get("packaging_rule", "") or updated.get("archetype_packaging_rule", "") or ""),
+        "selected_cluster_label": str(selected_cluster.get("label", "") or updated.get("selected_cluster_label", "") or ""),
+        "selected_cluster_key": str(selected_cluster.get("key", "") or updated.get("selected_cluster_key", "") or ""),
+        "series_anchor": series_anchor,
+        "public_shorts_summary": benchmark_summary,
+        "public_shorts_benchmark_titles": _dedupe_preserve_order(
+            [*benchmark_titles, *list(updated.get("public_shorts_benchmark_titles") or [])],
+            max_items=8,
+            max_chars=120,
+        ),
+        "public_shorts_benchmark_channels": _dedupe_preserve_order(
+            [*benchmark_channels, *list(updated.get("public_shorts_benchmark_channels") or [])],
+            max_items=8,
+            max_chars=80,
+        ),
+        "public_shorts_hook_moves": _dedupe_preserve_order(
+            [*hook_moves, *list(updated.get("public_shorts_hook_moves") or [])],
+            max_items=8,
+            max_chars=180,
+        ),
+        "public_shorts_packaging_moves": _dedupe_preserve_order(
+            [*packaging_moves, *list(updated.get("public_shorts_packaging_moves") or [])],
+            max_items=8,
+            max_chars=180,
+        ),
+        "public_shorts_visual_moves": _dedupe_preserve_order(
+            [*visual_moves, *list(updated.get("public_shorts_visual_moves") or [])],
+            max_items=8,
+            max_chars=180,
+        ),
+        "public_shorts_keyword_moves": _dedupe_preserve_order(
+            [*keyword_moves, *list(updated.get("public_shorts_keyword_moves") or [])],
+            max_items=10,
+            max_chars=40,
+        ),
+        "public_shorts_updated_at": time.time(),
+        "updated_at": time.time(),
+    })
+    updated["proven_keywords"] = _dedupe_preserve_order(
+        [*extracted_keywords, *keyword_moves, *list(updated.get("proven_keywords") or [])],
+        max_items=16,
+        max_chars=80,
+    )
+    updated["hook_learnings"] = _dedupe_preserve_order(
+        [*hook_moves, *list(updated.get("hook_learnings") or [])],
+        max_items=12,
+        max_chars=180,
+    )
+    updated["visual_learnings"] = _dedupe_preserve_order(
+        [*visual_moves, *list(updated.get("visual_learnings") or [])],
+        max_items=12,
+        max_chars=180,
+    )
+    updated["packaging_learnings"] = _dedupe_preserve_order(
+        [*packaging_moves, *list(updated.get("packaging_learnings") or [])],
+        max_items=12,
+        max_chars=180,
+    )
+    updated["next_video_moves"] = _dedupe_preserve_order(
+        [
+            *hook_moves[:2],
+            *packaging_moves[:2],
+            *visual_moves[:2],
+            *list(updated.get("next_video_moves") or []),
+        ],
+        max_items=12,
+        max_chars=180,
+    )
+    _catalyst_update_weighted_signals(updated, "hook_wins_map", hook_moves, 0.18)
+    _catalyst_update_weighted_signals(updated, "visual_wins_map", visual_moves, 0.18)
+    _catalyst_update_weighted_signals(updated, "packaging_wins_map", packaging_moves, 0.18)
+    _catalyst_update_weighted_signals(updated, "next_video_moves_map", [*hook_moves, *packaging_moves, *visual_moves], 0.14)
+    public = _catalyst_channel_memory_public_view(updated, series_anchor_override=series_anchor)
+    updated["summary"] = _clip_text(
+        " ".join(
+            part
+            for part in [
+                benchmark_summary,
+                f"Stored {len(benchmark_titles)} fresh public shorts references for {template}."
+                if benchmark_titles else "",
+                f"Benchmark channels: {', '.join(benchmark_channels[:3])}."
+                if benchmark_channels else "",
+                "Best public hook move: " + str((list(public.get("hook_wins") or []) or [""])[0]) + "."
+                if list(public.get("hook_wins") or []) else "",
+                "Next move: " + str((list(public.get("next_video_moves") or []) or [""])[0]) + "."
+                if list(public.get("next_video_moves") or []) else "",
+            ]
+            if part
+        ),
+        320,
+    )
+    return updated
+
 def _heuristic_catalyst_learning_record(
     *,
     session_snapshot: dict,
