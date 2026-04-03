@@ -329,6 +329,51 @@ def _heuristic_catalyst_edit_blueprint(
             "Use recap energy, chapter-turn escalation, and power hierarchy instead of documentary explanation rhythms.",
             "The next video should feel like a stronger chapter obsession, not a remake of the last upload.",
         ], max_items=5, max_chars=180)
+    primary_focus = str(rewrite_pressure.get("primary_focus", "") or "").strip().lower()
+    secondary_focus = str(rewrite_pressure.get("secondary_focus", "") or "").strip().lower()
+    opening_intensity = "measured"
+    if is_recap_lane or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
+        opening_intensity = "aggressive"
+    if pressure_scores.get("hook", 0) >= 75 or pressure_scores.get("pacing", 0) >= 75:
+        opening_intensity = "attack"
+    interrupt_strength = "medium"
+    if pressure_scores.get("pacing", 0) >= 70 or pressure_scores.get("visuals", 0) >= 70 or is_recap_lane:
+        interrupt_strength = "high"
+    payoff_hold_sec = 1.1
+    if pressure_scores.get("sound", 0) >= 65 or pressure_scores.get("packaging", 0) >= 65:
+        payoff_hold_sec = 1.35
+    if is_recap_lane:
+        payoff_hold_sec = 0.95
+    caption_rhythm = "balanced"
+    if opening_intensity in {"aggressive", "attack"} or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
+        caption_rhythm = "staccato"
+    elif archetype_key in {"systems_documentary", "science_mechanism", "power_history"}:
+        caption_rhythm = "measured"
+    sound_density = "controlled"
+    if pressure_scores.get("sound", 0) >= 65 or opening_intensity == "attack":
+        sound_density = "punchy"
+    if is_recap_lane:
+        sound_density = "trailer-heavy"
+    cut_profile = "cinematic"
+    if transition_style in {"snap", "crisp"} or opening_intensity in {"aggressive", "attack"}:
+        cut_profile = "punch-cut"
+    if secondary_focus == "visuals" and cut_profile == "cinematic":
+        cut_profile = "contrast-cut"
+    voice_pacing_bias = "steady"
+    if pressure_scores.get("hook", 0) >= 70 or pressure_scores.get("pacing", 0) >= 70:
+        voice_pacing_bias = "front-loaded"
+    elif pressure_scores.get("sound", 0) >= 70:
+        voice_pacing_bias = "tension-rise"
+    visual_variation_rule = _clip_text(
+        reference_visual_rewrites[0]
+        if reference_visual_rewrites
+        else (
+            "Every third beat must reset scale, composition, or symbolism so the viewer cannot settle into one frame grammar."
+            if pressure_scores.get("visuals", 0) >= 60
+            else "Introduce one visible composition or scale reset every few beats."
+        ),
+        220,
+    )
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),
@@ -380,6 +425,18 @@ def _heuristic_catalyst_edit_blueprint(
             ], max_items=4, max_chars=160),
             "voice_direction": voice_direction,
         },
+        "execution_strategy": {
+            "primary_focus": primary_focus,
+            "secondary_focus": secondary_focus,
+            "opening_intensity": opening_intensity,
+            "interrupt_strength": interrupt_strength,
+            "payoff_hold_sec": round(float(payoff_hold_sec), 2),
+            "caption_rhythm": caption_rhythm,
+            "sound_density": sound_density,
+            "cut_profile": cut_profile,
+            "voice_pacing_bias": voice_pacing_bias,
+            "visual_variation_rule": visual_variation_rule,
+        },
         "retention_targets": {
             "main_bottleneck": _clip_text(hook_watchouts[0] if hook_watchouts else hook_warning, 220),
             "main_opportunity": _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 220),
@@ -410,6 +467,7 @@ def _normalize_catalyst_edit_blueprint(raw: dict | None, heuristic: dict, chapte
     pacing_in = dict(raw.get("pacing_strategy") or {})
     motion_in = dict(raw.get("motion_strategy") or {})
     sound_in = dict(raw.get("sound_strategy") or {})
+    execution_in = dict(raw.get("execution_strategy") or {})
     retention_in = dict(raw.get("retention_targets") or {})
     heuristic_chapters = list(heuristic.get("chapter_blueprints") or [])
     raw_chapters = list(raw.get("chapter_blueprints") or [])
@@ -461,6 +519,18 @@ def _normalize_catalyst_edit_blueprint(raw: dict | None, heuristic: dict, chapte
             "mix_notes": _dedupe_preserve_order(list(sound_in.get("mix_notes") or heuristic.get("sound_strategy", {}).get("mix_notes", []) or []), max_items=8, max_chars=180),
             "silence_rules": _dedupe_preserve_order(list(sound_in.get("silence_rules") or heuristic.get("sound_strategy", {}).get("silence_rules", []) or []), max_items=6, max_chars=180),
             "voice_direction": _dedupe_preserve_order(list(sound_in.get("voice_direction") or heuristic.get("sound_strategy", {}).get("voice_direction", []) or []), max_items=6, max_chars=180),
+        },
+        "execution_strategy": {
+            "primary_focus": str(execution_in.get("primary_focus", heuristic.get("execution_strategy", {}).get("primary_focus", "")) or ""),
+            "secondary_focus": str(execution_in.get("secondary_focus", heuristic.get("execution_strategy", {}).get("secondary_focus", "")) or ""),
+            "opening_intensity": _clip_text(str(execution_in.get("opening_intensity", heuristic.get("execution_strategy", {}).get("opening_intensity", "measured")) or "measured"), 40),
+            "interrupt_strength": _clip_text(str(execution_in.get("interrupt_strength", heuristic.get("execution_strategy", {}).get("interrupt_strength", "medium")) or "medium"), 40),
+            "payoff_hold_sec": round(float(execution_in.get("payoff_hold_sec", heuristic.get("execution_strategy", {}).get("payoff_hold_sec", 1.1)) or 1.1), 2),
+            "caption_rhythm": _clip_text(str(execution_in.get("caption_rhythm", heuristic.get("execution_strategy", {}).get("caption_rhythm", "balanced")) or "balanced"), 40),
+            "sound_density": _clip_text(str(execution_in.get("sound_density", heuristic.get("execution_strategy", {}).get("sound_density", "controlled")) or "controlled"), 40),
+            "cut_profile": _clip_text(str(execution_in.get("cut_profile", heuristic.get("execution_strategy", {}).get("cut_profile", "cinematic")) or "cinematic"), 60),
+            "voice_pacing_bias": _clip_text(str(execution_in.get("voice_pacing_bias", heuristic.get("execution_strategy", {}).get("voice_pacing_bias", "steady")) or "steady"), 60),
+            "visual_variation_rule": _clip_text(str(execution_in.get("visual_variation_rule", heuristic.get("execution_strategy", {}).get("visual_variation_rule", "")) or ""), 220),
         },
         "retention_targets": {
             "main_bottleneck": _clip_text(str(retention_in.get("main_bottleneck", heuristic.get("retention_targets", {}).get("main_bottleneck", "")) or ""), 220),
@@ -523,7 +593,8 @@ async def _build_catalyst_edit_blueprint(
         "Build a render blueprint for a faceless YouTube long-form video. "
         "This blueprint must tell the renderer how to handle the hook, pacing, motion graphics, sound design, and chapter escalation. "
         "Output strict JSON with keys: version, visual_engine, format_preset, analysis_required_before_generation, "
-        "hook_strategy, pacing_strategy, motion_strategy, sound_strategy, retention_targets, scoring_rubric, chapter_blueprints. "
+        "hook_strategy, pacing_strategy, motion_strategy, sound_strategy, execution_strategy, retention_targets, scoring_rubric, chapter_blueprints. "
+        "execution_strategy must include: primary_focus, secondary_focus, opening_intensity, interrupt_strength, payoff_hold_sec, caption_rhythm, sound_density, cut_profile, voice_pacing_bias, visual_variation_rule. "
         "chapter_blueprints must be an array of objects with keys: focus, hook_job, shock_device, visual_motif, motion_note, sound_note, retention_goal, improvement_focus."
     )
     user_prompt = (

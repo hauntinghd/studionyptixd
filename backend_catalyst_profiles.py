@@ -104,6 +104,7 @@ def _catalyst_scene_execution_profile(
     pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
     motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     format_preset = str(edit_blueprint.get("format_preset", "") or "").strip().lower()
     niche_key = str(edit_blueprint.get("niche_key", "") or "").strip().lower()
     series_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or ""), 120)
@@ -124,13 +125,33 @@ def _catalyst_scene_execution_profile(
         scene_role = "payoff"
     elif is_interrupt:
         scene_role = "pattern_interrupt"
+    opening_intensity = str(execution_strategy.get("opening_intensity", "measured") or "measured").strip().lower()
+    interrupt_strength = str(execution_strategy.get("interrupt_strength", "medium") or "medium").strip().lower()
+    caption_rhythm = str(execution_strategy.get("caption_rhythm", "balanced") or "balanced").strip().lower()
+    sound_density = str(execution_strategy.get("sound_density", "controlled") or "controlled").strip().lower()
+    cut_profile = str(execution_strategy.get("cut_profile", "cinematic") or "cinematic").strip().lower()
+    voice_pacing_bias = str(execution_strategy.get("voice_pacing_bias", "steady") or "steady").strip().lower()
+    visual_variation_rule = _clip_text(str(execution_strategy.get("visual_variation_rule", "") or ""), 220)
+    payoff_hold_sec = max(0.7, min(1.8, float(execution_strategy.get("payoff_hold_sec", 1.1) or 1.1)))
+    execution_intensity = "steady"
+    if sound_density in {"punchy", "trailer-heavy"} or opening_intensity in {"aggressive", "attack"}:
+        execution_intensity = "high"
+    if is_opening and opening_intensity == "attack":
+        execution_intensity = "attack"
+    if is_closer and payoff_hold_sec >= 1.25:
+        execution_intensity = "payoff_hold"
     motion_cues = _dedupe_preserve_order([
         str(chapter_blueprint.get("motion_note", "") or ""),
         *list(motion_strategy.get("camera_language") or [])[:3],
         *list(motion_strategy.get("motion_graphics") or [])[:3],
         *list(motion_strategy.get("visual_rules") or [])[:2],
+        visual_variation_rule,
+        "Open on a hard first-frame image and compress setup instantly." if is_opening and opening_intensity == "attack" else "",
+        "Keep the first beats more aggressive and proof-led than explanatory." if is_opening and opening_intensity in {"aggressive", "attack"} else "",
         "Introduce a visible contrast reset in this beat." if is_interrupt else "",
+        "Make the interrupt feel abrupt, readable, and impossible to ignore." if is_interrupt and interrupt_strength == "high" else "",
         "Land the visual claim immediately before widening context." if is_opening else "",
+        "Use a deliberate payoff linger before the next transition." if is_closer and payoff_hold_sec >= 1.2 else "",
         "Resolve the idea with a clear payoff image and controlled pull-back." if is_closer else "",
     ], max_items=8, max_chars=180)
     sound_cues = _dedupe_preserve_order([
@@ -138,6 +159,8 @@ def _catalyst_scene_execution_profile(
         *list(sound_strategy.get("mix_notes") or [])[:3],
         *list(sound_strategy.get("silence_rules") or [])[:2],
         *list(sound_strategy.get("voice_direction") or [])[:2],
+        "Use denser trailer punctuation and stronger transient design." if sound_density in {"punchy", "trailer-heavy"} else "",
+        "Use recap-style swells and heavier reveal hits." if sound_density == "trailer-heavy" else "",
         "Use the silence pocket right before the reveal lands." if is_interrupt or is_closer else "",
         "Front-load one decisive sting before the explanation starts." if is_opening else "",
     ], max_items=8, max_chars=180)
@@ -147,6 +170,8 @@ def _catalyst_scene_execution_profile(
         str(hook_strategy.get("promise", "") or "") if is_opening else "",
         str(hook_strategy.get("first_30s_mission", "") or "") if is_opening else "",
         str(hook_strategy.get("open_loop", "") or ""),
+        "Keep captions staccato and punch the key claim words hard." if caption_rhythm == "staccato" else "",
+        "Keep captions measured and clean so the mechanism stays readable." if caption_rhythm == "measured" else "",
         "Reset attention with a new contrast or consequence right now." if is_interrupt else "",
         "Make the payoff concrete enough that the next chapter feels inevitable." if is_closer else "",
     ], max_items=8, max_chars=180)
@@ -184,6 +209,15 @@ def _catalyst_scene_execution_profile(
         "niche_execution_notes": niche_execution_notes,
         "pattern_interrupt_interval_sec": int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12),
         "voice_direction": _dedupe_preserve_order(list(sound_strategy.get("voice_direction") or []), max_items=6, max_chars=180),
+        "execution_intensity": execution_intensity,
+        "opening_intensity": opening_intensity,
+        "interrupt_strength": interrupt_strength,
+        "caption_rhythm": caption_rhythm,
+        "sound_density": sound_density,
+        "cut_profile": cut_profile,
+        "voice_pacing_bias": voice_pacing_bias,
+        "visual_variation_rule": visual_variation_rule,
+        "payoff_hold_sec": round(float(payoff_hold_sec), 2),
     }
 
 
@@ -196,9 +230,13 @@ def _catalyst_audio_mix_profile(
     edit_blueprint = dict(edit_blueprint or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
     pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     music_profile = str(sound_strategy.get("music_profile", "") or "").strip().lower()
     mix_notes = " ".join(str(v).strip().lower() for v in list(sound_strategy.get("mix_notes") or []) if str(v).strip())
     pattern_interrupt = int(pacing_strategy.get("pattern_interrupt_interval_sec", 12) or 12)
+    voice_pacing_bias = str(execution_strategy.get("voice_pacing_bias", "steady") or "steady").strip().lower()
+    sound_density = str(execution_strategy.get("sound_density", "controlled") or "controlled").strip().lower()
+    caption_rhythm = str(execution_strategy.get("caption_rhythm", "balanced") or "balanced").strip().lower()
     voice_speed = 1.0
     if pattern_interrupt <= 9:
         voice_speed = 1.08
@@ -206,6 +244,10 @@ def _catalyst_audio_mix_profile(
         voice_speed = 1.05
     elif format_preset in {"documentary", "explainer", "recap"}:
         voice_speed = 1.03
+    if voice_pacing_bias == "front-loaded":
+        voice_speed += 0.03
+    elif voice_pacing_bias == "tension-rise":
+        voice_speed += 0.015
     ambience_gain = 0.18
     bgm_gain = 0.55
     sfx_gain = 1.0
@@ -218,8 +260,19 @@ def _catalyst_audio_mix_profile(
     elif music_profile in {"story_pulse_bed"}:
         ambience_gain = 0.17
         bgm_gain = 0.46
+    if sound_density == "punchy":
+        sfx_gain += 0.08
+        bgm_gain = min(0.62, bgm_gain + 0.03)
+    elif sound_density == "trailer-heavy":
+        sfx_gain += 0.14
+        bgm_gain = min(0.64, bgm_gain + 0.04)
+        ambience_gain = max(0.14, ambience_gain - 0.02)
     if "silence" in mix_notes:
         ambience_gain = max(0.12, ambience_gain - 0.03)
+    if caption_rhythm == "staccato":
+        voice_speed += 0.01
+    elif caption_rhythm == "measured":
+        voice_speed -= 0.01
     return {
         "voice_speed": max(0.92, min(1.16, voice_speed)),
         "voice_gain": 1.0,

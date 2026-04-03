@@ -7999,6 +7999,9 @@ def _build_longform_scene_execution_prompt(
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
         f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") else "",
+        f"Edit intensity: {execution.get('execution_intensity', '')}." if execution.get("execution_intensity") else "",
+        f"Cut profile: {execution.get('cut_profile', '')}." if execution.get("cut_profile") else "",
+        f"Caption rhythm: {execution.get('caption_rhythm', '')}." if execution.get("caption_rhythm") else "",
         f"Niche execution: {'; '.join(execution.get('niche_execution_notes') or [])}." if execution.get("niche_execution_notes") else "",
         f"Motion execution: {'; '.join(execution.get('motion_cues') or [])}." if execution.get("motion_cues") else "",
         f"Retention objective: {'; '.join(execution.get('retention_cues') or [])}." if execution.get("retention_cues") else "",
@@ -8039,10 +8042,13 @@ def _build_longform_scene_motion_prompt(
         str(scene.get("visual_description", "") or ""),
         str(scene.get("motion_direction", "") or ""),
         f"Series anchor: {execution.get('series_anchor', '')}" if execution.get("series_anchor") else "",
+        f"Edit intensity: {execution.get('execution_intensity', '')}" if execution.get("execution_intensity") else "",
+        f"Cut profile: {execution.get('cut_profile', '')}" if execution.get("cut_profile") else "",
         *list(execution.get("niche_execution_notes") or [])[:2],
         *list(execution.get("motion_cues") or [])[:4],
         "Start with a stronger push-in and immediate reveal." if execution.get("is_opening") else "",
         "Use a visible pattern interrupt and contrast reset mid-shot." if execution.get("is_interrupt") else "",
+        "Let the final move linger for payoff before the next cut." if execution.get("payoff_hold_sec", 0) >= 1.2 else "",
         "Finish with a more deliberate pull-back or consequence hold." if execution.get("is_closer") else "",
     ], max_items=8, max_chars=180)
     return " ".join(parts).strip()
@@ -8068,6 +8074,8 @@ def _build_longform_scene_sfx_brief(
         f"SFX direction: {str(scene.get('sfx_direction', '') or '').strip()}." if str(scene.get("sfx_direction", "") or "").strip() else "",
         f"Engagement purpose: {str(scene.get('engagement_purpose', '') or '').strip()}." if str(scene.get("engagement_purpose", "") or "").strip() else "",
         f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") else "",
+        f"Sound density: {execution.get('sound_density', '')}." if execution.get("sound_density") else "",
+        f"Caption rhythm: {execution.get('caption_rhythm', '')}." if execution.get("caption_rhythm") else "",
         f"Niche execution: {'; '.join(execution.get('niche_execution_notes') or [])}." if execution.get("niche_execution_notes") else "",
         f"Sound execution: {'; '.join(execution.get('sound_cues') or [])}." if execution.get("sound_cues") else "",
     ] if part).strip()
@@ -8680,6 +8688,10 @@ async def _build_micro_escalation_clips(
         scene_payload = dict(scene_payloads[i] or {}) if scene_payloads and i < len(scene_payloads) else {}
         purpose = str(scene_payload.get("engagement_purpose", "") or "").lower()
         motion_direction = str(scene_payload.get("motion_direction", "") or "").lower()
+        execution_intensity = str(scene_payload.get("_execution_intensity", "") or "").strip().lower()
+        interrupt_strength = str(scene_payload.get("_interrupt_strength", "") or "").strip().lower()
+        cut_profile = str(scene_payload.get("_cut_profile", "") or "").strip().lower()
+        payoff_hold_sec = max(0.7, min(1.8, float(scene_payload.get("_payoff_hold_sec", 1.1) or 1.1)))
         interrupt_every = max(2, int(round(float(pattern_interrupt_interval_sec or 12) / 5.0)))
         is_opening = i < 2
         is_interrupt = i > 0 and (i + 1) % interrupt_every == 0
@@ -8698,6 +8710,13 @@ async def _build_micro_escalation_clips(
             boundaries = [0.0, round(base_dur * 0.26, 3), round(base_dur * 0.58, 3), base_dur]
         elif is_payoff:
             boundaries = [0.0, round(base_dur * 0.44, 3), base_dur]
+        if execution_intensity in {"high", "attack"} and len(boundaries) >= 3:
+            boundaries = [0.0, round(base_dur * 0.22, 3), round(base_dur * 0.52, 3), base_dur]
+        if interrupt_strength == "high" and (is_interrupt or strong_interrupt) and len(boundaries) >= 3:
+            boundaries = [0.0, round(base_dur * 0.21, 3), round(base_dur * 0.49, 3), base_dur]
+        if is_payoff and payoff_hold_sec >= 1.2:
+            hold_start = max(0.0, round(base_dur - min(payoff_hold_sec, max(0.9, base_dur * 0.45)), 3))
+            boundaries = [0.0, hold_start, base_dur]
 
         for b in range(len(boundaries) - 1):
             if len(micro_clips) >= MICRO_ESCALATION_MAX_OUTPUT_CLIPS:
@@ -8716,6 +8735,12 @@ async def _build_micro_escalation_clips(
                 vf = "setpts=0.92*PTS,eq=contrast=1.08:saturation=1.06"
             elif b >= 2:
                 vf = "setpts=0.97*PTS,eq=contrast=1.05:saturation=1.1"
+            if execution_intensity == "attack" and b == 0:
+                vf = "setpts=0.84*PTS,eq=contrast=1.14:saturation=1.10"
+            elif cut_profile == "contrast-cut" and (is_interrupt or strong_interrupt):
+                vf = "setpts=0.89*PTS,eq=contrast=1.15:saturation=1.12"
+            elif cut_profile == "punch-cut" and b <= 1:
+                vf = "setpts=0.87*PTS,eq=contrast=1.12:saturation=1.09"
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{start:.3f}",
@@ -16136,6 +16161,18 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             )
             scene["visual_description"] = locked_visual
             chapter_blueprint = dict(scene.get("_chapter_blueprint") or {})
+            execution_profile = _catalyst_scene_execution_profile(
+                edit_blueprint=edit_blueprint,
+                chapter_blueprint=chapter_blueprint,
+                scene_index=i,
+                total_scenes=len(scenes),
+            )
+            scene["_execution_intensity"] = str(execution_profile.get("execution_intensity", "") or "")
+            scene["_interrupt_strength"] = str(execution_profile.get("interrupt_strength", "") or "")
+            scene["_cut_profile"] = str(execution_profile.get("cut_profile", "") or "")
+            scene["_payoff_hold_sec"] = float(execution_profile.get("payoff_hold_sec", 1.1) or 1.1)
+            scene["_caption_rhythm"] = str(execution_profile.get("caption_rhythm", "") or "")
+            scene["_sound_density"] = str(execution_profile.get("sound_density", "") or "")
             full_prompt = _build_longform_scene_execution_prompt(
                 scene=scene,
                 template=template,
