@@ -19312,6 +19312,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     except Exception as e:
         log.warning(f"Creative script Catalyst setup failed for template={req.template}: {e}")
         catalyst_shorts_instructions = ""
+    persisted_public_shorts: dict = {}
     channel_context: dict = {}
     trend_titles: list[str] = []
     try:
@@ -19347,18 +19348,19 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     except Exception as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
         if req.template == "skeleton":
-            public_shorts_playbook: dict = {}
+            public_shorts_playbook: dict = dict(persisted_public_shorts.get("playbook") or {})
             try:
-                public_shorts_playbook = await _build_shorts_public_reference_playbook(
-                    req.template,
-                    req.prompt,
-                    channel_context,
-                    {},
-                    trend_hunt_enabled=trend_hunt_enabled,
-                )
+                if not public_shorts_playbook:
+                    public_shorts_playbook = await _build_shorts_public_reference_playbook(
+                        req.template,
+                        req.prompt,
+                        channel_context,
+                        {},
+                        trend_hunt_enabled=trend_hunt_enabled,
+                    )
             except Exception as inner_exc:
                 log.warning(f"Skeleton public shorts playbook build failed during creative fallback: {inner_exc}")
-                public_shorts_playbook = {}
+                public_shorts_playbook = dict(persisted_public_shorts.get("playbook") or {})
             log.warning(
                 "Skeleton script generation failed, using local Catalyst fallback "
                 f"(status={status_code}, trend_hunt={trend_hunt_enabled}): {e}"
