@@ -106,6 +106,25 @@ def _heuristic_catalyst_edit_blueprint(
         *list(memory_view.get("reference_next_video_moves") or []),
         *list(memory_view.get("next_video_moves") or []),
     ], max_items=8, max_chars=180)
+    execution_playbook = dict(memory_view.get("execution_playbook") or {})
+    execution_playbook_moves = [str(v).strip() for v in list(execution_playbook.get("next_run_moves") or []) if str(v).strip()]
+    execution_playbook_summary = _clip_text(str(execution_playbook.get("summary", "") or ""), 220)
+    strongest_execution_choices = dict(execution_playbook.get("strongest_choices") or {})
+    weakest_execution_choices = dict(execution_playbook.get("weakest_choices") or {})
+    strongest_cut_profile = str(strongest_execution_choices.get("cut_profile", "") or "").strip().lower()
+    weakest_cut_profile = str(weakest_execution_choices.get("cut_profile", "") or "").strip().lower()
+    strongest_caption_rhythm = str(strongest_execution_choices.get("caption_rhythm", "") or "").strip().lower()
+    weakest_caption_rhythm = str(weakest_execution_choices.get("caption_rhythm", "") or "").strip().lower()
+    strongest_opening_intensity = str(strongest_execution_choices.get("opening_intensity", "") or "").strip().lower()
+    weakest_opening_intensity = str(weakest_execution_choices.get("opening_intensity", "") or "").strip().lower()
+    strongest_interrupt_strength = str(strongest_execution_choices.get("interrupt_strength", "") or "").strip().lower()
+    weakest_interrupt_strength = str(weakest_execution_choices.get("interrupt_strength", "") or "").strip().lower()
+    strongest_sound_density = str(strongest_execution_choices.get("sound_density", "") or "").strip().lower()
+    weakest_sound_density = str(weakest_execution_choices.get("sound_density", "") or "").strip().lower()
+    strongest_voice_pacing_bias = str(strongest_execution_choices.get("voice_pacing_bias", "") or "").strip().lower()
+    weakest_voice_pacing_bias = str(weakest_execution_choices.get("voice_pacing_bias", "") or "").strip().lower()
+    strongest_visual_variation_rule = _clip_text(str(strongest_execution_choices.get("visual_variation_rule", "") or ""), 220)
+    weakest_visual_variation_rule = _clip_text(str(weakest_execution_choices.get("visual_variation_rule", "") or ""), 220)
     pattern_interrupt_interval = 10 if is_recap_lane else (15 if format_preset == "documentary" else 12)
     if pressure_scores.get("pacing", 0) >= 75:
         pattern_interrupt_interval = 8 if is_recap_lane else 9
@@ -344,13 +363,17 @@ def _heuristic_catalyst_edit_blueprint(
         opening_intensity = "aggressive"
     if pressure_scores.get("hook", 0) >= 75 or pressure_scores.get("pacing", 0) >= 75:
         opening_intensity = "attack"
-    if preferred_opening_intensity in {"measured", "aggressive", "attack"} and pressure_scores.get("hook", 0) < 85:
+    if preferred_opening_intensity in {"measured", "aggressive", "attack"} and pressure_scores.get("hook", 0) < 85 and preferred_opening_intensity != weakest_opening_intensity:
         opening_intensity = preferred_opening_intensity
+    elif strongest_opening_intensity in {"measured", "aggressive", "attack"} and (pressure_scores.get("hook", 0) >= 65 or not preferred_opening_intensity or preferred_opening_intensity == weakest_opening_intensity):
+        opening_intensity = strongest_opening_intensity
     interrupt_strength = "medium"
     if pressure_scores.get("pacing", 0) >= 70 or pressure_scores.get("visuals", 0) >= 70 or is_recap_lane:
         interrupt_strength = "high"
-    if preferred_interrupt_strength in {"medium", "high"} and pressure_scores.get("pacing", 0) < 85:
+    if preferred_interrupt_strength in {"medium", "high"} and pressure_scores.get("pacing", 0) < 85 and preferred_interrupt_strength != weakest_interrupt_strength:
         interrupt_strength = preferred_interrupt_strength
+    elif strongest_interrupt_strength in {"medium", "high"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_interrupt_strength or preferred_interrupt_strength == weakest_interrupt_strength):
+        interrupt_strength = strongest_interrupt_strength
     payoff_hold_sec = 1.1
     if pressure_scores.get("sound", 0) >= 65 or pressure_scores.get("packaging", 0) >= 65:
         payoff_hold_sec = 1.35
@@ -363,30 +386,42 @@ def _heuristic_catalyst_edit_blueprint(
         caption_rhythm = "staccato"
     elif archetype_key in {"systems_documentary", "science_mechanism", "power_history"}:
         caption_rhythm = "measured"
-    if preferred_caption_rhythm in {"balanced", "staccato", "measured"} and pressure_scores.get("hook", 0) < 85:
+    if preferred_caption_rhythm in {"balanced", "staccato", "measured"} and pressure_scores.get("hook", 0) < 85 and preferred_caption_rhythm != weakest_caption_rhythm:
         caption_rhythm = preferred_caption_rhythm
+    elif strongest_caption_rhythm in {"balanced", "staccato", "measured"} and (pressure_scores.get("hook", 0) >= 60 or not preferred_caption_rhythm or preferred_caption_rhythm == weakest_caption_rhythm):
+        caption_rhythm = strongest_caption_rhythm
     sound_density = "controlled"
     if pressure_scores.get("sound", 0) >= 65 or opening_intensity == "attack":
         sound_density = "punchy"
     if is_recap_lane:
         sound_density = "trailer-heavy"
-    if preferred_sound_density in {"controlled", "punchy", "trailer-heavy"} and pressure_scores.get("sound", 0) < 85:
+    if preferred_sound_density in {"controlled", "punchy", "trailer-heavy"} and pressure_scores.get("sound", 0) < 85 and preferred_sound_density != weakest_sound_density:
         sound_density = preferred_sound_density
+    elif strongest_sound_density in {"controlled", "punchy", "trailer-heavy"} and (pressure_scores.get("sound", 0) >= 60 or not preferred_sound_density or preferred_sound_density == weakest_sound_density):
+        sound_density = strongest_sound_density
     cut_profile = "cinematic"
     if transition_style in {"snap", "crisp"} or opening_intensity in {"aggressive", "attack"}:
         cut_profile = "punch-cut"
     if secondary_focus == "visuals" and cut_profile == "cinematic":
         cut_profile = "contrast-cut"
-    if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85:
+    if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85 and preferred_cut_profile != weakest_cut_profile:
         cut_profile = preferred_cut_profile
+    elif strongest_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_cut_profile or preferred_cut_profile == weakest_cut_profile):
+        cut_profile = strongest_cut_profile
     voice_pacing_bias = "steady"
     if pressure_scores.get("hook", 0) >= 70 or pressure_scores.get("pacing", 0) >= 70:
         voice_pacing_bias = "front-loaded"
     elif pressure_scores.get("sound", 0) >= 70:
         voice_pacing_bias = "tension-rise"
-    if preferred_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and pressure_scores.get("hook", 0) < 85:
+    if preferred_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and pressure_scores.get("hook", 0) < 85 and preferred_voice_pacing_bias != weakest_voice_pacing_bias:
         voice_pacing_bias = preferred_voice_pacing_bias
+    elif strongest_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and (pressure_scores.get("hook", 0) >= 60 or not preferred_voice_pacing_bias or preferred_voice_pacing_bias == weakest_voice_pacing_bias):
+        voice_pacing_bias = strongest_voice_pacing_bias
     visual_variation_seed = preferred_visual_variation_rule
+    if weakest_visual_variation_rule and visual_variation_seed and visual_variation_seed.lower() == weakest_visual_variation_rule.lower():
+        visual_variation_seed = ""
+    if not visual_variation_seed and strongest_visual_variation_rule:
+        visual_variation_seed = strongest_visual_variation_rule
     if not visual_variation_seed and reference_visual_rewrites:
         visual_variation_seed = str(reference_visual_rewrites[0] or "").strip()
     if not visual_variation_seed:
@@ -422,6 +457,7 @@ def _heuristic_catalyst_edit_blueprint(
             "pacing_rules": _dedupe_preserve_order([
                 primary_move,
                 rewrite_priorities[0] if rewrite_priorities else "",
+                execution_playbook_moves[0] if execution_playbook_moves else "",
                 *reference_pacing_rewrites[:2],
                 *pacing_wins[:2],
                 "Do not spend more than two scenes on the same visual idea.",
@@ -469,10 +505,14 @@ def _heuristic_catalyst_edit_blueprint(
             "niche_follow_up_rule": niche_follow_up_rule,
             "measured_ctr_context": f"Measured channel average CTR: {outcome_ctr:.2f}%." if outcome_ctr > 0 else "",
             "measured_retention_context": f"Measured average viewed: {outcome_avp:.2f}%." if outcome_avp > 0 else "",
-            "rewrite_pressure_summary": _clip_text(str(rewrite_pressure.get("summary", "") or ""), 240),
-            "next_run_priorities": rewrite_priorities[:5],
+            "rewrite_pressure_summary": _clip_text(" ".join(part for part in [str(rewrite_pressure.get("summary", "") or "").strip(), execution_playbook_summary] if part), 240),
+            "next_run_priorities": _dedupe_preserve_order([*rewrite_priorities[:5], *execution_playbook_moves[:3]], max_items=6, max_chars=180),
         },
-        "scoring_rubric": scoring_rubric,
+        "scoring_rubric": _dedupe_preserve_order([
+            *scoring_rubric,
+            execution_playbook_summary,
+            execution_playbook_moves[0] if execution_playbook_moves else "",
+        ], max_items=10, max_chars=180),
         "chapter_blueprints": _heuristic_catalyst_chapter_blueprints(
             chapter_count=chapter_count,
             subject=subject,

@@ -1275,6 +1275,168 @@ def _catalyst_rank_archetype_memory(archetype_map: dict | None) -> list[dict]:
     return ranked[:10]
 
 
+def _catalyst_pick_ranked_row(rankings: list[dict] | None, *, weakest: bool = False) -> dict:
+    rows = [dict(row or {}) for row in list(rankings or []) if str((row or {}).get("value", "") or "").strip()]
+    if not rows:
+        return {}
+    if not weakest:
+        return dict(rows[0] or {})
+    if len(rows) == 1:
+        return dict(rows[0] or {})
+    return dict(rows[-1] or {})
+
+
+def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
+    public = dict(memory_public or {})
+    execution_rankings = [dict(row or {}) for row in list(public.get("execution_profile_rankings") or []) if isinstance(row, dict)]
+    opening_rankings = [dict(row or {}) for row in list(public.get("opening_intensity_rankings") or []) if isinstance(row, dict)]
+    interrupt_rankings = [dict(row or {}) for row in list(public.get("interrupt_strength_rankings") or []) if isinstance(row, dict)]
+    caption_rankings = [dict(row or {}) for row in list(public.get("caption_rhythm_rankings") or []) if isinstance(row, dict)]
+    sound_rankings = [dict(row or {}) for row in list(public.get("sound_density_rankings") or []) if isinstance(row, dict)]
+    cut_rankings = [dict(row or {}) for row in list(public.get("cut_profile_rankings") or []) if isinstance(row, dict)]
+    voice_rankings = [dict(row or {}) for row in list(public.get("voice_pacing_bias_rankings") or []) if isinstance(row, dict)]
+    visual_rankings = [dict(row or {}) for row in list(public.get("visual_variation_rankings") or []) if isinstance(row, dict)]
+    best_profile = _catalyst_pick_ranked_row(execution_rankings)
+    worst_profile = _catalyst_pick_ranked_row(execution_rankings, weakest=True)
+    best_choices = {
+        "opening_intensity": _clip_text(str(_catalyst_pick_ranked_row(opening_rankings).get("value", "") or "").strip(), 40),
+        "interrupt_strength": _clip_text(str(_catalyst_pick_ranked_row(interrupt_rankings).get("value", "") or "").strip(), 40),
+        "caption_rhythm": _clip_text(str(_catalyst_pick_ranked_row(caption_rankings).get("value", "") or "").strip(), 40),
+        "sound_density": _clip_text(str(_catalyst_pick_ranked_row(sound_rankings).get("value", "") or "").strip(), 40),
+        "cut_profile": _clip_text(str(_catalyst_pick_ranked_row(cut_rankings).get("value", "") or "").strip(), 60),
+        "voice_pacing_bias": _clip_text(str(_catalyst_pick_ranked_row(voice_rankings).get("value", "") or "").strip(), 60),
+        "visual_variation_rule": _clip_text(str(_catalyst_pick_ranked_row(visual_rankings).get("value", "") or "").strip(), 180),
+    }
+    weak_choices = {
+        "opening_intensity": _clip_text(str(_catalyst_pick_ranked_row(opening_rankings, weakest=True).get("value", "") or "").strip(), 40),
+        "interrupt_strength": _clip_text(str(_catalyst_pick_ranked_row(interrupt_rankings, weakest=True).get("value", "") or "").strip(), 40),
+        "caption_rhythm": _clip_text(str(_catalyst_pick_ranked_row(caption_rankings, weakest=True).get("value", "") or "").strip(), 40),
+        "sound_density": _clip_text(str(_catalyst_pick_ranked_row(sound_rankings, weakest=True).get("value", "") or "").strip(), 40),
+        "cut_profile": _clip_text(str(_catalyst_pick_ranked_row(cut_rankings, weakest=True).get("value", "") or "").strip(), 60),
+        "voice_pacing_bias": _clip_text(str(_catalyst_pick_ranked_row(voice_rankings, weakest=True).get("value", "") or "").strip(), 60),
+        "visual_variation_rule": _clip_text(str(_catalyst_pick_ranked_row(visual_rankings, weakest=True).get("value", "") or "").strip(), 180),
+    }
+    avg_exec_overall = float(public.get("average_execution_overall_score", 0.0) or 0.0)
+    avg_exec_hook = float(public.get("average_execution_hook_score", 0.0) or 0.0)
+    avg_exec_pacing = float(public.get("average_execution_pacing_score", 0.0) or 0.0)
+    avg_exec_visual = float(public.get("average_execution_visual_score", 0.0) or 0.0)
+    avg_exec_sound = float(public.get("average_execution_sound_score", 0.0) or 0.0)
+    avg_exec_packaging = float(public.get("average_execution_packaging_score", 0.0) or 0.0)
+    winning_patterns = _dedupe_preserve_order(
+        [
+            (
+                f"Best execution profile is {str(best_profile.get('value', '') or '').strip()} "
+                f"(score {float(best_profile.get('score', 0.0) or 0.0):.2f})."
+                if str(best_profile.get("value", "") or "").strip()
+                else ""
+            ),
+            f"Promoted opening intensity: {best_choices['opening_intensity']}." if best_choices["opening_intensity"] else "",
+            f"Promoted cut profile: {best_choices['cut_profile']}." if best_choices["cut_profile"] else "",
+            f"Promoted caption rhythm: {best_choices['caption_rhythm']}." if best_choices["caption_rhythm"] else "",
+            f"Promoted sound density: {best_choices['sound_density']}." if best_choices["sound_density"] else "",
+            f"Promoted voice pacing bias: {best_choices['voice_pacing_bias']}." if best_choices["voice_pacing_bias"] else "",
+            f"Promoted visual variation rule: {best_choices['visual_variation_rule']}." if best_choices["visual_variation_rule"] else "",
+        ],
+        max_items=7,
+        max_chars=180,
+    )
+    losing_patterns = _dedupe_preserve_order(
+        [
+            (
+                f"Weakest execution profile is {str(worst_profile.get('value', '') or '').strip()} "
+                f"(score {float(worst_profile.get('score', 0.0) or 0.0):.2f})."
+                if str(worst_profile.get("value", "") or "").strip()
+                and str(worst_profile.get("value", "") or "").strip().lower() != str(best_profile.get("value", "") or "").strip().lower()
+                else ""
+            ),
+            f"Demoted opening intensity: {weak_choices['opening_intensity']}." if weak_choices["opening_intensity"] else "",
+            f"Demoted cut profile: {weak_choices['cut_profile']}." if weak_choices["cut_profile"] else "",
+            f"Demoted caption rhythm: {weak_choices['caption_rhythm']}." if weak_choices["caption_rhythm"] else "",
+            f"Demoted sound density: {weak_choices['sound_density']}." if weak_choices["sound_density"] else "",
+            f"Demoted voice pacing bias: {weak_choices['voice_pacing_bias']}." if weak_choices["voice_pacing_bias"] else "",
+            f"Demoted visual variation rule: {weak_choices['visual_variation_rule']}." if weak_choices["visual_variation_rule"] else "",
+        ],
+        max_items=7,
+        max_chars=180,
+    )
+    next_run_moves = _dedupe_preserve_order(
+        [
+            (
+                f"Follow the promoted execution stack: {str(best_profile.get('value', '') or '').strip()}."
+                if str(best_profile.get("value", "") or "").strip()
+                else ""
+            ),
+            (
+                f"Raise hook execution above {avg_exec_hook:.1f}/100 with a {best_choices['opening_intensity']} opening and {best_choices['caption_rhythm']} captions."
+                if avg_exec_hook > 0 and best_choices["opening_intensity"] and best_choices["caption_rhythm"]
+                else ""
+            ),
+            (
+                f"Raise pacing execution above {avg_exec_pacing:.1f}/100 by preferring {best_choices['cut_profile']} cuts and {best_choices['interrupt_strength']} interrupts."
+                if avg_exec_pacing > 0 and best_choices["cut_profile"] and best_choices["interrupt_strength"]
+                else ""
+            ),
+            (
+                f"Raise sound execution above {avg_exec_sound:.1f}/100 with {best_choices['sound_density']} density and {best_choices['voice_pacing_bias']} voice pacing."
+                if avg_exec_sound > 0 and best_choices["sound_density"] and best_choices["voice_pacing_bias"]
+                else ""
+            ),
+            (
+                f"Increase visual execution above {avg_exec_visual:.1f}/100 by enforcing this variation rule: {best_choices['visual_variation_rule']}"
+                if avg_exec_visual > 0 and best_choices["visual_variation_rule"]
+                else ""
+            ),
+            (
+                f"Avoid repeating the demoted execution profile: {str(worst_profile.get('value', '') or '').strip()}."
+                if str(worst_profile.get("value", "") or "").strip()
+                and str(worst_profile.get("value", "") or "").strip().lower() != str(best_profile.get("value", "") or "").strip().lower()
+                else ""
+            ),
+            (
+                f"Packaging execution is only {avg_exec_packaging:.1f}/100, so the edit has to make the core promise and payoff read earlier and cleaner."
+                if avg_exec_packaging > 0 and avg_exec_packaging < 76
+                else ""
+            ),
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    summary = _clip_text(
+        " ".join(
+            part
+            for part in [
+                f"Average execution score is {avg_exec_overall:.1f}/100." if avg_exec_overall > 0 else "",
+                f"Best execution profile: {str(best_profile.get('value', '') or '').strip()}."
+                if str(best_profile.get("value", "") or "").strip()
+                else "",
+                f"Weak execution profile: {str(worst_profile.get('value', '') or '').strip()}."
+                if str(worst_profile.get("value", "") or "").strip()
+                and str(worst_profile.get("value", "") or "").strip().lower() != str(best_profile.get("value", "") or "").strip().lower()
+                else "",
+                ("Next move: " + next_run_moves[0]) if next_run_moves else "",
+            ]
+            if part
+        ),
+        320,
+    )
+    return {
+        "summary": summary,
+        "best_profile": dict(best_profile or {}),
+        "worst_profile": dict(worst_profile or {}),
+        "strongest_choices": best_choices,
+        "weakest_choices": weak_choices,
+        "winning_patterns": winning_patterns,
+        "losing_patterns": losing_patterns,
+        "next_run_moves": next_run_moves,
+        "average_execution_overall_score": avg_exec_overall,
+        "average_execution_hook_score": avg_exec_hook,
+        "average_execution_pacing_score": avg_exec_pacing,
+        "average_execution_visual_score": avg_exec_visual,
+        "average_execution_sound_score": avg_exec_sound,
+        "average_execution_packaging_score": avg_exec_packaging,
+    }
+
+
 def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
     data = _catalyst_apply_outcome_averages(memory)
     series_map = dict(data.get("series_memory_map") or {})
@@ -1510,6 +1672,9 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         )
     else:
         public["archetype_memory_summary"] = ""
+    execution_playbook = _build_catalyst_execution_playbook(public)
+    public["execution_playbook"] = execution_playbook
+    public["execution_playbook_summary"] = _clip_text(str(execution_playbook.get("summary", "") or ""), 320)
     public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
     return public
 
@@ -1608,6 +1773,10 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     demoted_caption_rhythms = [str(v).strip().lower() for v in list(public.get("demoted_caption_rhythms") or []) if str(v).strip()]
     promoted_sound_densities = [str(v).strip().lower() for v in list(public.get("promoted_sound_densities") or []) if str(v).strip()]
     demoted_sound_densities = [str(v).strip().lower() for v in list(public.get("demoted_sound_densities") or []) if str(v).strip()]
+    execution_playbook = dict(public.get("execution_playbook") or {})
+    execution_playbook_moves = [str(v).strip() for v in list(execution_playbook.get("next_run_moves") or []) if str(v).strip()]
+    strongest_execution_choices = dict(execution_playbook.get("strongest_choices") or {})
+    weakest_execution_choices = dict(execution_playbook.get("weakest_choices") or {})
     active_series_anchor = str(public.get("series_anchor", "") or "").strip()
     archetype_key = str(public.get("archetype_key", "") or "").strip().lower()
     archetype_label = str(public.get("archetype_label", "") or "").strip()
@@ -1635,6 +1804,12 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     preferred_cut_profile = str(public.get("preferred_cut_profile", "") or "").strip().lower()
     preferred_caption_rhythm = str(public.get("preferred_caption_rhythm", "") or "").strip().lower()
     preferred_sound_density = str(public.get("preferred_sound_density", "") or "").strip().lower()
+    strongest_cut_profile = str(strongest_execution_choices.get("cut_profile", "") or "").strip().lower()
+    weakest_cut_profile = str(weakest_execution_choices.get("cut_profile", "") or "").strip().lower()
+    strongest_caption_rhythm = str(strongest_execution_choices.get("caption_rhythm", "") or "").strip().lower()
+    weakest_caption_rhythm = str(weakest_execution_choices.get("caption_rhythm", "") or "").strip().lower()
+    strongest_sound_density = str(strongest_execution_choices.get("sound_density", "") or "").strip().lower()
+    weakest_sound_density = str(weakest_execution_choices.get("sound_density", "") or "").strip().lower()
     hook_pressure = 12.0 + max(0.0, (62.0 - avg_first30) * 1.2) + max(0.0, (76.0 - avg_hook) * 0.55) + (len(hook_watchouts) * 7.0) + (min(2, len(retention_watchouts)) * 4.0) - (len(hook_wins) * 4.0)
     pacing_pressure = 10.0 + max(0.0, (42.0 - avg_avp) * 1.1) + max(0.0, (52.0 - avg_first60) * 0.8) + max(0.0, (76.0 - avg_pacing) * 0.5) + (len(pacing_watchouts) * 7.0) - (len(pacing_wins) * 4.0)
     visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
@@ -1649,15 +1824,28 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         pacing_pressure += 5.0
     elif preferred_cut_profile and preferred_cut_profile in promoted_cut_profiles[:2]:
         pacing_pressure -= 1.5
+    if preferred_cut_profile and weakest_cut_profile and preferred_cut_profile == weakest_cut_profile:
+        pacing_pressure += 2.5
+    elif preferred_cut_profile and strongest_cut_profile and preferred_cut_profile == strongest_cut_profile:
+        pacing_pressure -= 1.2
     if preferred_caption_rhythm and preferred_caption_rhythm in demoted_caption_rhythms[:2]:
         pacing_pressure += 3.5
         hook_pressure += 1.5
     elif preferred_caption_rhythm and preferred_caption_rhythm in promoted_caption_rhythms[:2]:
         pacing_pressure -= 1.0
+    if preferred_caption_rhythm and weakest_caption_rhythm and preferred_caption_rhythm == weakest_caption_rhythm:
+        pacing_pressure += 1.8
+        hook_pressure += 0.8
+    elif preferred_caption_rhythm and strongest_caption_rhythm and preferred_caption_rhythm == strongest_caption_rhythm:
+        pacing_pressure -= 0.8
     if preferred_sound_density and preferred_sound_density in demoted_sound_densities[:2]:
         sound_pressure += 4.0
     elif preferred_sound_density and preferred_sound_density in promoted_sound_densities[:2]:
         sound_pressure -= 1.2
+    if preferred_sound_density and weakest_sound_density and preferred_sound_density == weakest_sound_density:
+        sound_pressure += 2.0
+    elif preferred_sound_density and strongest_sound_density and preferred_sound_density == strongest_sound_density:
+        sound_pressure -= 0.8
     if active_series_anchor:
         lowered_anchor = active_series_anchor.lower()
         if any(lowered_anchor == arc.lower() for arc in demoted_arcs[:2]):
@@ -1721,6 +1909,8 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         arc_moves.append(f"Promoted execution profile from measured outcomes: {promoted_execution_profiles[0]}.")
     if demoted_execution_profiles:
         arc_moves.append(f"Demoted execution profile to avoid repeating: {demoted_execution_profiles[0]}.")
+    if execution_playbook_moves:
+        arc_moves.append(execution_playbook_moves[0])
     priorities = _dedupe_preserve_order(
         [
             *arc_moves,
@@ -1733,6 +1923,7 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
             *(top.get("watchouts") or []),
             *(secondary.get("rewrites") or []),
             *(secondary.get("watchouts") or []),
+            *execution_playbook_moves[:3],
             *next_moves[:3],
         ],
         max_items=10,
