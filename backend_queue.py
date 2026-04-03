@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from backend_settings import (
@@ -10,6 +11,7 @@ from backend_settings import (
     REDIS_QUEUE_ENABLED,
     REDIS_QUEUE_PREFIX,
     REDIS_URL,
+    TEMP_DIR,
 )
 
 try:
@@ -30,6 +32,13 @@ _jobs_ref: dict[str, dict[str, Any]] | None = None
 _log = logging.getLogger("nyptid-studio")
 _redis_client: Redis | None = None
 _redis_healthy = True
+_job_state_file_lock = asyncio.Lock()
+_JOB_STATE_DIR = TEMP_DIR / "job_state_cache"
+_JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _job_state_file(job_id: str) -> Path:
+    return _JOB_STATE_DIR / f"{job_id}.json"
 
 
 def _redis_enabled() -> bool:
@@ -132,17 +141,39 @@ async def _ensure_job_workers():
 
 
 async def persist_job_state(job_id: str, job_state: dict[str, Any]):
+    payload = json.dumps(job_state, ensure_ascii=True)
     redis = await _get_redis()
-    if redis is None:
-        return
-    await redis.set(_job_key(job_id), json.dumps(job_state, ensure_ascii=True), ex=60 * 60 * 6)
+    if redis is not None:
+        try:
+            await redis.set(_job_key(job_id), payload, ex=60 * 60 * 6)
+        except Exception as e:
+            _log.warning(f"Redis job persistence failed for {job_id}: {e}")
+    try:
+        async with _job_state_file_lock:
+            path = _job_state_file(job_id)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(path)
+    except Exception as e:
+        _log.warning(f"Local job persistence failed for {job_id}: {e}")
 
 
 async def get_persisted_job_state(job_id: str) -> dict[str, Any] | None:
     redis = await _get_redis()
-    if redis is None:
-        return None
-    raw = await redis.get(_job_key(job_id))
+    raw = None
+    if redis is not None:
+        try:
+            raw = await redis.get(_job_key(job_id))
+        except Exception as e:
+            _log.warning(f"Redis job load failed for {job_id}: {e}")
+    if not raw:
+        try:
+            path = _job_state_file(job_id)
+            if path.exists():
+                raw = path.read_text(encoding="utf-8")
+        except Exception as e:
+            _log.warning(f"Local job load failed for {job_id}: {e}")
+            raw = None
     if not raw:
         return None
     try:

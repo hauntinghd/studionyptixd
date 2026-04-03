@@ -15786,6 +15786,7 @@ async def run_generation_pipeline(
             "title": script_data.get("title", topic),
         })
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
     except Exception as e:
@@ -15793,6 +15794,7 @@ async def run_generation_pipeline(
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
@@ -17058,6 +17060,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
             _save_catalyst_memory()
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
             if isinstance(session_live, dict):
@@ -17079,6 +17082,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
             if isinstance(session_live, dict):
@@ -17090,6 +17094,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
             if isinstance(session_live, dict):
@@ -19668,6 +19673,7 @@ async def _run_creative_pipeline(
             "title": script_data.get("title", session.get("topic", "")),
         })
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
 
         sid = session.get("session_id")
@@ -19681,6 +19687,7 @@ async def _run_creative_pipeline(
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
@@ -21378,6 +21385,7 @@ async def run_clone_pipeline(
             "tags": script_data.get("tags", []),
         }
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
     except Exception as e:
@@ -21385,6 +21393,7 @@ async def run_clone_pipeline(
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
+        await persist_job_state(job_id, jobs[job_id])
         if video_path:
             Path(video_path).unlink(missing_ok=True)
 
