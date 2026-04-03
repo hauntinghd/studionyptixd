@@ -13973,15 +13973,36 @@ async def composite_video(
                 raise
             log.warning(f"RunPod compositing failed, falling back local: {e}")
 
-    with open(concat_file, "w") as f:
-        for clip in working_clips:
-            f.write("file '" + str(clip.resolve()) + "'\n")
-
     merged_video = TEMP_DIR / ("merged_" + job_ts + ".mp4")
     style = _normalize_transition_style(transition_style)
     xfade_type = TRANSITION_STYLE_MAP.get(style, "fade")
     transition_dur = _transition_duration_for_style(style)
     use_xfade = (style != "no_motion" and style != "none" and len(working_clips) > 1)
+
+    def _write_concat_manifest(clips: list[Path]) -> None:
+        with open(concat_file, "w") as f:
+            for clip in clips:
+                f.write("file '" + str(clip.resolve()) + "'\n")
+
+    async def _run_ffmpeg_merge(cmd: list[str]) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr_data = await proc.communicate()
+        return proc.returncode, stderr_data.decode()
+
+    async def _concat_merge(clips: list[Path]) -> tuple[int, str]:
+        _write_concat_manifest(clips)
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_file),
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            str(merged_video),
+        ]
+        return await _run_ffmpeg_merge(cmd)
+
+    merge_code = 0
+    merge_stderr = ""
     if use_xfade:
         durations = []
         for i, clip in enumerate(working_clips):
@@ -14006,21 +14027,27 @@ async def composite_video(
             "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
             str(merged_video),
         ])
+        merge_code, merge_stderr = await _run_ffmpeg_merge(cmd)
+        if merge_code != 0:
+            log.warning(
+                "FFmpeg xfade merge failed, retrying slideshow merge with plain base-scene concat: %s",
+                merge_stderr[-300:],
+            )
+            fallback_clips = list(existing_clips)
+            merge_code, merge_stderr = await _concat_merge(fallback_clips)
     else:
-        cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(concat_file),
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            str(merged_video),
-        ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr_concat = await proc.communicate()
-    if proc.returncode != 0:
-        err_msg = stderr_concat.decode()[-500:]
-        log.error(f"FFmpeg concat error: {err_msg}")
-        raise RuntimeError("FFmpeg failed to concat scene clips: " + err_msg[-200:])
+        merge_code, merge_stderr = await _concat_merge(working_clips)
+        if merge_code != 0 and working_clips != existing_clips:
+            log.warning(
+                "FFmpeg concat on working clips failed, retrying slideshow merge with base-scene concat: %s",
+                merge_stderr[-300:],
+            )
+            merge_code, merge_stderr = await _concat_merge(list(existing_clips))
+
+    if merge_code != 0:
+        err_msg = merge_stderr[-500:]
+        log.error(f"FFmpeg merge error: {err_msg}")
+        raise RuntimeError("FFmpeg failed to merge scene clips: " + err_msg[-200:])
 
     if not merged_video.exists() or merged_video.stat().st_size == 0:
         raise RuntimeError("FFmpeg concat produced no output file")
