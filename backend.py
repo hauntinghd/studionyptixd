@@ -171,6 +171,7 @@ from backend_catalyst_core import (
     _catalyst_channel_memory_key,
     _catalyst_channel_memory_public_view,
     _catalyst_extract_series_anchor,
+    _catalyst_infer_archetype,
     _catalyst_infer_niche,
     _catalyst_merge_signal_lists,
     _catalyst_merge_weighted_signals,
@@ -1056,6 +1057,7 @@ def _youtube_connection_public_view(record: dict) -> dict:
             "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
             "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
             "top_videos": list(analytics_snapshot.get("top_videos") or []),
+            "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
         },
     }
 
@@ -2643,6 +2645,7 @@ async def _harvest_catalyst_outcomes_for_channel(
             "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
             "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
             "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
+            "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
             "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
         }
         recent_candidates = await _youtube_fetch_channel_search(access_token, channel_key, order="date", max_results=candidate_limit)
@@ -6838,6 +6841,171 @@ async def _youtube_fetch_channel_search(access_token: str, channel_id: str, orde
     return await _youtube_fetch_videos(access_token, video_ids)
 
 
+async def _youtube_fetch_video_analytics_bulk(access_token: str, channel_id: str, video_ids: list[str]) -> dict[str, dict]:
+    ids = [str(v).strip() for v in list(video_ids or []) if str(v).strip()]
+    if not ids:
+        return {}
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=180)
+    metrics_map: dict[str, dict] = {}
+    for metrics in (
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+    ):
+        try:
+            payload = await _youtube_api_get(
+                access_token,
+                "/reports",
+                analytics=True,
+                params={
+                    "ids": f"channel=={channel_id}",
+                    "startDate": start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                    "dimensions": "video",
+                    "filters": f"video=={','.join(ids[:25])}",
+                    "maxResults": min(25, len(ids)),
+                    "metrics": metrics,
+                },
+            )
+            headers = [str((col or {}).get("name", "") or "") for col in list(payload.get("columnHeaders") or [])]
+            for row in list(payload.get("rows") or []):
+                if not isinstance(row, list) or not row:
+                    continue
+                video_id = str(row[0] or "").strip()
+                if not video_id:
+                    continue
+                parsed: dict[str, float] = {}
+                for idx, header in enumerate(headers):
+                    if idx >= len(row) or not header:
+                        continue
+                    if header == "video":
+                        continue
+                    try:
+                        parsed[header] = float(row[idx] or 0)
+                    except Exception:
+                        pass
+                if parsed:
+                    metrics_map[video_id] = parsed
+            if metrics_map:
+                break
+        except Exception:
+            continue
+    return metrics_map
+
+
+def _youtube_connected_failure_mode(video: dict) -> tuple[str, str]:
+    views = int(float((video or {}).get("views", 0) or 0))
+    impressions = int(float((video or {}).get("impressions", 0) or 0))
+    ctr = float((video or {}).get("impression_click_through_rate", 0.0) or 0.0)
+    avp = float((video or {}).get("average_view_percentage", 0.0) or 0.0)
+    if views <= 1 and impressions <= 40:
+        return "no_distribution", "No Distribution"
+    if impressions >= 50 and ctr > 0 and ctr < 2.2:
+        return "packaging_fail", "Packaging Fail"
+    if views >= 20 and avp > 0 and avp < 34.0:
+        return "retention_fail", "Retention Fail"
+    if views >= 10 or impressions >= 50:
+        return "mixed", "Mixed Signal"
+    return "mixed", "Mixed Signal"
+
+
+def _youtube_historical_video_score(video: dict) -> float:
+    views = float((video or {}).get("views", 0.0) or 0.0)
+    likes = float((video or {}).get("likes", 0.0) or 0.0)
+    impressions = float((video or {}).get("impressions", 0.0) or 0.0)
+    ctr = float((video or {}).get("impression_click_through_rate", 0.0) or 0.0)
+    avp = float((video or {}).get("average_view_percentage", 0.0) or 0.0)
+    return round((views * 0.08) + (likes * 3.0) + (ctr * 20.0) + (avp * 3.0) + min(impressions * 0.02, 40.0), 2)
+
+
+def _youtube_historical_compare_public_view(video: dict | None) -> dict:
+    payload = dict(video or {})
+    failure_mode_key, failure_mode_label = _youtube_connected_failure_mode(payload)
+    return {
+        "video_id": str(payload.get("video_id", "") or "").strip(),
+        "title": str(payload.get("title", "") or "").strip(),
+        "published_at": str(payload.get("published_at", "") or "").strip(),
+        "thumbnail_url": str(payload.get("thumbnail_url", "") or "").strip(),
+        "views": int(float(payload.get("views", 0) or 0)),
+        "likes": int(float(payload.get("likes", 0) or 0)),
+        "comments": int(float(payload.get("comments", 0) or 0)),
+        "impressions": int(float(payload.get("impressions", 0) or 0)),
+        "impression_click_through_rate": round(float(payload.get("impression_click_through_rate", 0.0) or 0.0), 2),
+        "average_view_duration_sec": int(float(payload.get("average_view_duration_sec", 0) or 0)),
+        "average_view_percentage": round(float(payload.get("average_view_percentage", 0.0) or 0.0), 2),
+        "duration_sec": int(float(payload.get("duration_sec", 0) or 0)),
+        "series_anchor": str(payload.get("series_anchor", "") or "").strip(),
+        "niche_key": str(payload.get("niche_key", "") or "").strip(),
+        "niche_label": str(payload.get("niche_label", "") or "").strip(),
+        "archetype_key": str(payload.get("archetype_key", "") or "").strip(),
+        "archetype_label": str(payload.get("archetype_label", "") or "").strip(),
+        "score": _youtube_historical_video_score(payload),
+        "failure_mode_key": failure_mode_key,
+        "failure_mode_label": failure_mode_label,
+    }
+
+
+def _youtube_build_historical_compare(videos: list[dict]) -> dict:
+    rows = [dict(v or {}) for v in list(videos or []) if isinstance(v, dict) and str((v or {}).get("video_id", "") or "").strip()]
+    if not rows:
+        return {}
+    rows.sort(key=lambda row: str(row.get("published_at", "") or ""), reverse=True)
+    latest = dict(rows[0] or {})
+    previous = dict(rows[1] or {}) if len(rows) > 1 else {}
+    ranked = sorted(rows, key=_youtube_historical_video_score, reverse=True)
+    best = dict(ranked[0] or {})
+    worst = dict(ranked[-1] or {})
+    latest_view = _youtube_historical_compare_public_view(latest)
+    previous_view = _youtube_historical_compare_public_view(previous) if previous else {}
+    best_view = _youtube_historical_compare_public_view(best)
+    worst_view = _youtube_historical_compare_public_view(worst)
+    winner_title = str(best_view.get("title", "") or "").strip()
+    loser_title = str(worst_view.get("title", "") or "").strip()
+    winner_len = len(winner_title)
+    loser_len = len(loser_title)
+    winner_words = len([word for word in re.split(r"\s+", winner_title) if word.strip()])
+    loser_words = len([word for word in re.split(r"\s+", loser_title) if word.strip()])
+    winner_series = str(best_view.get("series_anchor", "") or "").strip()
+    loser_series = str(worst_view.get("series_anchor", "") or "").strip()
+    winner_mode = str(best_view.get("failure_mode_label", "") or "").strip()
+    loser_mode = str(worst_view.get("failure_mode_label", "") or "").strip()
+    summary_parts = []
+    if latest_view and previous_view:
+        summary_parts.append(
+            f"Latest upload '{latest_view.get('title', '')}' currently has {int(latest_view.get('views', 0) or 0)} views"
+            + (f", {int(latest_view.get('impressions', 0) or 0)} impressions, and {float(latest_view.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR" if float(latest_view.get('impression_click_through_rate', 0.0) or 0.0) > 0 or int(latest_view.get('impressions', 0) or 0) > 0 else "")
+            + f"; previous upload '{previous_view.get('title', '')}' has {int(previous_view.get('views', 0) or 0)} views."
+        )
+    if winner_title and loser_title:
+        summary_parts.append(
+            f"Best recent package is '{winner_title}' ({winner_mode}), while weakest is '{loser_title}' ({loser_mode})."
+        )
+    learnings: list[str] = []
+    if winner_len and loser_len and winner_len + 8 < loser_len:
+        learnings.append("Winning uploads skew shorter and easier to process at a glance; avoid long premise chains.")
+    if winner_words and loser_words and winner_words + 3 < loser_words:
+        learnings.append("Winning uploads use fewer words before the payoff becomes obvious.")
+    if "," in loser_title or " then " in loser_title.lower():
+        learnings.append("Weak uploads often read like recap summaries with chained events instead of one clean click promise.")
+    if winner_series and loser_series and winner_series.lower() != loser_series.lower():
+        learnings.append(f"The stronger upload stayed in a clearer emotional arena ({winner_series}) while the weaker one leaned harder on lore-heavy framing ({loser_series}).")
+    next_moves: list[str] = []
+    if str(latest_view.get("failure_mode_key", "") or "") == "no_distribution":
+        next_moves.append("Treat the latest underperformer as a distribution/package miss first: fix title clarity and thumbnail promise before blaming pacing.")
+    if str(worst_view.get("failure_mode_key", "") or "") == "packaging_fail":
+        next_moves.append("Push a cleaner curiosity gap with one conflict, one victim, and one payoff instead of stacked lore descriptors.")
+    next_moves.append("Favor human conflict or betrayal framing over abstract lore stacking when titling recap uploads.")
+    return {
+        "latest_video": latest_view,
+        "previous_video": previous_view,
+        "best_recent_video": best_view,
+        "worst_recent_video": worst_view,
+        "winner_vs_loser_summary": " ".join(part for part in summary_parts if part).strip(),
+        "winner_patterns": _dedupe_clip_list(learnings, max_items=4),
+        "next_moves": _dedupe_clip_list(next_moves, max_items=4),
+    }
+
+
 async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -> dict:
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=90)
@@ -6942,6 +7110,45 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
 
     recent_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="date", max_results=12)
     popular_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="viewCount", max_results=12)
+    candidate_video_ids = _dedupe_preserve_order(
+        [
+            *[str((row or {}).get("video_id", "") or "").strip() for row in list(recent_uploads or [])],
+            *[str((row or {}).get("video_id", "") or "").strip() for row in list(popular_uploads or [])],
+            *[str((row or {}).get("video_id", "") or "").strip() for row in list(top_videos or [])],
+        ],
+        max_items=18,
+        max_chars=24,
+    )
+    bulk_video_metrics = await _youtube_fetch_video_analytics_bulk(access_token, channel_id, candidate_video_ids)
+    for bucket in (recent_uploads, popular_uploads, top_videos):
+        for row in list(bucket or []):
+            if not isinstance(row, dict):
+                continue
+            metrics = dict(bulk_video_metrics.get(str(row.get("video_id", "") or "").strip()) or {})
+            if not metrics:
+                continue
+            row["views"] = int(metrics.get("views", row.get("views", 0) or 0) or 0)
+            row["average_view_duration_sec"] = int(metrics.get("averageViewDuration", row.get("average_view_duration_sec", 0) or 0) or 0)
+            row["average_view_percentage"] = round(float(metrics.get("averageViewPercentage", row.get("average_view_percentage", 0.0) or 0.0) or 0.0), 2)
+            row["impressions"] = int(metrics.get("impressions", row.get("impressions", 0) or 0) or 0)
+            row["impression_click_through_rate"] = round(float(metrics.get("impressionClickThroughRate", row.get("impression_click_through_rate", 0.0) or 0.0) or 0.0), 2)
+            niche = _catalyst_infer_niche(str(row.get("title", "") or ""), str(row.get("description", "") or ""), " ".join(list(row.get("tags") or [])))
+            row["niche_key"] = str(niche.get("key", "") or "").strip()
+            row["niche_label"] = str(niche.get("label", "") or "").strip()
+            archetype = _catalyst_infer_archetype(
+                str(row.get("title", "") or ""),
+                str(row.get("description", "") or ""),
+                " ".join(list(row.get("tags") or [])),
+                niche_key=str(row.get("niche_key", "") or "").strip().lower(),
+            )
+            row["archetype_key"] = str(archetype.get("key", "") or "").strip()
+            row["archetype_label"] = str(archetype.get("label", "") or "").strip()
+            row["series_anchor"] = _catalyst_extract_series_anchor(
+                str(row.get("title", "") or ""),
+                str(row.get("description", "") or ""),
+                " ".join(list(row.get("tags") or [])),
+                niche_key=str(row.get("niche_key", "") or "").strip().lower(),
+            )
     popular_titles = [str(v.get("title", "") or "").strip() for v in popular_uploads if str(v.get("title", "") or "").strip()]
     recent_titles = [str(v.get("title", "") or "").strip() for v in recent_uploads if str(v.get("title", "") or "").strip()]
     series_clusters = _catalyst_build_channel_series_clusters(
@@ -6991,6 +7198,16 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         title_pattern_hints.append("Best-performing arc playbook: " + "; ".join(winning_patterns[:2]))
     if losing_patterns:
         retention_learnings.append("Weak-arc watchouts: " + "; ".join(losing_patterns[:2]))
+    historical_compare = _youtube_build_historical_compare(recent_uploads[:8])
+    historical_summary = str(historical_compare.get("winner_vs_loser_summary", "") or "").strip()
+    if historical_summary:
+        packaging_learnings.append(historical_summary)
+    historical_patterns = [str(v).strip() for v in list(historical_compare.get("winner_patterns") or []) if str(v).strip()]
+    if historical_patterns:
+        title_pattern_hints.append("Historical winner pattern: " + "; ".join(historical_patterns[:2]))
+    historical_moves = [str(v).strip() for v in list(historical_compare.get("next_moves") or []) if str(v).strip()]
+    if historical_moves:
+        packaging_learnings.append("Historical next moves: " + "; ".join(historical_moves[:2]))
 
     summary_parts = [
         f"Connected channel recent views: {int(summary_map.get('views', 0) or 0):,}" if summary_map.get("views") else "",
@@ -7010,6 +7227,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         "title_pattern_hints": _dedupe_clip_list(title_pattern_hints, max_items=6),
         "series_clusters": list(series_clusters),
         "series_cluster_playbook": series_cluster_playbook,
+        "historical_compare": historical_compare,
     }
 
 
@@ -7097,6 +7315,7 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
         "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
         "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
+        "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
         "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
     }
 
@@ -7172,6 +7391,13 @@ async def _build_shorts_catalyst_extra_instructions(
     retention = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()]
     if retention:
         parts.append("Retention learnings: " + "; ".join(retention[:4]))
+    historical_compare = dict(channel_context.get("historical_compare") or {})
+    historical_summary = str(historical_compare.get("winner_vs_loser_summary", "") or "").strip()
+    if historical_summary:
+        parts.append("Historical winner vs loser: " + _clip_text(historical_summary, 280))
+    historical_moves = [str(v).strip() for v in list(historical_compare.get("next_moves") or []) if str(v).strip()]
+    if historical_moves:
+        parts.append("Historical next moves: " + "; ".join(_clip_text(v, 140) for v in historical_moves[:3]))
     if cluster_context:
         parts.append(cluster_context)
     if list(selected_cluster.get("keywords") or []):
@@ -7990,6 +8216,13 @@ def _render_source_context(
         packaging = [str(v).strip() for v in list((channel_context or {}).get("packaging_learnings") or []) if str(v).strip()]
         if packaging:
             parts.append("Channel packaging learnings: " + "; ".join(_clip_text(v, 120) for v in packaging[:4]))
+        historical_compare = dict((channel_context or {}).get("historical_compare") or {})
+        historical_summary = str(historical_compare.get("winner_vs_loser_summary", "") or "").strip()
+        if historical_summary:
+            parts.append("Channel winner vs loser compare: " + _clip_text(historical_summary, 240))
+        historical_moves = [str(v).strip() for v in list(historical_compare.get("next_moves") or []) if str(v).strip()]
+        if historical_moves:
+            parts.append("Historical channel next moves: " + "; ".join(_clip_text(v, 120) for v in historical_moves[:3]))
     cluster_context = _render_catalyst_series_cluster_context(selected_cluster)
     if cluster_context:
         parts.append(cluster_context)

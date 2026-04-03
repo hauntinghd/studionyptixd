@@ -62,6 +62,18 @@ type ConnectedYouTubeChannel = {
         top_video_titles?: string[];
         packaging_learnings?: string[];
         retention_learnings?: string[];
+        historical_compare?: {
+            winner_vs_loser_summary?: string;
+            next_moves?: string[];
+            best_recent_video?: {
+                title?: string;
+                views?: number;
+            };
+            worst_recent_video?: {
+                title?: string;
+                views?: number;
+            };
+        };
     };
     last_sync_error?: string;
 };
@@ -1016,6 +1028,28 @@ export default function LongFormPanel() {
                                             <p className="font-semibold text-white">{current.title}</p>
                                             {current.analytics_snapshot?.channel_summary ? (
                                                 <p className="mt-2">{current.analytics_snapshot.channel_summary}</p>
+                                            ) : null}
+                                            {current.analytics_snapshot?.historical_compare?.winner_vs_loser_summary ? (
+                                                <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-500/5 p-2 text-[11px] text-amber-100">
+                                                    <p className="font-semibold uppercase tracking-[0.16em] text-amber-200">Historical Compare</p>
+                                                    <p className="mt-1 text-gray-200">{current.analytics_snapshot.historical_compare.winner_vs_loser_summary}</p>
+                                                    {current.analytics_snapshot.historical_compare.best_recent_video?.title ? (
+                                                        <p className="mt-1 text-gray-300">
+                                                            Best recent: {current.analytics_snapshot.historical_compare.best_recent_video.title}
+                                                            {typeof current.analytics_snapshot.historical_compare.best_recent_video.views === 'number'
+                                                                ? ` (${current.analytics_snapshot.historical_compare.best_recent_video.views} views)`
+                                                                : ''}
+                                                        </p>
+                                                    ) : null}
+                                                    {current.analytics_snapshot.historical_compare.worst_recent_video?.title ? (
+                                                        <p className="mt-1 text-gray-300">
+                                                            Weakest recent: {current.analytics_snapshot.historical_compare.worst_recent_video.title}
+                                                            {typeof current.analytics_snapshot.historical_compare.worst_recent_video.views === 'number'
+                                                                ? ` (${current.analytics_snapshot.historical_compare.worst_recent_video.views} views)`
+                                                                : ''}
+                                                        </p>
+                                                    ) : null}
+                                                </div>
                                             ) : null}
                                             {current.last_sync_error ? (
                                                 <p className="mt-2 text-amber-300">Last sync note: {current.last_sync_error}</p>
