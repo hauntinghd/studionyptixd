@@ -200,6 +200,8 @@ from backend_catalyst_profiles import (
     _catalyst_default_sound_profile,
     _catalyst_default_visual_engine,
     _catalyst_scene_execution_profile,
+    _catalyst_short_execution_pack,
+    _catalyst_rank_shorts_angle_candidates,
     _heuristic_catalyst_chapter_blueprints,
 )
 from backend_catalyst_blueprint import _build_catalyst_edit_blueprint
@@ -7406,10 +7408,23 @@ def _youtube_title_keywords(title: str, max_items: int = 6) -> list[str]:
     return out
 
 
-def _summarize_public_shorts_reference_playbook(template: str, reference_rows: list[dict], queries: list[str]) -> dict:
+def _summarize_public_shorts_reference_playbook(
+    template: str,
+    reference_rows: list[dict],
+    queries: list[str],
+    *,
+    topic: str = "",
+    channel_context: dict | None = None,
+    selected_cluster: dict | None = None,
+    trend_titles: list[str] | None = None,
+    trend_hunt_enabled: bool = False,
+) -> dict:
     rows = [dict(row or {}) for row in list(reference_rows or []) if isinstance(row, dict)]
     if not rows:
         return {}
+    channel_context = dict(channel_context or {})
+    selected_cluster = dict(selected_cluster or {})
+    trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
     titles = [str(row.get("title", "") or "").strip() for row in rows if str(row.get("title", "") or "").strip()]
     channels = _dedupe_preserve_order(
         [str(row.get("channel_title", "") or "").strip() for row in rows if str(row.get("channel_title", "") or "").strip()],
@@ -7464,6 +7479,20 @@ def _summarize_public_shorts_reference_playbook(template: str, reference_rows: l
     elif normalized == "story":
         visual_moves.append("Favor one emotionally charged visual turn per beat with clear subject continuity.")
     benchmark_titles = _dedupe_preserve_order(titles, max_items=6, max_chars=120)
+    angle_candidates = _catalyst_rank_shorts_angle_candidates(
+        template=template,
+        topic=topic,
+        channel_context=channel_context,
+        selected_cluster=selected_cluster,
+        benchmark_titles=benchmark_titles,
+        trend_titles=trend_titles,
+        hook_moves=hook_moves,
+        packaging_moves=packaging_moves,
+        visual_moves=visual_moves,
+        keyword_moves=strong_keywords[:6],
+        trend_hunt_enabled=trend_hunt_enabled,
+        max_items=6,
+    )
     summary = (
         f"Public shorts benchmark from {len(rows)} fresh references across queries "
         f"{', '.join(_dedupe_preserve_order(list(queries or []), max_items=3, max_chars=60))}: "
@@ -7478,6 +7507,8 @@ def _summarize_public_shorts_reference_playbook(template: str, reference_rows: l
         "packaging_moves": _dedupe_preserve_order(packaging_moves, max_items=5, max_chars=180),
         "visual_moves": _dedupe_preserve_order(visual_moves, max_items=5, max_chars=180),
         "keyword_moves": strong_keywords[:6],
+        "angle_candidates": angle_candidates,
+        "trend_titles": _dedupe_preserve_order(trend_titles, max_items=6, max_chars=120),
     }
 
 
@@ -7610,7 +7641,22 @@ async def _build_shorts_public_reference_playbook(
             break
     if not rows:
         return {}
-    return _summarize_public_shorts_reference_playbook(template, rows, queries)
+    trend_titles: list[str] = []
+    try:
+        trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
+        trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
+    except Exception:
+        trend_titles = []
+    return _summarize_public_shorts_reference_playbook(
+        template,
+        rows,
+        queries,
+        topic=topic,
+        channel_context=channel_context,
+        selected_cluster=selected_cluster,
+        trend_titles=trend_titles,
+        trend_hunt_enabled=trend_hunt_enabled,
+    )
 
 
 def _public_shorts_playbook_from_memory_view(memory_public: dict | None) -> dict:
@@ -7629,6 +7675,8 @@ def _public_shorts_playbook_from_memory_view(memory_public: dict | None) -> dict
         ],
         "visual_moves": [str(v).strip() for v in list(public.get("public_shorts_visual_moves") or []) if str(v).strip()],
         "keyword_moves": [str(v).strip() for v in list(public.get("public_shorts_keyword_moves") or []) if str(v).strip()],
+        "angle_candidates": [dict(v or {}) for v in list(public.get("public_shorts_angle_candidates") or []) if isinstance(v, dict)],
+        "trend_titles": [str(v).strip() for v in list(public.get("public_shorts_trend_titles") or []) if str(v).strip()],
     }
     if not any(playbook.values()):
         return {}
@@ -7828,9 +7876,14 @@ def _build_skeleton_shorts_local_fallback(
     source = re.sub(r"\s+", " ", str(source_text or "").strip())
     if not source:
         source = "viral skeleton comparison"
+    angle_candidates = [dict(v or {}) for v in list(public_shorts_playbook.get("angle_candidates") or []) if isinstance(v, dict)]
     comparison_match = re.split(r"\bvs\.?\b|\bversus\b", source, maxsplit=1, flags=re.IGNORECASE)
     comparison_mode = len(comparison_match) == 2
     compact_topic = _clip_text(source, 180)
+    if angle_candidates and (trend_hunt_enabled or not str(source_text or "").strip()):
+        best_angle = str((angle_candidates[0] or {}).get("angle", "") or "").strip()
+        if best_angle:
+            compact_topic = _clip_text(best_angle, 180)
     trend_hint = trend_titles[0] if trend_titles else ""
     public_hook_hint = str((list(public_shorts_playbook.get("hook_moves") or [""])[:1] or [""])[0] or "").strip()
     public_visual_hint = str((list(public_shorts_playbook.get("visual_moves") or [""])[:1] or [""])[0] or "").strip()
@@ -8036,6 +8089,25 @@ async def _build_shorts_catalyst_extra_instructions(
                 max_items=6,
                 max_chars=40,
             ),
+            "trend_titles": _dedupe_preserve_order(
+                [
+                    *list(public_shorts_playbook.get("trend_titles") or []),
+                    *list(stored_public_shorts_playbook.get("trend_titles") or []),
+                ],
+                max_items=6,
+                max_chars=120,
+            ),
+            "angle_candidates": sorted(
+                [
+                    *[dict(v or {}) for v in list(public_shorts_playbook.get("angle_candidates") or []) if isinstance(v, dict)],
+                    *[dict(v or {}) for v in list(stored_public_shorts_playbook.get("angle_candidates") or []) if isinstance(v, dict)],
+                ],
+                key=lambda row: (
+                    -float(dict(row or {}).get("score", 0.0) or 0.0),
+                    -int(dict(row or {}).get("novelty_score", 0) or 0),
+                    str(dict(row or {}).get("angle", "") or "").lower(),
+                ),
+            )[:8],
         }
     elif not public_shorts_playbook:
         public_shorts_playbook = stored_public_shorts_playbook
@@ -8114,6 +8186,19 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Public shorts visual moves: " + "; ".join(list(public_shorts_playbook.get("visual_moves") or [])[:4]))
     if list(public_shorts_playbook.get("keyword_moves") or []):
         parts.append("Public shorts recurring keywords: " + ", ".join(list(public_shorts_playbook.get("keyword_moves") or [])[:6]))
+    angle_candidates = [dict(v or {}) for v in list(public_shorts_playbook.get("angle_candidates") or []) if isinstance(v, dict)]
+    if angle_candidates:
+        parts.append(
+            "Ranked angle candidates: "
+            + "; ".join(
+                _clip_text(
+                    f"{str(row.get('angle', '') or '').strip()} (why: {str(row.get('why_now', '') or '').strip()})",
+                    180,
+                )
+                for row in angle_candidates[:4]
+                if str(row.get("angle", "") or "").strip()
+            )
+        )
     if trend_titles:
         parts.append("Fresh public YouTube trend signals: " + "; ".join(trend_titles[:4]))
     if memory_context:
@@ -16082,12 +16167,29 @@ def _apply_short_execution_pacing_profile(
     template: str,
     voice_speed: float = 1.0,
     pacing_mode: str = "standard",
+    topic: str = "",
 ) -> list:
     if not _short_template_narration_fit_enabled(template):
         return scenes
     normalized = str(template or "").strip().lower()
     total = len(scenes or [])
     mode = _normalize_pacing_mode(pacing_mode)
+    scene_texts: list[str] = []
+    for raw in scenes or []:
+        payload = dict(raw or {})
+        scene_texts.extend(
+            [
+                str(payload.get("narration", "") or "").strip(),
+                str(payload.get("visual_description", "") or "").strip(),
+            ]
+        )
+    execution_pack = _catalyst_short_execution_pack(
+        template=template,
+        topic=topic,
+        scene_texts=scene_texts,
+        pacing_mode=mode,
+    )
+    interrupt_every = max(2, int(round(float(execution_pack.get("pattern_interrupt_interval_sec", 9) or 9) / 5.0)))
     profiled: list[dict] = []
     for index, raw in enumerate(scenes or []):
         scene = dict(raw or {})
@@ -16097,37 +16199,21 @@ def _apply_short_execution_pacing_profile(
         is_opening = index == 0
         is_early = index <= 1
         is_payoff = index >= max(0, total - 2)
+        is_interrupt = index > 0 and (index + 1) % interrupt_every == 0
 
-        execution_intensity = "medium"
-        interrupt_strength = "medium"
-        cut_profile = "dynamic-cut"
-        payoff_hold_sec = 1.0
-
-        if normalized == "skeleton":
+        opening_intensity = str(execution_pack.get("opening_intensity", "aggressive") or "aggressive").strip().lower()
+        interrupt_strength = str(execution_pack.get("interrupt_strength", "medium") or "medium").strip().lower()
+        cut_profile = str(execution_pack.get("cut_profile", "dynamic-cut") or "dynamic-cut").strip().lower()
+        caption_rhythm = str(execution_pack.get("caption_rhythm", "pulse-synced") or "pulse-synced").strip().lower()
+        sound_density = str(execution_pack.get("sound_density", "controlled") or "controlled").strip().lower()
+        voice_pacing_bias = str(execution_pack.get("voice_pacing_bias", "steady") or "steady").strip().lower()
+        visual_variation_rule = _clip_text(str(execution_pack.get("visual_variation_rule", "") or ""), 180)
+        payoff_hold_sec = max(0.85, float(execution_pack.get("payoff_hold_sec", 1.05) or 1.05))
+        execution_intensity = str(execution_pack.get("default_execution_intensity", "medium") or "medium").strip().lower()
+        if is_opening and opening_intensity == "attack":
+            execution_intensity = "attack"
+        elif is_opening and opening_intensity == "aggressive" and execution_intensity == "medium":
             execution_intensity = "high"
-            interrupt_strength = "high" if is_early else "medium"
-            cut_profile = "contrast-cut"
-            payoff_hold_sec = 1.0 if not is_payoff else 1.15
-        elif normalized == "daytrading":
-            execution_intensity = "high" if is_early else "medium"
-            interrupt_strength = "high" if is_opening else "medium"
-            cut_profile = "punch-cut"
-            payoff_hold_sec = 1.05 if not is_payoff else 1.2
-        elif normalized == "chatstory":
-            execution_intensity = "high" if is_early else "medium"
-            interrupt_strength = "high"
-            cut_profile = "punch-cut"
-            payoff_hold_sec = 0.95 if not is_payoff else 1.1
-        elif normalized == "motivation":
-            execution_intensity = "medium"
-            interrupt_strength = "medium"
-            cut_profile = "dynamic-cut"
-            payoff_hold_sec = 1.1 if is_payoff else 1.0
-        else:
-            execution_intensity = "high" if is_opening else "medium"
-            interrupt_strength = "medium"
-            cut_profile = "dynamic-cut"
-            payoff_hold_sec = 1.0 if not is_payoff else 1.1
 
         if fill_ratio < 0.74:
             interrupt_strength = "high"
@@ -16155,6 +16241,8 @@ def _apply_short_execution_pacing_profile(
         motion_direction = str(scene.get("motion_direction", "") or "").strip()
         if not motion_direction:
             motion_direction = "controlled push-in with a clean contrast cut"
+        if visual_variation_rule and visual_variation_rule.lower() not in motion_direction.lower():
+            motion_direction = motion_direction.rstrip(". ") + f"; {visual_variation_rule}"
         if interrupt_strength == "high" and "interrupt" not in motion_direction.lower():
             motion_direction = motion_direction.rstrip(". ") + "; add a fast pattern interrupt before the beat lands."
         elif is_payoff and "payoff" not in motion_direction.lower():
@@ -16167,17 +16255,29 @@ def _apply_short_execution_pacing_profile(
             sfx_direction = sfx_direction.rstrip(". ") + "; sharper interrupt accent and stronger whoosh timing."
         elif is_payoff and "resolve" not in sfx_direction.lower():
             sfx_direction = sfx_direction.rstrip(". ") + "; add a cleaner payoff resolve under the final phrase."
+        if sound_density == "trailer-heavy" and "trailer" not in sfx_direction.lower():
+            sfx_direction = sfx_direction.rstrip(". ") + "; trailer-grade low-end accent and bigger reveal hit timing."
 
         engagement_purpose = str(scene.get("engagement_purpose", "") or "").strip()
         if not engagement_purpose:
             engagement_purpose = "advance the short with a stronger contrast, reveal, or payoff"
         if fill_ratio < 0.8 and "keep the viewer locked in" not in engagement_purpose.lower():
             engagement_purpose = engagement_purpose.rstrip(". ") + ". Keep the viewer locked in with a stronger mid-beat escalation."
+        if is_interrupt and "pattern interrupt" not in engagement_purpose.lower():
+            engagement_purpose = engagement_purpose.rstrip(". ") + ". Land a visible pattern interrupt here."
 
         scene["_narration_fill_ratio"] = round(fill_ratio, 2)
         scene["_execution_intensity"] = execution_intensity
+        scene["_archetype_key"] = str(execution_pack.get("archetype_key", "") or "")
+        scene["_archetype_label"] = str(execution_pack.get("archetype_label", "") or "")
+        scene["_opening_intensity"] = opening_intensity
         scene["_interrupt_strength"] = interrupt_strength
         scene["_cut_profile"] = cut_profile
+        scene["_caption_rhythm"] = caption_rhythm
+        scene["_sound_density"] = sound_density
+        scene["_voice_pacing_bias"] = voice_pacing_bias
+        scene["_visual_variation_rule"] = visual_variation_rule
+        scene["_pattern_interrupt_interval_sec"] = int(execution_pack.get("pattern_interrupt_interval_sec", 9) or 9)
         scene["_payoff_hold_sec"] = round(float(payoff_hold_sec), 2)
         scene["motion_direction"] = motion_direction
         scene["sfx_direction"] = sfx_direction
@@ -16520,7 +16620,13 @@ async def run_generation_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
-        scenes = _apply_short_execution_pacing_profile(scenes, template, voice_speed=voice_speed, pacing_mode=pacing_mode)
+        scenes = _apply_short_execution_pacing_profile(
+            scenes,
+            template,
+            voice_speed=voice_speed,
+            pacing_mode=pacing_mode,
+            topic=topic,
+        )
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
@@ -20509,7 +20615,13 @@ async def _run_creative_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
-        scenes = _apply_short_execution_pacing_profile(scenes, template, voice_speed=voice_speed, pacing_mode=pacing_mode)
+        scenes = _apply_short_execution_pacing_profile(
+            scenes,
+            template,
+            voice_speed=voice_speed,
+            pacing_mode=pacing_mode,
+            topic=str(session.get("topic", "") or script_data.get("title", "") or ""),
+        )
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})

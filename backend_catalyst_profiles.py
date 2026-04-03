@@ -1,6 +1,349 @@
 import re
 
-from backend_catalyst_core import _clip_text, _dedupe_preserve_order
+from backend_catalyst_core import (
+    _catalyst_infer_archetype,
+    _catalyst_text_overlap_score,
+    _catalyst_title_novelty_score,
+    _clip_text,
+    _dedupe_preserve_order,
+)
+
+
+_CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS = {
+    "recap_escalation": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "trailer-heavy",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Keep every beat tied to a new power turn, betrayal, rank jump, or world-specific escalation cue.",
+        "pattern_interrupt_interval_sec": 8,
+        "payoff_hold_sec": 1.12,
+        "default_execution_intensity": "high",
+    },
+    "systems_documentary": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "measured",
+        "sound_density": "controlled",
+        "cut_profile": "dynamic-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Alternate hidden-system cutaways, consequence frames, and macro detail instead of repeating the same hero object.",
+        "pattern_interrupt_interval_sec": 11,
+        "payoff_hold_sec": 1.18,
+        "default_execution_intensity": "medium",
+    },
+    "dark_psychology": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "punchy",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "tension-rise",
+        "visual_variation_rule": "Keep contrast high between invasive personal consequence shots and hidden-mechanism explanation shots.",
+        "pattern_interrupt_interval_sec": 9,
+        "payoff_hold_sec": 1.1,
+        "default_execution_intensity": "high",
+    },
+    "trading_execution": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "punchy",
+        "cut_profile": "punch-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Rotate between chart proof, order-flow/execution proof, and loss-versus-edge contrast instead of repeating the same screen angle.",
+        "pattern_interrupt_interval_sec": 8,
+        "payoff_hold_sec": 1.08,
+        "default_execution_intensity": "high",
+    },
+    "power_history": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "controlled",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Alternate map power shifts, leader close-focus, and consequence boards to keep stakes visually climbing.",
+        "pattern_interrupt_interval_sec": 10,
+        "payoff_hold_sec": 1.2,
+        "default_execution_intensity": "medium",
+    },
+    "science_mechanism": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "measured",
+        "sound_density": "controlled",
+        "cut_profile": "dynamic-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Alternate macro mechanism views, simplified causal diagrams, and human consequence frames to avoid textbook repetition.",
+        "pattern_interrupt_interval_sec": 11,
+        "payoff_hold_sec": 1.16,
+        "default_execution_intensity": "medium",
+    },
+    "gaming_breakdown": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "punchy",
+        "cut_profile": "punch-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Alternate winning state, broken mechanic proof, and decisive mistake frames instead of staying in one camera angle.",
+        "pattern_interrupt_interval_sec": 8,
+        "payoff_hold_sec": 1.02,
+        "default_execution_intensity": "high",
+    },
+    "viral_explainer": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "punchy",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Use one dominant symbol per beat and force a clear contrast reset before the viewer settles into repetition.",
+        "pattern_interrupt_interval_sec": 9,
+        "payoff_hold_sec": 1.08,
+        "default_execution_intensity": "medium",
+    },
+}
+
+
+_CATALYST_SHORT_TEMPLATE_EXECUTION_OVERRIDES = {
+    "skeleton": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "punchy",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Use one dominant skeleton comparison or contradiction per beat and avoid repeating the same body pose back to back.",
+        "pattern_interrupt_interval_sec": 8,
+        "default_execution_intensity": "high",
+    },
+    "daytrading": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "punchy",
+        "cut_profile": "punch-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Keep every beat tied to a different proof layer: setup, entry, risk, trap, or payoff.",
+        "pattern_interrupt_interval_sec": 8,
+        "default_execution_intensity": "high",
+    },
+    "chatstory": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "staccato",
+        "sound_density": "punchy",
+        "cut_profile": "punch-cut",
+        "voice_pacing_bias": "front-loaded",
+        "visual_variation_rule": "Keep the conflict legible as a new message turn, reveal, or betrayal beat every scene.",
+        "pattern_interrupt_interval_sec": 7,
+        "default_execution_intensity": "high",
+    },
+    "motivation": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "controlled",
+        "cut_profile": "dynamic-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Rotate between obstacle, consequence, and breakthrough imagery so the speech does not sit on one static mood.",
+        "pattern_interrupt_interval_sec": 10,
+        "default_execution_intensity": "medium",
+    },
+    "story": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "controlled",
+        "cut_profile": "dynamic-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Keep emotional subject continuity, but rotate environment, scale, and consequence framing to avoid visual loopiness.",
+        "pattern_interrupt_interval_sec": 10,
+        "default_execution_intensity": "medium",
+    },
+}
+
+
+def _merge_short_execution_pack(*packs: dict | None) -> dict:
+    merged: dict = {}
+    for raw in packs:
+        pack = dict(raw or {})
+        for key, value in pack.items():
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    continue
+            elif value is None:
+                continue
+            merged[key] = value
+    return merged
+
+
+def _normalize_shorts_angle_seed(text: str, max_chars: int = 100) -> str:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return ""
+    value = re.sub(r"\s*\|.*$", "", value).strip()
+    value = re.sub(r"#shorts?\b", "", value, flags=re.IGNORECASE).strip()
+    value = value.strip(" -|:;,.")
+    return _clip_text(value, max_chars)
+
+
+def _catalyst_short_execution_pack(
+    *,
+    template: str,
+    topic: str = "",
+    scene_texts: list[str] | None = None,
+    archetype_key: str = "",
+    pacing_mode: str = "standard",
+) -> dict:
+    normalized_template = str(template or "").strip().lower()
+    scene_texts = [str(v).strip() for v in list(scene_texts or []) if str(v).strip()]
+    inferred = _catalyst_infer_archetype(
+        topic,
+        " ".join(scene_texts[:6]),
+        niche_key="day_trading" if normalized_template == "daytrading" else "",
+        format_preset="documentary" if normalized_template == "daytrading" else "",
+    )
+    resolved_key = str(archetype_key or inferred.get("key", "") or "").strip().lower()
+    if not resolved_key:
+        resolved_key = "viral_explainer"
+    resolved_label = str(inferred.get("label", "") or resolved_key.replace("_", " ").title()).strip()
+    pack = _merge_short_execution_pack(
+        _CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS.get("viral_explainer") or {},
+        _CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS.get(resolved_key) or {},
+        _CATALYST_SHORT_TEMPLATE_EXECUTION_OVERRIDES.get(normalized_template) or {},
+    )
+    mode = str(pacing_mode or "standard").strip().lower()
+    interrupt_interval = max(7, int(pack.get("pattern_interrupt_interval_sec", 9) or 9))
+    if mode == "very_fast":
+        interrupt_interval = max(7, interrupt_interval - 2)
+        pack["interrupt_strength"] = "high"
+        if str(pack.get("opening_intensity", "") or "").strip().lower() == "aggressive":
+            pack["opening_intensity"] = "attack"
+    elif mode == "fast":
+        interrupt_interval = max(7, interrupt_interval - 1)
+    elif mode == "slow":
+        interrupt_interval = min(13, interrupt_interval + 1)
+        if str(pack.get("caption_rhythm", "") or "").strip().lower() == "staccato":
+            pack["caption_rhythm"] = "pulse-synced"
+    pack["pattern_interrupt_interval_sec"] = interrupt_interval
+    pack["archetype_key"] = resolved_key
+    pack["archetype_label"] = resolved_label
+    return pack
+
+
+def _catalyst_rank_shorts_angle_candidates(
+    *,
+    template: str,
+    topic: str = "",
+    channel_context: dict | None = None,
+    selected_cluster: dict | None = None,
+    benchmark_titles: list[str] | None = None,
+    trend_titles: list[str] | None = None,
+    hook_moves: list[str] | None = None,
+    packaging_moves: list[str] | None = None,
+    visual_moves: list[str] | None = None,
+    keyword_moves: list[str] | None = None,
+    trend_hunt_enabled: bool = False,
+    max_items: int = 6,
+) -> list[dict]:
+    channel_context = dict(channel_context or {})
+    selected_cluster = dict(selected_cluster or {})
+    benchmark_titles = [str(v).strip() for v in list(benchmark_titles or []) if str(v).strip()]
+    trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
+    hook_moves = [str(v).strip() for v in list(hook_moves or []) if str(v).strip()]
+    packaging_moves = [str(v).strip() for v in list(packaging_moves or []) if str(v).strip()]
+    visual_moves = [str(v).strip() for v in list(visual_moves or []) if str(v).strip()]
+    keyword_moves = [str(v).strip() for v in list(keyword_moves or []) if str(v).strip()]
+    recent_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    cluster_titles = [str(v).strip() for v in list(selected_cluster.get("sample_titles") or []) if str(v).strip()]
+    cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
+    inferred = _catalyst_infer_archetype(
+        topic,
+        " ".join(benchmark_titles[:4]),
+        " ".join(trend_titles[:4]),
+        " ".join(cluster_titles[:3]),
+        " ".join(keyword_moves[:6]),
+        niche_key=str(selected_cluster.get("niche_key", "") or ""),
+        format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
+    )
+    archetype_label = str(inferred.get("label", "") or "").strip()
+    archetype_keywords = [str(v).strip() for v in list(inferred.get("keywords") or []) if str(v).strip()]
+    shared_keywords = _dedupe_preserve_order([*keyword_moves[:6], *cluster_keywords[:6], *archetype_keywords[:4]], max_items=8, max_chars=40)
+    seed_rows: list[tuple[str, str, float]] = []
+    raw_topic = _normalize_shorts_angle_seed(topic, max_chars=96)
+    if raw_topic:
+        seed_rows.append((raw_topic, "topic", 1.02))
+    for title in trend_titles[:6]:
+        seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "trend", 1.24))
+    for title in benchmark_titles[:6]:
+        seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "benchmark", 1.08))
+    for title in cluster_titles[:4]:
+        seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "cluster", 0.96))
+    for title in recent_titles[:4]:
+        seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "channel", 0.9))
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for index, (seed, source, base_weight) in enumerate(seed_rows):
+        if not seed:
+            continue
+        normalized_seed = seed.lower()
+        if normalized_seed in seen:
+            continue
+        seen.add(normalized_seed)
+        novelty_score = _catalyst_title_novelty_score(seed, source_title=topic, recent_titles=recent_titles)
+        overlap_score = max((_catalyst_text_overlap_score(seed, title) for title in recent_titles[:4]), default=0.0)
+        keyword_hits = [kw for kw in shared_keywords if kw and kw.lower() in normalized_seed]
+        keyword_bonus = min(0.24, len(keyword_hits) * 0.05)
+        length_bonus = 0.08 if 24 <= len(seed) <= 72 else (-0.06 if len(seed) > 86 else 0.0)
+        novelty_bonus = ((float(novelty_score) - 50.0) / 100.0) * 0.5
+        recency_bonus = 0.12 if trend_hunt_enabled and source == "trend" else 0.0
+        overlap_penalty = 0.32 if source == "channel" and overlap_score >= 0.78 else (0.12 if overlap_score >= 0.58 else 0.0)
+        score = round(base_weight + keyword_bonus + length_bonus + novelty_bonus + recency_bonus - overlap_penalty - (index * 0.015), 3)
+        angle = seed
+        template_key = str(template or "").strip().lower()
+        if template_key == "skeleton" and not re.search(r"\b(skeleton|bone|bones|skull)\b", angle, flags=re.IGNORECASE):
+            if re.search(r"\b(vs\.?|versus|better|worse|stronger|weaker|job|salary|rich|poor)\b", angle, flags=re.IGNORECASE):
+                angle = _clip_text(f"{angle} as a skeleton comparison", 96)
+        elif template_key == "daytrading" and not re.search(r"\b(trade|trading|chart|setup|risk|market|stock|option|entry|exit)\b", angle, flags=re.IGNORECASE):
+            angle = _clip_text(f"{angle} with a real trading consequence", 96)
+        why_now = {
+            "trend": "Fresh recent public YouTube trend title in this lane.",
+            "benchmark": "Recurring public short benchmark pattern that is already getting reach.",
+            "cluster": "Matches the connected channel's strongest series cluster.",
+            "channel": "Close to the connected channel's current arena, but needs novelty.",
+            "topic": "Directly matches the requested topic while keeping room for a fresher hook.",
+        }.get(source, "Fresh candidate angle.")
+        if trend_hunt_enabled and source == "trend":
+            why_now = "Fresh breakout public trend title with strong novelty pressure for this lane."
+        candidates.append(
+            {
+                "angle": angle,
+                "source": source,
+                "score": score,
+                "novelty_score": novelty_score,
+                "why_now": why_now,
+                "hook_move": _clip_text(hook_moves[min(index, len(hook_moves) - 1)] if hook_moves else (str(inferred.get("hook_rule", "") or "") or "Lead with the cleanest hidden payoff first."), 180),
+                "packaging_move": _clip_text(packaging_moves[min(index, len(packaging_moves) - 1)] if packaging_moves else (str(inferred.get("packaging_rule", "") or "") or "Keep the package cleaner and sharper than the current lane."), 180),
+                "visual_move": _clip_text(visual_moves[min(index, len(visual_moves) - 1)] if visual_moves else (str(inferred.get("visual_rule", "") or "") or "Use one dominant visual symbol with cleaner contrast."), 180),
+                "keyword_bias": keyword_hits[:4] or shared_keywords[:4],
+                "archetype_label": archetype_label,
+            }
+        )
+    candidates.sort(
+        key=lambda row: (
+            -float(row.get("score", 0.0) or 0.0),
+            -int(row.get("novelty_score", 0) or 0),
+            str(row.get("source", "") or ""),
+            str(row.get("angle", "") or "").lower(),
+        )
+    )
+    return [dict(row or {}) for row in candidates[: max(3, min(int(max_items or 6), 8))]]
 
 
 def _catalyst_default_visual_engine(template: str, format_preset: str) -> str:

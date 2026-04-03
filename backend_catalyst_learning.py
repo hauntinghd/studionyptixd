@@ -102,8 +102,32 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
         max_items=10,
         max_chars=40,
     )
+    raw_angle_candidates = [dict(v or {}) for v in list(playbook.get("angle_candidates") or []) if isinstance(v, dict)]
+    angle_candidates: list[dict] = []
+    for raw in raw_angle_candidates:
+        angle = _clip_text(str(raw.get("angle", "") or "").strip(), 100)
+        if not angle:
+            continue
+        angle_candidates.append(
+            {
+                "angle": angle,
+                "source": _clip_text(str(raw.get("source", "") or "").strip(), 24),
+                "score": round(float(raw.get("score", 0.0) or 0.0), 3),
+                "novelty_score": int(raw.get("novelty_score", 0) or 0),
+                "why_now": _clip_text(str(raw.get("why_now", "") or "").strip(), 180),
+                "hook_move": _clip_text(str(raw.get("hook_move", "") or "").strip(), 180),
+                "packaging_move": _clip_text(str(raw.get("packaging_move", "") or "").strip(), 180),
+                "visual_move": _clip_text(str(raw.get("visual_move", "") or "").strip(), 180),
+                "keyword_bias": _dedupe_preserve_order(
+                    [str(v).strip() for v in list(raw.get("keyword_bias") or []) if str(v).strip()],
+                    max_items=4,
+                    max_chars=40,
+                ),
+                "archetype_label": _clip_text(str(raw.get("archetype_label", "") or "").strip(), 60),
+            }
+        )
     benchmark_summary = _clip_text(str(playbook.get("summary", "") or "").strip(), 320)
-    if not any([benchmark_summary, benchmark_titles, benchmark_channels, hook_moves, packaging_moves, visual_moves, keyword_moves]):
+    if not any([benchmark_summary, benchmark_titles, benchmark_channels, hook_moves, packaging_moves, visual_moves, keyword_moves, angle_candidates]):
         return updated
 
     format_preset = str(updated.get("format_preset", "") or template or "story").strip().lower() or "story"
@@ -201,9 +225,52 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
             max_items=10,
             max_chars=40,
         ),
+        "public_shorts_trend_titles": _dedupe_preserve_order(
+            [*list(playbook.get("trend_titles") or []), *list(updated.get("public_shorts_trend_titles") or [])],
+            max_items=8,
+            max_chars=120,
+        ),
         "public_shorts_updated_at": time.time(),
         "updated_at": time.time(),
     })
+    merged_angle_map: dict[str, dict] = {}
+    for row in [*angle_candidates, *list(updated.get("public_shorts_angle_candidates") or [])]:
+        payload = dict(row or {})
+        angle = _clip_text(str(payload.get("angle", "") or "").strip(), 100)
+        if not angle:
+            continue
+        key = angle.lower()
+        current = dict(merged_angle_map.get(key) or {})
+        if not current or float(payload.get("score", 0.0) or 0.0) >= float(current.get("score", 0.0) or 0.0):
+            merged_angle_map[key] = {
+                "angle": angle,
+                "source": _clip_text(str(payload.get("source", "") or "").strip(), 24),
+                "score": round(float(payload.get("score", 0.0) or 0.0), 3),
+                "novelty_score": int(payload.get("novelty_score", 0) or 0),
+                "why_now": _clip_text(str(payload.get("why_now", "") or "").strip(), 180),
+                "hook_move": _clip_text(str(payload.get("hook_move", "") or "").strip(), 180),
+                "packaging_move": _clip_text(str(payload.get("packaging_move", "") or "").strip(), 180),
+                "visual_move": _clip_text(str(payload.get("visual_move", "") or "").strip(), 180),
+                "keyword_bias": _dedupe_preserve_order(
+                    [str(v).strip() for v in list(payload.get("keyword_bias") or []) if str(v).strip()],
+                    max_items=4,
+                    max_chars=40,
+                ),
+                "archetype_label": _clip_text(str(payload.get("archetype_label", "") or "").strip(), 60),
+            }
+    updated["public_shorts_angle_candidates"] = sorted(
+        merged_angle_map.values(),
+        key=lambda row: (
+            -float(row.get("score", 0.0) or 0.0),
+            -int(row.get("novelty_score", 0) or 0),
+            str(row.get("angle", "") or "").lower(),
+        ),
+    )[:8]
+    updated["preferred_shorts_angles"] = _dedupe_preserve_order(
+        [str((row or {}).get("angle", "") or "").strip() for row in list(updated.get("public_shorts_angle_candidates") or [])],
+        max_items=8,
+        max_chars=100,
+    )
     updated["proven_keywords"] = _dedupe_preserve_order(
         [*extracted_keywords, *keyword_moves, *list(updated.get("proven_keywords") or [])],
         max_items=16,
@@ -229,6 +296,7 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
             *hook_moves[:2],
             *packaging_moves[:2],
             *visual_moves[:2],
+            *[str((row or {}).get("angle", "") or "").strip() for row in angle_candidates[:3]],
             *list(updated.get("next_video_moves") or []),
         ],
         max_items=12,
@@ -237,6 +305,12 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
     _catalyst_update_weighted_signals(updated, "hook_wins_map", hook_moves, 0.18)
     _catalyst_update_weighted_signals(updated, "visual_wins_map", visual_moves, 0.18)
     _catalyst_update_weighted_signals(updated, "packaging_wins_map", packaging_moves, 0.18)
+    _catalyst_update_weighted_signals(
+        updated,
+        "next_video_moves_map",
+        [str((row or {}).get("angle", "") or "").strip() for row in angle_candidates[:4]],
+        0.16,
+    )
     _catalyst_update_weighted_signals(updated, "next_video_moves_map", [*hook_moves, *packaging_moves, *visual_moves], 0.14)
     public = _catalyst_channel_memory_public_view(updated, series_anchor_override=series_anchor)
     updated["summary"] = _clip_text(
