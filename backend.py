@@ -7516,7 +7516,11 @@ async def _build_shorts_catalyst_extra_instructions(
 ) -> str:
     if not isinstance(user, dict):
         return ""
-    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id)
+    try:
+        channel_context = await _youtube_selected_channel_context(user, preferred_channel_id)
+    except Exception as e:
+        log.warning(f"Catalyst shorts context failed for template={template}: {e}")
+        return ""
     channel_id = str(channel_context.get("channel_id", "") or "").strip()
     if not channel_id:
         return ""
@@ -7546,13 +7550,17 @@ async def _build_shorts_catalyst_extra_instructions(
     archetype_hook_rule = str(memory_public.get("archetype_hook_rule", "") or "").strip()
     archetype_visual_rule = str(memory_public.get("archetype_visual_rule", "") or "").strip()
     archetype_packaging_rule = str(memory_public.get("archetype_packaging_rule", "") or "").strip()
-    reference_playbook = _build_catalyst_reference_playbook(
-        reference_memory=_catalyst_reference_memory,
-        format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
-        topic=topic,
-        channel_memory=memory_public,
-        selected_cluster=selected_cluster,
-    )
+    try:
+        reference_playbook = _build_catalyst_reference_playbook(
+            reference_memory=_catalyst_reference_memory,
+            format_preset="documentary" if str(template or "").strip().lower() == "daytrading" else "",
+            topic=topic,
+            channel_memory=memory_public,
+            selected_cluster=selected_cluster,
+        )
+    except Exception as e:
+        log.warning(f"Catalyst reference playbook failed for template={template}: {e}")
+        reference_playbook = {}
     trend_titles: list[str] = []
     if trend_hunt_enabled:
         trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
@@ -18430,18 +18438,29 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "Make the visual_description fields self-contained, specific, and editable so users can regenerate each scene from the prompt alone. "
             "Every visual_description should read like a production-ready image prompt with the exact subject, setting, action, framing, lighting, and key props required by that script beat."
         )
-    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
-        user,
-        req.template,
-        preferred_channel_id=youtube_channel_id,
-        topic=req.prompt,
-        trend_hunt_enabled=trend_hunt_enabled,
-    )
-    channel_context = await _youtube_selected_channel_context(user, youtube_channel_id) if (youtube_channel_id or trend_hunt_enabled) else {}
+    try:
+        catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+            user,
+            req.template,
+            preferred_channel_id=youtube_channel_id,
+            topic=req.prompt,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Creative script Catalyst setup failed for template={req.template}: {e}")
+        catalyst_shorts_instructions = ""
+    channel_context: dict = {}
     trend_titles: list[str] = []
-    if trend_hunt_enabled:
-        trend_query = _build_shorts_trend_query(req.template, req.prompt, channel_context, {})
-        trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
+    try:
+        if youtube_channel_id or trend_hunt_enabled:
+            channel_context = await _youtube_selected_channel_context(user, youtube_channel_id)
+        if trend_hunt_enabled:
+            trend_query = _build_shorts_trend_query(req.template, req.prompt, channel_context, {})
+            trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
+    except Exception as e:
+        log.warning(f"Creative script YouTube trend setup failed for template={req.template}: {e}")
+        channel_context = {}
+        trend_titles = []
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     try:
         script_data = await generate_script(
@@ -18584,13 +18603,17 @@ async def creative_create_session(body: dict, request: Request = None):
         pacing_mode = "standard"
     youtube_channel_id = str(body.get("youtube_channel_id", "") or "").strip()
     trend_hunt_enabled = _bool_from_any(body.get("trend_hunt_enabled"), False)
-    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
-        user,
-        template,
-        preferred_channel_id=youtube_channel_id,
-        topic=str(body.get("topic", "") or ""),
-        trend_hunt_enabled=trend_hunt_enabled,
-    )
+    try:
+        catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+            user,
+            template,
+            preferred_channel_id=youtube_channel_id,
+            topic=str(body.get("topic", "") or ""),
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Creative session Catalyst setup failed for template={template}: {e}")
+        catalyst_shorts_instructions = ""
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     default_reference_url = _default_reference_for_template(template)
     reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, template, reference_lock_mode)
@@ -20494,13 +20517,17 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         pacing_mode = "standard"
     youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
     trend_hunt_enabled = _bool_from_any(getattr(req, "trend_hunt_enabled", False), False)
-    catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
-        user,
-        req.template,
-        preferred_channel_id=youtube_channel_id,
-        topic=req.prompt,
-        trend_hunt_enabled=trend_hunt_enabled,
-    )
+    try:
+        catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
+            user,
+            req.template,
+            preferred_channel_id=youtube_channel_id,
+            topic=req.prompt,
+            trend_hunt_enabled=trend_hunt_enabled,
+        )
+    except Exception as e:
+        log.warning(f"Generate short Catalyst setup failed for template={req.template}: {e}")
+        catalyst_shorts_instructions = ""
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
     reference_dna, reference_quality = await _extract_reference_profile(reference_image_url, req.template, reference_lock_mode)
