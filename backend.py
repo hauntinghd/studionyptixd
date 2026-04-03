@@ -18392,7 +18392,11 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", True))
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     default_reference_url = _default_reference_for_template(req.template)
-    reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, req.template, reference_lock_mode)
+    try:
+        reference_dna, reference_quality = await _extract_reference_profile(default_reference_url, req.template, reference_lock_mode)
+    except Exception as e:
+        log.warning(f"Creative script reference-profile setup failed for template={req.template}: {e}")
+        reference_dna, reference_quality = {}, {}
     transition_style = _normalize_transition_style(req.transition_style)
     micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
     if cinematic_boost:
@@ -18539,7 +18543,10 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
-        _save_creative_sessions_to_disk()
+        try:
+            _save_creative_sessions_to_disk()
+        except Exception as e:
+            log.warning(f"Creative script session persistence failed for {session_id}: {e}")
     return {
         "session_id": session_id,
         "title": script_data.get("title", req.prompt),
