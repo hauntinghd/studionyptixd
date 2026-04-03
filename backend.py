@@ -12252,6 +12252,62 @@ async def generate_scene_image(
         except Exception as e:
             log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
 
+    async def _hosted_fal_backup_result() -> dict | None:
+        if not FAL_AI_KEY:
+            return None
+        fallback_candidates: list[str] = []
+        primary_backup = _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL)
+        if primary_backup and primary_backup != "grok_imagine":
+            fallback_candidates.append(primary_backup)
+        if template == "skeleton":
+            fallback_candidates.extend(["imagen4_fast", "seedream45", "imagen4_ultra", "recraft_v4", "flux_2_pro"])
+        else:
+            fallback_candidates.extend(["imagen4_fast", "recraft_v4", "seedream45", "imagen4_ultra", "flux_2_pro"])
+        seen_candidates: set[str] = set()
+        for candidate in fallback_candidates:
+            candidate_id = _normalize_creative_image_model_id(candidate, template=template)
+            if not candidate_id or candidate_id == "grok_imagine" or candidate_id in seen_candidates:
+                continue
+            seen_candidates.add(candidate_id)
+            try:
+                backup_result = await _generate_image_fal_selected_model(
+                    candidate_id,
+                    prompt,
+                    output_path,
+                    resolution=resolution,
+                    negative_prompt=negative_prompt,
+                    reference_image_url=reference_image_url,
+                )
+                await _enforce_1080_image(output_path)
+                _ensure_generated_image_valid(output_path)
+                qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
+                qa_gate_ok, qa_gate_min = _image_quality_gate(
+                    qa,
+                    template=template,
+                    lock_mode=lock_mode,
+                    has_reference=has_reference,
+                    prompt=prompt,
+                )
+                if template == "skeleton" and not qa_gate_ok:
+                    raise RuntimeError(
+                        f"Hosted fallback '{candidate_id}' failed skeleton QA gate "
+                        f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
+                    )
+                backup_result["provider"] = candidate_id
+                backup_result["qa_score"] = qa.get("score", 0.0)
+                backup_result["qa_ok"] = bool(qa_gate_ok)
+                backup_result["qa_min_score"] = qa_gate_min
+                backup_result["qa_notes"] = qa.get("notes", [])
+                log.info(f"Hosted fal backup image succeeded via {candidate_id}")
+                return backup_result
+            except Exception as backup_err:
+                log.warning(f"Hosted fal backup '{candidate_id}' failed: {backup_err}")
+        return None
+
+    hosted_backup_result = await _hosted_fal_backup_result()
+    if hosted_backup_result:
+        return hosted_backup_result
+
     for provider in provider_order[xai_index + 1:]:
         try:
             local_result = await _local_provider_result(provider)
@@ -12266,6 +12322,11 @@ async def generate_scene_image(
         if last_local_provider_err is not None:
             raise RuntimeError(str(last_local_provider_err))
         raise RuntimeError("Skeleton interactive generation exhausted WAN2.2 attempt budget")
+
+    if not _configured_local_image_provider_order():
+        if last_local_provider_err is not None:
+            raise RuntimeError(f"Remote image generation failed and no local providers are configured: {last_local_provider_err}")
+        raise RuntimeError("Remote image generation failed and no local providers are configured")
 
     safe_route = dict(template_adapter_route or {})
     safe_route["enabled"] = False
