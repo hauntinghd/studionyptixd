@@ -15568,6 +15568,132 @@ def _apply_short_scene_narration_fit(scenes: list, template: str, voice_speed: f
     return fitted
 
 
+def _short_template_pattern_interrupt_interval_sec(template: str, pacing_mode: str = "standard") -> int:
+    normalized = str(template or "").strip().lower()
+    base = 12
+    if normalized in {"skeleton", "daytrading", "chatstory"}:
+        base = 10
+    elif normalized in {"story"}:
+        base = 11
+    elif normalized in {"motivation"}:
+        base = 12
+    mode = _normalize_pacing_mode(pacing_mode)
+    if mode == "fast":
+        base = max(8, base - 1)
+    elif mode == "very_fast":
+        base = max(7, base - 2)
+    return int(base)
+
+
+def _apply_short_execution_pacing_profile(
+    scenes: list,
+    template: str,
+    voice_speed: float = 1.0,
+    pacing_mode: str = "standard",
+) -> list:
+    if not _short_template_narration_fit_enabled(template):
+        return scenes
+    normalized = str(template or "").strip().lower()
+    total = len(scenes or [])
+    mode = _normalize_pacing_mode(pacing_mode)
+    profiled: list[dict] = []
+    for index, raw in enumerate(scenes or []):
+        scene = dict(raw or {})
+        duration = max(3.5, float(scene.get("duration_sec", 5.0) or 5.0))
+        estimate = float(scene.get("_narration_fit_estimate_sec", _estimate_spoken_duration_seconds(scene.get("narration", ""), voice_speed=voice_speed)) or 0.0)
+        fill_ratio = max(0.0, min(1.6, estimate / max(duration, 0.1)))
+        is_opening = index == 0
+        is_early = index <= 1
+        is_payoff = index >= max(0, total - 2)
+
+        execution_intensity = "medium"
+        interrupt_strength = "medium"
+        cut_profile = "dynamic-cut"
+        payoff_hold_sec = 1.0
+
+        if normalized == "skeleton":
+            execution_intensity = "high"
+            interrupt_strength = "high" if is_early else "medium"
+            cut_profile = "contrast-cut"
+            payoff_hold_sec = 1.0 if not is_payoff else 1.15
+        elif normalized == "daytrading":
+            execution_intensity = "high" if is_early else "medium"
+            interrupt_strength = "high" if is_opening else "medium"
+            cut_profile = "punch-cut"
+            payoff_hold_sec = 1.05 if not is_payoff else 1.2
+        elif normalized == "chatstory":
+            execution_intensity = "high" if is_early else "medium"
+            interrupt_strength = "high"
+            cut_profile = "punch-cut"
+            payoff_hold_sec = 0.95 if not is_payoff else 1.1
+        elif normalized == "motivation":
+            execution_intensity = "medium"
+            interrupt_strength = "medium"
+            cut_profile = "dynamic-cut"
+            payoff_hold_sec = 1.1 if is_payoff else 1.0
+        else:
+            execution_intensity = "high" if is_opening else "medium"
+            interrupt_strength = "medium"
+            cut_profile = "dynamic-cut"
+            payoff_hold_sec = 1.0 if not is_payoff else 1.1
+
+        if fill_ratio < 0.74:
+            interrupt_strength = "high"
+            cut_profile = "punch-cut" if normalized in {"daytrading", "chatstory"} else "contrast-cut"
+            if is_opening or normalized in {"skeleton", "story"}:
+                execution_intensity = "attack"
+        elif fill_ratio < 0.9:
+            if interrupt_strength != "high":
+                interrupt_strength = "medium"
+            if cut_profile == "dynamic-cut":
+                cut_profile = "contrast-cut" if is_early else "dynamic-cut"
+
+        if mode == "very_fast":
+            interrupt_strength = "high"
+            if execution_intensity == "medium":
+                execution_intensity = "high"
+            if cut_profile == "dynamic-cut":
+                cut_profile = "punch-cut"
+        elif mode == "fast" and interrupt_strength != "high":
+            interrupt_strength = "medium"
+
+        if is_payoff:
+            payoff_hold_sec = max(payoff_hold_sec, 1.2 if fill_ratio >= 0.9 else 1.05)
+
+        motion_direction = str(scene.get("motion_direction", "") or "").strip()
+        if not motion_direction:
+            motion_direction = "controlled push-in with a clean contrast cut"
+        if interrupt_strength == "high" and "interrupt" not in motion_direction.lower():
+            motion_direction = motion_direction.rstrip(". ") + "; add a fast pattern interrupt before the beat lands."
+        elif is_payoff and "payoff" not in motion_direction.lower():
+            motion_direction = motion_direction.rstrip(". ") + "; hold the payoff slightly longer so the final point lands."
+
+        sfx_direction = str(scene.get("sfx_direction", "") or "").strip()
+        if not sfx_direction:
+            sfx_direction = "tight cinematic accent"
+        if interrupt_strength == "high" and "interrupt" not in sfx_direction.lower():
+            sfx_direction = sfx_direction.rstrip(". ") + "; sharper interrupt accent and stronger whoosh timing."
+        elif is_payoff and "resolve" not in sfx_direction.lower():
+            sfx_direction = sfx_direction.rstrip(". ") + "; add a cleaner payoff resolve under the final phrase."
+
+        engagement_purpose = str(scene.get("engagement_purpose", "") or "").strip()
+        if not engagement_purpose:
+            engagement_purpose = "advance the short with a stronger contrast, reveal, or payoff"
+        if fill_ratio < 0.8 and "keep the viewer locked in" not in engagement_purpose.lower():
+            engagement_purpose = engagement_purpose.rstrip(". ") + ". Keep the viewer locked in with a stronger mid-beat escalation."
+
+        scene["_narration_fill_ratio"] = round(fill_ratio, 2)
+        scene["_execution_intensity"] = execution_intensity
+        scene["_interrupt_strength"] = interrupt_strength
+        scene["_cut_profile"] = cut_profile
+        scene["_payoff_hold_sec"] = round(float(payoff_hold_sec), 2)
+        scene["motion_direction"] = motion_direction
+        scene["sfx_direction"] = sfx_direction
+        scene["engagement_purpose"] = engagement_purpose
+        profiled.append(scene)
+    return profiled
+
+
 def _job_diag_init(job_id: str, mode: str):
     _prune_in_memory_jobs()
     job = jobs.get(job_id)
@@ -15765,6 +15891,7 @@ async def run_generation_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
+        scenes = _apply_short_execution_pacing_profile(scenes, template, voice_speed=voice_speed, pacing_mode=pacing_mode)
         if not scenes:
             raise ValueError("Script generation returned no scenes")
 
@@ -15967,6 +16094,7 @@ async def run_generation_pipeline(
             bgm_track=bgm_track,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            pattern_interrupt_interval_sec=_short_template_pattern_interrupt_interval_sec(template, pacing_mode=pacing_mode),
             voice_gain=float(sound_mix_profile.get("voice_gain", 1.0) or 1.0),
             ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
             sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
@@ -19692,6 +19820,7 @@ async def _run_creative_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
+        scenes = _apply_short_execution_pacing_profile(scenes, template, voice_speed=voice_speed, pacing_mode=pacing_mode)
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
         script_data = session.get("script_data", {})
@@ -19890,6 +20019,7 @@ async def _run_creative_pipeline(
             bgm_track=bgm_track,
             transition_style=_normalize_transition_style(transition_style),
             micro_escalation_mode=micro_escalation_mode,
+            pattern_interrupt_interval_sec=_short_template_pattern_interrupt_interval_sec(template, pacing_mode=pacing_mode),
             voice_gain=float(sound_mix_profile.get("voice_gain", 1.0) or 1.0),
             ambience_gain=float(sound_mix_profile.get("ambience_gain", 0.18) or 0.18),
             sfx_gain=float(sound_mix_profile.get("sfx_gain", 1.0) or 1.0),
