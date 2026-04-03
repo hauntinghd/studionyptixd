@@ -2016,6 +2016,58 @@ def _same_arena_focus_entity(source_bundle: dict, topic: str = "") -> str:
     return fallback
 
 
+def _manga_recap_packaging_rescue_titles(
+    source_title: str,
+    focus: str,
+    series_anchor: str = "",
+    max_items: int = 6,
+) -> list[str]:
+    raw_title = str(source_title or "").strip()
+    anchor = _clean_same_arena_phrase(series_anchor or focus or raw_title, max_words=5)
+    lowered = raw_title.lower()
+    variants: list[str] = []
+
+    if any(token in lowered for token in ["sect", "clan", "blade", "heir", "ruins", "returned", "returns"]):
+        variants.extend([
+            "They Destroyed His Sect. He Came Back Untouchable",
+            "The Last Heir They Tried to Erase",
+            "Betrayed by His Clan, Feared by Everyone",
+            "They Left Him in Ruins. He Returned Deadlier",
+            f"{anchor}: The Return They Never Saw Coming" if anchor else "",
+        ])
+
+    if any(token in lowered for token in ["married", "count", "husband", "wife", "empress", "duke"]):
+        variants.extend([
+            "She Married a Monster in Disguise",
+            "She Tried to Expose Him. He Was Worse Than Expected",
+            "Her Husband Was the Biggest Trap of All",
+            f"{anchor}: The Marriage That Turned Into a Nightmare" if anchor else "",
+        ])
+
+    if any(token in lowered for token in ["punishment", "sentenced", "prison", "hell", "abyss"]):
+        variants.extend([
+            "His Punishment Created a Monster",
+            "They Gave Him the Worst Fate Possible",
+            "The Punishment That Made Him Unstoppable",
+        ])
+
+    if not variants:
+        focus_subject = anchor or "the hero"
+        variants.extend([
+            f"They Betrayed {focus_subject}. Now Everyone Pays",
+            f"{focus_subject.title()} Became the Threat They Feared Most",
+            f"The Return of {focus_subject.title()}",
+        ])
+
+    compact = []
+    for value in variants:
+        title = _clip_text(str(value or "").strip(), 96)
+        if not title:
+            continue
+        compact.append(title)
+    return _dedupe_clip_list(compact, max_items=max_items, max_chars=110)
+
+
 def _same_arena_title_variants(
     source_bundle: dict,
     topic: str = "",
@@ -2031,14 +2083,15 @@ def _same_arena_title_variants(
     pattern, top_number = _source_title_pattern(source_title)
     variants: list[str] = []
     if niche_key == "manga_recap":
+        variants.extend(_manga_recap_packaging_rescue_titles(source_title, focus, series_anchor))
         if series_anchor:
             variants.extend([
-                f"Why {series_anchor} Became the Most Dangerous Force in the Story",
+                f"Why {series_anchor} Became Everyone's Worst Nightmare",
                 f"How {series_anchor} Broke the Entire Power System",
                 f"The Brutal Rise of {series_anchor}",
             ])
         variants.extend([
-            f"Why {focus} Became the Most Dangerous Force in the Story",
+            f"Why {focus} Became Everyone's Worst Nightmare",
             f"How {focus} Broke the Entire Power System",
             f"The Brutal Rise of {focus}",
         ])
@@ -2147,9 +2200,9 @@ def _same_arena_thumbnail_angles(
     series_anchor = _catalyst_extract_series_anchor(str((source_bundle or {}).get("title", "") or ""), topic, subject, niche_key=niche_key)
     if niche_key == "manga_recap":
         angles = [
-            f"{series_anchor or subject} framed like a premium manga/manhwa recap key visual, one dominant character or symbol, cinematic panel energy, strong hierarchy, 16:9",
-            f"{series_anchor or subject} shown at the peak of a power reveal with one clean environment, intense contrast, recap-ready 16:9 packaging",
-            f"One overpowered hero-versus-system composition built around {series_anchor or subject}, premium recap thumbnail, clear focal hierarchy, 16:9",
+            f"{series_anchor or subject} as one dominant angry protagonist close-up, betrayal cue or ruined clan in the background, premium manga/manhwa recap thumbnail, strong hierarchy, 16:9",
+            f"{series_anchor or subject} at the peak of a revenge or power reveal, one clear enemy threat, intense contrast, one obvious focal face, recap-ready 16:9 packaging",
+            f"One overpowered hero-versus-system composition built around {series_anchor or subject}, clean betrayal stakes, bold emotion, premium recap thumbnail, clear focal hierarchy, 16:9",
         ]
     elif niche_key == "day_trading":
         angles = [
@@ -2246,6 +2299,13 @@ def _longform_build_publish_package_candidates(
     archetype_memory_summary = _clip_text(str(channel_memory.get("archetype_memory_summary", "") or "").strip(), 240)
     promoted_archetype_keywords = [str(v).strip() for v in list(best_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
     demoted_archetype_keywords = [str(v).strip() for v in list(weakest_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
+    package_niche = _catalyst_infer_niche(
+        source_title,
+        package_subject,
+        effective_topic,
+        format_preset=format_preset,
+    )
+    package_niche_key = str(package_niche.get("key", "") or "").strip().lower()
     title_candidates: list[tuple[str, int]] = []
     for candidate in [
         *list(source_analysis.get("title_angles") or []),
@@ -2305,6 +2365,21 @@ def _longform_build_publish_package_candidates(
             keyword_bonus += 8
         novelty = _catalyst_title_novelty_score(value, source_title=source_title, recent_titles=channel_title_memory)
         candidate_score = novelty + keyword_bonus
+        if package_niche_key == "manga_recap":
+            lowered_value = value.lower()
+            title_len = len(value)
+            if title_len <= 72:
+                candidate_score += 8
+            elif title_len >= 90:
+                candidate_score -= 14
+            if " then " in lowered_value or "," in value:
+                candidate_score -= 10
+            if lowered_value.startswith("a ") or lowered_value.startswith("the "):
+                candidate_score -= 2
+            if any(token in lowered_value for token in ["betrayed", "return", "returned", "insane", "monster", "deadliest", "worst", "punishment"]):
+                candidate_score += 6
+            if "| manhwa recap" in lowered_value or "| manga recap" in lowered_value:
+                candidate_score -= 2 if title_len > 78 else 0
         if (weighted_packaging_rewrites or reference_packaging_rewrites) and any(
             token.lower() in value.lower()
             for token in _extract_catalyst_keywords(
@@ -2331,6 +2406,15 @@ def _longform_build_publish_package_candidates(
                 and value not in title_variants
             ):
                 title_variants.append(value)
+    if package_niche_key == "manga_recap":
+        title_variants = _dedupe_preserve_order(
+            [
+                *_manga_recap_packaging_rescue_titles(source_title, effective_topic or package_subject, series_anchor, max_items=4),
+                *title_variants,
+            ],
+            max_items=6,
+            max_chars=120,
+        )
 
     description_variants: list[str] = []
     for candidate in [
