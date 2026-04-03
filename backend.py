@@ -12131,6 +12131,19 @@ async def generate_scene_image(
                             log.warning(f"Skeleton repair pass {salvage_idx + 1}/1 failed: {salvage_err}")
                 if not winner_result["qa_ok"]:
                     if template == "skeleton":
+                        notes = _interactive_soft_accept_notes(winner_result.get("qa_notes", []) or [])
+                        if not _skeleton_notes_are_severe(notes):
+                            winner_result["qa_notes"] = notes
+                            winner_result["qa_ok"] = False
+                            log.warning(
+                                "Skeleton hosted best-of soft-accepted "
+                                f"(score={winner_result.get('qa_score', 0.0):.2f}, notes={winner_result.get('qa_notes', [])})"
+                            )
+                            for cand in candidates:
+                                p = Path(str(cand.get("path", "") or ""))
+                                if p.exists() and p.resolve() != Path(output_path).resolve():
+                                    p.unlink(missing_ok=True)
+                            return winner_result
                         raise RuntimeError(
                             "Skeleton best-of candidates failed QA gate "
                             f"(score={winner_result.get('qa_score', 0.0)}, notes={winner_result.get('qa_notes', [])})"
@@ -12238,12 +12251,11 @@ async def generate_scene_image(
                     except Exception as salvage_err:
                         log.warning(f"Skeleton single-pass repair {salvage_idx + 1}/1 failed: {salvage_err}")
             if template == "skeleton" and not bool(result.get("qa_ok", False)):
-                if interactive_fast:
-                    notes = _interactive_soft_accept_notes(result.get("qa_notes", []) or [])
-                    if not _skeleton_notes_are_severe(notes):
-                        result["qa_notes"] = notes
-                        result["qa_ok"] = False
-                        return result
+                notes = _interactive_soft_accept_notes(result.get("qa_notes", []) or [])
+                if not _skeleton_notes_are_severe(notes):
+                    result["qa_notes"] = notes
+                    result["qa_ok"] = False
+                    return result
                 raise RuntimeError(
                     "Skeleton single-pass generation failed QA gate "
                     f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
@@ -12289,15 +12301,18 @@ async def generate_scene_image(
                     prompt=prompt,
                 )
                 if template == "skeleton" and not qa_gate_ok:
-                    raise RuntimeError(
-                        f"Hosted fallback '{candidate_id}' failed skeleton QA gate "
-                        f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
-                    )
+                    notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
+                    if _skeleton_notes_are_severe(notes):
+                        raise RuntimeError(
+                            f"Hosted fallback '{candidate_id}' failed skeleton QA gate "
+                            f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
+                        )
+                    backup_result["qa_notes"] = notes
                 backup_result["provider"] = candidate_id
                 backup_result["qa_score"] = qa.get("score", 0.0)
                 backup_result["qa_ok"] = bool(qa_gate_ok)
                 backup_result["qa_min_score"] = qa_gate_min
-                backup_result["qa_notes"] = qa.get("notes", [])
+                backup_result["qa_notes"] = backup_result.get("qa_notes", qa.get("notes", []))
                 log.info(f"Hosted fal backup image succeeded via {candidate_id}")
                 return backup_result
             except Exception as backup_err:
