@@ -331,49 +331,71 @@ def _heuristic_catalyst_edit_blueprint(
         ], max_items=5, max_chars=180)
     primary_focus = str(rewrite_pressure.get("primary_focus", "") or "").strip().lower()
     secondary_focus = str(rewrite_pressure.get("secondary_focus", "") or "").strip().lower()
+    preferred_cut_profile = str(memory_view.get("preferred_cut_profile", "") or "").strip().lower()
+    preferred_caption_rhythm = str(memory_view.get("preferred_caption_rhythm", "") or "").strip().lower()
+    preferred_opening_intensity = str(memory_view.get("preferred_opening_intensity", "") or "").strip().lower()
+    preferred_interrupt_strength = str(memory_view.get("preferred_interrupt_strength", "") or "").strip().lower()
+    preferred_sound_density = str(memory_view.get("preferred_sound_density", "") or "").strip().lower()
+    preferred_voice_pacing_bias = str(memory_view.get("preferred_voice_pacing_bias", "") or "").strip().lower()
+    preferred_visual_variation_rule = _clip_text(str(memory_view.get("preferred_visual_variation_rule", "") or ""), 220)
+    preferred_payoff_hold_sec = float(memory_view.get("preferred_payoff_hold_sec", 0.0) or 0.0)
     opening_intensity = "measured"
     if is_recap_lane or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
         opening_intensity = "aggressive"
     if pressure_scores.get("hook", 0) >= 75 or pressure_scores.get("pacing", 0) >= 75:
         opening_intensity = "attack"
+    if preferred_opening_intensity in {"measured", "aggressive", "attack"} and pressure_scores.get("hook", 0) < 85:
+        opening_intensity = preferred_opening_intensity
     interrupt_strength = "medium"
     if pressure_scores.get("pacing", 0) >= 70 or pressure_scores.get("visuals", 0) >= 70 or is_recap_lane:
         interrupt_strength = "high"
+    if preferred_interrupt_strength in {"medium", "high"} and pressure_scores.get("pacing", 0) < 85:
+        interrupt_strength = preferred_interrupt_strength
     payoff_hold_sec = 1.1
     if pressure_scores.get("sound", 0) >= 65 or pressure_scores.get("packaging", 0) >= 65:
         payoff_hold_sec = 1.35
     if is_recap_lane:
         payoff_hold_sec = 0.95
+    if preferred_payoff_hold_sec > 0:
+        payoff_hold_sec = max(0.7, min(1.8, preferred_payoff_hold_sec))
     caption_rhythm = "balanced"
     if opening_intensity in {"aggressive", "attack"} or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
         caption_rhythm = "staccato"
     elif archetype_key in {"systems_documentary", "science_mechanism", "power_history"}:
         caption_rhythm = "measured"
+    if preferred_caption_rhythm in {"balanced", "staccato", "measured"} and pressure_scores.get("hook", 0) < 85:
+        caption_rhythm = preferred_caption_rhythm
     sound_density = "controlled"
     if pressure_scores.get("sound", 0) >= 65 or opening_intensity == "attack":
         sound_density = "punchy"
     if is_recap_lane:
         sound_density = "trailer-heavy"
+    if preferred_sound_density in {"controlled", "punchy", "trailer-heavy"} and pressure_scores.get("sound", 0) < 85:
+        sound_density = preferred_sound_density
     cut_profile = "cinematic"
     if transition_style in {"snap", "crisp"} or opening_intensity in {"aggressive", "attack"}:
         cut_profile = "punch-cut"
     if secondary_focus == "visuals" and cut_profile == "cinematic":
         cut_profile = "contrast-cut"
+    if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85:
+        cut_profile = preferred_cut_profile
     voice_pacing_bias = "steady"
     if pressure_scores.get("hook", 0) >= 70 or pressure_scores.get("pacing", 0) >= 70:
         voice_pacing_bias = "front-loaded"
     elif pressure_scores.get("sound", 0) >= 70:
         voice_pacing_bias = "tension-rise"
-    visual_variation_rule = _clip_text(
-        reference_visual_rewrites[0]
-        if reference_visual_rewrites
-        else (
+    if preferred_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and pressure_scores.get("hook", 0) < 85:
+        voice_pacing_bias = preferred_voice_pacing_bias
+    visual_variation_seed = preferred_visual_variation_rule
+    if not visual_variation_seed and reference_visual_rewrites:
+        visual_variation_seed = str(reference_visual_rewrites[0] or "").strip()
+    if not visual_variation_seed:
+        visual_variation_seed = (
             "Every third beat must reset scale, composition, or symbolism so the viewer cannot settle into one frame grammar."
             if pressure_scores.get("visuals", 0) >= 60
             else "Introduce one visible composition or scale reset every few beats."
-        ),
-        220,
-    )
+        )
+    visual_variation_rule = _clip_text(visual_variation_seed, 220)
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),

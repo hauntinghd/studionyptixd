@@ -58,6 +58,7 @@ def _heuristic_catalyst_learning_record(
     pacing_strategy = dict(edit_blueprint.get("pacing_strategy") or {})
     motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     chapter_count = len(chapters)
     outcome_summary = (
         f"Catalyst built a {session_snapshot.get('format_preset', 'documentary')} follow-up around "
@@ -94,17 +95,23 @@ def _heuristic_catalyst_learning_record(
         "pacing_adjustments": _dedupe_preserve_order([
             _clip_text(str(pacing_strategy.get("escalation_curve", "") or ""), 160),
             *list(pacing_strategy.get("pacing_rules") or [])[:3],
+            _clip_text(f"Cut profile: {str(execution_strategy.get('cut_profile', '') or '').strip()}", 120) if str(execution_strategy.get("cut_profile", "") or "").strip() else "",
+            _clip_text(f"Voice pacing bias: {str(execution_strategy.get('voice_pacing_bias', '') or '').strip()}", 120) if str(execution_strategy.get("voice_pacing_bias", "") or "").strip() else "",
             f"Keep each chapter near {chapter_count} high-signal beats and avoid dead air." if chapter_count else "",
         ], max_items=6, max_chars=180),
         "visual_adjustments": _dedupe_preserve_order([
             *list(motion_strategy.get("visual_rules") or [])[:3],
             *list(motion_strategy.get("camera_language") or [])[:2],
             *list(motion_strategy.get("motion_graphics") or [])[:2],
+            _clip_text(str(execution_strategy.get("visual_variation_rule", "") or ""), 180),
+            _clip_text(f"Caption rhythm: {str(execution_strategy.get('caption_rhythm', '') or '').strip()}", 120) if str(execution_strategy.get("caption_rhythm", "") or "").strip() else "",
         ], max_items=8, max_chars=180),
         "sound_adjustments": _dedupe_preserve_order([
             *list(sound_strategy.get("mix_notes") or [])[:3],
             *list(sound_strategy.get("silence_rules") or [])[:2],
             *list(sound_strategy.get("voice_direction") or [])[:2],
+            _clip_text(f"Sound density: {str(execution_strategy.get('sound_density', '') or '').strip()}", 120) if str(execution_strategy.get("sound_density", "") or "").strip() else "",
+            _clip_text(f"Opening intensity: {str(execution_strategy.get('opening_intensity', '') or '').strip()}", 120) if str(execution_strategy.get("opening_intensity", "") or "").strip() else "",
         ], max_items=8, max_chars=180),
         "packaging_adjustments": _dedupe_preserve_order([
             *packaging_findings[:3],
@@ -121,8 +128,20 @@ def _heuristic_catalyst_learning_record(
             _clip_text(str(hook_strategy.get("promise", "") or ""), 180),
             _clip_text(str(sound_strategy.get("music_profile", "") or ""), 120),
             _clip_text(str(motion_strategy.get("transition_style", "") or ""), 120),
+            _clip_text(str(execution_strategy.get("cut_profile", "") or ""), 120),
+            _clip_text(str(execution_strategy.get("caption_rhythm", "") or ""), 120),
             _clip_text(selected_title, 160),
         ], max_items=8, max_chars=180),
+        "execution_strategy": {
+            "opening_intensity": str(execution_strategy.get("opening_intensity", "") or ""),
+            "interrupt_strength": str(execution_strategy.get("interrupt_strength", "") or ""),
+            "caption_rhythm": str(execution_strategy.get("caption_rhythm", "") or ""),
+            "sound_density": str(execution_strategy.get("sound_density", "") or ""),
+            "cut_profile": str(execution_strategy.get("cut_profile", "") or ""),
+            "voice_pacing_bias": str(execution_strategy.get("voice_pacing_bias", "") or ""),
+            "payoff_hold_sec": round(float(execution_strategy.get("payoff_hold_sec", 0.0) or 0.0), 2),
+            "visual_variation_rule": _clip_text(str(execution_strategy.get("visual_variation_rule", "") or ""), 180),
+        },
         "selected_title": selected_title,
         "selected_description": selected_description,
         "selected_tags": list(package.get("selected_tags") or []),
@@ -149,6 +168,7 @@ def _update_catalyst_channel_memory(
     package = dict(package or session_snapshot.get("package") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
     motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     selected_title = str(learning_record.get("selected_title", "") or package.get("selected_title", "") or "").strip()
     source_title = str(source_video.get("title", "") or "").strip()
     format_preset = str(session_snapshot.get("format_preset", "") or existing.get("format_preset", "") or "documentary")
@@ -215,6 +235,14 @@ def _update_catalyst_channel_memory(
         "preferred_transition_style": str(motion_strategy.get("transition_style", "") or updated.get("preferred_transition_style", "") or ""),
         "preferred_music_profile": str(sound_strategy.get("music_profile", "") or updated.get("preferred_music_profile", "") or ""),
         "preferred_visual_engine": str(edit_blueprint.get("visual_engine", "") or updated.get("preferred_visual_engine", "") or ""),
+        "preferred_cut_profile": str(execution_strategy.get("cut_profile", "") or updated.get("preferred_cut_profile", "") or ""),
+        "preferred_caption_rhythm": str(execution_strategy.get("caption_rhythm", "") or updated.get("preferred_caption_rhythm", "") or ""),
+        "preferred_opening_intensity": str(execution_strategy.get("opening_intensity", "") or updated.get("preferred_opening_intensity", "") or ""),
+        "preferred_interrupt_strength": str(execution_strategy.get("interrupt_strength", "") or updated.get("preferred_interrupt_strength", "") or ""),
+        "preferred_sound_density": str(execution_strategy.get("sound_density", "") or updated.get("preferred_sound_density", "") or ""),
+        "preferred_voice_pacing_bias": str(execution_strategy.get("voice_pacing_bias", "") or updated.get("preferred_voice_pacing_bias", "") or ""),
+        "preferred_payoff_hold_sec": round(float(execution_strategy.get("payoff_hold_sec", updated.get("preferred_payoff_hold_sec", 0.0)) or 0.0), 2),
+        "preferred_visual_variation_rule": _clip_text(str(execution_strategy.get("visual_variation_rule", "") or updated.get("preferred_visual_variation_rule", "") or ""), 180),
         "updated_at": time.time(),
     })
     updated["recent_source_titles"] = _dedupe_preserve_order([source_title, *list(updated.get("recent_source_titles") or [])], max_items=10, max_chars=160)

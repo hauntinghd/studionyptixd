@@ -1334,6 +1334,17 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "series_memory_key": active_series_key,
         "selected_cluster_label": str(data.get("selected_cluster_label", "") or ""),
         "selected_cluster_key": str(data.get("selected_cluster_key", "") or ""),
+        "preferred_transition_style": str(data.get("preferred_transition_style", "") or ""),
+        "preferred_music_profile": str(data.get("preferred_music_profile", "") or ""),
+        "preferred_visual_engine": str(data.get("preferred_visual_engine", "") or ""),
+        "preferred_cut_profile": str(data.get("preferred_cut_profile", "") or ""),
+        "preferred_caption_rhythm": str(data.get("preferred_caption_rhythm", "") or ""),
+        "preferred_opening_intensity": str(data.get("preferred_opening_intensity", "") or ""),
+        "preferred_interrupt_strength": str(data.get("preferred_interrupt_strength", "") or ""),
+        "preferred_sound_density": str(data.get("preferred_sound_density", "") or ""),
+        "preferred_voice_pacing_bias": str(data.get("preferred_voice_pacing_bias", "") or ""),
+        "preferred_payoff_hold_sec": round(float(data.get("preferred_payoff_hold_sec", 0.0) or 0.0), 2),
+        "preferred_visual_variation_rule": _clip_text(str(data.get("preferred_visual_variation_rule", "") or ""), 180),
     }
     ranked_series_memory = _catalyst_rank_series_memory(series_map)
     public["series_rankings"] = ranked_series_memory
