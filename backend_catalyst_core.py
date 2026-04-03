@@ -155,6 +155,22 @@ def _catalyst_archetype_memory_key(archetype_key: str) -> str:
     return normalized or "general"
 
 
+_CATALYST_FAILURE_MODE_LABELS = {
+    "no_distribution": "No Distribution",
+    "packaging_fail": "Packaging Fail",
+    "retention_fail": "Retention Fail",
+    "mixed": "Mixed Signal",
+    "healthy": "Healthy",
+}
+
+
+def _catalyst_failure_mode_label(mode_key: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(mode_key or "").strip().lower()).strip("_")
+    if not normalized:
+        return ""
+    return str(_CATALYST_FAILURE_MODE_LABELS.get(normalized) or normalized.replace("_", " ").title())
+
+
 _CATALYST_KEYWORD_STOPWORDS = {
     "the", "and", "with", "that", "this", "from", "your", "into", "what", "when", "will", "have",
     "about", "their", "them", "they", "over", "more", "than", "just", "make", "made", "make", "video",
@@ -1106,6 +1122,7 @@ def _catalyst_series_memory_score(bucket: dict | None) -> float:
     avp = float(data.get("average_average_percentage_viewed", 0.0) or 0.0)
     first30 = float(data.get("average_first_30_sec_retention_pct", 0.0) or 0.0)
     ref_overall = float(data.get("average_reference_overall_score", 0.0) or 0.0)
+    dominant_failure_mode_key = str(data.get("dominant_failure_mode_key", "") or "").strip().lower()
     hook_watchouts = len([str(v).strip() for v in list(data.get("hook_watchouts") or []) if str(v).strip()])
     retention_watchouts = len([str(v).strip() for v in list(data.get("retention_watchouts") or []) if str(v).strip()])
     packaging_watchouts = len([str(v).strip() for v in list(data.get("packaging_watchouts") or []) if str(v).strip()])
@@ -1120,6 +1137,12 @@ def _catalyst_series_memory_score(bucket: dict | None) -> float:
     score -= min(18.0, hook_watchouts * 3.0)
     score -= min(18.0, retention_watchouts * 3.0)
     score -= min(14.0, packaging_watchouts * 2.5)
+    if dominant_failure_mode_key == "no_distribution":
+        score -= 6.0
+    elif dominant_failure_mode_key == "packaging_fail":
+        score -= 8.0
+    elif dominant_failure_mode_key == "retention_fail":
+        score -= 10.0
     return round(max(0.0, score), 2)
 
 
@@ -1164,6 +1187,8 @@ def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
         label = str(bucket.get("series_anchor", "") or "").strip()
         if not label:
             continue
+        failure_mode_rankings = _catalyst_rank_weighted_choices(bucket.get("failure_mode_counts_map") or {}, {}, max_items=3, max_chars=32)
+        dominant_failure_mode_key = str((failure_mode_rankings[0] or {}).get("value", "") or bucket.get("last_failure_mode_key", "") or "").strip()
         hook_wins = _catalyst_merge_signal_lists(_catalyst_weighted_signal_items(bucket.get("hook_wins_map") or {}, max_items=6), list(bucket.get("hook_learnings") or [])[:4], max_items=10, max_chars=180)
         packaging_wins = _catalyst_merge_signal_lists(_catalyst_weighted_signal_items(bucket.get("packaging_wins_map") or {}, max_items=6), list(bucket.get("packaging_learnings") or [])[:4], max_items=10, max_chars=180)
         retention_watchouts = _catalyst_weighted_signal_items(bucket.get("retention_watchouts_map") or {}, max_items=6)
@@ -1179,6 +1204,7 @@ def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
                 "retention_watchouts": retention_watchouts,
                 "packaging_watchouts": _catalyst_weighted_signal_items(bucket.get("packaging_watchouts_map") or {}, max_items=6),
                 "hook_watchouts": _catalyst_weighted_signal_items(bucket.get("hook_watchouts_map") or {}, max_items=6),
+                "dominant_failure_mode_key": dominant_failure_mode_key,
             }
         )
         row = {
@@ -1197,6 +1223,8 @@ def _catalyst_rank_series_memory(series_map: dict | None) -> list[dict]:
             "next_video_moves": _dedupe_preserve_order(list(bucket.get("next_video_moves") or []), max_items=6, max_chars=180),
             "packaging_wins": _dedupe_preserve_order(packaging_wins, max_items=4, max_chars=180),
             "retention_watchouts": _dedupe_preserve_order(retention_watchouts, max_items=4, max_chars=180),
+            "dominant_failure_mode_key": dominant_failure_mode_key,
+            "dominant_failure_mode_label": _catalyst_failure_mode_label(dominant_failure_mode_key),
             "memory_score": memory_score,
         }
         ranked.append(row)
@@ -1220,6 +1248,8 @@ def _catalyst_rank_archetype_memory(archetype_map: dict | None) -> list[dict]:
         archetype_label = str(bucket.get("archetype_label", "") or archetype_key or "").strip()
         if not archetype_key and not archetype_label:
             continue
+        failure_mode_rankings = _catalyst_rank_weighted_choices(bucket.get("failure_mode_counts_map") or {}, {}, max_items=3, max_chars=32)
+        dominant_failure_mode_key = str((failure_mode_rankings[0] or {}).get("value", "") or bucket.get("last_failure_mode_key", "") or "").strip()
         hook_wins = _catalyst_merge_signal_lists(
             _catalyst_weighted_signal_items(bucket.get("hook_wins_map") or {}, max_items=6),
             list(bucket.get("hook_learnings") or [])[:4],
@@ -1245,6 +1275,7 @@ def _catalyst_rank_archetype_memory(archetype_map: dict | None) -> list[dict]:
                 "retention_watchouts": retention_watchouts,
                 "packaging_watchouts": _catalyst_weighted_signal_items(bucket.get("packaging_watchouts_map") or {}, max_items=6),
                 "hook_watchouts": _catalyst_weighted_signal_items(bucket.get("hook_watchouts_map") or {}, max_items=6),
+                "dominant_failure_mode_key": dominant_failure_mode_key,
             }
         )
         ranked.append(
@@ -1262,6 +1293,8 @@ def _catalyst_rank_archetype_memory(archetype_map: dict | None) -> list[dict]:
                 "proven_keywords": _dedupe_preserve_order(list(bucket.get("proven_keywords") or []), max_items=8, max_chars=60),
                 "series_anchors": _dedupe_preserve_order(list(bucket.get("series_anchors") or []), max_items=6, max_chars=80),
                 "next_video_moves": _dedupe_preserve_order(list(bucket.get("next_video_moves") or []), max_items=6, max_chars=180),
+                "dominant_failure_mode_key": dominant_failure_mode_key,
+                "dominant_failure_mode_label": _catalyst_failure_mode_label(dominant_failure_mode_key),
                 "memory_score": memory_score,
             }
         )
@@ -1497,6 +1530,15 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
     voice_pacing_rankings = _catalyst_rank_weighted_choices(data.get("voice_pacing_bias_wins_map") or {}, data.get("voice_pacing_bias_watchouts_map") or {}, max_items=4, max_chars=60)
     visual_variation_rankings = _catalyst_rank_weighted_choices(data.get("visual_variation_rule_wins_map") or {}, data.get("visual_variation_rule_watchouts_map") or {}, max_items=4, max_chars=120)
     execution_profile_rankings = _catalyst_rank_weighted_choices(data.get("execution_profile_wins_map") or {}, data.get("execution_profile_watchouts_map") or {}, max_items=4, max_chars=140)
+    failure_mode_rankings = [
+        {
+            **dict(row or {}),
+            "label": _catalyst_failure_mode_label(str((row or {}).get("value", "") or "")),
+        }
+        for row in _catalyst_rank_weighted_choices(data.get("failure_mode_counts_map") or {}, {}, max_items=5, max_chars=32)
+    ]
+    dominant_failure_mode_key = str((failure_mode_rankings[0] or {}).get("value", "") or data.get("last_failure_mode_key", "") or "").strip()
+    dominant_failure_mode_label = _catalyst_failure_mode_label(dominant_failure_mode_key)
     public = {
         "channel_id": str(data.get("channel_id", "") or ""),
         "series_anchor": str(data.get("series_anchor", "") or ""),
@@ -1564,6 +1606,12 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "reference_packaging_rewrites": list(data.get("reference_packaging_rewrites") or []),
         "reference_next_video_moves": list(data.get("reference_next_video_moves") or []),
         "last_outcome_summary": _clip_text(str(data.get("last_outcome_summary", "") or ""), 220),
+        "last_failure_mode_key": str(data.get("last_failure_mode_key", "") or ""),
+        "last_failure_mode_label": _catalyst_failure_mode_label(str(data.get("last_failure_mode_key", "") or "")),
+        "last_failure_mode_summary": _clip_text(str(data.get("last_failure_mode_summary", "") or ""), 220),
+        "dominant_failure_mode_key": dominant_failure_mode_key,
+        "dominant_failure_mode_label": dominant_failure_mode_label,
+        "failure_mode_rankings": failure_mode_rankings,
         "series_catalog": series_catalog,
         "series_memory_key": active_series_key,
         "selected_cluster_label": str(data.get("selected_cluster_label", "") or ""),
@@ -1620,6 +1668,9 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
                     if str(weak_row.get("series_anchor", "") or "").strip()
                     and str(weak_row.get("series_anchor", "") or "").strip() != str(best_row.get("series_anchor", "") or "").strip()
                     else "",
+                    f"Promoted arc's dominant failure mode is {str(best_row.get('dominant_failure_mode_label', '') or '').strip()}."
+                    if str(best_row.get("dominant_failure_mode_label", "") or "").strip()
+                    else "",
                 ]
                 if part
             ),
@@ -1665,6 +1716,9 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
                     if str(weak_arch.get("archetype_label", "") or weak_arch.get("archetype_key", "") or "").strip()
                     and str(weak_arch.get("archetype_key", "") or "").strip() != str(best_arch.get("archetype_key", "") or "").strip()
                     else "",
+                    f"Promoted archetype's dominant failure mode is {str(best_arch.get('dominant_failure_mode_label', '') or '').strip()}."
+                    if str(best_arch.get("dominant_failure_mode_label", "") or "").strip()
+                    else "",
                 ]
                 if part
             ),
@@ -1672,6 +1726,19 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         )
     else:
         public["archetype_memory_summary"] = ""
+    public["failure_mode_summary"] = _clip_text(
+        " ".join(
+            part
+            for part in [
+                f"Dominant measured failure mode is {dominant_failure_mode_label}."
+                if dominant_failure_mode_label
+                else "",
+                str(data.get("last_failure_mode_summary", "") or "").strip(),
+            ]
+            if part
+        ),
+        280,
+    )
     execution_playbook = _build_catalyst_execution_playbook(public)
     public["execution_playbook"] = execution_playbook
     public["execution_playbook_summary"] = _clip_text(str(execution_playbook.get("summary", "") or ""), 320)
@@ -1810,6 +1877,10 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     weakest_caption_rhythm = str(weakest_execution_choices.get("caption_rhythm", "") or "").strip().lower()
     strongest_sound_density = str(strongest_execution_choices.get("sound_density", "") or "").strip().lower()
     weakest_sound_density = str(weakest_execution_choices.get("sound_density", "") or "").strip().lower()
+    dominant_failure_mode_key = str(public.get("dominant_failure_mode_key", "") or "").strip().lower()
+    dominant_failure_mode_label = str(public.get("dominant_failure_mode_label", "") or "").strip()
+    last_failure_mode_key = str(public.get("last_failure_mode_key", "") or "").strip().lower()
+    last_failure_mode_label = str(public.get("last_failure_mode_label", "") or "").strip()
     hook_pressure = 12.0 + max(0.0, (62.0 - avg_first30) * 1.2) + max(0.0, (76.0 - avg_hook) * 0.55) + (len(hook_watchouts) * 7.0) + (min(2, len(retention_watchouts)) * 4.0) - (len(hook_wins) * 4.0)
     pacing_pressure = 10.0 + max(0.0, (42.0 - avg_avp) * 1.1) + max(0.0, (52.0 - avg_first60) * 0.8) + max(0.0, (76.0 - avg_pacing) * 0.5) + (len(pacing_watchouts) * 7.0) - (len(pacing_wins) * 4.0)
     visual_pressure = 9.0 + max(0.0, (78.0 - avg_visual) * 0.55) + (len(visual_watchouts) * 7.0) - (len(visual_wins) * 4.0)
@@ -1880,6 +1951,45 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
     elif archetype_key == "science_mechanism":
         visual_pressure += 2.0
         sound_pressure += 1.0
+    failure_mode_moves: list[str] = []
+    dominant_failure_mode = dominant_failure_mode_key or last_failure_mode_key
+    if dominant_failure_mode == "no_distribution":
+        packaging_pressure += 18.0
+        hook_pressure += 10.0
+        pacing_pressure = max(8.0, pacing_pressure - 8.0)
+        sound_pressure = max(8.0, sound_pressure - 5.0)
+        visual_pressure = max(8.0, visual_pressure - 3.0)
+        failure_mode_moves.extend(
+            [
+                f"Current failure mode is {dominant_failure_mode_label or last_failure_mode_label or 'No Distribution'}, so do not blame pacing or sound before fixing distribution and packaging.",
+                "Treat this as a reach problem first: stronger title novelty, cleaner thumbnail promise, and a more immediate first-impression hook.",
+            ]
+        )
+    elif dominant_failure_mode == "packaging_fail":
+        packaging_pressure += 12.0
+        hook_pressure += 6.0
+        pacing_pressure = max(8.0, pacing_pressure - 3.0)
+        failure_mode_moves.extend(
+            [
+                f"Current failure mode is {dominant_failure_mode_label or last_failure_mode_label or 'Packaging Fail'}, so the next run should fix click appeal before overhauling the middle of the edit.",
+                "Push a cleaner curiosity gap and a more visually obvious payoff into the title and thumbnail.",
+            ]
+        )
+    elif dominant_failure_mode == "retention_fail":
+        pacing_pressure += 10.0
+        hook_pressure += 7.0
+        sound_pressure += 4.0
+        visual_pressure += 3.0
+        failure_mode_moves.extend(
+            [
+                f"Current failure mode is {dominant_failure_mode_label or last_failure_mode_label or 'Retention Fail'}, so the next run should fix early payoff, pacing, and beat density.",
+                "Assume viewers clicked but did not stay, so remove dead-air and escalate faster.",
+            ]
+        )
+    elif dominant_failure_mode == "healthy":
+        packaging_pressure += 2.0
+        hook_pressure += 2.0
+        failure_mode_moves.append("The current lane is healthy enough to preserve the arena and push freshness harder than structural rewrites.")
     categories = [
         {"key": "hook", "label": "Hook", "score": max(8, min(100, int(round(hook_pressure)))), "wins": hook_wins[:3], "watchouts": hook_watchouts[:3], "rewrites": reference_hook_rewrites[:3]},
         {"key": "pacing", "label": "Pacing", "score": max(8, min(100, int(round(pacing_pressure)))), "wins": pacing_wins[:3], "watchouts": pacing_watchouts[:3], "rewrites": reference_pacing_rewrites[:3]},
@@ -1913,6 +2023,7 @@ def _catalyst_rewrite_pressure_profile(memory_public: dict | None) -> dict:
         arc_moves.append(execution_playbook_moves[0])
     priorities = _dedupe_preserve_order(
         [
+            *failure_mode_moves,
             *arc_moves,
             archetype_hook_rule,
             archetype_pace_rule,

@@ -159,6 +159,9 @@ class CatalystOutcomeIngestRequest(BaseModel):
     thumbnail_prompt: str = ""
     thumbnail_url: str = ""
     tags: list[str] = []
+    failure_mode_key: str = ""
+    failure_mode_label: str = ""
+    failure_mode_summary: str = ""
     views: int = 0
     impressions: int = 0
     likes: int = 0

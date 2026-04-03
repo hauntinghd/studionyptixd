@@ -7,6 +7,7 @@ from backend_catalyst_core import (
     _catalyst_archetype_memory_key,
     _catalyst_channel_memory_public_view,
     _catalyst_extract_series_anchor,
+    _catalyst_failure_mode_label,
     _catalyst_infer_archetype,
     _catalyst_infer_niche,
     _catalyst_outcome_weight,
@@ -16,6 +17,41 @@ from backend_catalyst_core import (
     _extract_catalyst_keywords,
 )
 from backend_models import CatalystOutcomeIngestRequest
+
+
+def _catalyst_classify_outcome_failure_mode(metrics: dict | None) -> dict:
+    payload = dict(metrics or {})
+    views = int(payload.get("views", 0) or 0)
+    impressions = int(payload.get("impressions", 0) or 0)
+    ctr = float(payload.get("impression_click_through_rate", 0.0) or 0.0)
+    avd = float(payload.get("average_view_duration_sec", 0.0) or 0.0)
+    avp = float(payload.get("average_percentage_viewed", 0.0) or 0.0)
+    first30 = float(payload.get("first_30_sec_retention_pct", 0.0) or 0.0)
+    first60 = float(payload.get("first_60_sec_retention_pct", 0.0) or 0.0)
+    has_retention_signal = any(metric > 0 for metric in (avd, avp, first30, first60))
+    has_distribution_signal = impressions >= 80 or views >= 20
+    key = "mixed"
+    summary = "The run has mixed outcome signals, so Catalyst should adjust both package and execution without overfitting to one metric."
+    if impressions <= 40 and views <= 5 and not has_retention_signal:
+        key = "no_distribution"
+        summary = "This upload barely received distribution, so there is not enough viewer-behavior signal yet to blame pacing, sound, or scene execution."
+    elif has_distribution_signal and 0 < ctr < 3.0 and (not has_retention_signal or avp >= 35.0 or first30 >= 55.0):
+        key = "packaging_fail"
+        summary = "The video was shown to people, but the package underperformed. Catalyst should treat title, thumbnail, and first-impression promise as the main bottleneck."
+    elif (views >= 20 or has_retention_signal) and ((0 < avp < 40.0) or (0 < first30 < 58.0) or (0 < first60 < 48.0)):
+        key = "retention_fail"
+        summary = "The video earned enough clicks to judge viewer behavior, and the main bottleneck is retention. Catalyst should tighten hook payoff, pacing, and execution."
+    elif (ctr >= 4.0 or views >= 100) and (avp >= 42.0 or first30 >= 62.0):
+        key = "healthy"
+        summary = "The package and early retention are healthy enough that Catalyst should preserve the lane and push freshness harder than structural rewrites."
+    return {
+        "key": key,
+        "label": _catalyst_failure_mode_label(key),
+        "summary": summary,
+        "has_distribution_signal": has_distribution_signal,
+        "has_retention_signal": has_retention_signal,
+        "enough_viewer_signal": has_distribution_signal or has_retention_signal,
+    }
 
 def _heuristic_catalyst_learning_record(
     *,
@@ -512,68 +548,80 @@ def _build_auto_outcome_request(
     preview_success = float((dict(session_snapshot.get("learning_record") or {})).get("preview_success_rate", 0.0) or 0.0)
     target_duration_sec = max(float(video_meta.get("duration_sec", 0.0) or 0.0), float(session_snapshot.get("target_minutes", 0.0) or 0.0) * 60.0)
     avd_ratio = round((avd / max(target_duration_sec, 1.0)) * 100.0, 2) if target_duration_sec > 0 else 0.0
+    failure_mode = _catalyst_classify_outcome_failure_mode(metrics)
+    failure_mode_key = str(failure_mode.get("key", "") or "")
+    failure_mode_label = str(failure_mode.get("label", "") or "")
+    failure_mode_summary = _clip_text(str(failure_mode.get("summary", "") or ""), 220)
+    enough_viewer_signal = bool(failure_mode.get("enough_viewer_signal"))
 
     strongest_signals = _dedupe_preserve_order([
+        "This run has enough measured viewer signal to learn from." if enough_viewer_signal else "",
         f"CTR around {ctr:.2f}% is showing the package is earning clicks." if ctr >= 4.0 else "",
         f"Average viewed around {avp:.2f}% suggests the pacing is holding attention." if avp >= 42.0 else "",
         f"First 30 second retention around {first30:.2f}% shows the hook is landing." if first30 >= 62.0 else "",
         f"Views have reached roughly {int(metrics['views']):,}, so this run has enough signal to learn from." if int(metrics["views"]) >= 300 else "",
     ], max_items=8, max_chars=180)
     weak_points = _dedupe_preserve_order([
+        failure_mode_summary,
         f"CTR around {ctr:.2f}% is soft, so the title/thumbnail package needs a stronger curiosity gap." if 0 < ctr < 4.0 else "",
-        f"Average viewed around {avp:.2f}% suggests the pacing still loses too many viewers." if 0 < avp < 42.0 else "",
-        f"First 30 second retention around {first30:.2f}% suggests the hook needs a faster payoff." if 0 < first30 < 62.0 else "",
+        f"Average viewed around {avp:.2f}% suggests the pacing still loses too many viewers." if enough_viewer_signal and 0 < avp < 42.0 else "",
+        f"First 30 second retention around {first30:.2f}% suggests the hook needs a faster payoff." if enough_viewer_signal and 0 < first30 < 62.0 else "",
         f"Title novelty score is only {title_novelty}/100, so the headline is still too close to prior phrasing." if title_novelty < 75 else "",
     ], max_items=8, max_chars=180)
     hook_wins = _dedupe_preserve_order([
-        "The opening promise is working; keep starting on the consequence or hidden mechanism." if first30 >= 62.0 else "",
-        "The hook is converting because the title promise gets paid off quickly." if first60 >= 52.0 else "",
+        "The opening promise is working; keep starting on the consequence or hidden mechanism." if enough_viewer_signal and first30 >= 62.0 else "",
+        "The hook is converting because the title promise gets paid off quickly." if enough_viewer_signal and first60 >= 52.0 else "",
     ], max_items=6, max_chars=180)
     hook_watchouts = _dedupe_preserve_order([
-        "Shorten the setup and show the concrete payoff earlier in the first 15 to 30 seconds." if 0 < first30 < 62.0 else "",
-        "The hook still needs a harder first-minute escalation." if 0 < first60 < 52.0 else "",
+        "Lead with a sharper contradiction, reveal, or payoff promise in the title, thumbnail, and first 10 seconds." if failure_mode_key in {"no_distribution", "packaging_fail"} else "",
+        "Shorten the setup and show the concrete payoff earlier in the first 15 to 30 seconds." if enough_viewer_signal and 0 < first30 < 62.0 else "",
+        "The hook still needs a harder first-minute escalation." if enough_viewer_signal and 0 < first60 < 52.0 else "",
     ], max_items=6, max_chars=180)
     pacing_wins = _dedupe_preserve_order([
-        "The pacing is holding viewers well enough to keep the same escalation pattern." if avp >= 42.0 else "",
-        "Average view duration suggests the chapter rhythm is working." if avd_ratio >= 35.0 else "",
+        "The pacing is holding viewers well enough to keep the same escalation pattern." if enough_viewer_signal and avp >= 42.0 else "",
+        "Average view duration suggests the chapter rhythm is working." if enough_viewer_signal and avd_ratio >= 35.0 else "",
     ], max_items=6, max_chars=180)
     pacing_watchouts = _dedupe_preserve_order([
-        "Cut dead-air explanation blocks and force a reveal, contrast, or payoff beat every 10 to 15 seconds." if 0 < avp < 42.0 else "",
-        "Compress mid-section explanation and escalate consequences sooner." if 0 < avd_ratio < 35.0 else "",
+        "Cut dead-air explanation blocks and force a reveal, contrast, or payoff beat every 10 to 15 seconds." if failure_mode_key == "retention_fail" and 0 < avp < 42.0 else "",
+        "Compress mid-section explanation and escalate consequences sooner." if failure_mode_key == "retention_fail" and 0 < avd_ratio < 35.0 else "",
     ], max_items=6, max_chars=180)
     visual_wins = _dedupe_preserve_order([
         "The visual grammar is supporting retention; keep the same premium 3D documentary direction." if avp >= 42.0 and preview_success >= 80.0 else "",
         "Scene coverage is strong enough to keep the same proof-style visual system." if preview_success >= 90.0 else "",
     ], max_items=6, max_chars=180)
     visual_watchouts = _dedupe_preserve_order([
-        "Increase visual variety and replace repeated hero-object framing with system cutaways or human-versus-system beats." if 0 < avp < 42.0 else "",
+        "Increase visual variety and replace repeated hero-object framing with system cutaways or human-versus-system beats." if failure_mode_key == "retention_fail" and 0 < avp < 42.0 else "",
         "Scene-preview reliability needs to stay higher so no proof beat drops out." if 0 < preview_success < 90.0 else "",
     ], max_items=6, max_chars=180)
     sound_wins = _dedupe_preserve_order([
-        "Sound design is supporting retention; keep using reveals as the moments for impact punctuation." if first60 >= 52.0 else "",
-        "The narration rhythm is holding through the early beats." if avp >= 42.0 else "",
+        "Sound design is supporting retention; keep using reveals as the moments for impact punctuation." if enough_viewer_signal and first60 >= 52.0 else "",
+        "The narration rhythm is holding through the early beats." if enough_viewer_signal and avp >= 42.0 else "",
     ], max_items=6, max_chars=180)
     sound_watchouts = _dedupe_preserve_order([
-        "Use more deliberate impact punctuation and silence pockets around the main reveals." if 0 < first60 < 52.0 else "",
-        "The sound bed is probably too flat or too constant for the reveal cadence." if 0 < avp < 40.0 else "",
+        "Use more deliberate impact punctuation and silence pockets around the main reveals." if failure_mode_key == "retention_fail" and 0 < first60 < 52.0 else "",
+        "The sound bed is probably too flat or too constant for the reveal cadence." if failure_mode_key == "retention_fail" and 0 < avp < 40.0 else "",
     ], max_items=6, max_chars=180)
     packaging_wins = _dedupe_preserve_order([
         "The package is working; keep the same arena while changing the angle." if ctr >= 4.0 else "",
         "The title is distinct enough from prior winners to preserve freshness." if title_novelty >= 80 else "",
     ], max_items=6, max_chars=180)
     packaging_watchouts = _dedupe_preserve_order([
+        "This upload did not get enough real distribution. Rework the title, thumbnail, and first-impression promise before blaming the edit itself." if failure_mode_key == "no_distribution" else "",
         "Generate a genuinely new headline in the same arena instead of staying too close to prior titles." if title_novelty < 80 else "",
-        "Push one stronger hidden mechanism, conflict, or payoff into the title and thumbnail." if 0 < ctr < 4.0 else "",
+        "Push one stronger hidden mechanism, conflict, or payoff into the title and thumbnail." if failure_mode_key in {"no_distribution", "packaging_fail"} or 0 < ctr < 4.0 else "",
     ], max_items=6, max_chars=180)
     retention_wins = _dedupe_preserve_order([
-        "Viewer retention is strong enough to keep the same chapter escalation grammar." if avp >= 42.0 else "",
-        "The first 30 seconds are holding; preserve the fast payoff structure." if first30 >= 62.0 else "",
+        "Viewer retention is strong enough to keep the same chapter escalation grammar." if enough_viewer_signal and avp >= 42.0 else "",
+        "The first 30 seconds are holding; preserve the fast payoff structure." if enough_viewer_signal and first30 >= 62.0 else "",
     ], max_items=6, max_chars=180)
     retention_watchouts = _dedupe_preserve_order([
-        "The intro still needs a tighter promise and faster proof." if 0 < first30 < 62.0 else "",
-        "Retention is the bottleneck; every next run should remove dead-air explanation and repeat less." if 0 < avp < 42.0 else "",
+        "The intro still needs a tighter promise and faster proof." if failure_mode_key == "retention_fail" and 0 < first30 < 62.0 else "",
+        "Retention is the bottleneck; every next run should remove dead-air explanation and repeat less." if failure_mode_key == "retention_fail" and 0 < avp < 42.0 else "",
     ], max_items=6, max_chars=180)
     next_video_moves = _dedupe_preserve_order([
+        "Fix the package first: create a cleaner curiosity gap and more obvious thumbnail promise before rewriting the body." if failure_mode_key == "no_distribution" else "",
+        "Stay in the same arena, but make the next title feel adjacent and more clickable instead of repeating the same headline structure." if failure_mode_key == "packaging_fail" else "",
+        "Keep the package arena but tighten early payoff, pacing, and beat density because viewers clicked but did not stay." if failure_mode_key == "retention_fail" else "",
         *list(channel_memory.get("reference_next_video_moves") or [])[:3],
         *packaging_watchouts[:2],
         *hook_watchouts[:1],
@@ -581,13 +629,15 @@ def _build_auto_outcome_request(
         "Stay in the same arena, but shift the angle so the next headline feels adjacent and genuinely new.",
     ], max_items=8, max_chars=180)
     operator_summary = _clip_text(
-        f"Auto-harvested outcome for {title_used or 'this video'}. "
-        + (f"CTR {ctr:.2f}%. " if ctr > 0 else "")
-        + (f"Average viewed {avp:.2f}%. " if avp > 0 else "")
-        + (f"First 30 seconds {first30:.2f}%. " if first30 > 0 else "")
-        + ("Main issue: the package needs a stronger curiosity gap. " if 0 < ctr < 4.0 else "")
-        + ("Main issue: the hook or pacing still loses viewers too early. " if (0 < first30 < 62.0 or 0 < avp < 42.0) else "")
-        + ("Next move: " + next_video_moves[0] + ".") if next_video_moves else "",
+        (
+            f"Auto-harvested outcome for {title_used or 'this video'}. "
+            + f"Failure mode: {failure_mode_label}. "
+            + (f"CTR {ctr:.2f}%. " if ctr > 0 else "")
+            + (f"Average viewed {avp:.2f}%. " if avp > 0 else "")
+            + (f"First 30 seconds {first30:.2f}%. " if first30 > 0 else "")
+            + failure_mode_summary
+            + (" Next move: " + next_video_moves[0] + "." if next_video_moves else "")
+        ),
         320,
     )
     return CatalystOutcomeIngestRequest(
@@ -598,6 +648,9 @@ def _build_auto_outcome_request(
         thumbnail_prompt=str(package.get("thumbnail_prompt", "") or ""),
         thumbnail_url=str(video_meta.get("thumbnail_url", "") or package.get("thumbnail_url", "") or ""),
         tags=[str(v).strip() for v in list(video_meta.get("tags") or package.get("selected_tags") or []) if str(v).strip()],
+        failure_mode_key=failure_mode_key,
+        failure_mode_label=failure_mode_label,
+        failure_mode_summary=failure_mode_summary,
         views=int(metrics["views"]),
         impressions=int(metrics["impressions"]),
         likes=int(metrics["likes"]),
@@ -1146,6 +1199,10 @@ def _build_catalyst_outcome_record(
         "first_30_sec_retention_pct": round(float(outcome_req.first_30_sec_retention_pct or 0.0), 2),
         "first_60_sec_retention_pct": round(float(outcome_req.first_60_sec_retention_pct or 0.0), 2),
     }
+    failure_mode = _catalyst_classify_outcome_failure_mode(metrics)
+    failure_mode_key = str(outcome_req.failure_mode_key or failure_mode.get("key", "") or "").strip()
+    failure_mode_label = str(outcome_req.failure_mode_label or _catalyst_failure_mode_label(failure_mode_key) or "").strip()
+    failure_mode_summary = _clip_text(str(outcome_req.failure_mode_summary or failure_mode.get("summary", "") or "").strip(), 220)
     weight = _catalyst_outcome_weight(metrics)
     execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     strongest_signals = _dedupe_preserve_order([
@@ -1184,6 +1241,9 @@ def _build_catalyst_outcome_record(
         "thumbnail_url": str(outcome_req.thumbnail_url or package.get("thumbnail_url", "") or "").strip(),
         "tags": selected_tags,
         "weight": weight,
+        "failure_mode_key": failure_mode_key,
+        "failure_mode_label": failure_mode_label,
+        "failure_mode_summary": failure_mode_summary,
         "metrics": metrics,
         "operator_summary": operator_summary,
         "strongest_signals": strongest_signals,
@@ -1258,6 +1318,9 @@ def _apply_catalyst_outcome_to_channel_memory(
     updated["last_session_id"] = str(session_snapshot.get("session_id", "") or updated.get("last_session_id", "") or "")
     updated["updated_at"] = time.time()
     updated["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+    updated["last_failure_mode_key"] = str(outcome_record.get("failure_mode_key", "") or "")
+    updated["last_failure_mode_label"] = str(outcome_record.get("failure_mode_label", "") or "")
+    updated["last_failure_mode_summary"] = _clip_text(str(outcome_record.get("failure_mode_summary", "") or ""), 220)
     updated["recent_selected_titles"] = _dedupe_preserve_order(
         [str(outcome_record.get("title_used", "") or "").strip(), *list(updated.get("recent_selected_titles") or [])],
         max_items=10,
@@ -1307,6 +1370,7 @@ def _apply_catalyst_outcome_to_channel_memory(
     ], max_items=8, max_chars=80)
     updated["reference_tier"] = str(reference_comparison.get("tier", "") or updated.get("reference_tier", "") or "")
     updated["last_reference_summary"] = _clip_text(str(reference_comparison.get("reference_summary", "") or updated.get("last_reference_summary", "") or ""), 360)
+    _catalyst_update_weighted_signals(updated, "failure_mode_counts_map", [str(outcome_record.get("failure_mode_key", "") or "").strip()], weight)
     _catalyst_update_weighted_signals(updated, "hook_wins_map", list(outcome_record.get("hook_wins") or []), weight)
     _catalyst_update_weighted_signals(updated, "hook_watchouts_map", list(outcome_record.get("hook_watchouts") or []), weight)
     _catalyst_update_weighted_signals(updated, "pacing_wins_map", list(outcome_record.get("pacing_wins") or []), weight)
@@ -1419,6 +1483,9 @@ def _apply_catalyst_outcome_to_channel_memory(
         series_bucket["last_session_id"] = str(session_snapshot.get("session_id", "") or "")
         series_bucket["updated_at"] = time.time()
         series_bucket["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+        series_bucket["last_failure_mode_key"] = str(outcome_record.get("failure_mode_key", "") or "")
+        series_bucket["last_failure_mode_label"] = str(outcome_record.get("failure_mode_label", "") or "")
+        series_bucket["last_failure_mode_summary"] = _clip_text(str(outcome_record.get("failure_mode_summary", "") or ""), 220)
         series_bucket["recent_selected_titles"] = _dedupe_preserve_order([outcome_title, *list(series_bucket.get("recent_selected_titles") or [])], max_items=10, max_chars=160)
         series_bucket["recent_source_titles"] = _dedupe_preserve_order([outcome_source_title, *list(series_bucket.get("recent_source_titles") or [])], max_items=10, max_chars=160)
         series_bucket["proven_keywords"] = _dedupe_preserve_order([
@@ -1467,6 +1534,7 @@ def _apply_catalyst_outcome_to_channel_memory(
         ], max_items=8, max_chars=80)
         series_bucket["reference_tier"] = str(reference_comparison.get("tier", "") or series_bucket.get("reference_tier", "") or "")
         series_bucket["last_reference_summary"] = _clip_text(str(reference_comparison.get("reference_summary", "") or series_bucket.get("last_reference_summary", "") or ""), 360)
+        _catalyst_update_weighted_signals(series_bucket, "failure_mode_counts_map", [str(outcome_record.get("failure_mode_key", "") or "").strip()], weight)
         for field, items in (
             ("hook_wins_map", list(outcome_record.get("hook_wins") or [])),
             ("hook_watchouts_map", list(outcome_record.get("hook_watchouts") or [])),
@@ -1506,6 +1574,7 @@ def _apply_catalyst_outcome_to_channel_memory(
         series_bucket["summary"] = _clip_text(
             f"Catalyst now has {int(series_public.get('outcome_count', 0) or 0)} measured outcome{'s' if int(series_public.get('outcome_count', 0) or 0) != 1 else ''} inside {series_anchor}. "
             + (f"Avg CTR {float(series_public.get('average_ctr', 0.0) or 0.0):.2f}%. " if float(series_public.get("average_ctr", 0.0) or 0.0) > 0 else "")
+            + (f"Dominant failure mode: {str(series_public.get('dominant_failure_mode_label', '') or '').strip()}. " if str(series_public.get("dominant_failure_mode_label", "") or "").strip() else "")
             + ("Best hook win: " + str((list(series_public.get("hook_wins") or []) or [""])[0]) + ". " if list(series_public.get("hook_wins") or []) else "")
             + ("Primary watchout: " + str((list(series_public.get("retention_watchouts") or []) or [""])[0]) + ". " if list(series_public.get("retention_watchouts") or []) else "")
             + ("Reference rewrite pressure: " + str((list(series_public.get("reference_packaging_rewrites") or list(series_public.get("reference_hook_rewrites") or [])) or [""])[0]) + "." if list(series_public.get("reference_packaging_rewrites") or list(series_public.get("reference_hook_rewrites") or [])) else ""),
@@ -1528,6 +1597,9 @@ def _apply_catalyst_outcome_to_channel_memory(
         archetype_bucket["updated_at"] = time.time()
         archetype_bucket["last_session_id"] = str(session_snapshot.get("session_id", "") or "")
         archetype_bucket["last_outcome_summary"] = _clip_text(str(outcome_record.get("operator_summary", "") or ""), 320)
+        archetype_bucket["last_failure_mode_key"] = str(outcome_record.get("failure_mode_key", "") or "")
+        archetype_bucket["last_failure_mode_label"] = str(outcome_record.get("failure_mode_label", "") or "")
+        archetype_bucket["last_failure_mode_summary"] = _clip_text(str(outcome_record.get("failure_mode_summary", "") or ""), 220)
         archetype_bucket["recent_selected_titles"] = _dedupe_preserve_order(
             [outcome_title, *list(archetype_bucket.get("recent_selected_titles") or [])],
             max_items=10,
@@ -1597,6 +1669,7 @@ def _apply_catalyst_outcome_to_channel_memory(
             str(reference_comparison.get("reference_summary", "") or archetype_bucket.get("last_reference_summary", "") or ""),
             360,
         )
+        _catalyst_update_weighted_signals(archetype_bucket, "failure_mode_counts_map", [str(outcome_record.get("failure_mode_key", "") or "").strip()], weight)
         for field, items in (
             ("hook_wins_map", list(outcome_record.get("hook_wins") or [])),
             ("hook_watchouts_map", list(outcome_record.get("hook_watchouts") or [])),
@@ -1632,9 +1705,11 @@ def _apply_catalyst_outcome_to_channel_memory(
         ):
             _catalyst_update_weighted_signals(archetype_bucket, f"{field_name}_wins_map", list(payload.get("wins") or []), weight)
             _catalyst_update_weighted_signals(archetype_bucket, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), weight)
+        archetype_public = _catalyst_channel_memory_public_view(archetype_bucket)
         archetype_bucket["summary"] = _clip_text(
             f"Catalyst now has {int(archetype_bucket.get('outcome_count', 0) or 0)} measured outcome{'s' if int(archetype_bucket.get('outcome_count', 0) or 0) != 1 else ''} inside the {archetype_label} archetype. "
             + (f"Avg CTR {(float(archetype_bucket.get('outcome_ctr_sum', 0.0) or 0.0) / max(int(archetype_bucket.get('outcome_count', 0) or 0), 1)):.2f}%. " if int(archetype_bucket.get("outcome_count", 0) or 0) > 0 else "")
+            + (f"Dominant failure mode: {str(archetype_public.get('dominant_failure_mode_label', '') or '').strip()}. " if str(archetype_public.get("dominant_failure_mode_label", "") or "").strip() else "")
             + ("Series anchors: " + ", ".join(list(archetype_bucket.get("series_anchors") or [])[:3]) + ". " if list(archetype_bucket.get("series_anchors") or []) else "")
             + ("Reference rewrite pressure: " + str((list(reference_comparison.get("packaging_rewrites") or list(reference_comparison.get("hook_rewrites") or [])) or [""])[0]) + "." if list(reference_comparison.get("packaging_rewrites") or list(reference_comparison.get("hook_rewrites") or [])) else ""),
             320,
