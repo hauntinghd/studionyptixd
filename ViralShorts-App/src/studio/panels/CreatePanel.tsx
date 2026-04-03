@@ -53,6 +53,7 @@ interface CreatePanelPersistedState {
     backgroundMusic?: string;
     soundReferencePreset?: string;
     youtubeChannelId?: string;
+    trendHuntEnabled?: boolean;
     jobId: string | null;
     ts: number;
 }
@@ -83,6 +84,7 @@ interface ProjectRow {
     image_model_id?: string;
     video_model_id?: string;
     youtube_channel_id?: string;
+    trend_hunt_enabled?: boolean;
     cinematic_boost?: boolean;
     error?: string;
 }
@@ -237,6 +239,7 @@ export default function CreatePanel() {
     const [soundReferencePreset, setSoundReferencePreset] = useState(soundReferenceOptions[0].id);
     const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
     const [youtubeChannelId, setYoutubeChannelId] = useState('');
+    const [trendHuntEnabled, setTrendHuntEnabled] = useState(false);
     const [youtubeLoading, setYoutubeLoading] = useState(false);
     const [youtubeError, setYoutubeError] = useState('');
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
@@ -353,6 +356,8 @@ export default function CreatePanel() {
     const chatStoryTemplateUnlocked = hasChatStoryTemplateAccess(plan, billingActive, role);
     const liveWorkspaceTemplates = templates.filter((template) => liveTemplateIds.has(template.id));
     const currentTemplateMeta = templates.find((template) => template.id === selectedTemplate) || templates[0];
+    const supportsTrendHunt = selectedTemplate === 'skeleton';
+    const effectiveTrendHuntEnabled = supportsTrendHunt && trendHuntEnabled;
     const selectedYouTubeChannel = useMemo(
         () => youtubeChannels.find((channel) => channel.channel_id === youtubeChannelId) || null,
         [youtubeChannels, youtubeChannelId],
@@ -695,7 +700,26 @@ export default function CreatePanel() {
         const interval = setInterval(async () => {
             try {
                 const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
-                if (!res.ok) return;
+                if (!res.ok) {
+                    const { data, raw } = await readJsonResponse<any>(res);
+                    const detail = String(
+                        data?.detail ||
+                        raw ||
+                        (res.status === 404
+                            ? "Render job was not found. It likely expired, failed, or this tab is showing stale state."
+                            : `Render status check failed (${res.status}).`)
+                    ).trim();
+                    setJobStatus((prev: any) => ({
+                        ...(prev || {}),
+                        job_id: jobId,
+                        status: 'error',
+                        progress: typeof prev?.progress === 'number' ? prev.progress : 0,
+                        error: detail,
+                    }));
+                    clearInterval(interval);
+                    setLoading(false);
+                    return;
+                }
                 const { data } = await readJsonResponse<any>(res);
                 if (!data || typeof data !== "object") return;
                 setJobStatus(data);
@@ -802,6 +826,9 @@ export default function CreatePanel() {
             if (typeof saved.youtubeChannelId === 'string') {
                 setYoutubeChannelId(saved.youtubeChannelId);
             }
+            if (typeof saved.trendHuntEnabled === 'boolean') {
+                setTrendHuntEnabled(saved.trendHuntEnabled);
+            }
             if (typeof saved.jobId === 'string' && saved.jobId) {
                 setJobId(saved.jobId);
                 setLoading(true);
@@ -857,6 +884,7 @@ export default function CreatePanel() {
             backgroundMusic,
             soundReferencePreset,
             youtubeChannelId,
+            trendHuntEnabled,
             jobId,
             ts: Date.now(),
         };
@@ -898,6 +926,7 @@ export default function CreatePanel() {
         backgroundMusic,
         soundReferencePreset,
         youtubeChannelId,
+        trendHuntEnabled,
         jobId,
     ]);
 
@@ -1212,6 +1241,7 @@ export default function CreatePanel() {
                     pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
                     story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
                     youtube_channel_id: youtubeChannelId.trim(),
+                    trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_image_url: referenceImageDataUrl,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
@@ -1317,6 +1347,7 @@ export default function CreatePanel() {
                     pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
                     story_animation_enabled: templateSupportsVoiceControls ? effectiveAnimationEnabled : true,
                     youtube_channel_id: youtubeChannelId.trim(),
+                    trend_hunt_enabled: effectiveTrendHuntEnabled,
                 }),
             });
             if (!res.ok) {
@@ -1337,6 +1368,9 @@ export default function CreatePanel() {
             }
             if (typeof data.youtube_channel_id === 'string') {
                 setYoutubeChannelId(data.youtube_channel_id);
+            }
+            if (typeof data.trend_hunt_enabled === 'boolean') {
+                setTrendHuntEnabled(data.trend_hunt_enabled);
             }
             if (creativeReferenceImage) {
                 const uploadForm = new FormData();
@@ -1411,6 +1445,7 @@ export default function CreatePanel() {
                     voice_speed: templateSupportsVoiceControls ? storyVoiceSpeed : 1,
                     pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
                     youtube_channel_id: youtubeChannelId.trim(),
+                    trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
@@ -1430,6 +1465,9 @@ export default function CreatePanel() {
             }
             if (typeof data.youtube_channel_id === 'string') {
                 setYoutubeChannelId(data.youtube_channel_id);
+            }
+            if (typeof data.trend_hunt_enabled === 'boolean') {
+                setTrendHuntEnabled(data.trend_hunt_enabled);
             }
 
             if (creativeReferenceImage) {
@@ -1521,6 +1559,7 @@ export default function CreatePanel() {
                     micro_escalation_mode: microEscalationMode,
                     cinematic_boost: effectiveCinematicBoostEnabled,
                     youtube_channel_id: youtubeChannelId.trim(),
+                    trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
@@ -1734,6 +1773,7 @@ export default function CreatePanel() {
                     pacing_mode: templateSupportsVoiceControls ? storyPacingMode : 'standard',
                     subtitles_enabled: templateSupportsVoiceControls ? subtitlesEnabled : true,
                     youtube_channel_id: youtubeChannelId.trim(),
+                    trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_lock_mode: creativeReferenceLockMode,
                     narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
@@ -2340,6 +2380,9 @@ export default function CreatePanel() {
             if (typeof p.youtube_channel_id === 'string') {
                 setYoutubeChannelId(p.youtube_channel_id);
             }
+            if (typeof p.trend_hunt_enabled === 'boolean') {
+                setTrendHuntEnabled(p.trend_hunt_enabled);
+            }
             setCinematicBoostEnabled(Boolean(p.cinematic_boost) || cinematicBoostAlwaysOn);
             if (p.mode === 'creative' || p.mode === 'script_to_short') {
                 const hydratedScenes: CreativeScene[] = Array.isArray(p.scenes) && p.scenes.length > 0
@@ -2471,7 +2514,7 @@ export default function CreatePanel() {
             setRenderMonitorDismissed(false);
         }
     }, [creativeStep, jobId]);
-    const globalActiveRenderStatus = creativeStep === 'generating'
+    const globalActiveRenderStatus = creativeStep === 'generating' && jobId
         ? (jobStatus || (loading ? { status: 'queued', progress: 0 } : null))
         : null;
     const globalRenderProgressWindow = globalActiveRenderStatus && !renderMonitorDismissed && globalActiveRenderStatus.status !== 'complete' && globalActiveRenderStatus.status !== 'error' ? (
@@ -3403,6 +3446,22 @@ export default function CreatePanel() {
                                 </option>
                             ))}
                         </select>
+                        {supportsTrendHunt ? (
+                            <label className="flex items-start gap-3 rounded-lg border border-emerald-400/20 bg-emerald-500/5 px-3 py-3 text-sm text-emerald-50">
+                                <input
+                                    type="checkbox"
+                                    checked={trendHuntEnabled}
+                                    onChange={(e) => setTrendHuntEnabled(e.target.checked)}
+                                    className="mt-1 h-4 w-4 rounded border-white/20 bg-black/30 text-emerald-400 focus:ring-emerald-400/50"
+                                />
+                                <span>
+                                    <span className="block font-semibold text-emerald-100">Trend Hunt</span>
+                                    <span className="mt-1 block text-xs text-emerald-100/70">
+                                        Use your connected channel plus fresh public YouTube trend signals to bias Skeleton AI toward newer breakout angles instead of recycling stale comparison hooks.
+                                    </span>
+                                </span>
+                            </label>
+                        ) : null}
                         {youtubeError ? <p className="text-xs text-red-400">{youtubeError}</p> : null}
                         {selectedYouTubeChannel ? (
                             <div className="rounded-lg border border-cyan-400/20 bg-black/20 p-3 text-xs text-gray-300">
@@ -3412,6 +3471,11 @@ export default function CreatePanel() {
                                 ) : (
                                     <p className="mt-2">Catalyst will use this channel’s saved winners and packaging memory on the next short-generation pass.</p>
                                 )}
+                                {supportsTrendHunt && trendHuntEnabled ? (
+                                    <p className="mt-2 text-[11px] text-emerald-200/80">
+                                        Trend Hunt is active for this Skeleton run. Catalyst will bias toward fresher public angle clusters and more breakout-friendly hooks.
+                                    </p>
+                                ) : null}
                             </div>
                         ) : null}
                     </div>

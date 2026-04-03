@@ -7320,11 +7320,199 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
     }
 
 
+async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -> list[str]:
+    search_query = re.sub(r"\s+", " ", str(query or "").strip())
+    if not search_query or not YOUTUBE_API_KEY:
+        return []
+    published_after = datetime.now(timezone.utc) - timedelta(days=45)
+    params = {
+        "part": "snippet",
+        "type": "video",
+        "q": search_query,
+        "order": "date",
+        "maxResults": max(1, min(int(max_results or 6), 10)),
+        "publishedAfter": published_after.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "key": YOUTUBE_API_KEY,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(f"{YOUTUBE_DATA_API_BASE}/search", params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception:
+        return []
+    titles: list[str] = []
+    for item in list(payload.get("items") or []):
+        title = _clip_text(str(((item or {}).get("snippet") or {}).get("title", "") or "").strip(), 120)
+        if title:
+            titles.append(title)
+    return _dedupe_preserve_order(titles, max_items=max_results, max_chars=120)
+
+
+def _build_shorts_trend_query(
+    template: str,
+    topic: str,
+    channel_context: dict,
+    selected_cluster: dict,
+) -> str:
+    raw_topic = re.sub(r"\s+", " ", str(topic or "").strip())
+    if raw_topic:
+        return raw_topic
+    cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
+    channel_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    if cluster_keywords:
+        if str(template or "").strip().lower() == "skeleton":
+            return " ".join(cluster_keywords[:3] + ["comparison"])
+        return " ".join(cluster_keywords[:3])
+    if channel_titles:
+        seed = re.sub(r"\s*\|.*$", "", channel_titles[0]).strip()
+        return _clip_text(seed, 120)
+    if str(template or "").strip().lower() == "skeleton":
+        return "viral skeleton comparison shorts"
+    if str(template or "").strip().lower() == "daytrading":
+        return "day trading mistakes psychology shorts"
+    return "viral youtube shorts ideas"
+
+
+def _split_text_into_fallback_beats(source_text: str, min_count: int, max_count: int) -> list[str]:
+    text = re.sub(r"\s+", " ", str(source_text or "").strip())
+    if not text:
+        return []
+    base_parts = [part.strip(" ,;:-") for part in re.split(r"(?<=[.!?])\s+", text) if part.strip(" ,;:-")]
+    beats = list(base_parts or [text])
+
+    def _split_fragment_once(fragment: str) -> tuple[str, str] | None:
+        source = re.sub(r"\s+", " ", str(fragment or "").strip())
+        if len(source) < 70:
+            return None
+        split_patterns = [
+            r"(?<=[,;:])\s+",
+            r"\s+(?=(?:when|while|because|after|before|then|but|so)\b)",
+            r"\s+-\s+",
+        ]
+        for pattern in split_patterns:
+            parts = [part.strip(" ,;:-") for part in re.split(pattern, source, maxsplit=1) if part.strip(" ,;:-")]
+            if len(parts) == 2 and len(parts[0]) >= 24 and len(parts[1]) >= 24:
+                return (parts[0], parts[1])
+        midpoint = len(source) // 2
+        split_at = source.rfind(" ", 0, midpoint + 1)
+        if split_at <= 20:
+            return None
+        left = source[:split_at].strip(" ,;:-")
+        right = source[split_at:].strip(" ,;:-")
+        if len(left) < 24 or len(right) < 24:
+            return None
+        return (left, right)
+
+    while len(beats) < min_count:
+        longest_index = max(range(len(beats)), key=lambda idx: len(beats[idx]))
+        split_pair = _split_fragment_once(beats[longest_index])
+        if not split_pair:
+            break
+        beats[longest_index : longest_index + 1] = [split_pair[0], split_pair[1]]
+    if len(beats) <= max_count:
+        return beats
+    target_count = max_count
+    chunk_size = max(1, (len(beats) + target_count - 1) // target_count)
+    grouped: list[str] = []
+    for start in range(0, len(beats), chunk_size):
+        grouped.append(" ".join(beats[start : start + chunk_size]).strip())
+    return grouped[:max_count]
+
+
+def _build_skeleton_shorts_local_fallback(
+    source_text: str,
+    channel_context: dict | None = None,
+    trend_titles: list[str] | None = None,
+    script_to_short_mode: bool = False,
+    trend_hunt_enabled: bool = False,
+) -> dict:
+    channel_context = dict(channel_context or {})
+    trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
+    source = re.sub(r"\s+", " ", str(source_text or "").strip())
+    if not source:
+        source = "viral skeleton comparison"
+    comparison_match = re.split(r"\bvs\.?\b|\bversus\b", source, maxsplit=1, flags=re.IGNORECASE)
+    comparison_mode = len(comparison_match) == 2
+    compact_topic = _clip_text(source, 180)
+    trend_hint = trend_titles[0] if trend_titles else ""
+
+    if script_to_short_mode:
+        beats = _split_text_into_fallback_beats(source, min_count=10, max_count=14)
+    elif comparison_mode:
+        left = re.sub(r"\s+", " ", comparison_match[0]).strip(" -")
+        right = re.sub(r"\s+", " ", comparison_match[1]).strip(" -")
+        beats = [
+            f"Open with the most shocking truth about {left} versus {right}.",
+            f"Show {left} first with the clearest visual advantage or status cue.",
+            f"Show {right} with a stronger counterpoint so the contrast is obvious instantly.",
+            f"Reveal the hidden tradeoff most people miss between {left} and {right}.",
+            f"Raise the stakes with money, time, status, pain, or effort consequences.",
+            f"Use the clearest visual proof point that makes the comparison undeniable.",
+            f"Show the side that looks stronger at first but hides a real weakness.",
+            f"Show the side that looks weaker at first but wins on the metric that matters.",
+            f"Escalate to the most dramatic consequence of choosing the wrong side.",
+            f"End with the sharpest verdict on {left} versus {right}.",
+        ]
+    else:
+        beats = [
+            f"Open with the strongest hidden truth inside {compact_topic}.",
+            f"Show the first visual proof point behind {compact_topic}.",
+            f"Reveal the cost, pressure, or sacrifice most people ignore in {compact_topic}.",
+            f"Raise the stakes with money, time, status, or survival consequences around {compact_topic}.",
+            f"Show the hidden system or mechanism driving {compact_topic}.",
+            f"Contrast what people think about {compact_topic} with what actually happens.",
+            f"Show the most dramatic payoff or damage caused by {compact_topic}.",
+            f"End with the clearest verdict that makes {compact_topic} unforgettable.",
+        ]
+    if trend_hunt_enabled and trend_hint:
+        beats[0] = f"Open with a fresher breakout angle on {compact_topic}, not a recycled take. Trend cue: {trend_hint}."
+        beats[min(2, len(beats) - 1)] = f"Introduce a surprising, shareable angle that could become a new comparison trend around {compact_topic}."
+
+    scenes: list[dict] = []
+    base_duration = 50.0
+    scene_duration = max(4.0, min(5.5, round(base_duration / max(len(beats), 1), 2)))
+    for idx, beat in enumerate(beats[:14], start=1):
+        narration = beat.strip()
+        visual_description = (
+            f"Canonical cinematic skeleton scene for this beat: {narration} "
+            "Same ivory-white anatomical skeleton with realistic eyes and translucent body shell, "
+            "hyper-real 3D materials, topic-matched props, premium vertical framing, and instantly readable contrast."
+        )
+        scenes.append(
+            {
+                "scene_num": idx,
+                "duration_sec": scene_duration,
+                "narration": narration,
+                "visual_description": visual_description,
+            }
+        )
+
+    if comparison_mode:
+        left = re.sub(r"\s+", " ", comparison_match[0]).strip(" -")
+        right = re.sub(r"\s+", " ", comparison_match[1]).strip(" -")
+        title = _clip_text(f"{left} vs {right}: The Truth Nobody Tells You", 80)
+        tags = [left.lower(), right.lower(), "comparison", "skeleton ai", "viral shorts", "3d"]
+    else:
+        title = _clip_text(compact_topic if len(compact_topic) <= 70 else f"The Hidden Truth About {compact_topic[:48].rstrip()}", 80)
+        tags = [compact_topic.lower(), "skeleton ai", "viral shorts", "3d comparison", "shorts"]
+    if trend_hunt_enabled:
+        tags.append("trend hunt")
+
+    return {
+        "title": title,
+        "scenes": scenes,
+        "description": f"{title} generated by Catalyst Skeleton fallback.",
+        "tags": _dedupe_preserve_order([t for t in tags if t], max_items=8, max_chars=40),
+    }
+
+
 async def _build_shorts_catalyst_extra_instructions(
     user: dict | None,
     template: str,
     preferred_channel_id: str = "",
     topic: str = "",
+    trend_hunt_enabled: bool = False,
 ) -> str:
     if not isinstance(user, dict):
         return ""
@@ -7365,6 +7553,10 @@ async def _build_shorts_catalyst_extra_instructions(
         channel_memory=memory_public,
         selected_cluster=selected_cluster,
     )
+    trend_titles: list[str] = []
+    if trend_hunt_enabled:
+        trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
+        trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
 
     parts: list[str] = [
         "CATALYST SHORTS CHANNEL MODE: Build a NEW short in the same arena as the connected channel. Do not remake or lightly paraphrase an existing upload.",
@@ -7422,6 +7614,8 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Reference packaging moves: " + "; ".join(list(reference_playbook.get("packaging_rewrites") or [])[:3]))
     if list(reference_playbook.get("next_video_moves") or []):
         parts.append("Reference next-video moves: " + "; ".join(list(reference_playbook.get("next_video_moves") or [])[:3]))
+    if trend_titles:
+        parts.append("Fresh public YouTube trend signals: " + "; ".join(trend_titles[:4]))
     if memory_context:
         parts.append(memory_context)
     rewrite_summary = str(rewrite_pressure.get("summary", "") or "").strip()
@@ -7434,6 +7628,15 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append(
             "DAY TRADING TEMPLATE RULES: keep the short anchored to real trading or investing behavior, chart logic, risk management, market psychology, or setup quality. "
             "Use sharper hooks, clearer stakes, and premium trading-desk / chart visuals. Use photoreal market screens, execution dashboards, order-flow or chart realism, and avoid generic wealth-posturing, empty motivational filler, medical objects, or abstract sci-fi props."
+        )
+    if str(template or "").strip().lower() == "skeleton":
+        parts.append(
+            "SKELETON TREND RULES: use instantly readable comparison logic, stronger salary/status/effort tradeoffs, and one dominant contrast per short. "
+            "Avoid stale repeated profession pairings, dense lore, or confusing premise chains. Prioritize social-shareable hooks that feel new but still obvious in the first second."
+        )
+    if trend_hunt_enabled:
+        parts.append(
+            "TREND HUNT MODE: bias toward fresher breakout angles instead of safe repeats. Stay in the same arena, but choose the newer, more surprising, more curiosity-driven framing that could create a new trend for this channel."
         )
     if topic:
         parts.append(
@@ -15313,6 +15516,8 @@ async def run_generation_pipeline(
         voice_speed = _normalize_voice_speed(job_state.get("voice_speed", 1.0), default=1.0)
         pacing_mode = _normalize_pacing_mode(job_state.get("pacing_mode", "standard"))
         art_style = _normalize_art_style(job_state.get("art_style", "auto"), template=template)
+        youtube_channel_id = str(job_state.get("youtube_channel_id", "") or "").strip()
+        trend_hunt_enabled = _bool_from_any(job_state.get("trend_hunt_enabled"), False)
         reference_image_url = _normalize_reference_with_default(template, str(job_state.get("reference_image_url", "") or "").strip())
         reference_lock_mode = _normalize_reference_lock_mode(job_state.get("reference_lock_mode"), default="strict")
         reference_dna = job_state.get("reference_dna", {}) if isinstance(job_state.get("reference_dna"), dict) else {}
@@ -15325,7 +15530,31 @@ async def run_generation_pipeline(
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
         catalyst_shorts_instructions = str(job_state.get("catalyst_shorts_instructions", "") or "").strip()
         extra_instructions = lang_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")
-        script_data = await generate_script(template, topic, extra_instructions=extra_instructions)
+        try:
+            script_data = await generate_script(template, topic, extra_instructions=extra_instructions)
+        except Exception as e:
+            if template == "skeleton":
+                channel_context = {}
+                trend_titles: list[str] = []
+                user_id = str(job_state.get("user_id", "") or "").strip()
+                if user_id and (youtube_channel_id or trend_hunt_enabled):
+                    channel_context = await _youtube_selected_channel_context({"id": user_id}, youtube_channel_id)
+                if trend_hunt_enabled:
+                    trend_query = _build_shorts_trend_query(template, topic, channel_context, {})
+                    trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
+                log.warning(
+                    "Skeleton auto generation script phase failed, using local fallback "
+                    f"(trend_hunt={trend_hunt_enabled}): {e}"
+                )
+                script_data = _build_skeleton_shorts_local_fallback(
+                    topic,
+                    channel_context=channel_context,
+                    trend_titles=trend_titles,
+                    script_to_short_mode=False,
+                    trend_hunt_enabled=trend_hunt_enabled,
+                )
+            else:
+                raise
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
         mint_mode = _normalize_mint_mode(mint_mode, template=template)
@@ -18177,6 +18406,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         voice_speed = 1.0
         pacing_mode = "standard"
     youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
+    trend_hunt_enabled = _bool_from_any(getattr(req, "trend_hunt_enabled", False), False)
     lang_name = SUPPORTED_LANGUAGES.get(req.language, {}).get("name", "English")
     lang_instruction = ""
     if req.language != "en":
@@ -18205,7 +18435,13 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         req.template,
         preferred_channel_id=youtube_channel_id,
         topic=req.prompt,
+        trend_hunt_enabled=trend_hunt_enabled,
     )
+    channel_context = await _youtube_selected_channel_context(user, youtube_channel_id) if (youtube_channel_id or trend_hunt_enabled) else {}
+    trend_titles: list[str] = []
+    if trend_hunt_enabled:
+        trend_query = _build_shorts_trend_query(req.template, req.prompt, channel_context, {})
+        trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=False)
     try:
         script_data = await generate_script(
@@ -18213,17 +18449,35 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             req.prompt,
             extra_instructions=(lang_instruction + script_to_short_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")),
         )
-    except httpx.HTTPStatusError as e:
+    except Exception as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if status_code == 429:
+        if req.template == "skeleton":
+            log.warning(
+                "Skeleton script generation failed, using local Catalyst fallback "
+                f"(status={status_code}, trend_hunt={trend_hunt_enabled}): {e}"
+            )
+            script_data = _build_skeleton_shorts_local_fallback(
+                req.prompt,
+                channel_context=channel_context,
+                trend_titles=trend_titles,
+                script_to_short_mode=script_to_short_mode,
+                trend_hunt_enabled=trend_hunt_enabled,
+            )
+        elif isinstance(e, httpx.HTTPStatusError) and status_code == 429:
             raise HTTPException(
                 503,
                 "Script generation is temporarily rate-limited upstream. Retry in a minute.",
             ) from e
-        raise HTTPException(
-            502,
-            "Script generation failed upstream. Retry shortly.",
-        ) from e
+        elif isinstance(e, httpx.HTTPStatusError):
+            raise HTTPException(
+                502,
+                "Script generation failed upstream. Retry shortly.",
+            ) from e
+        else:
+            raise HTTPException(
+                502,
+                "Script generation failed. Retry shortly.",
+            ) from e
     scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
     scenes = _apply_template_scene_constraints(scenes, req.template, quality_mode=quality_mode)
     scenes = _apply_mint_scene_compiler(scenes, req.template, mint_mode=mint_mode)
@@ -18261,6 +18515,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
             "youtube_channel_id": youtube_channel_id,
+            "trend_hunt_enabled": trend_hunt_enabled,
             "catalyst_shorts_instructions": catalyst_shorts_instructions,
             "prompt_passthrough": True,
             "created_at": time.time(),
@@ -18292,6 +18547,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
         "youtube_channel_id": youtube_channel_id,
+        "trend_hunt_enabled": trend_hunt_enabled,
         "prompt_passthrough": True,
         "mode": "script_to_short" if script_to_short_mode else "creative",
     }
@@ -18327,11 +18583,13 @@ async def creative_create_session(body: dict, request: Request = None):
         voice_speed = 1.0
         pacing_mode = "standard"
     youtube_channel_id = str(body.get("youtube_channel_id", "") or "").strip()
+    trend_hunt_enabled = _bool_from_any(body.get("trend_hunt_enabled"), False)
     catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
         user,
         template,
         preferred_channel_id=youtube_channel_id,
         topic=str(body.get("topic", "") or ""),
+        trend_hunt_enabled=trend_hunt_enabled,
     )
     reference_lock_mode = _normalize_reference_lock_mode(body.get("reference_lock_mode"), default="strict")
     default_reference_url = _default_reference_for_template(template)
@@ -18374,6 +18632,7 @@ async def creative_create_session(body: dict, request: Request = None):
             "reference_image_uploaded": False,
             "rolling_reference_image_url": default_reference_url,
             "youtube_channel_id": youtube_channel_id,
+            "trend_hunt_enabled": trend_hunt_enabled,
             "catalyst_shorts_instructions": catalyst_shorts_instructions,
             "prompt_passthrough": True,
             "created_at": time.time(),
@@ -18397,6 +18656,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "pacing_mode": pacing_mode,
         "animation_enabled": animation_enabled,
         "youtube_channel_id": youtube_channel_id,
+        "trend_hunt_enabled": trend_hunt_enabled,
         "session_id": session_id,
         "story_animation_enabled": story_animation_enabled,
         "scene_count": 0,
@@ -18420,6 +18680,7 @@ async def creative_create_session(body: dict, request: Request = None):
         "animation_enabled": animation_enabled,
         "reference_lock_mode": reference_lock_mode,
         "youtube_channel_id": youtube_channel_id,
+        "trend_hunt_enabled": trend_hunt_enabled,
         "prompt_passthrough": True,
     }
 
@@ -20232,11 +20493,13 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         voice_speed = 1.0
         pacing_mode = "standard"
     youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
+    trend_hunt_enabled = _bool_from_any(getattr(req, "trend_hunt_enabled", False), False)
     catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
         user,
         req.template,
         preferred_channel_id=youtube_channel_id,
         topic=req.prompt,
+        trend_hunt_enabled=trend_hunt_enabled,
     )
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     reference_image_url = _normalize_reference_with_default(req.template, str(req.reference_image_url or "").strip())
@@ -20303,6 +20566,7 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "animation_enabled": animation_enabled,
         "story_animation_enabled": animation_enabled if req.template == "story" else True,
         "youtube_channel_id": youtube_channel_id,
+        "trend_hunt_enabled": trend_hunt_enabled,
         "catalyst_shorts_instructions": catalyst_shorts_instructions,
         "reference_image_url": reference_image_url,
         "reference_lock_mode": reference_lock_mode,

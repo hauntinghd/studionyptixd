@@ -5,6 +5,7 @@ class GenerateRequest(BaseModel):
     template: str
     prompt: str
     youtube_channel_id: str = ""
+    trend_hunt_enabled: bool = False
     resolution: str = "720p"
     language: str = "en"
     mode: str = "auto"
