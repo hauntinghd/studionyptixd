@@ -103,5 +103,109 @@
     "expected_channel_title": "neo",
     "niche": "geopolitics news documentary",
     "style_notes": "Clean visual journalism, restrained motion graphics, map and system explainers, and story-first editorial structure."
+  },
+  {
+    "slug": "economics_explained",
+    "query": "Economics Explained youtube documentary",
+    "channel_url": "https://www.youtube.com/@EconomicsExplained/videos",
+    "expected_channel_title": "Economics Explained",
+    "niche": "finance economics documentary",
+    "style_notes": "Macro-economics documentary framing, system and map visuals, polished infographic pacing, and high-stakes money storytelling."
+  },
+  {
+    "slug": "new_money",
+    "query": "New Money youtube finance documentary",
+    "channel_url": "https://www.youtube.com/@NewMoneyYouTube/videos",
+    "expected_channel_title": "New Money",
+    "niche": "finance investing business documentary",
+    "style_notes": "Finance-story documentary pacing, market and company breakdowns, premium editorial polish, and mainstream clarity."
+  },
+  {
+    "slug": "how_money_works",
+    "query": "How Money Works youtube documentary",
+    "channel_url": "https://www.youtube.com/@HowMoneyWorks/videos",
+    "expected_channel_title": "How Money Works",
+    "niche": "finance economics documentary",
+    "style_notes": "Faceless money-system explainers, simplified infographics, direct narration, and clarity-first economic storytelling."
+  },
+  {
+    "slug": "tradinglab",
+    "query": "TradingLab youtube trading",
+    "channel_url": "https://www.youtube.com/@TradingLabOfficial/videos",
+    "expected_channel_title": "TradingLab",
+    "niche": "day trading finance explainer",
+    "style_notes": "Chart-led trading explainers, terminal-style visuals, fast procedural clarity, and hook-first money risk framing."
+  },
+  {
+    "slug": "mustard",
+    "query": "Mustard youtube documentary",
+    "channel_url": "https://www.youtube.com/@MustardChannel/videos",
+    "expected_channel_title": "Mustard",
+    "niche": "technology history aviation documentary",
+    "style_notes": "Premium 3D engineering-history explainers, machine cutaways, strong systems storytelling, and polished CG spectacle."
+  },
+  {
+    "slug": "astrum",
+    "query": "Astrum youtube documentary",
+    "channel_url": "https://www.youtube.com/@astrumspace/videos",
+    "expected_channel_title": "Astrum",
+    "niche": "science space documentary",
+    "style_notes": "Space-science documentary visuals, orbital 3D staging, elegant CG scale shots, and awe-led educational pacing."
+  },
+  {
+    "slug": "sea",
+    "query": "SEA youtube science documentary",
+    "channel_url": "https://www.youtube.com/@sea_space/videos",
+    "expected_channel_title": "SEA",
+    "niche": "science space documentary",
+    "style_notes": "Dark cinematic science explainers, premium cosmic CG, existential hooks, and scale-heavy visual storytelling."
+  },
+  {
+    "slug": "second_thought",
+    "query": "Second Thought youtube documentary",
+    "channel_url": "https://www.youtube.com/@SecondThought/videos",
+    "expected_channel_title": "Second Thought",
+    "niche": "politics economics documentary",
+    "style_notes": "Political-economic faceless documentaries, direct argument-led structure, bold hooks, and high-retention editorial pacing."
+  },
+  {
+    "slug": "caspian_report",
+    "query": "CaspianReport youtube documentary",
+    "channel_url": "https://www.youtube.com/@CaspianReport/videos",
+    "expected_channel_title": "CaspianReport",
+    "niche": "geopolitics politics documentary",
+    "style_notes": "Geopolitical briefing style, map and power-structure visuals, restrained authority, and strategic escalation."
+  },
+  {
+    "slug": "kings_and_generals",
+    "query": "Kings and Generals youtube documentary",
+    "channel_url": "https://www.youtube.com/@KingsandGenerals/videos",
+    "expected_channel_title": "Kings and Generals",
+    "niche": "history military documentary",
+    "style_notes": "Animated history documentary structure, battle-map storytelling, tactical escalation, and long-form narrative clarity."
+  },
+  {
+    "slug": "knowledgia",
+    "query": "Knowledgia youtube documentary",
+    "channel_url": "https://www.youtube.com/@Knowledgia/videos",
+    "expected_channel_title": "Knowledgia",
+    "niche": "history politics documentary",
+    "style_notes": "Historical faceless documentary pacing, timeline and leader-driven storytelling, and clear power-shift narratives."
+  },
+  {
+    "slug": "practical_engineering",
+    "query": "Practical Engineering youtube documentary",
+    "channel_url": "https://www.youtube.com/@PracticalEngineeringChannel/videos",
+    "expected_channel_title": "Practical Engineering",
+    "niche": "technology infrastructure documentary",
+    "style_notes": "Systems-engineering explanations, practical mechanism visuals, grounded diagrams, and clean build-up to payoff."
+  },
+  {
+    "slug": "not_what_you_think",
+    "query": "Not What You Think youtube documentary",
+    "channel_url": "https://www.youtube.com/@NotWhatYouThink/videos",
+    "expected_channel_title": "Not What You Think",
+    "niche": "history technology military documentary",
+    "style_notes": "Military and technology spectacle, animated explainer framing, bold packaging, and stronger shock-value openings."
   }
 ]
