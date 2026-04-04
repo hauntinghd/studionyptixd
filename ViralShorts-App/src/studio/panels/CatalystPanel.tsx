@@ -260,9 +260,9 @@ export default function CatalystPanel() {
                     refresh_outcomes: refreshOutcomes,
                 }),
             });
-            const data = await res.json().catch(() => ({}));
+            const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to refresh Catalyst hub'));
-            setPayload(data);
+            setPayload(data as CatalystHubPayload);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to refresh Catalyst hub'));
         } finally {
@@ -288,9 +288,9 @@ export default function CatalystPanel() {
                     apply_scope: applyScope === 'current' ? selectedWorkspaceId : applyScope,
                 }),
             });
-            const data = await res.json().catch(() => ({}));
+            const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to save Catalyst instructions'));
-            setPayload(data);
+            setPayload(data as CatalystHubPayload);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to save Catalyst instructions'));
         } finally {
@@ -305,7 +305,10 @@ export default function CatalystPanel() {
     };
 
     const channelOptions = payload?.channels || [];
-    const selectedChannel = payload?.selected_channel || null;
+    const selectedChannel = useMemo(
+        () => channelOptions.find((row) => String(row.channel_id || '').trim() === String(selectedChannelId || '').trim()) || payload?.selected_channel || null,
+        [channelOptions, payload?.selected_channel, selectedChannelId]
+    );
     const memory = selectedWorkspace?.memory_public || {};
     const playbook = selectedWorkspace?.playbook || {};
     const recentLearning = payload?.recent_learning || [];

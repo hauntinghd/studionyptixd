@@ -22015,12 +22015,16 @@ async def catalyst_hub_snapshot(
         raise HTTPException(401, "Auth required")
     if not _is_admin_user(user):
         raise HTTPException(403, "Catalyst hub is owner-only")
-    return await _build_catalyst_hub_payload(
-        user=user,
-        channel_id=str(channel_id or "").strip(),
-        include_public_benchmarks=bool(refresh),
-        refresh_outcomes=False,
-    )
+    try:
+        return await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=str(channel_id or "").strip(),
+            include_public_benchmarks=bool(refresh),
+            refresh_outcomes=False,
+        )
+    except Exception as e:
+        log.exception("Catalyst hub snapshot failed")
+        raise HTTPException(500, _clip_text(f"Catalyst hub failed to load: {e}", 220))
 
 
 @app.post("/api/catalyst/hub/refresh")
@@ -22030,12 +22034,16 @@ async def catalyst_hub_refresh(
 ):
     if not _is_admin_user(user):
         raise HTTPException(403, "Catalyst hub is owner-only")
-    return await _build_catalyst_hub_payload(
-        user=user,
-        channel_id=str((req or {}).channel_id or "").strip(),
-        include_public_benchmarks=bool((req or {}).include_public_benchmarks),
-        refresh_outcomes=bool((req or {}).refresh_outcomes),
-    )
+    try:
+        return await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=str((req or {}).channel_id or "").strip(),
+            include_public_benchmarks=bool((req or {}).include_public_benchmarks),
+            refresh_outcomes=bool((req or {}).refresh_outcomes),
+        )
+    except Exception as e:
+        log.exception("Catalyst hub refresh failed")
+        raise HTTPException(500, _clip_text(f"Catalyst hub refresh failed: {e}", 220))
 
 
 @app.post("/api/catalyst/hub/instructions")
@@ -22068,12 +22076,16 @@ async def catalyst_hub_save_instructions(
             updated["key"] = memory_key
             _catalyst_channel_memory[memory_key] = updated
         _save_catalyst_memory()
-    return await _build_catalyst_hub_payload(
-        user=user,
-        channel_id=channel_id,
-        include_public_benchmarks=False,
-        refresh_outcomes=False,
-    )
+    try:
+        return await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=False,
+            refresh_outcomes=False,
+        )
+    except Exception as e:
+        log.exception("Catalyst hub instruction save failed")
+        raise HTTPException(500, _clip_text(f"Catalyst hub save failed: {e}", 220))
 
 
 @app.get("/api/youtube/channels")
