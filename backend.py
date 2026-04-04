@@ -22143,7 +22143,11 @@ async def select_connected_youtube_channel(
             raise HTTPException(404, "Connected YouTube channel not found")
         bucket["default_channel_id"] = channel_id
         _save_youtube_connections()
-    channel_public = await _youtube_sync_and_persist_for_user(user_id, channel_id)
+    try:
+        channel_public = await _youtube_sync_and_persist_for_user(user_id, channel_id)
+    except Exception as e:
+        log.warning(f"YouTube channel select sync failed for user={user_id} channel={channel_id}: {e}")
+        channel_public = await _youtube_connected_channel_public_view(user_id, channel_id)
     return {
         "ok": True,
         "default_channel_id": channel_id,

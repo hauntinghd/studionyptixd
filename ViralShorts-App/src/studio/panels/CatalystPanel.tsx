@@ -75,9 +75,9 @@ const WORKSPACE_LABELS: Record<string, string> = {
 };
 
 const APPLY_SCOPE_OPTIONS = [
-    { value: 'all', label: 'All Workspaces' },
-    { value: 'shorts', label: 'All Shorts' },
-    { value: 'longform', label: 'All Long Form' },
+    { value: 'all', label: 'Apply everywhere' },
+    { value: 'shorts', label: 'Apply to all shorts' },
+    { value: 'longform', label: 'Apply to all long-form' },
 ];
 
 const WORKSPACE_ORDER = ['skeleton', 'story', 'motivation', 'daytrading', 'chatstory', 'documentary', 'recap', 'explainer', 'story_channel'];
@@ -313,7 +313,7 @@ export default function CatalystPanel() {
     const playbook = selectedWorkspace?.playbook || {};
     const recentLearning = payload?.recent_learning || [];
     const applyScopeOptions = useMemo(
-        () => [...APPLY_SCOPE_OPTIONS, { value: 'current', label: `Current Workspace (${WORKSPACE_LABELS[selectedWorkspaceId] || selectedWorkspaceId})` }],
+        () => [...APPLY_SCOPE_OPTIONS, { value: 'current', label: `Only this workspace (${WORKSPACE_LABELS[selectedWorkspaceId] || selectedWorkspaceId})` }],
         [selectedWorkspaceId]
     );
 
@@ -391,10 +391,11 @@ export default function CatalystPanel() {
                                     value={selectedChannelId}
                                     onChange={(e) => { void persistSelectedChannel(e.target.value); }}
                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+                                    style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
                                 >
-                                    <option value="">Select a connected channel</option>
+                                    <option value="" style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>Select a connected channel</option>
                                     {channelOptions.map((channel) => (
-                                        <option key={channel.channel_id} value={channel.channel_id}>
+                                        <option key={channel.channel_id} value={channel.channel_id} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
                                             {channel.title}{channel.channel_handle ? ` (${channel.channel_handle})` : ''}
                                         </option>
                                     ))}
@@ -406,9 +407,10 @@ export default function CatalystPanel() {
                                     value={selectedWorkspaceId}
                                     onChange={(e) => setSelectedWorkspaceId(e.target.value)}
                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+                                    style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
                                 >
                                     {Object.keys(workspaceSnapshots).map((workspaceId) => (
-                                        <option key={workspaceId} value={workspaceId}>
+                                        <option key={workspaceId} value={workspaceId} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
                                             {WORKSPACE_LABELS[workspaceId] || workspaceId}
                                         </option>
                                     ))}
@@ -418,38 +420,42 @@ export default function CatalystPanel() {
 
                         <div className="mt-5 grid gap-4 md:grid-cols-2">
                             <label className="space-y-2">
-                                <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Mission</span>
+                                <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Main Goal</span>
                                 <input
                                     value={mission}
                                     onChange={(e) => setMission(e.target.value)}
-                                    placeholder="Example: Push fresher breakout skeleton angles without repeating the last winning hook."
+                                    placeholder="Example: Make Fern-style business videos with stronger hooks and cleaner 3D system visuals."
                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
                                 />
+                                <p className="text-xs text-gray-500">The one-sentence outcome you want Catalyst to optimize for.</p>
                             </label>
                             <label className="space-y-2">
-                                <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Apply Scope</span>
+                                <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Where To Apply It</span>
                                 <select
                                     value={applyScope}
                                     onChange={(e) => setApplyScope(e.target.value)}
                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
+                                    style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
                                 >
                                     {applyScopeOptions.map((option) => (
-                                        <option key={option.value} value={option.value}>
+                                        <option key={option.value} value={option.value} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
                                             {option.label}
                                         </option>
                                     ))}
                                 </select>
+                                <p className="text-xs text-gray-500">Choose whether this instruction affects everything, all shorts, all long-form, or just the current workspace.</p>
                             </label>
                         </div>
 
                         <label className="mt-5 block space-y-2">
-                            <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Operator Directive</span>
+                            <span className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">What Catalyst Should Do</span>
                             <textarea
                                 value={directive}
                                 onChange={(e) => setDirective(e.target.value)}
-                                placeholder="Tell Catalyst exactly what to optimize, what angles to hunt, what to avoid, and what kind of videos to build next."
+                                placeholder="Write the exact instruction. Example: Study Empire Magnates winners, avoid generic lab shots, push polished 3D business-documentary visuals, and generate stronger click-first titles."
                                 className="min-h-[180px] w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
                             />
+                            <p className="text-xs text-gray-500">This is your plain-English command to Catalyst. Use it to tell the engine what to build, what to avoid, and what to improve next.</p>
                         </label>
 
                         <div className="mt-5 grid gap-4 md:grid-cols-2">
