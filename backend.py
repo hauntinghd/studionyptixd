@@ -9811,6 +9811,31 @@ def _build_longform_scene_execution_prompt(
     chapter_blueprint = dict(chapter_blueprint or {})
     visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or ""), 180)
     visual_variation_rule = _clip_text(str(execution.get("visual_variation_rule", "") or ""), 180)
+    if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        documentary_archetype = _longform_documentary_archetype(
+            edit_blueprint=edit_blueprint,
+            chapter_blueprint=chapter_blueprint,
+            format_preset=format_preset,
+            narration=str(scene.get("narration", "") or ""),
+            visual_description=visual_description,
+        )
+        documentary_prefix = (
+            "Premium 3D psychology documentary frame, obviously CG, consequence-first, premium dark systems staging, and no live-action photography."
+            if documentary_archetype == "psychology_documentary"
+            else "Premium 3D systems documentary frame, obviously CG, proof-first, premium business-documentary staging, and no live-action photography."
+        )
+        visual_parts = _dedupe_preserve_order([
+            visual_description,
+            f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
+            f"Visual motif: {visual_motif}." if visual_motif else "",
+            f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
+            "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
+            "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
+            "Use the attached reference sheet for framing, lighting, and documentary CG discipline only; never copy any text, logos, UI panels, or layout literally from the reference.",
+            "No text overlays, no chapter cards, no labels, no UI panels, no watermarks.",
+        ], max_items=8, max_chars=240)
+        visual_delta = " ".join(part for part in visual_parts if part).strip()
+        return f"{documentary_prefix} {visual_delta}".strip()
     visual_parts = _dedupe_preserve_order([
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
@@ -9823,15 +9848,6 @@ def _build_longform_scene_execution_prompt(
         "No text overlays, no chapter cards, no labels, no UI panels, no watermarks.",
     ], max_items=8, max_chars=220)
     visual_delta = " ".join(part for part in visual_parts if part).strip()
-    if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        style_fragment = _art_style_prompt_fragment(art_style, template=template)
-        documentary_prefix = (
-            "Premium stylized 3D documentary frame, obviously CG and intentionally designed, with cinematic lighting, readable hierarchy, expensive composition, and no live-action photography. "
-            "Use proof-first framing, premium documentary staging, and one clear visual idea per frame."
-        )
-        if style_fragment:
-            return f"{documentary_prefix} IMMUTABLE STYLE: {style_fragment} {visual_delta}".strip()
-        return f"{documentary_prefix} {visual_delta}".strip()
     return _build_scene_prompt_with_reference(
         template=template,
         visual_description=visual_delta,
@@ -10013,22 +10029,22 @@ async def _generate_longform_chapter(
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
         system_prompt += (
             " Visual default for this format: premium stylized 3D documentary/business-explainer imagery. "
-            "Every visual_description should bias toward designed 3D sets, clean object-centric storytelling, readable motion-design composition, "
+            "Every visual_description should bias toward designed 3D sets, readable human-scale proof framing, clean motion-design composition, "
             "polished CGI materials, bold focal hierarchy, and premium YouTube documentary energy. "
             "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that. "
-            "Scene variation rule: rotate between symbolic hero objects, macro mechanism cutaways, stylized human interaction, map or system views, before-versus-after contrasts, and consequence-driven environments. "
-            "Do not repeat the same floating object in the same room across the whole chapter."
+            "Scene variation rule: rotate between surveillance or dossier proof frames, social manipulation scenes, boardroom or institutional consequence frames, archive evidence tables, influence or system maps, before-versus-after contrasts, and consequence-driven environments. "
+            "Do not repeat the same isolated object, sterile room, or floating machine in the same chapter."
         )
         documentary_archetype = str(edit_blueprint.get("archetype_key", "") or "").strip().lower()
         if documentary_archetype == "psychology_documentary":
             system_prompt += (
-                " Psychology-documentary lock: visualize hidden behavior through dossiers, surveillance, social manipulation tableaux, mirror/reversal frames, attention funnels, hidden triggers, and human consequence scenes. "
-                "Do not default to literal exposed brains, textbook anatomy, sterile labs, floating machines, sci-fi device showcases, or abstract gear sculptures unless the narration explicitly requires them."
+                " Psychology-documentary lock: visualize hidden behavior through dossiers, surveillance, social manipulation tableaux, mirror/reversal frames, attention funnels, hidden triggers, observed choice moments, and human consequence scenes. "
+                "Favor Fern-style dark systems framing over generic explainer widgets. Do not default to literal exposed brains, textbook anatomy, sterile labs, floating machines, sci-fi device showcases, or abstract gear sculptures unless the narration explicitly requires them."
             )
         elif documentary_archetype == "systems_documentary":
             system_prompt += (
                 " Systems-documentary lock: visualize control through dossiers, boardrooms, ledgers, networks, maps, infrastructure, and consequence frames. "
-                "Avoid generic floating-object stages, random lab props, anatomy filler, and glossy machine hero shots unless the narration explicitly requires them."
+                "Favor Fern-grade systems staging and Magnates-style expensive consequence framing over generic floating-object stages, random lab props, anatomy filler, and glossy machine hero shots unless the narration explicitly requires them."
             )
     if format_preset == "recap" or str(edit_blueprint.get("niche_key", "") or "").strip().lower() == "manga_recap":
         recap_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or topic or input_title or "the series"), 120)
@@ -18419,7 +18435,7 @@ def _longform_scene_looks_like_machine_filler(text: str, archetype_key: str = ""
     if not lowered:
         return True
     generic_machine = bool(re.search(r"\b(gear|gears|cog|cogs|reactor|capsule|widget|widgets|module|modules|machine core|machine assembly|console|device housing)\b", lowered))
-    generic_stage = bool(re.search(r"\b(isolated hero-object|hero object stage|macro mechanism cutaway|process-diagram environment|clean cinematic lighting|readable subject hierarchy|strong depth|designed in 3d|explainer frame focused on)\b", lowered))
+    generic_stage = bool(re.search(r"\b(isolated hero-object|hero object stage|hero object under aggressive spotlight|macro mechanism cutaway|process-diagram environment|clean cinematic lighting|readable subject hierarchy|strong depth|designed in 3d|explainer frame focused on)\b", lowered))
     literal_brain = bool(re.search(r"\bbrain\b", lowered))
     human_context = bool(re.search(r"\b(person|people|face|faces|eyes|hand|hands|body|mirror|surveillance|dossier|interrogation|boardroom|room|corridor|office|crowd|couple|conversation|choice|decision|consequence)\b", lowered))
     if archetype_key == "psychology_documentary":
@@ -18743,6 +18759,80 @@ def _longform_preview_url(filename: str) -> str:
     return f"/api/longform/preview/{filename}"
 
 
+CATALYST_REFERENCE_FRAMES_DIR = Path(__file__).resolve().parent / "analysis" / "reference_frames"
+EMPIRE_PSYCHOLOGY_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_psychology_reference_sheet_v2.jpg"
+EMPIRE_SYSTEMS_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_systems_reference_sheet_v2.jpg"
+_LONGFORM_REFERENCE_IMAGE_CACHE: dict[str, str] = {}
+
+
+def _longform_documentary_reference_sheet_path(
+    *,
+    template: str,
+    format_preset: str,
+    channel_context: dict | None = None,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    topic: str = "",
+    input_title: str = "",
+    narration: str = "",
+    visual_description: str = "",
+) -> Path | None:
+    if not _longform_prefers_3d_documentary_visuals(template, format_preset):
+        return None
+    if not _is_empire_magnates_channel(channel_context):
+        return None
+    documentary_archetype = _longform_documentary_archetype(
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+        narration=narration,
+        visual_description=visual_description,
+    )
+    candidate = (
+        EMPIRE_PSYCHOLOGY_REFERENCE_SHEET
+        if documentary_archetype == "psychology_documentary"
+        else EMPIRE_SYSTEMS_REFERENCE_SHEET
+    )
+    return candidate if candidate.exists() else None
+
+
+def _longform_documentary_reference_image_url(
+    *,
+    template: str,
+    format_preset: str,
+    channel_context: dict | None = None,
+    edit_blueprint: dict | None = None,
+    chapter_blueprint: dict | None = None,
+    topic: str = "",
+    input_title: str = "",
+    narration: str = "",
+    visual_description: str = "",
+) -> str:
+    reference_path = _longform_documentary_reference_sheet_path(
+        template=template,
+        format_preset=format_preset,
+        channel_context=channel_context,
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        topic=topic,
+        input_title=input_title,
+        narration=narration,
+        visual_description=visual_description,
+    )
+    if not reference_path:
+        return ""
+    cache_key = str(reference_path.resolve())
+    cached = _LONGFORM_REFERENCE_IMAGE_CACHE.get(cache_key, "")
+    if cached:
+        return cached
+    encoded = _file_to_data_image_url(str(reference_path))
+    if encoded:
+        _LONGFORM_REFERENCE_IMAGE_CACHE[cache_key] = encoded
+    return encoded
+
+
 def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
     channel_context = dict(channel_context or {})
     haystack = " ".join(
@@ -18857,7 +18947,7 @@ def _coerce_empire_longform_channel_memory(
 
 def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        candidates = ["grok_imagine"]
+        candidates = ["seedream45", "imagen4_ultra", "recraft_v4_pro", "grok_imagine"]
     else:
         candidates = ["grok_imagine"]
     deduped: list[str] = []
@@ -19025,11 +19115,13 @@ async def _longform_attach_scene_previews(
         )
     session_topic = ""
     session_input_title = ""
+    channel_context: dict = {}
     try:
         async with _longform_sessions_lock:
             live_session = dict(_longform_sessions.get(session_id) or {})
         session_topic = str(live_session.get("topic", "") or "").strip()
         session_input_title = str(live_session.get("input_title", "") or "").strip()
+        channel_context = dict((dict(live_session.get("metadata_pack") or {})).get("youtube_channel") or {})
     except Exception:
         pass
     scenes = _repair_longform_generated_scenes(
@@ -19094,6 +19186,17 @@ async def _longform_attach_scene_previews(
             format_preset=format_preset,
         )
         scene["visual_description"] = visual_desc
+        reference_image_url = _longform_documentary_reference_image_url(
+            template=template,
+            format_preset=format_preset,
+            channel_context=channel_context,
+            edit_blueprint=edit_blueprint,
+            chapter_blueprint=chapter_blueprint,
+            topic=session_topic,
+            input_title=session_input_title,
+            narration=str(scene.get("narration", "") or ""),
+            visual_description=visual_desc,
+        )
 
         prompt = _build_longform_scene_execution_prompt(
             scene=scene,
@@ -19457,6 +19560,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         format_preset = str(session_snapshot.get("format_preset", "explainer") or "explainer").strip().lower()
         edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
         channel_memory_snapshot = dict(session_snapshot.get("channel_memory") or {})
+        channel_context = dict((dict(session_snapshot.get("metadata_pack") or {})).get("youtube_channel") or {})
         sound_mix_profile = _catalyst_audio_mix_profile(
             edit_blueprint,
             format_preset=format_preset,
@@ -19560,7 +19664,6 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         scene_assets: list[dict] = []
         scene_prompts: list[str] = []
         skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
-        reference_image_url = _normalize_reference_with_default(template, "")
         longform_art_style = _longform_default_art_style(template, format_preset)
         total_steps = len(scenes) * (2 if animation_enabled else 1)
 
@@ -19597,6 +19700,20 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             scene["_payoff_hold_sec"] = float(execution_profile.get("payoff_hold_sec", 1.1) or 1.1)
             scene["_caption_rhythm"] = str(execution_profile.get("caption_rhythm", "") or "")
             scene["_sound_density"] = str(execution_profile.get("sound_density", "") or "")
+            reference_image_url = _longform_documentary_reference_image_url(
+                template=template,
+                format_preset=format_preset,
+                channel_context=channel_context,
+                edit_blueprint=edit_blueprint,
+                chapter_blueprint=chapter_blueprint,
+                topic=topic,
+                input_title=input_title,
+                narration=str(scene.get("narration", "") or ""),
+                visual_description=locked_visual,
+            )
+            reference_lock_mode = "inspired" if reference_image_url else "strict"
+            if not reference_image_url:
+                reference_image_url = _normalize_reference_with_default(template, "")
             full_prompt = _build_longform_scene_execution_prompt(
                 scene=scene,
                 template=template,
@@ -19624,7 +19741,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                         template=template,
                         format_preset=format_preset,
                         reference_image_url=reference_image_url,
-                        reference_lock_mode="strict",
+                        reference_lock_mode=reference_lock_mode,
                         best_of_enabled=False,
                         salvage_enabled=False,
                     )
