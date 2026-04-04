@@ -17792,7 +17792,11 @@ def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, ma
     preflight = _catalyst_longform_preflight(session_snapshot)
     blockers = [str(v).strip() for v in list(preflight.get("blockers") or []) if str(v).strip()]
     next_fixes = [str(v).strip() for v in list(preflight.get("next_fixes") or []) if str(v).strip()]
-    memory_view = dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {})
+    memory_view = _coerce_empire_longform_channel_memory(
+        channel_context,
+        dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {}),
+        format_preset=format_preset,
+    )
     rewrite_pressure = dict(memory_view.get("rewrite_pressure") or edit_blueprint.get("rewrite_pressure") or {})
     rewrite_priorities = [str(v).strip() for v in list(rewrite_pressure.get("next_run_priorities") or []) if str(v).strip()]
     chapter_focus = _clip_text(str(chapter_blueprint.get("focus", "") or "").strip(), 220)
@@ -17831,9 +17835,48 @@ def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, ma
     return _clip_text(" ".join(part for part in note_parts if part), 1600)
 
 
+async def _refresh_longform_edit_blueprint_for_session(session: dict) -> dict:
+    session_snapshot = dict(session or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    format_preset = str(session_snapshot.get("format_preset", "") or "documentary").strip().lower()
+    channel_memory = _coerce_empire_longform_channel_memory(
+        channel_context,
+        dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {}),
+        format_preset=format_preset,
+    )
+    return await _build_catalyst_edit_blueprint(
+        template=str(session_snapshot.get("template", "story") or "story"),
+        format_preset=format_preset,
+        topic=str(session_snapshot.get("topic", "") or ""),
+        input_title=str(session_snapshot.get("input_title", "") or ""),
+        input_description=str(session_snapshot.get("input_description", "") or ""),
+        chapter_count=max(1, len(list(session_snapshot.get("chapters") or []))),
+        chapter_target_sec=float(((list(session_snapshot.get("chapters") or [{}]) or [{}])[0] or {}).get("target_sec", 70) or 70),
+        source_bundle=dict(metadata_pack.get("source_video") or {}),
+        source_analysis=dict(metadata_pack.get("source_analysis") or {}),
+        channel_context=channel_context,
+        channel_memory=channel_memory,
+        strategy_notes=str(session_snapshot.get("strategy_notes", "") or ""),
+        xai_json_completion_fn=_xai_json_completion,
+        marketing_doctrine_text_fn=_marketing_doctrine_text,
+        render_reference_corpus_context_fn=lambda **kwargs: _render_catalyst_reference_corpus_context(
+            reference_memory=_catalyst_reference_memory,
+            **kwargs,
+        ),
+        same_arena_subject_fn=_same_arena_subject,
+    )
+
+
 def _longform_public_session(session: dict) -> dict:
     s = dict(session or {})
     catalyst_preflight = _catalyst_longform_preflight(s)
+    metadata_pack = dict(s.get("metadata_pack") or {})
+    public_channel_memory = _coerce_empire_longform_channel_memory(
+        dict(metadata_pack.get("youtube_channel") or {}),
+        _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
+        format_preset=str(s.get("format_preset", "") or "documentary"),
+    )
     chapters = []
     for ch in list(s.get("chapters") or []):
         chapter = dict(ch or {})
@@ -17891,7 +17934,7 @@ def _longform_public_session(session: dict) -> dict:
         "edit_blueprint": dict(s.get("edit_blueprint") or {}),
         "learning_record": dict(s.get("learning_record") or {}),
         "latest_outcome": dict(s.get("latest_outcome") or {}),
-        "channel_memory": _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
+        "channel_memory": public_channel_memory,
         "catalyst_preflight": catalyst_preflight,
         "chapters": chapters,
         "review_state": _longform_review_state(s),
@@ -18126,6 +18169,75 @@ def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
         for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
     ).lower()
     return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
+
+
+def _coerce_empire_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+) -> dict:
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_empire_magnates_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "business_documentary"
+    updated["niche_label"] = "Business Documentary"
+    updated["archetype_key"] = "systems_documentary"
+    updated["archetype_label"] = "Systems Documentary"
+    updated["archetype_hook_rule"] = _clip_text(
+        str(updated.get("archetype_hook_rule", "") or "").strip()
+        or "Open on a consequence, contradiction, or hidden control point before any explanation.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Use premium proof-first pacing: claim, proof, system, consequence, payoff. No generic setup drift.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Use premium 3D boardroom, dossier, archive, map, network, infrastructure, mechanism, and consequence frames. Avoid literal brains, anatomy, sterile labs, and floating-object filler.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Use expensive documentary tension, controlled low-end pulses, and silence pockets before reveals instead of horror-heavy texture.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Package around one contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        str(updated.get("summary", "") or "").strip()
+        or "Empire Magnates should run as premium 3D systems documentary, not literal dark-psychology filler.",
+        320,
+    )
+    existing_guardrails = [str(v).strip() for v in list(updated.get("operator_guardrails") or []) if str(v).strip()]
+    updated["operator_guardrails"] = _dedupe_preserve_order(
+        [
+            *existing_guardrails,
+            "No literal brains or textbook anatomy unless the beat explicitly demands a symbolic mind-world proof frame",
+            "No sterile lab filler",
+            "No generic floating-object hero shots",
+            "Keep visuals obviously premium CG and documentary-grade",
+        ],
+        max_items=10,
+        max_chars=180,
+    )
+    existing_niches = [str(v).strip() for v in list(updated.get("operator_target_niches") or []) if str(v).strip()]
+    updated["operator_target_niches"] = _dedupe_preserve_order(
+        [
+            *existing_niches,
+            "business documentaries",
+            "wealth systems",
+            "hidden power structures",
+            "psychology",
+            "economic manipulation",
+        ],
+        max_items=8,
+        max_chars=80,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
 
 
 def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
@@ -19241,6 +19353,11 @@ async def _create_longform_session_internal(
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
         channel_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or {})
+    channel_memory = _coerce_empire_longform_channel_memory(
+        channel_context,
+        channel_memory,
+        format_preset=format_preset,
+    )
 
     source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
     if source_bundle:
@@ -20056,6 +20173,13 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         chapter_live = dict((list(session_live.get("chapters") or [])[chapter_index]) or {})
         return {"session": _longform_public_session(session_live), "chapter": chapter_live}
 
+    edit_blueprint = dict(session_copy.get("edit_blueprint") or {})
+    try:
+        refreshed_edit_blueprint = await _refresh_longform_edit_blueprint_for_session(session_copy)
+        if refreshed_edit_blueprint:
+            edit_blueprint = dict(refreshed_edit_blueprint or {})
+    except Exception as e:
+        log.warning(f"[longform:{session_id}] regenerate blueprint refresh failed: {e}")
     regenerated = await _generate_longform_chapter(
         template=str(session_copy.get("template", "story") or "story"),
         topic=str(session_copy.get("topic", "") or ""),
@@ -20070,8 +20194,8 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         fix_note=_catalyst_default_fix_note_for_session(session_copy, chapter_index, str(req.reason or "").strip()),
         source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
         strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
-        edit_blueprint=dict(session_copy.get("edit_blueprint") or {}),
-        chapter_blueprint=_catalyst_chapter_blueprint_for_index(dict(session_copy.get("edit_blueprint") or {}), chapter_index),
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=_catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_index),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -20090,6 +20214,7 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         chapters_live = list(session_live.get("chapters") or [])
         chapters_live[chapter_index] = regenerated
         session_live["chapters"] = chapters_live
+        session_live["edit_blueprint"] = edit_blueprint
         session_live["status"] = "draft_review"
         progress = dict(session_live.get("draft_progress") or {})
         session_live["draft_progress"] = {
@@ -20100,6 +20225,18 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
             "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
         }
         session_live["updated_at"] = time.time()
+        live_metadata_pack = dict(session_live.get("metadata_pack") or {})
+        live_metadata_pack["catalyst_channel_memory"] = _coerce_empire_longform_channel_memory(
+            dict(live_metadata_pack.get("youtube_channel") or {}),
+            dict(live_metadata_pack.get("catalyst_channel_memory") or session_live.get("channel_memory") or {}),
+            format_preset=str(session_live.get("format_preset", "") or "documentary"),
+        )
+        session_live["metadata_pack"] = live_metadata_pack
+        session_live["channel_memory"] = _coerce_empire_longform_channel_memory(
+            dict(live_metadata_pack.get("youtube_channel") or {}),
+            dict(session_live.get("channel_memory") or {}),
+            format_preset=str(session_live.get("format_preset", "") or "documentary"),
+        )
         _save_longform_sessions()
     if auto_pipeline:
         await _queue_next_longform_chapter_if_ready(session_id)
@@ -20134,6 +20271,13 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         chapter = dict(chapters[chapter_index] or {})
         session_copy = dict(session)
 
+    edit_blueprint = dict(session_copy.get("edit_blueprint") or {})
+    try:
+        refreshed_edit_blueprint = await _refresh_longform_edit_blueprint_for_session(session_copy)
+        if refreshed_edit_blueprint:
+            edit_blueprint = dict(refreshed_edit_blueprint or {})
+    except Exception as e:
+        log.warning(f"[longform:{session_id}] resolve-error blueprint refresh failed: {e}")
     regenerated = await _generate_longform_chapter(
         template=str(session_copy.get("template", "story") or "story"),
         topic=str(session_copy.get("topic", "") or ""),
@@ -20148,8 +20292,8 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         fix_note=_catalyst_default_fix_note_for_session(session_copy, chapter_index, str(req.fix_note or "").strip()),
         source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
         strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
-        edit_blueprint=dict(session_copy.get("edit_blueprint") or {}),
-        chapter_blueprint=_catalyst_chapter_blueprint_for_index(dict(session_copy.get("edit_blueprint") or {}), chapter_index),
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=_catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_index),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -20169,6 +20313,7 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         chapters_live = list(session_live.get("chapters") or [])
         chapters_live[chapter_index] = regenerated
         session_live["chapters"] = chapters_live
+        session_live["edit_blueprint"] = edit_blueprint
         session_live["status"] = "draft_review"
         session_live["paused_error"] = None
         progress = dict(session_live.get("draft_progress") or {})
@@ -20180,6 +20325,18 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
             "stage": "auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval",
         }
         session_live["updated_at"] = time.time()
+        live_metadata_pack = dict(session_live.get("metadata_pack") or {})
+        live_metadata_pack["catalyst_channel_memory"] = _coerce_empire_longform_channel_memory(
+            dict(live_metadata_pack.get("youtube_channel") or {}),
+            dict(live_metadata_pack.get("catalyst_channel_memory") or session_live.get("channel_memory") or {}),
+            format_preset=str(session_live.get("format_preset", "") or "documentary"),
+        )
+        session_live["metadata_pack"] = live_metadata_pack
+        session_live["channel_memory"] = _coerce_empire_longform_channel_memory(
+            dict(live_metadata_pack.get("youtube_channel") or {}),
+            dict(session_live.get("channel_memory") or {}),
+            format_preset=str(session_live.get("format_preset", "") or "documentary"),
+        )
         _save_longform_sessions()
     if force_accept or auto_pipeline:
         await _queue_next_longform_chapter_if_ready(session_id)
