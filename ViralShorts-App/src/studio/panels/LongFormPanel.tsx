@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Download, FolderKanban, Loader2, RefreshCw, RotateCcw, Sparkles, Wand2 } from 'lucide-react';
 import { API, AuthContext } from '../shared';
-import { ProgressBar } from '../components/StudioWidgets';
+import { ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 
 type LongFormChapter = {
     index: number;
@@ -290,6 +290,7 @@ export default function LongFormPanel() {
     const [outcomeNextMoves, setOutcomeNextMoves] = useState('');
     const [outcomeSaving, setOutcomeSaving] = useState(false);
     const [outcomeAutoSaving, setOutcomeAutoSaving] = useState(false);
+    const [renderMonitorDismissed, setRenderMonitorDismissed] = useState(false);
     const restoredSessionUserRef = useRef('');
     const outcomeSeedRef = useRef('');
 
@@ -834,11 +835,58 @@ export default function LongFormPanel() {
     }, []);
     const packageThumbnailUrl = hasPublishPackage ? resolveSceneImageUrl(String(lfSession?.package?.thumbnail_url || '')) : '';
     const packageThumbnailError = hasPublishPackage ? String(lfSession?.package?.thumbnail_error || '') : '';
+    const flattenedRenderScenes = useMemo(() => {
+        const chapters = Array.isArray(lfSession?.chapters) ? lfSession.chapters : [];
+        return chapters.flatMap((chapter) => {
+            const chapterIndex = Number(chapter?.index || 0);
+            const chapterTitle = String(chapter?.title || `Chapter ${chapterIndex + 1}`);
+            const scenes = Array.isArray(chapter?.scenes) ? chapter.scenes : [];
+            return scenes.map((scene) => ({
+                chapterIndex,
+                chapterTitle,
+                sceneNum: Number(scene?.scene_num || 0),
+                imageUrl: resolveSceneImageUrl(String(scene?.image_url || '')),
+            }));
+        });
+    }, [lfSession?.chapters, resolveSceneImageUrl]);
+    const longformRenderPreview = useMemo(() => {
+        const directPreviewUrl = resolveSceneImageUrl(String(jobStatus?.preview_url || ''));
+        if (directPreviewUrl) {
+            return {
+                url: directPreviewUrl,
+                kind: String(jobStatus?.preview_type || 'image') === 'video' ? 'video' as const : 'image' as const,
+                label: String(jobStatus?.preview_label || 'Current long-form render preview'),
+            };
+        }
+        const safeSceneIndex = Math.max(0, Number(jobStatus?.current_scene || 1) - 1);
+        const candidate = flattenedRenderScenes[safeSceneIndex] || flattenedRenderScenes[flattenedRenderScenes.length - 1];
+        if (candidate?.imageUrl) {
+            return {
+                url: candidate.imageUrl,
+                kind: 'image' as const,
+                label: `Chapter ${candidate.chapterIndex + 1} · Scene ${candidate.sceneNum || safeSceneIndex + 1} preview`,
+            };
+        }
+        if (outputUrl) {
+            return {
+                url: outputUrl,
+                kind: 'video' as const,
+                label: 'Current long-form render output',
+            };
+        }
+        return null;
+    }, [flattenedRenderScenes, jobStatus?.current_scene, jobStatus?.preview_label, jobStatus?.preview_type, jobStatus?.preview_url, outputUrl, resolveSceneImageUrl]);
     const formatTimestamp = useCallback((value: number) => {
         const ts = Number(value || 0);
         if (ts <= 0) return 'Unknown';
         return new Date(ts * 1000).toLocaleString();
     }, []);
+
+    useEffect(() => {
+        if (lfSession?.status === 'rendering' && lfSession?.job_id) {
+            setRenderMonitorDismissed(false);
+        }
+    }, [lfSession?.job_id, lfSession?.status]);
 
     useEffect(() => {
         const seedKey = `${String(lfSession?.session_id || '')}:${String(latestOutcome?.created_at || 0)}:${outputFile}`;
@@ -869,6 +917,28 @@ export default function LongFormPanel() {
         setOutcomeRetentionWatchouts(joinOutcomeLines(latestOutcome?.retention_watchouts));
         setOutcomeNextMoves(joinOutcomeLines(latestOutcome?.next_video_moves));
     }, [latestOutcome, lfSession?.session_id, outputFile]);
+
+    const activeLongformRenderStatus = lfSession?.status === 'rendering' && lfSession?.job_id
+        ? (
+            jobStatus || {
+                status: 'queued',
+                progress: 0,
+                current_scene: 0,
+                total_scenes: flattenedRenderScenes.length,
+                resolution: lfSession?.resolution,
+            }
+        )
+        : null;
+    const longformRenderProgressWindow = activeLongformRenderStatus && !renderMonitorDismissed && activeLongformRenderStatus.status !== 'complete' && activeLongformRenderStatus.status !== 'error' ? (
+        <RenderProgressWindow
+            jobStatus={activeLongformRenderStatus}
+            title={`${String(lfSession?.input_title || lfSession?.topic || 'Long-Form Documentary')} · Long-Form Render`}
+            previewUrl={longformRenderPreview?.url || null}
+            previewType={longformRenderPreview?.kind || 'image'}
+            previewLabel={longformRenderPreview?.label || 'Current long-form render preview'}
+            onDismiss={() => setRenderMonitorDismissed(true)}
+        />
+    ) : null;
 
     const submitOutcome = useCallback(async () => {
         if (!lfSession?.session_id) return;
@@ -2235,6 +2305,7 @@ export default function LongFormPanel() {
                     </div>
                 </div>
             )}
+            {longformRenderProgressWindow}
         </div>
     );
 }

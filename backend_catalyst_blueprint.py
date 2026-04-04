@@ -84,8 +84,8 @@ def _heuristic_catalyst_edit_blueprint(
         ])
         empire_psychology_mode = bool(re.search(r"\b(psychology|brain|mind|behavior|behaviour|manipulat|bias|blind spot|subconscious|attention|dopamine|control)\b", psychology_haystack))
     if is_empire_magnates:
-        archetype_key = "systems_documentary"
-        archetype_label = "Systems Documentary"
+        archetype_key = "psychology_documentary" if empire_psychology_mode else "systems_documentary"
+        archetype_label = "Psychology Documentary" if empire_psychology_mode else "Systems Documentary"
         archetype_hook_rule = _clip_text(
             operator_mission
             or "Open on a premium contradiction or consequence frame that exposes the hidden system before any explanation.",
@@ -235,7 +235,7 @@ def _heuristic_catalyst_edit_blueprint(
         hook_open_loop = _clip_text(rewrite_priorities[0] if rewrite_priorities else hook_open_loop, 180)
         hook_first30 = _clip_text("Shorten setup brutally. Promise, proof, and reversal must all appear in the first 30 seconds.", 180)
         shock_device = "Use one counterintuitive reveal or disturbing contradiction in the first 10 to 15 seconds."
-    elif archetype_key == "dark_psychology":
+    elif archetype_key in {"dark_psychology", "psychology_documentary"}:
         shock_device = "Use one intimate contradiction or disturbing subconscious reveal in the first 10 to 15 seconds."
     elif archetype_key == "trading_execution":
         shock_device = "Use one money consequence, execution mistake, or setup edge in the first 10 to 15 seconds."
@@ -495,7 +495,7 @@ def _heuristic_catalyst_edit_blueprint(
             "risk-versus-reward comparisons instead of generic financial luxury visuals",
             *motion_graphics,
         ], max_items=7, max_chars=180)
-    elif archetype_key == "dark_psychology" and not is_recap_lane:
+    elif archetype_key in {"dark_psychology", "psychology_documentary"} and not is_recap_lane:
         camera_language = _dedupe_preserve_order([
             "intimate macro moves into mental symbols and hidden mechanisms",
             "stark contrast resets that feel invasive and personal",
@@ -668,7 +668,7 @@ def _heuristic_catalyst_edit_blueprint(
     preferred_visual_variation_rule = _clip_text(str(memory_view.get("preferred_visual_variation_rule", "") or ""), 220)
     preferred_payoff_hold_sec = float(memory_view.get("preferred_payoff_hold_sec", 0.0) or 0.0)
     opening_intensity = "measured"
-    if is_recap_lane or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
+    if is_recap_lane or archetype_key in {"dark_psychology", "psychology_documentary", "trading_execution", "gaming_breakdown"}:
         opening_intensity = "aggressive"
     if format_preset == "documentary" and not is_recap_lane:
         opening_intensity = "aggressive"
@@ -699,7 +699,7 @@ def _heuristic_catalyst_edit_blueprint(
     if preferred_payoff_hold_sec > 0:
         payoff_hold_sec = max(0.7, min(1.8, preferred_payoff_hold_sec))
     caption_rhythm = "balanced"
-    if opening_intensity in {"aggressive", "attack"} or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
+    if opening_intensity in {"aggressive", "attack"} or archetype_key in {"dark_psychology", "psychology_documentary", "trading_execution", "gaming_breakdown"}:
         caption_rhythm = "staccato"
     elif archetype_key in {"systems_documentary", "science_mechanism", "power_history"}:
         caption_rhythm = "measured"

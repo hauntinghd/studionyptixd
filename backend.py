@@ -1717,6 +1717,13 @@ LONGFORM_3D_DOC_VISUAL_DIRECTIVE = (
     "This should feel like elite faceless YouTube documentary 3D: more designed, more intentional, more motion-graphics-aware, and more obviously CG. "
     "Avoid gritty street-photo realism, random warehouses, candid live-action film stills, cluttered lab repetition, medical-textbook rendering, or generic moody humans unless the beat absolutely requires a person."
 )
+LONGFORM_3D_PSYCHOLOGY_DOC_VISUAL_DIRECTIVE = (
+    "3D psychology documentary style lock: premium stylized 3D faceless documentary render about hidden behavior, not live-action photography. "
+    "Use designed psychological environments, clean focal hierarchy, controlled dark-stage contrast, elegant surveillance and dossier framing, mirror or split-self reversals, "
+    "social power dynamics, influence webs, symbolic mind-worlds, and human consequence tableaux that feel invasive, premium, and obviously CG. "
+    "Bias toward emotional symbols, hidden triggers, observation rooms, interrogation/archive staging, and consequence-first human scenes rather than abstract machine assemblies. "
+    "Avoid literal exposed brains, textbook anatomy, sterile labs, floating gears, generic machine filler, cluttered boardrooms, or random sci-fi widgets unless the beat explicitly demands them."
+)
 
 
 def _longform_is_horror_tone(tone: str) -> bool:
@@ -1746,7 +1753,17 @@ def _longform_tone_locked_visual_description(
     base = str(visual_description or "").strip()
     lower = base.lower()
     if _longform_prefers_3d_documentary_visuals(template, format_preset) and "3d documentary style lock:" not in lower:
-        base = (base + " " + LONGFORM_3D_DOC_VISUAL_DIRECTIVE).strip()
+        doc_visual_directive = (
+            LONGFORM_3D_PSYCHOLOGY_DOC_VISUAL_DIRECTIVE
+            if _longform_prefers_psychology_documentary_visuals(
+                visual_description=base,
+                tone=tone,
+                template=template,
+                format_preset=format_preset,
+            )
+            else LONGFORM_3D_DOC_VISUAL_DIRECTIVE
+        )
+        base = (base + " " + doc_visual_directive).strip()
         lower = base.lower()
     if not re.search(r"\b(no on-screen text|no typography|no captions|no labels|no logos|no watermarks)\b", lower):
         base = (
@@ -7505,6 +7522,24 @@ def _youtube_title_keywords(title: str, max_items: int = 6) -> list[str]:
     return out
 
 
+def _longform_prefers_psychology_documentary_visuals(
+    visual_description: str,
+    tone: str,
+    template: str,
+    format_preset: str = "",
+) -> bool:
+    if not _longform_prefers_3d_documentary_visuals(template, format_preset):
+        return False
+    haystack = " ".join([
+        str(visual_description or "").strip().lower(),
+        str(tone or "").strip().lower(),
+    ])
+    return bool(re.search(
+        r"\b(psychology|psychological|brain|mind|mental|behavior|behaviour|manipulat|bias|blind spot|subconscious|attention|dopamine|emotion|thought|memory|control|choice|choices|decision|decisions|influence|gaslight|fear|shame|envy|desire|hidden behavior|trigger)\b",
+        haystack,
+    ))
+
+
 def _summarize_public_shorts_reference_playbook(
     template: str,
     reference_rows: list[dict],
@@ -9765,7 +9800,7 @@ def _build_longform_scene_execution_prompt(
     art_style: str = "auto",
 ) -> str:
     scene = dict(scene or {})
-    visual_description = str(scene.get("visual_description", "") or "").strip()
+    visual_description = _clip_text(str(scene.get("visual_description", "") or "").strip(), 420)
     motion_direction = str(scene.get("motion_direction", "") or "").strip()
     execution = _catalyst_scene_execution_profile(
         edit_blueprint=edit_blueprint,
@@ -9776,7 +9811,7 @@ def _build_longform_scene_execution_prompt(
     chapter_blueprint = dict(chapter_blueprint or {})
     visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or ""), 180)
     visual_variation_rule = _clip_text(str(execution.get("visual_variation_rule", "") or ""), 180)
-    visual_delta = " ".join(part for part in [
+    visual_parts = _dedupe_preserve_order([
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
         f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
@@ -9786,7 +9821,8 @@ def _build_longform_scene_execution_prompt(
         "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
         "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
         "No text overlays, no chapter cards, no labels, no UI panels, no watermarks.",
-    ] if part).strip()
+    ], max_items=8, max_chars=220)
+    visual_delta = " ".join(part for part in visual_parts if part).strip()
     return _build_scene_prompt_with_reference(
         template=template,
         visual_description=visual_delta,
@@ -15825,6 +15861,25 @@ async def composite_video(
             float(minimum_scene_duration or 3.5),
         )
     for i, (scene, asset) in enumerate(zip(scenes, scene_assets)):
+        chapter_index = int((scene or {}).get("_chapter_index", 0) or 0)
+        scene_num = int((scene or {}).get("scene_num", i + 1) or (i + 1))
+        if job_id:
+            _job_update_scene_pointer(
+                job_id,
+                i + 1,
+                num_scenes,
+                chapter_index=chapter_index + 1,
+                scene_num=scene_num,
+            )
+            preview_url = str((scene or {}).get("image_url", "") or "")
+            if preview_url:
+                _job_update_preview(
+                    job_id,
+                    preview_url=preview_url,
+                    preview_type="image",
+                    preview_label=f"Chapter {chapter_index + 1} Scene {scene_num} render preview",
+                )
+            _job_set_stage(job_id, "compositing", 84 + int(((i + 1) / max(num_scenes, 1)) * 4))
         duration = planned_scene_durations[i] if i < len(planned_scene_durations) else max(
             float((scene or {}).get("duration_sec", minimum_scene_duration or 3.5) or (minimum_scene_duration or 3.5)),
             float(minimum_scene_duration or 3.5),
@@ -16009,6 +16064,13 @@ async def composite_video(
         raise RuntimeError("FFmpeg concat produced no output file")
 
     if job_id:
+        if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+            _job_update_preview(
+                job_id,
+                preview_url=f"/api/download/{Path(output_path).name}",
+                preview_type="video",
+                preview_label="Current long-form render output",
+            )
         _job_set_stage(job_id, "compositing", 90)
 
     has_sfx = ambience_track and Path(ambience_track).exists()
@@ -16115,6 +16177,12 @@ async def composite_video(
         raise RuntimeError("FFmpeg produced no final output file")
 
     if job_id:
+        _job_update_preview(
+            job_id,
+            preview_url=f"/api/download/{Path(output_path).name}",
+            preview_type="video",
+            preview_label="Current long-form render output",
+        )
         _job_set_stage(job_id, "compositing", 98)
 
     for clip in set(scene_clips + working_clips):
@@ -17143,6 +17211,43 @@ def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, even
     if len(events) > 30:
         del events[:-30]
     diag["last_updated_at"] = now
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
+
+
+def _job_update_preview(job_id: str, preview_url: str = "", preview_type: str = "image", preview_label: str = ""):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    if str(preview_url or "").strip():
+        job["preview_url"] = str(preview_url or "").strip()
+        job["preview_type"] = str(preview_type or "image").strip() or "image"
+        job["preview_label"] = str(preview_label or "").strip()
+    try:
+        asyncio.create_task(persist_job_state(job_id, job))
+    except Exception:
+        pass
+
+
+def _job_update_scene_pointer(
+    job_id: str,
+    current_scene: int,
+    total_scenes: int,
+    *,
+    chapter_index: int | None = None,
+    scene_num: int | None = None,
+):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    job["current_scene"] = max(0, int(current_scene or 0))
+    job["total_scenes"] = max(0, int(total_scenes or 0))
+    if chapter_index is not None:
+        job["current_chapter"] = max(0, int(chapter_index or 0))
+    if scene_num is not None:
+        job["current_chapter_scene"] = max(0, int(scene_num or 0))
     try:
         asyncio.create_task(persist_job_state(job_id, job))
     except Exception:
@@ -18202,34 +18307,64 @@ def _coerce_empire_longform_channel_memory(
     if str(format_preset or "").strip().lower() != "documentary" or not _is_empire_magnates_channel(channel_context):
         return memory
     updated = dict(memory)
-    updated["niche_key"] = "business_documentary"
-    updated["niche_label"] = "Business Documentary"
-    updated["archetype_key"] = "systems_documentary"
-    updated["archetype_label"] = "Systems Documentary"
+    psychology_haystack = " ".join([
+        str((channel_context or {}).get("summary", "") or "").strip().lower(),
+        str((channel_context or {}).get("channel_summary", "") or "").strip().lower(),
+        str(updated.get("niche_key", "") or "").strip().lower(),
+        str(updated.get("niche_label", "") or "").strip().lower(),
+        str(updated.get("archetype_key", "") or "").strip().lower(),
+        str(updated.get("archetype_label", "") or "").strip().lower(),
+        str(updated.get("selected_cluster_label", "") or "").strip().lower(),
+        " ".join(str(v).strip().lower() for v in list(updated.get("operator_target_niches") or []) if str(v).strip()),
+    ])
+    empire_psychology_mode = bool(re.search(
+        r"\b(psychology|psychological|brain|mind|behavior|behaviour|manipulat|bias|blind spot|subconscious|attention|dopamine|emotion|thought|memory|control|choice|choices|decision|decisions|influence|hidden behavior)\b",
+        psychology_haystack,
+    ))
+    updated["niche_key"] = "psychology_documentary" if empire_psychology_mode else "business_documentary"
+    updated["niche_label"] = "Psychology / Hidden Behavior" if empire_psychology_mode else "Business Documentary"
+    updated["archetype_key"] = "psychology_documentary" if empire_psychology_mode else "systems_documentary"
+    updated["archetype_label"] = "Psychology Documentary" if empire_psychology_mode else "Systems Documentary"
     updated["archetype_hook_rule"] = _clip_text(
         str(updated.get("archetype_hook_rule", "") or "").strip()
-        or "Open on a consequence, contradiction, or hidden control point before any explanation.",
+        or (
+            "Open on an invasive contradiction, hidden behavior trigger, or personal consequence before any explanation."
+            if empire_psychology_mode
+            else "Open on a consequence, contradiction, or hidden control point before any explanation."
+        ),
         220,
     )
     updated["archetype_pace_rule"] = _clip_text(
-        "Use premium proof-first pacing: claim, proof, system, consequence, payoff. No generic setup drift.",
+        "Use premium proof-first pacing: claim, proof, trigger, consequence, payoff. No generic setup drift."
+        if empire_psychology_mode
+        else "Use premium proof-first pacing: claim, proof, system, consequence, payoff. No generic setup drift.",
         220,
     )
     updated["archetype_visual_rule"] = _clip_text(
-        "Use premium 3D boardroom, dossier, archive, map, network, infrastructure, mechanism, and consequence frames. Avoid literal brains, anatomy, sterile labs, and floating-object filler.",
+        "Use premium 3D symbolic mind-worlds, surveillance, social manipulation tableaux, mirror or split-self reversals, dossiers, emotional consequence scenes, and hidden-control environments. Avoid literal exposed brains, textbook anatomy, sterile labs, floating gears, and generic machine filler."
+        if empire_psychology_mode
+        else "Use premium 3D boardroom, dossier, archive, map, network, infrastructure, mechanism, and consequence frames. Avoid literal brains, anatomy, sterile labs, and floating-object filler.",
         220,
     )
     updated["archetype_sound_rule"] = _clip_text(
-        "Use expensive documentary tension, controlled low-end pulses, and silence pockets before reveals instead of horror-heavy texture.",
+        "Use expensive documentary tension, invasive low-end pulses, restrained silence pockets, and precise reveal accents that feel personal instead of horror camp."
+        if empire_psychology_mode
+        else "Use expensive documentary tension, controlled low-end pulses, and silence pockets before reveals instead of horror-heavy texture.",
         220,
     )
     updated["archetype_packaging_rule"] = _clip_text(
-        "Package around one contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait.",
+        "Package around one invasive contradiction, one hidden behavior mechanism, and one premium consequence image instead of generic clickbait or textbook psychology."
+        if empire_psychology_mode
+        else "Package around one contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait.",
         220,
     )
     updated["summary"] = _clip_text(
         str(updated.get("summary", "") or "").strip()
-        or "Empire Magnates should run as premium 3D systems documentary, not literal dark-psychology filler.",
+        or (
+            "Empire Magnates should run as premium 3D psychology documentary: hidden behavior, emotional consequence, and premium proof frames instead of generic brains or machines."
+            if empire_psychology_mode
+            else "Empire Magnates should run as premium 3D systems documentary, not literal dark-psychology filler."
+        ),
         320,
     )
     existing_guardrails = [str(v).strip() for v in list(updated.get("operator_guardrails") or []) if str(v).strip()]
@@ -18239,6 +18374,7 @@ def _coerce_empire_longform_channel_memory(
             "No literal brains or textbook anatomy unless the beat explicitly demands a symbolic mind-world proof frame",
             "No sterile lab filler",
             "No generic floating-object hero shots",
+            "No generic gears, machine filler, or stock systems widgets unless the beat explicitly demands them",
             "Keep visuals obviously premium CG and documentary-grade",
         ],
         max_items=10,
@@ -18248,10 +18384,13 @@ def _coerce_empire_longform_channel_memory(
     updated["operator_target_niches"] = _dedupe_preserve_order(
         [
             *existing_niches,
+            "psychology",
+            "hidden behavior",
+            "attention and manipulation",
+            "emotional control",
             "business documentaries",
             "wealth systems",
             "hidden power structures",
-            "psychology",
             "economic manipulation",
         ],
         max_items=8,
@@ -18940,10 +19079,17 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         total_steps = len(scenes) * (2 if animation_enabled else 1)
 
         for i, scene in enumerate(scenes):
-            jobs[job_id]["current_scene"] = i + 1
+            chapter_index = int(scene.get("_chapter_index", 0) or 0)
+            scene_num = int(scene.get("scene_num", i + 1) or (i + 1))
+            _job_update_scene_pointer(
+                job_id,
+                i + 1,
+                len(scenes),
+                chapter_index=chapter_index + 1,
+                scene_num=scene_num,
+            )
             step_base = i * (2 if animation_enabled else 1)
             _job_set_stage(job_id, "generating_images", 8 + int((step_base / max(total_steps, 1)) * 58))
-            chapter_index = int(scene.get("_chapter_index", 0) or 0)
             chapter_tone = str(chapter_tones.get(chapter_index, session_tone) or session_tone)
             locked_visual = _longform_tone_locked_visual_description(
                 str(scene.get("visual_description", "") or ""),
@@ -19008,6 +19154,19 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                             f"[{job_id}] Long-form image quality below gate for scene {i + 1}: "
                             f"{score:.1f} < {min_score:.1f}. Accepting for throughput."
                         )
+                    cdn_url = str((img_result or {}).get("cdn_url", "") or "")
+                    preview_url = ""
+                    if Path(img_path).exists():
+                        preview_url = str(scene.get("image_url", "") or "")
+                    if not preview_url:
+                        preview_url = str(cdn_url or "")
+                    if preview_url:
+                        _job_update_preview(
+                            job_id,
+                            preview_url=preview_url,
+                            preview_type="image",
+                            preview_label=f"Chapter {chapter_index + 1} Scene {scene_num} preview",
+                        )
                     image_ok = True
                     break
                 except Exception as e:
@@ -19022,7 +19181,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 raise LongFormPauseError("Image generation failed repeatedly", pause_details)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
-            cdn_url = (img_result or {}).get("cdn_url")
+            cdn_url = str((img_result or {}).get("cdn_url", "") or "")
             if animation_enabled:
                 _job_set_stage(job_id, "animating_scenes", 8 + int(((step_base + 1) / max(total_steps, 1)) * 58))
                 anim_error = ""

@@ -296,9 +296,18 @@ export function RenderProgressWindow({
     };
     const currentScene = Number(jobStatus.current_scene || 0);
     const totalScenes = Number(jobStatus.total_scenes || 0);
+    const currentChapter = Number(jobStatus.current_chapter || 0);
+    const currentChapterScene = Number(jobStatus.current_chapter_scene || 0);
     const statusKey = String(jobStatus.status || '');
     const statusLabel = statusLabels[statusKey] || String(jobStatus.status || 'Rendering');
-    const statusDescription = stageDescriptions[statusKey] || 'Catalyst is processing your render.';
+    const compositingDescription = progress >= 94
+        ? 'Final FFmpeg pass: mixing voice, captions, and exporting the MP4. This last step can sit here for a minute before it flips to complete.'
+        : progress >= 86
+            ? 'Merging scene clips into one timeline. Slideshow renders still have to build every scene clip before the final export.'
+            : 'Preparing the slideshow timeline and syncing scene lengths to the voice track.';
+    const statusDescription = statusKey === 'compositing'
+        ? compositingDescription
+        : stageDescriptions[statusKey] || 'Catalyst is processing your render.';
 
     return (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/72 px-4 py-6 backdrop-blur-sm">
@@ -357,6 +366,11 @@ export function RenderProgressWindow({
                             {currentScene > 0 && totalScenes > 0 ? (
                                 <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1">
                                     Scene {currentScene} of {totalScenes}
+                                </span>
+                            ) : null}
+                            {currentChapter > 0 && currentChapterScene > 0 ? (
+                                <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1">
+                                    Chapter {currentChapter} · Scene {currentChapterScene}
                                 </span>
                             ) : null}
                             {jobStatus.resolution ? (
