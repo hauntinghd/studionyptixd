@@ -150,16 +150,14 @@ export default function CatalystPanel() {
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to load Catalyst hub'));
             setPayload(data as CatalystHubPayload);
             const nextChannelId = String(data?.selected_channel_id || data?.default_channel_id || channelId || '').trim();
-            const nextWorkspaceId = String(data?.default_workspace_id || selectedWorkspaceId || 'skeleton').trim();
             if (nextChannelId) setSelectedChannelId(nextChannelId);
-            if (nextWorkspaceId) setSelectedWorkspaceId(nextWorkspaceId);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to load Catalyst hub'));
         } finally {
             setLoading(false);
             setRefreshing(false);
         }
-    }, [bearerHeaders, selectedWorkspaceId, session]);
+    }, [bearerHeaders, session]);
 
     useEffect(() => {
         if (!session) return;

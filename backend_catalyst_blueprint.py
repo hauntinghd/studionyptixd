@@ -307,6 +307,44 @@ def _heuristic_catalyst_edit_blueprint(
             "corridor-of-power staging with clear cause-versus-fallout transitions",
             *camera_language,
         ], max_items=7, max_chars=160)
+    if format_preset == "documentary" and not is_recap_lane:
+        camera_language = _dedupe_preserve_order([
+            "premium 3D documentary camera language with designed dolly-ins, miniature-world sweeps, and hard contrast resets",
+            "boardroom, map-room, void-stage, and systems-table staging that feels intentional instead of generic explainer coverage",
+            "clean scale shifts from macro system view to human consequence view",
+            *camera_language,
+        ], max_items=8, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "use clean system overlays, map cues, and documentary-style interface callouts only when they prove the point",
+            "prefer one dominant graphic idea per beat instead of cluttered data walls",
+            "make every visual beat feel designed, premium, and obviously CG instead of stock explainer filler",
+            *motion_graphics,
+        ], max_items=8, max_chars=180)
+        visual_rules = _dedupe_preserve_order([
+            "Avoid generic floating lab objects, repeated anatomy shots, and sterile explainer filler.",
+            "Bias toward premium 3D symbolic hero objects, system boards, power maps, and consequence-first compositions.",
+            "Each scene should feel like a crafted business documentary frame, not a generic AI render.",
+            *visual_rules,
+        ], max_items=8, max_chars=180)
+        mix_notes = _dedupe_preserve_order([
+            "Use premium documentary trailer tension, controlled impact accents, and cleaner silence pockets before big reveals.",
+            "Keep the bed cinematic and polished, not horror-heavy or overly busy.",
+            *mix_notes,
+        ], max_items=8, max_chars=160)
+        voice_direction = _dedupe_preserve_order([
+            "Confident, controlled, and high-clarity.",
+            "Lead stronger in the first 20 seconds and avoid overexplaining obvious beats.",
+            *voice_direction,
+        ], max_items=6, max_chars=160)
+        scoring_rubric = _dedupe_preserve_order([
+            "Every chapter should look and sound like a premium 3D business documentary, not a generic explainer.",
+            "The opening must create curiosity immediately and feel more expensive than the average faceless documentary video.",
+            *scoring_rubric,
+        ], max_items=9, max_chars=180)
+        niche_execution_notes = _dedupe_preserve_order([
+            *niche_execution_notes,
+            "Push premium 3D documentary motion, cleaner system storytelling, and stronger cinematic consequence framing.",
+        ], max_items=5, max_chars=180)
     if is_recap_lane:
         camera_language = _dedupe_preserve_order([
             "kinetic manga-recap push-ins on power beats",
@@ -361,6 +399,8 @@ def _heuristic_catalyst_edit_blueprint(
     opening_intensity = "measured"
     if is_recap_lane or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
         opening_intensity = "aggressive"
+    if format_preset == "documentary" and not is_recap_lane:
+        opening_intensity = "aggressive"
     if pressure_scores.get("hook", 0) >= 75 or pressure_scores.get("pacing", 0) >= 75:
         opening_intensity = "attack"
     if preferred_opening_intensity in {"measured", "aggressive", "attack"} and pressure_scores.get("hook", 0) < 85 and preferred_opening_intensity != weakest_opening_intensity:
@@ -370,6 +410,8 @@ def _heuristic_catalyst_edit_blueprint(
     interrupt_strength = "medium"
     if pressure_scores.get("pacing", 0) >= 70 or pressure_scores.get("visuals", 0) >= 70 or is_recap_lane:
         interrupt_strength = "high"
+    elif format_preset == "documentary" and not is_recap_lane:
+        interrupt_strength = "medium"
     if preferred_interrupt_strength in {"medium", "high"} and pressure_scores.get("pacing", 0) < 85 and preferred_interrupt_strength != weakest_interrupt_strength:
         interrupt_strength = preferred_interrupt_strength
     elif strongest_interrupt_strength in {"medium", "high"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_interrupt_strength or preferred_interrupt_strength == weakest_interrupt_strength):
@@ -385,6 +427,8 @@ def _heuristic_catalyst_edit_blueprint(
     if opening_intensity in {"aggressive", "attack"} or archetype_key in {"dark_psychology", "trading_execution", "gaming_breakdown"}:
         caption_rhythm = "staccato"
     elif archetype_key in {"systems_documentary", "science_mechanism", "power_history"}:
+        caption_rhythm = "measured"
+    if format_preset == "documentary" and not is_recap_lane and caption_rhythm == "balanced":
         caption_rhythm = "measured"
     if preferred_caption_rhythm in {"balanced", "staccato", "measured"} and pressure_scores.get("hook", 0) < 85 and preferred_caption_rhythm != weakest_caption_rhythm:
         caption_rhythm = preferred_caption_rhythm
@@ -404,6 +448,8 @@ def _heuristic_catalyst_edit_blueprint(
         cut_profile = "punch-cut"
     if secondary_focus == "visuals" and cut_profile == "cinematic":
         cut_profile = "contrast-cut"
+    if format_preset == "documentary" and not is_recap_lane and cut_profile == "punch-cut":
+        cut_profile = "contrast-cut"
     if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85 and preferred_cut_profile != weakest_cut_profile:
         cut_profile = preferred_cut_profile
     elif strongest_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_cut_profile or preferred_cut_profile == weakest_cut_profile):
@@ -413,6 +459,8 @@ def _heuristic_catalyst_edit_blueprint(
         voice_pacing_bias = "front-loaded"
     elif pressure_scores.get("sound", 0) >= 70:
         voice_pacing_bias = "tension-rise"
+    elif format_preset == "documentary" and not is_recap_lane:
+        voice_pacing_bias = "front-loaded"
     if preferred_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and pressure_scores.get("hook", 0) < 85 and preferred_voice_pacing_bias != weakest_voice_pacing_bias:
         voice_pacing_bias = preferred_voice_pacing_bias
     elif strongest_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and (pressure_scores.get("hook", 0) >= 60 or not preferred_voice_pacing_bias or preferred_voice_pacing_bias == weakest_voice_pacing_bias):
