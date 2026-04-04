@@ -594,6 +594,8 @@ def _heuristic_catalyst_longform_execution_qa(
         "system", "network", "map", "diagram", "blueprint", "ledger", "boardroom", "market",
         "currency", "dossier", "archive", "timeline", "mechanism", "flow", "surveillance",
         "chart", "grid", "control room", "war room", "city", "headquarters", "server room",
+        "ownership", "capital", "bank", "vault", "shareholder", "institution", "trading floor",
+        "evidence board", "money flow", "infrastructure", "portfolio", "asset", "board",
     )
     documentary_negative_cues = (
         "laboratory", "sterile lab", "microscope", "beaker", "petri", "anatomy", "floating object",
@@ -714,7 +716,11 @@ def _heuristic_catalyst_longform_execution_qa(
     )
     title_value = str(package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
     title_variants = [str(v).strip() for v in list(package.get("title_variants") or []) if str(v).strip()]
-    thumbnail_angles = [str(v).strip() for v in list(package.get("thumbnail_angles") or []) if str(v).strip()]
+    thumbnail_angles = [
+        str(v).strip()
+        for v in list(package.get("thumbnail_angles") or package.get("thumbnail_prompts") or [])
+        if str(v).strip()
+    ]
     tags = [str(v).strip() for v in list(package.get("selected_tags") or package.get("tags") or []) if str(v).strip()]
     packaging_score = _clamp_score(
         30.0

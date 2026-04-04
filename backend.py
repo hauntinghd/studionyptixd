@@ -17629,6 +17629,7 @@ def _catalyst_longform_preflight(session: dict) -> dict:
     session_snapshot = dict(session or {})
     edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
     package = dict(session_snapshot.get("package") or {})
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
     review = _longform_review_state(session_snapshot)
     qa = _heuristic_catalyst_longform_execution_qa(
         session_snapshot=session_snapshot,
@@ -17725,12 +17726,25 @@ def _catalyst_longform_preflight(session: dict) -> dict:
     elif overall_score > 0.0 and overall_score < 76.0:
         warnings.append(f"Overall execution score is {overall_score:.1f}/100. The run is usable but not yet clean.")
 
-    selected_title = str(package.get("selected_title", "") or "").strip()
-    title_variants = [str(v).strip() for v in list(package.get("title_variants") or []) if str(v).strip()]
+    selected_title = str(
+        package.get("selected_title", "")
+        or session_snapshot.get("input_title", "")
+        or ((metadata_pack.get("title_variants") or [""])[0] if isinstance(metadata_pack.get("title_variants"), list) else "")
+        or ""
+    ).strip()
+    title_variants = [
+        str(v).strip()
+        for v in list(package.get("title_variants") or metadata_pack.get("title_variants") or [])
+        if str(v).strip()
+    ]
     if not selected_title and not title_variants:
         warnings.append("Publish package does not yet have a selected title.")
     thumbnail_url = str(package.get("thumbnail_url", "") or "").strip()
-    thumbnail_prompt = str(package.get("thumbnail_prompt", "") or "").strip()
+    thumbnail_prompt = str(
+        package.get("thumbnail_prompt", "")
+        or ((metadata_pack.get("thumbnail_prompts") or [""])[0] if isinstance(metadata_pack.get("thumbnail_prompts"), list) else "")
+        or ""
+    ).strip()
     if not thumbnail_url and not thumbnail_prompt:
         warnings.append("Publish package does not yet have a resolved thumbnail angle.")
 
@@ -18050,6 +18064,15 @@ def _longform_preview_url(filename: str) -> str:
     return f"/api/longform/preview/{filename}"
 
 
+def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
+    channel_context = dict(channel_context or {})
+    haystack = " ".join(
+        str(channel_context.get(key, "") or "").strip()
+        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
+    ).lower()
+    return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
+
+
 def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
         candidates = ["grok_imagine"]
@@ -18097,6 +18120,77 @@ async def _longform_generate_scene_image(
                     await asyncio.sleep(1.5)
     detail = " | ".join(errors[-2:]) if errors else "no hosted image models were available"
     raise RuntimeError(f"Long-form hosted image generation failed: {detail}")
+
+
+def _longform_thumbnail_model_candidates(format_preset: str = "", channel_context: dict | None = None) -> list[str]:
+    if _is_empire_magnates_channel(channel_context):
+        ordered = ["seedream45", "recraft_v4_pro", "imagen4_ultra", "recraft_v4", "grok_imagine"]
+    elif str(format_preset or "").strip().lower() == "documentary":
+        ordered = ["seedream45", "recraft_v4", "imagen4_ultra", "grok_imagine"]
+    else:
+        ordered = ["recraft_v4", "seedream45", "imagen4_fast", "grok_imagine"]
+    deduped: list[str] = []
+    for candidate in ordered:
+        normalized = _normalize_creative_image_model_id(candidate)
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+async def _generate_longform_package_thumbnail(
+    *,
+    prompt: str,
+    selected_title: str,
+    output_path: str,
+    format_preset: str = "",
+    channel_context: dict | None = None,
+) -> dict:
+    base_prompt = _clip_text(
+        f"{str(prompt or '').strip()} Packaging hook: {str(selected_title or '').strip()}. "
+        "Create a premium faceless YouTube thumbnail in 16:9. One dominant subject, one dominant contradiction, "
+        "premium 3D documentary lighting, strong contrast, instantly readable at phone size, no text baked into the image, "
+        "no collage clutter, no anatomy filler, no generic floating object.",
+        1200,
+    )
+    negative_prompt = (
+        f"{NEGATIVE_PROMPT}. Avoid tiny unreadable details, multi-panel collage layouts, repeated subjects, "
+        "sterile medical/lab imagery, and weak low-contrast staging."
+    )
+    errors: list[str] = []
+    for model_id in _longform_thumbnail_model_candidates(format_preset, channel_context):
+        try:
+            result = await _generate_image_fal_selected_model(
+                model_id,
+                base_prompt,
+                output_path,
+                resolution="1080p_landscape",
+                negative_prompt=negative_prompt,
+            )
+            await _enforce_thumbnail_1080(output_path)
+            return {
+                **dict(result or {}),
+                "provider": str(result.get("provider", model_id) or model_id),
+                "provider_label": str(result.get("provider_label", model_id) or model_id),
+            }
+        except Exception as e:
+            errors.append(f"{model_id}: {e}")
+    if PIKZELS_API_KEY:
+        pikzels_result = await _generate_thumbnail_image(
+            prompt=base_prompt,
+            negative_prompt=negative_prompt,
+            output_path=output_path,
+            user=None,
+            mode="describe",
+        )
+        await _enforce_thumbnail_1080(output_path)
+        return {
+            "local_path": output_path,
+            "provider": "pikzels",
+            "provider_label": "Pikzels",
+            "request_id": str(pikzels_result.get("request_id", "") or ""),
+        }
+    detail = " | ".join(errors[-3:]) if errors else "no long-form thumbnail model was available"
+    raise RuntimeError(f"Long-form package thumbnail generation failed: {detail}")
 
 
 async def _longform_attach_scene_previews(
@@ -18913,22 +19007,23 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         package_thumbnail_file = ""
         package_thumbnail_url = ""
         package_thumbnail_error = ""
-        if PIKZELS_API_KEY and thumbnail_prompt_selected:
+        package_thumbnail_provider = ""
+        if thumbnail_prompt_selected:
             try:
                 thumbnail_user = {"id": str(session_snapshot.get("user_id", "") or "")}
                 thumbnail_output_name = f"{job_id}_longform_package.png"
                 thumbnail_output_path = str(_thumbnail_output_dir_for_user(thumbnail_user) / thumbnail_output_name)
-                thumbnail_render = await _generate_thumbnail_image(
-                    prompt=f"{thumbnail_prompt_selected}. Packaging hook: {selected_title}.",
-                    negative_prompt=NEGATIVE_PROMPT,
+                thumbnail_render = await _generate_longform_package_thumbnail(
+                    prompt=thumbnail_prompt_selected,
+                    selected_title=selected_title,
                     output_path=thumbnail_output_path,
-                    user=thumbnail_user,
-                    mode="describe",
+                    format_preset=format_preset,
+                    channel_context=dict(metadata_pack_snapshot.get("youtube_channel") or {}),
                 )
-                await _enforce_thumbnail_1080(thumbnail_output_path)
                 package_thumbnail_file = thumbnail_output_name
                 package_thumbnail_url = f"/api/thumbnails/generated/{thumbnail_output_name}"
-                jobs[job_id]["thumbnail_provider"] = "pikzels"
+                package_thumbnail_provider = str(thumbnail_render.get("provider", "") or thumbnail_render.get("provider_label", "") or "").strip()
+                jobs[job_id]["thumbnail_provider"] = package_thumbnail_provider or "fal"
                 jobs[job_id]["thumbnail_request_id"] = str(thumbnail_render.get("request_id", "") or "")
             except Exception as e:
                 package_thumbnail_error = str(e)[:240]
@@ -18946,6 +19041,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             "thumbnail_file": package_thumbnail_file,
             "thumbnail_url": package_thumbnail_url,
             "thumbnail_error": package_thumbnail_error,
+            "thumbnail_provider": package_thumbnail_provider,
         }
         learning_record = _heuristic_catalyst_learning_record(
             session_snapshot=session_snapshot,

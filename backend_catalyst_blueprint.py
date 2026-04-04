@@ -12,6 +12,15 @@ from backend_catalyst_profiles import (
     _heuristic_catalyst_chapter_blueprints,
 )
 
+
+def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
+    channel_context = dict(channel_context or {})
+    haystack = " ".join(
+        str(channel_context.get(key, "") or "").strip()
+        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
+    ).lower()
+    return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
+
 def _heuristic_catalyst_edit_blueprint(
     *,
     template: str,
@@ -54,6 +63,7 @@ def _heuristic_catalyst_edit_blueprint(
     archetype_packaging_rule = _clip_text(str(memory_view.get("archetype_packaging_rule", "") or ""), 220)
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
+    is_empire_magnates = bool(format_preset == "documentary" and not is_recap_lane and _is_empire_magnates_channel(channel_context))
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
     same_arena_subject_fn = same_arena_subject_fn or (lambda _source_bundle, topic="": "")
     subject = same_arena_subject_fn({"title": input_title or topic}, topic=topic or input_title) or cluster_label or _clip_text(topic or input_title or "the core subject", 80)
@@ -141,6 +151,8 @@ def _heuristic_catalyst_edit_blueprint(
         pattern_interrupt_interval = max(8, pattern_interrupt_interval - (2 if format_preset == "documentary" and not is_recap_lane else 1))
     if timeline_duplicate_visuals > 0:
         pattern_interrupt_interval = max(8, pattern_interrupt_interval - 1)
+    if is_empire_magnates:
+        pattern_interrupt_interval = min(pattern_interrupt_interval, 8)
     hook_promise = _clip_text(reference_hook_rewrites[0] if reference_hook_rewrites else f"Open on the strongest hidden consequence around {subject}, not generic setup.", 220)
     hook_open_loop = _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180)
     hook_first30 = _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180)
@@ -222,6 +234,82 @@ def _heuristic_catalyst_edit_blueprint(
             )
             recap_blueprints.append(chapter)
         chapter_blueprints = recap_blueprints
+    elif is_empire_magnates:
+        empire_opening_jobs = [
+            f"Open on the most unsettling contradiction around {subject} before any explanation begins.",
+            f"Start with a human consequence frame that proves the system behind {subject} is already affecting someone.",
+            f"Lead with a hidden mechanism reveal inside {subject}, then widen into the system around it.",
+            f"Open on a boardroom, dossier, or money-flow proof frame that makes control obvious instantly.",
+            f"Start on a map, network, or institutional consequence frame that shows the scale before the theory.",
+            f"Lead with a reversal: what people believe about {subject} versus the darker structure underneath it.",
+            f"Start on the payoff image first, then backfill the mechanism with restraint.",
+            f"Open on a concrete incentive contradiction, not a generic scene-setter.",
+        ]
+        empire_visual_motifs = [
+            f"premium dossier board with one dominant evidence thread built around {subject}",
+            f"boardroom power-map composition showing winners, losers, and hidden leverage around {subject}",
+            f"macro system-mechanism cutaway revealing the invisible machine behind {subject}",
+            f"money-flow or ownership network visualization tied directly to {subject}",
+            f"surveillance-grade archive frame with one premium symbolic object proving the point about {subject}",
+            f"infrastructure or city-scale consequence frame showing the downstream effect of {subject}",
+            f"clean before-versus-after contrast board exposing what {subject} changes in the real world",
+            f"void-stage hero composition with one premium symbol and one hard contradiction around {subject}",
+        ]
+        empire_motion_notes = [
+            "hard first-frame reveal, then controlled dolly-in with one decisive proof cutaway",
+            "clean scale jump from human consequence to system map in the same beat",
+            "ledger-to-boardroom contrast reset that makes the hidden mechanism feel expensive and legible",
+            "map-table sweep into one dominant institutional proof frame",
+            "surveillance or archive push-in, then abrupt evidence-board reset",
+            "macro mechanism reveal followed by a wider consequence frame before the viewer settles",
+            "before-versus-after composition reset with sharper documentary punctuation",
+            "architectural pull-through into one premium symbol instead of a generic floating object",
+        ]
+        empire_sound_notes = [
+            "controlled trailer pulse, low-end tension, and one silence pocket before the reveal lands",
+            "subtle tension swell under narration, then one clean documentary hit on the contradiction",
+            "boardroom-weight low pulse plus a restrained impact sting when the proof frame arrives",
+            "ominous bed with a sharp system-sweep accent when the mechanism is exposed",
+            "clean silence pocket before the reveal, then a heavy but polished consequence hit",
+            "surveillance hum, restrained low-end, and a premium trailer punctuation on the reversal",
+            "institutional tension bed with a hard contrast sting on the payoff image",
+            "quiet dread under the first claim, then one deliberate impact when the hidden control point appears",
+        ]
+        empire_shock_devices = [
+            "unsettling contradiction + immediate proof",
+            "personal consequence + hidden mechanism",
+            "institutional reveal + power imbalance",
+            "money-flow proof + betrayed incentives",
+            "scale shock + downstream consequence",
+            "myth-versus-reality reversal",
+            "payoff-first reveal + hidden system",
+            "control-point exposure + personal stake",
+        ]
+        empire_improvement_moves = [
+            "Open on a different proof mode than the previous chapter so the sequence never repeats the same opening beat.",
+            "Change staging aggressively between dossier, boardroom, map, mechanism, archive, and consequence frames.",
+            "Keep the first scene of each chapter consequence-first, not explanation-first.",
+            "Bias every chapter toward one premium proof frame before any abstract narration.",
+        ]
+        empire_blueprints: list[dict] = []
+        for idx, raw_blueprint in enumerate(chapter_blueprints):
+            chapter = dict(raw_blueprint or {})
+            variant_idx = idx % len(empire_opening_jobs)
+            chapter["focus"] = _clip_text(
+                f"{str(chapter.get('focus', '') or '').strip()} Anchor this chapter to a distinct documentary proof mode, not a recycled opener.",
+                220,
+            )
+            chapter["hook_job"] = _clip_text(empire_opening_jobs[variant_idx], 180)
+            chapter["shock_device"] = _clip_text(empire_shock_devices[variant_idx], 160)
+            chapter["visual_motif"] = _clip_text(empire_visual_motifs[variant_idx], 220)
+            chapter["motion_note"] = _clip_text(empire_motion_notes[variant_idx], 180)
+            chapter["sound_note"] = _clip_text(empire_sound_notes[variant_idx], 180)
+            chapter["improvement_focus"] = _clip_text(
+                f"{str(chapter.get('improvement_focus', '') or '').strip()} {empire_improvement_moves[idx % len(empire_improvement_moves)]}",
+                180,
+            )
+            empire_blueprints.append(chapter)
+        chapter_blueprints = empire_blueprints
     camera_language = _dedupe_preserve_order([
         "controlled dolly pushes into hero objects",
         "macro cutaways that reveal the hidden mechanism",
@@ -362,6 +450,44 @@ def _heuristic_catalyst_edit_blueprint(
             *niche_execution_notes,
             "Push premium 3D documentary motion, cleaner system storytelling, and stronger cinematic consequence framing.",
         ], max_items=5, max_chars=180)
+    if is_empire_magnates:
+        camera_language = _dedupe_preserve_order([
+            "Fern-grade premium 3D business-documentary camera language with architectural dolly-ins, dossier-table reveals, and sharp consequence resets",
+            "luxury boardroom, ownership-map, archive, surveillance, and infrastructure staging instead of generic lab or anatomy filler",
+            "force a different opening proof mode every chapter: dossier, boardroom, map, mechanism, archive, consequence, or reversal frame",
+            *camera_language,
+        ], max_items=8, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "ownership webs, money-flow lines, dossier annotations, power maps, and evidence-board callouts only when they make the point feel more expensive",
+            "one premium documentary proof frame per beat; never let adjacent scenes reuse the same CG stage grammar",
+            "no cluttered data walls; use one sharp contradiction or proof idea per frame",
+            *motion_graphics,
+        ], max_items=8, max_chars=180)
+        visual_rules = _dedupe_preserve_order([
+            "Avoid anatomy, sterile lab, and floating-object filler unless the narration explicitly demands it.",
+            "Bias toward premium 3D wealth-system, institution, network, archive, and consequence frames.",
+            "Every chapter opener must feel like a distinct premium documentary proof image, not a rephrased repeat.",
+            *visual_rules,
+        ], max_items=8, max_chars=180)
+        mix_notes = _dedupe_preserve_order([
+            "Use premium documentary trailer tension with cleaner low-end pulses, sharper reveal punctuation, and more deliberate silence pockets.",
+            "Sound should feel expensive and controlled, not noisy or horror-heavy.",
+            *mix_notes,
+        ], max_items=8, max_chars=160)
+        voice_direction = _dedupe_preserve_order([
+            "Read like a calm operator exposing a hidden system the viewer was never supposed to notice.",
+            "Front-load the first claim and make every early line feel like consequence, not setup.",
+            *voice_direction,
+        ], max_items=6, max_chars=160)
+        scoring_rubric = _dedupe_preserve_order([
+            "Each chapter must open on a visibly different documentary proof mode so the run never feels parked.",
+            "Every early scene should feel premium, invasive, and attention-grabbing enough to beat generic faceless business videos.",
+            *scoring_rubric,
+        ], max_items=10, max_chars=180)
+        niche_execution_notes = _dedupe_preserve_order([
+            *niche_execution_notes,
+            "For Empire Magnates, push premium business-documentary proof frames, sharper contradictions, and cleaner power-system storytelling than the last run.",
+        ], max_items=6, max_chars=180)
     if format_preset == "documentary" and not is_recap_lane and timeline_visual_lock > 0 and timeline_visual_lock < 72.0:
         camera_language = _dedupe_preserve_order([
             "favor dossier, boardroom, map-table, archive, surveillance, and infrastructure staging before any floating-object metaphor",
@@ -443,6 +569,8 @@ def _heuristic_catalyst_edit_blueprint(
         opening_intensity = "aggressive"
     if pressure_scores.get("hook", 0) >= 75 or pressure_scores.get("pacing", 0) >= 75:
         opening_intensity = "attack"
+    if is_empire_magnates:
+        opening_intensity = "attack"
     if preferred_opening_intensity in {"measured", "aggressive", "attack"} and pressure_scores.get("hook", 0) < 85 and preferred_opening_intensity != weakest_opening_intensity:
         opening_intensity = preferred_opening_intensity
     elif strongest_opening_intensity in {"measured", "aggressive", "attack"} and (pressure_scores.get("hook", 0) >= 65 or not preferred_opening_intensity or preferred_opening_intensity == weakest_opening_intensity):
@@ -452,6 +580,8 @@ def _heuristic_catalyst_edit_blueprint(
         interrupt_strength = "high"
     elif format_preset == "documentary" and not is_recap_lane:
         interrupt_strength = "medium"
+    if is_empire_magnates:
+        interrupt_strength = "high"
     if preferred_interrupt_strength in {"medium", "high"} and pressure_scores.get("pacing", 0) < 85 and preferred_interrupt_strength != weakest_interrupt_strength:
         interrupt_strength = preferred_interrupt_strength
     elif strongest_interrupt_strength in {"medium", "high"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_interrupt_strength or preferred_interrupt_strength == weakest_interrupt_strength):
@@ -492,6 +622,8 @@ def _heuristic_catalyst_edit_blueprint(
         cut_profile = "contrast-cut"
     if timeline_duplicate_visuals > 0 and cut_profile == "cinematic":
         cut_profile = "contrast-cut"
+    if is_empire_magnates:
+        cut_profile = "contrast-cut"
     if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85 and preferred_cut_profile != weakest_cut_profile:
         cut_profile = preferred_cut_profile
     elif strongest_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_cut_profile or preferred_cut_profile == weakest_cut_profile):
@@ -502,6 +634,8 @@ def _heuristic_catalyst_edit_blueprint(
     elif pressure_scores.get("sound", 0) >= 70:
         voice_pacing_bias = "tension-rise"
     elif format_preset == "documentary" and not is_recap_lane:
+        voice_pacing_bias = "front-loaded"
+    if is_empire_magnates:
         voice_pacing_bias = "front-loaded"
     if preferred_voice_pacing_bias in {"steady", "front-loaded", "tension-rise"} and pressure_scores.get("hook", 0) < 85 and preferred_voice_pacing_bias != weakest_voice_pacing_bias:
         voice_pacing_bias = preferred_voice_pacing_bias
@@ -522,6 +656,10 @@ def _heuristic_catalyst_edit_blueprint(
             if pressure_scores.get("visuals", 0) >= 60
             else "Introduce one visible composition or scale reset every few beats."
         )
+    if is_empire_magnates:
+        visual_variation_seed = (
+            "Rotate aggressively between dossier, boardroom, map, mechanism, archive, network, and consequence proof modes so adjacent scenes cannot share the same documentary frame grammar."
+        )
     visual_variation_rule = _clip_text(visual_variation_seed, 220)
     director_notes = _dedupe_preserve_order([
         latest_timeline_summary,
@@ -529,6 +667,7 @@ def _heuristic_catalyst_edit_blueprint(
         "Force harder composition resets on the next run to stop repeated visual framing." if timeline_duplicate_visuals > 0 else "",
         "Raise documentary visual lock with more system, dossier, boardroom, map, and infrastructure proof frames." if format_preset == "documentary" and not is_recap_lane and 0.0 < timeline_visual_lock < 72.0 else "",
         "Keep the next documentary run preview-safe so no hook or payoff scene ships without a ready visual." if 0.0 < timeline_preview_success < 90.0 else "",
+        "For Empire Magnates, every chapter opener must land on a different premium proof frame before explanation begins." if is_empire_magnates else "",
     ], max_items=5, max_chars=180)
     return {
         "version": "catalyst_edit_v1",
