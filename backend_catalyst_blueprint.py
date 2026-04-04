@@ -347,7 +347,7 @@ def _heuristic_catalyst_edit_blueprint(
                 f"Lead with a social manipulation tableau where one hidden trigger changes the outcome around {subject}.",
                 f"Open on a dossier or surveillance frame that makes the hidden control pattern around {subject} obvious instantly.",
                 f"Start on a mirror, split-self, or reversal frame showing what the person feels versus what is actually controlling them.",
-                f"Lead with a hidden-behavior mechanism reveal, then widen into the real-world consequence around {subject}.",
+                f"Lead with a hidden-behavior proof reveal, then widen into the real-world consequence around {subject}.",
                 f"Start on the emotional payoff image first, then backfill the invisible manipulation with restraint.",
                 f"Open on one disturbing blind-spot proof image, not a generic brain or machine scene.",
             ]
@@ -357,7 +357,7 @@ def _heuristic_catalyst_edit_blueprint(
                 f"surveillance-grade dossier board mapping triggers, leverage points, and emotional consequences tied to {subject}",
                 f"mirror or split-reality consequence frame showing what the victim perceives versus the hidden force shaping {subject}",
                 f"clean network of influence around a person, relationship, or decision point connected directly to {subject}",
-                f"archive or interrogation-room style proof frame exposing the hidden behavior mechanism behind {subject}",
+                f"archive or interrogation-room style proof frame exposing the hidden behavior pattern behind {subject}",
                 f"controlled symbolic frame using strings, masks, reflections, shadows, or attention funnels to visualize {subject}",
                 f"premium consequence-first human scene where the emotional fallout of {subject} is unmistakable",
             ]

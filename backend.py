@@ -18315,6 +18315,14 @@ _LONGFORM_PROMPT_CONTROL_PATTERNS = [
     r"\bpackaging iteration depth\b",
     r"\bhook proof density\b",
     r"\bopening variation\b",
+    r"\bmake the first \d+\s*(to|-)\s*\d+ seconds\b",
+    r"\bshorten setup brutally\b",
+    r"\bpromise, proof, and reversal\b",
+    r"\bkeep captions\b",
+    r"\bbias every chapter\b",
+    r"\bchange staging aggressively\b",
+    r"\bkeep the first scene of each chapter\b",
+    r"\bopen on a different\b",
 ]
 
 
@@ -18338,6 +18346,19 @@ def _clean_longform_scene_text(text: str) -> str:
     cleaned = " ".join(kept).strip()
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -,:")
     return cleaned
+
+
+def _longform_text_is_strategy_garbage(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    if _longform_sentence_is_prompt_control(lowered):
+        return True
+    return bool(re.search(
+        r"\b(scene-setting|proof mode|opening beat|captions?|chapter|seconds?|setup|packaging|thumbnail|visual lock|hook proof|variation|retention)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    ))
 
 
 def _longform_documentary_archetype(
@@ -18379,7 +18400,7 @@ def _longform_scene_focus_phrase(
     input_title: str = "",
 ) -> str:
     cleaned_narration = _clean_longform_scene_text(narration)
-    if cleaned_narration and len(cleaned_narration.split()) <= 18:
+    if cleaned_narration and len(cleaned_narration.split()) <= 18 and not _longform_text_is_strategy_garbage(cleaned_narration):
         return _clip_text(cleaned_narration, 140)
     for candidate in [
         str((chapter_blueprint or {}).get("focus", "") or "").strip(),
@@ -18388,7 +18409,7 @@ def _longform_scene_focus_phrase(
         _longform_fallback_visual_focus(topic, input_title),
     ]:
         cleaned = _clean_longform_scene_text(candidate)
-        if cleaned:
+        if cleaned and not _longform_text_is_strategy_garbage(cleaned):
             return _clip_text(cleaned, 140)
     return "the hidden mechanism behind the behavior"
 
@@ -18602,22 +18623,65 @@ def _longform_fallback_chapter(
     blueprint_sound = _clip_text(str(chapter_blueprint.get("sound_note", "") or ""), 140)
     blueprint_retention = _clip_text(str(chapter_blueprint.get("retention_goal", "") or ""), 140)
     blueprint_improvement = _clip_text(str(chapter_blueprint.get("improvement_focus", "") or ""), 140)
-    visual_modes = [
-        "isolated hero-object stage composition with one dominant subject",
-        "macro mechanism cutaway with one clearly visible internal process",
-        "stylized human interaction shot with one person reacting to the core subject",
-        "tabletop map or system-view composition with one zone clearly emphasized",
-        "before-versus-after comparison frame with strong contrast between two states",
-        "clean process-diagram environment with one visible cause and one visible effect",
-    ]
-    narration_modes = [
-        "Open with the clearest reveal first so the audience immediately understands why this beat matters.",
-        "Show the mechanism or hidden driver that pushes the idea forward.",
-        "Translate the explanation into a consequence the viewer can feel or picture instantly.",
-        "Raise the stakes by showing how the system expands, spreads, or takes control.",
-        "Introduce a contrast, reversal, or clash that sharpens the point instead of repeating it.",
-        "Land the beat with a concrete payoff that makes the next reveal feel bigger.",
-    ]
+    documentary_archetype = _longform_documentary_archetype(
+        edit_blueprint=edit_blueprint,
+        chapter_blueprint=chapter_blueprint,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+    )
+    if str(format_preset or "").strip().lower() == "documentary":
+        if documentary_archetype == "psychology_documentary":
+            visual_modes = [
+                "surveillance-grade dossier room with one hidden trigger landing on a real person",
+                "mirror or split-self consequence frame showing private perception versus hidden control",
+                "social manipulation tableau with one figure subtly steering another",
+                "archive or interrogation-room proof frame exposing the behavior pattern behind the choice",
+                "human-scale influence web around one relationship or decision point",
+                "controlled symbolic mind-world using reflections, masks, strings, or attention funnels rather than literal anatomy",
+            ]
+            narration_modes = [
+                "Open on the invasive consequence first so the audience instantly feels the hidden behavior.",
+                "Show the trigger and the human reaction in the same beat.",
+                "Translate the hidden influence into a personal consequence the viewer can picture immediately.",
+                "Raise the stakes by showing how the behavior quietly reshapes a decision or relationship.",
+                "Introduce a reversal between what the person believes and what is actually controlling the outcome.",
+                "Land the beat on a consequence or proof image that makes the next reveal feel more personal.",
+            ]
+        else:
+            visual_modes = [
+                "premium dossier-table proof frame with one dominant evidence thread",
+                "boardroom or institutional power-map composition showing leverage and consequence",
+                "ownership or money-flow network tied directly to the subject",
+                "archive, ledger, or infrastructure proof frame exposing the hidden system",
+                "before-versus-after consequence frame with one sharply legible change",
+                "human consequence scene showing who benefits, who loses, and why the system matters",
+            ]
+            narration_modes = [
+                "Open with the clearest contradiction or proof first so the audience immediately understands why this beat matters.",
+                "Show the hidden system and the visible consequence in the same beat.",
+                "Translate the explanation into a downstream effect the viewer can picture instantly.",
+                "Raise the stakes by showing how the system expands, routes power, or shifts incentives.",
+                "Introduce a contrast or reversal that sharpens the point instead of repeating it.",
+                "Land the beat with a concrete payoff that makes the next reveal feel bigger.",
+            ]
+    else:
+        visual_modes = [
+            "isolated hero-object stage composition with one dominant subject",
+            "macro mechanism cutaway with one clearly visible internal process",
+            "stylized human interaction shot with one person reacting to the core subject",
+            "tabletop map or system-view composition with one zone clearly emphasized",
+            "before-versus-after comparison frame with strong contrast between two states",
+            "clean process-diagram environment with one visible cause and one visible effect",
+        ]
+        narration_modes = [
+            "Open with the clearest reveal first so the audience immediately understands why this beat matters.",
+            "Show the mechanism or hidden driver that pushes the idea forward.",
+            "Translate the explanation into a consequence the viewer can feel or picture instantly.",
+            "Raise the stakes by showing how the system expands, spreads, or takes control.",
+            "Introduce a contrast, reversal, or clash that sharpens the point instead of repeating it.",
+            "Land the beat with a concrete payoff that makes the next reveal feel bigger.",
+        ]
     scenes: list[dict] = []
     for i in range(scene_goal):
         beat = i + 1
