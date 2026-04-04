@@ -218,3 +218,17 @@ class CatalystHubRefreshRequest(BaseModel):
     channel_id: str = ""
     include_public_benchmarks: bool = True
     refresh_outcomes: bool = False
+
+
+class CatalystHubLaunchRequest(BaseModel):
+    channel_id: str = ""
+    workspace_id: str = ""
+    mission: str = ""
+    directive: str = ""
+    guardrails: list[str] = []
+    target_niches: list[str] = []
+    target_minutes: float = 0.0
+    language: str = "en"
+    animation_enabled: bool = True
+    sfx_enabled: bool = True
+    auto_pipeline: bool = True

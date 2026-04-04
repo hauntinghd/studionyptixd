@@ -124,6 +124,7 @@ export default function CatalystPanel() {
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [syncingOutcomes, setSyncingOutcomes] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [launching, setLaunching] = useState(false);
     const [error, setError] = useState('');
 
     const bearerHeaders = useMemo<Record<string, string>>(() => {
@@ -175,6 +176,10 @@ export default function CatalystPanel() {
         ),
         [workspaceSnapshots]
     );
+    const pendingLongformLaunchKey = useMemo(() => {
+        const uid = String(session?.user?.id || 'guest').trim() || 'guest';
+        return `nyptid_longform_launch_session_${uid}`;
+    }, [session?.user?.id]);
 
     const selectedWorkspace = useMemo(
         () => workspaceSnapshots[selectedWorkspaceId] || null,
@@ -194,8 +199,15 @@ export default function CatalystPanel() {
         setGuardrails(Array.isArray(memory.operator_guardrails) ? memory.operator_guardrails.join('\n') : '');
         setTargetNiches(Array.isArray(memory.operator_target_niches) ? memory.operator_target_niches.join('\n') : '');
         const scope = String(memory.operator_apply_scope || '').trim().toLowerCase();
-        setApplyScope(scope || 'all');
-    }, [selectedWorkspaceId, selectedWorkspace]);
+        const normalizedScope = !scope
+            ? 'all'
+            : APPLY_SCOPE_OPTIONS.some((option) => option.value === scope)
+                ? scope
+                : orderedWorkspaceIds.includes(scope)
+                    ? 'current'
+                    : 'all';
+        setApplyScope(normalizedScope);
+    }, [orderedWorkspaceIds, selectedWorkspaceId, selectedWorkspace]);
 
     const startYouTubeConnect = useCallback(async () => {
         if (!session || youtubeConnecting) return;
@@ -296,6 +308,51 @@ export default function CatalystPanel() {
         }
     };
 
+    const handleLaunchLongform = async () => {
+        if (!session || !selectedChannelId) return;
+        if (!['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) {
+            setError('Catalyst launch is only available for long-form workspaces right now.');
+            return;
+        }
+        setLaunching(true);
+        setError('');
+        try {
+            const res = await fetch(`${API}/api/catalyst/hub/launch`, {
+                method: 'POST',
+                headers: jsonHeaders,
+                body: JSON.stringify({
+                    channel_id: selectedChannelId,
+                    workspace_id: selectedWorkspaceId,
+                    mission,
+                    directive,
+                    guardrails: splitLines(guardrails),
+                    target_niches: splitLines(targetNiches),
+                    language: 'en',
+                    animation_enabled: true,
+                    sfx_enabled: true,
+                    auto_pipeline: true,
+                }),
+            });
+            const data = await readJsonResponse<any>(res);
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to launch Catalyst long-form run'));
+            const sessionId = String(data?.session?.session_id || '').trim();
+            if (!sessionId) throw new Error('Catalyst launch returned no session id');
+            try {
+                sessionStorage.setItem(pendingLongformLaunchKey, sessionId);
+            } catch {
+                // ignore storage errors
+            }
+            const nextUrl = new URL(window.location.href);
+            nextUrl.searchParams.set('page', 'dashboard');
+            nextUrl.searchParams.set('tab', 'longform');
+            window.location.href = nextUrl.toString();
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to launch Catalyst long-form run'));
+        } finally {
+            setLaunching(false);
+        }
+    };
+
     const handleRefreshChannels = async () => {
         setRefreshingChannels(true);
         await loadHub(selectedChannelId || '', false);
@@ -314,6 +371,7 @@ export default function CatalystPanel() {
         () => [...APPLY_SCOPE_OPTIONS, { value: 'current', label: `Only this workspace (${WORKSPACE_LABELS[selectedWorkspaceId] || selectedWorkspaceId})` }],
         [selectedWorkspaceId]
     );
+    const canLaunchLongform = Boolean(selectedChannelId && ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId));
 
     if (!session) return null;
 
@@ -486,6 +544,15 @@ export default function CatalystPanel() {
                             >
                                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                                 Save Catalyst Directive
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleLaunchLongform()}
+                                disabled={launching || !canLaunchLongform}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-3 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                {launching ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+                                Launch Catalyst Long-Form
                             </button>
                             <span className="text-xs text-gray-500">
                                 Saved directives are written into Catalyst channel memory and reused by shorts and long-form guidance.

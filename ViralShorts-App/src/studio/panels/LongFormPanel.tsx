@@ -297,6 +297,10 @@ export default function LongFormPanel() {
         const uid = String(session?.user?.id || 'guest').trim() || 'guest';
         return `nyptid_longform_last_session_${uid}`;
     }, [session?.user?.id]);
+    const pendingLaunchStorageKey = useMemo(() => {
+        const uid = String(session?.user?.id || 'guest').trim() || 'guest';
+        return `nyptid_longform_launch_session_${uid}`;
+    }, [session?.user?.id]);
 
     const persistSessionId = useCallback((value: string) => {
         try {
@@ -548,6 +552,26 @@ export default function LongFormPanel() {
         if (!session) return;
         void loadYouTubeChannels(true);
     }, [session, loadYouTubeChannels]);
+
+    useEffect(() => {
+        const uid = String(session?.user?.id || '').trim();
+        if (!uid) return;
+        let pendingSessionId = '';
+        try {
+            pendingSessionId = String(sessionStorage.getItem(pendingLaunchStorageKey) || '').trim();
+            if (pendingSessionId) {
+                sessionStorage.removeItem(pendingLaunchStorageKey);
+            }
+        } catch {
+            pendingSessionId = '';
+        }
+        if (!pendingSessionId) return;
+        restoredSessionUserRef.current = uid;
+        setActiveTab('create');
+        setSessionIdInput(pendingSessionId);
+        persistSessionId(pendingSessionId);
+        void refreshStatus(pendingSessionId, false);
+    }, [pendingLaunchStorageKey, persistSessionId, refreshStatus, session?.user?.id]);
 
     useEffect(() => {
         const uid = String(session?.user?.id || '').trim();

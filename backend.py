@@ -241,6 +241,7 @@ from backend_models import (
     CatalystChannelOutcomeSyncRequest,
     CatalystHubDirectiveRequest,
     CatalystHubRefreshRequest,
+    CatalystHubLaunchRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -7816,6 +7817,148 @@ def _catalyst_hub_workspace_ids_for_scope(scope: str) -> list[str]:
     if normalized in {*(CATALYST_HUB_SHORT_WORKSPACES), *(CATALYST_HUB_LONGFORM_WORKSPACES)}:
         return [normalized]
     return [*CATALYST_HUB_SHORT_WORKSPACES, *CATALYST_HUB_LONGFORM_WORKSPACES]
+
+
+def _catalyst_hub_workspace_label(workspace_id: str) -> str:
+    return {
+        "story": "AI Stories",
+        "motivation": "Motivation",
+        "skeleton": "Skeleton AI",
+        "daytrading": "Day Trading",
+        "chatstory": "Chat Story",
+        "documentary": "Long Form Documentary",
+        "recap": "Long Form Recap",
+        "explainer": "Long Form Explainer",
+        "story_channel": "Long Form Story Channel",
+    }.get(str(workspace_id or "").strip().lower(), str(workspace_id or "").strip() or "Catalyst")
+
+
+def _catalyst_hub_longform_default_minutes(workspace_id: str) -> float:
+    normalized = str(workspace_id or "").strip().lower()
+    if normalized == "recap":
+        return 60.0
+    if normalized == "story_channel":
+        return 12.0
+    if normalized == "documentary":
+        return 10.0
+    return 8.0
+
+
+async def _derive_longform_seed_from_catalyst_hub(
+    *,
+    workspace_id: str,
+    channel_context: dict | None = None,
+    memory_public: dict | None = None,
+    playbook: dict | None = None,
+    mission: str = "",
+    directive: str = "",
+    guardrails: list[str] | None = None,
+    target_niches: list[str] | None = None,
+) -> dict:
+    workspace_key = str(workspace_id or "documentary").strip().lower()
+    workspace_label = _catalyst_hub_workspace_label(workspace_key)
+    channel_context = dict(channel_context or {})
+    memory_public = dict(memory_public or {})
+    playbook = dict(playbook or {})
+    mission_text = _clip_text(str(mission or "").strip(), 320)
+    directive_text = _clip_text(str(directive or "").strip(), 2400)
+    guardrail_list = [str(v).strip() for v in list(guardrails or []) if str(v).strip()]
+    niche_list = [str(v).strip() for v in list(target_niches or []) if str(v).strip()]
+    selected_cluster = dict(memory_public.get("selected_cluster") or {})
+    series_anchor = _clip_text(
+        str(
+            memory_public.get("series_anchor")
+            or memory_public.get("selected_cluster_label")
+            or selected_cluster.get("label")
+            or ""
+        ).strip(),
+        140,
+    )
+    archetype_label = _clip_text(str(memory_public.get("archetype_label", "") or "").strip(), 120)
+    channel_summary = _clip_text(str(channel_context.get("summary", "") or "").strip(), 900)
+    recent_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    top_titles = [str(v).strip() for v in list(channel_context.get("top_video_titles") or []) if str(v).strip()]
+    packaging_learnings = [str(v).strip() for v in list(channel_context.get("packaging_learnings") or []) if str(v).strip()]
+    retention_learnings = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()]
+    reference_summary = _clip_text(str(playbook.get("summary", "") or memory_public.get("reference_playbook_summary", "") or "").strip(), 600)
+    best_moves = [str(v).strip() for v in list(memory_public.get("next_video_moves") or []) if str(v).strip()]
+    strongest_signals = [str(v).strip() for v in list(memory_public.get("wins_to_keep") or []) if str(v).strip()]
+    weak_points = [str(v).strip() for v in list(memory_public.get("mistakes_to_avoid") or []) if str(v).strip()]
+    focus_subject = series_anchor or archetype_label or (niche_list[0] if niche_list else "") or "the strongest winning angle on this channel"
+    fallback_topic = mission_text or f"A stronger {workspace_label.lower()} about {focus_subject}".strip()
+    fallback_title = _clip_text(
+        str(
+            memory_public.get("operator_summary")
+            or memory_public.get("summary")
+            or f"The Hidden System Behind {focus_subject}"
+        ).strip(),
+        140,
+    )
+    if _title_is_too_close_to_any(fallback_title, [*recent_titles[:8], *top_titles[:8]]):
+        fallback_title = f"Why {focus_subject} Quietly Shapes More Than You Think"
+    fallback_description = _clip_text(
+        " ".join(
+            bit
+            for bit in [
+                mission_text or f"Build a sharper {workspace_label.lower()} in the same winning arena.",
+                directive_text[:320] if directive_text else "",
+                f"Stay in the channel's strongest lane around {focus_subject}.",
+                ("Guardrails: " + "; ".join(guardrail_list[:4])) if guardrail_list else "",
+            ]
+            if bit
+        ),
+        420,
+    )
+    try:
+        payload = await _xai_json_completion(
+            system_prompt=(
+                "You create fresh next-video briefs for an automated faceless YouTube engine. "
+                "Return strict JSON with keys topic, title, description. "
+                "Stay inside the channel's proven arena without copying old titles. "
+                "Titles must be clear, clickable, under 110 characters, and not generic."
+            ),
+            user_prompt="\n".join(
+                [
+                    f"Workspace: {workspace_label}",
+                    f"Channel summary: {channel_summary}",
+                    f"Mission: {mission_text}",
+                    f"Directive: {directive_text}",
+                    ("Guardrails: " + "; ".join(guardrail_list[:6])) if guardrail_list else "",
+                    ("Priority niches: " + ", ".join(niche_list[:6])) if niche_list else "",
+                    f"Series/arc focus: {series_anchor or 'general'}",
+                    f"Archetype: {archetype_label or 'general'}",
+                    ("Top titles: " + " | ".join(top_titles[:6])) if top_titles else "",
+                    ("Recent titles: " + " | ".join(recent_titles[:6])) if recent_titles else "",
+                    ("Packaging learnings: " + "; ".join(packaging_learnings[:4])) if packaging_learnings else "",
+                    ("Retention learnings: " + "; ".join(retention_learnings[:4])) if retention_learnings else "",
+                    ("Reference playbook: " + reference_summary) if reference_summary else "",
+                    ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
+                    ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
+                    ("Next moves: " + "; ".join(best_moves[:5])) if best_moves else "",
+                    "Return a fresh next video idea, title, and description for this channel.",
+                ]
+            ),
+            temperature=0.35,
+            timeout_sec=60,
+        )
+    except Exception:
+        payload = {}
+    topic = _clip_text(str(payload.get("topic", "") or fallback_topic).strip(), 180)
+    title = _clip_text(str(payload.get("title", "") or fallback_title).strip(), 140)
+    description = _clip_text(str(payload.get("description", "") or fallback_description).strip(), 420)
+    if not topic:
+        topic = fallback_topic
+    if not title:
+        title = fallback_title
+    if _title_is_too_close_to_any(title, [*recent_titles[:8], *top_titles[:8]]):
+        title = _clip_text(f"How {focus_subject} Quietly Rewrites the Outcome", 140)
+    if not description:
+        description = fallback_description
+    return {
+        "topic": topic,
+        "title": title,
+        "description": description,
+    }
 
 
 def _apply_catalyst_operator_directives(
@@ -22285,6 +22428,107 @@ async def catalyst_hub_save_instructions(
     except Exception as e:
         log.exception("Catalyst hub instruction save failed")
         raise HTTPException(500, _clip_text(f"Catalyst hub save failed: {e}", 220))
+
+
+@app.post("/api/catalyst/hub/launch")
+async def catalyst_hub_launch_longform(
+    req: CatalystHubLaunchRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    if not _longform_deep_analysis_enabled(user):
+        raise HTTPException(403, "Catalyst long-form deep analysis is not enabled for this account")
+    channel_id = str((req or {}).channel_id or "").strip()
+    workspace_id = str((req or {}).workspace_id or "").strip().lower()
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
+        raise HTTPException(400, "Catalyst long-form launch only supports long-form workspaces")
+    busy_session_id = await _active_longform_capacity_session_id(str(user.get("id", "") or ""))
+    if busy_session_id:
+        raise HTTPException(
+            409,
+            f"Long-form isolated capacity is already busy on session {busy_session_id}. Wait for that run to finish before launching another active Long Form generation.",
+        )
+    try:
+        hub_payload = await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=True,
+            refresh_outcomes=False,
+        )
+    except Exception as e:
+        log.exception("Catalyst hub long-form launch failed to load hub payload")
+        raise HTTPException(500, _clip_text(f"Catalyst launch failed to load channel memory: {e}", 220))
+    workspace_snapshot = dict((dict(hub_payload.get("workspace_snapshots") or {})).get(workspace_id) or {})
+    memory_public = dict(workspace_snapshot.get("memory_public") or {})
+    playbook = dict(workspace_snapshot.get("playbook") or {})
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
+    if not channel_context:
+        raise HTTPException(400, "Connect and sync the YouTube channel before launching Catalyst long-form")
+    mission = _clip_text(str((req or {}).mission or memory_public.get("operator_mission", "") or "").strip(), 320)
+    directive = _clip_text(str((req or {}).directive or memory_public.get("operator_directive", "") or "").strip(), 2400)
+    guardrails = _dedupe_preserve_order(
+        [str(v).strip() for v in list((req or {}).guardrails or memory_public.get("operator_guardrails") or []) if str(v).strip()],
+        max_items=10,
+        max_chars=180,
+    )
+    target_niches = _dedupe_preserve_order(
+        [str(v).strip() for v in list((req or {}).target_niches or memory_public.get("operator_target_niches") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=80,
+    )
+    seed = await _derive_longform_seed_from_catalyst_hub(
+        workspace_id=workspace_id,
+        channel_context=channel_context,
+        memory_public=memory_public,
+        playbook=playbook,
+        mission=mission,
+        directive=directive,
+        guardrails=guardrails,
+        target_niches=target_niches,
+    )
+    strategy_lines = [
+        f"Catalyst hub launch workspace: {_catalyst_hub_workspace_label(workspace_id)}",
+        ("Main goal: " + mission) if mission else "",
+        ("Operator directive: " + directive) if directive else "",
+        ("Guardrails: " + "; ".join(guardrails[:6])) if guardrails else "",
+        ("Priority niches: " + ", ".join(target_niches[:6])) if target_niches else "",
+        ("Channel summary: " + _clip_text(str(channel_context.get("summary", "") or "").strip(), 600)) if channel_context.get("summary") else "",
+        ("Catalyst memory summary: " + _clip_text(str(memory_public.get("summary", "") or "").strip(), 400)) if memory_public.get("summary") else "",
+        ("Catalyst playbook summary: " + _clip_text(str(playbook.get("summary", "") or "").strip(), 400)) if playbook.get("summary") else "",
+        "Launch intent: Build the next strongest long-form video for this channel using connected-channel memory, public benchmark mining, and Catalyst operator guidance.",
+    ]
+    session_public = await _create_longform_session_internal(
+        user=user,
+        template="story",
+        topic=str(seed.get("topic", "") or "").strip(),
+        input_title=str(seed.get("title", "") or "").strip(),
+        input_description=str(seed.get("description", "") or "").strip(),
+        format_preset=workspace_id,
+        source_url="",
+        youtube_channel_id=channel_id,
+        analytics_notes="",
+        strategy_notes=_clip_text("\n".join(line for line in strategy_lines if line), 5000),
+        transcript_text="",
+        target_minutes=_normalize_longform_target_minutes(
+            float((req or {}).target_minutes or 0.0) or _catalyst_hub_longform_default_minutes(workspace_id)
+        ),
+        language=_normalize_longform_language(str((req or {}).language or "en")),
+        animation_enabled=_bool_from_any((req or {}).animation_enabled, True),
+        sfx_enabled=_bool_from_any((req or {}).sfx_enabled, True),
+        whisper_mode="cinematic",
+        auto_pipeline_requested=_bool_from_any((req or {}).auto_pipeline, True),
+    )
+    return {
+        "ok": True,
+        "workspace_id": workspace_id,
+        "seed": seed,
+        "session": session_public,
+    }
 
 
 @app.get("/api/youtube/channels")
