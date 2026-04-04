@@ -8258,6 +8258,11 @@ async def _build_shorts_catalyst_extra_instructions(
     memory_public = dict(series_context.get("memory_view") or {})
     memory_context = _render_catalyst_channel_memory_context(memory_public)
     rewrite_pressure = dict(memory_public.get("rewrite_pressure") or _catalyst_rewrite_pressure_profile(memory_public))
+    operator_summary = _clip_text(str(memory_public.get("operator_summary", "") or "").strip(), 320)
+    operator_directive = _clip_text(str(memory_public.get("operator_directive", "") or "").strip(), 1200)
+    operator_mission = _clip_text(str(memory_public.get("operator_mission", "") or "").strip(), 220)
+    operator_guardrails = [str(v).strip() for v in list(memory_public.get("operator_guardrails") or []) if str(v).strip()]
+    operator_target_niches = [str(v).strip() for v in list(memory_public.get("operator_target_niches") or []) if str(v).strip()]
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320)
     archetype_label = str(memory_public.get("archetype_label", "") or "").strip()
@@ -8457,6 +8462,16 @@ async def _build_shorts_catalyst_extra_instructions(
     historical_moves = [str(v).strip() for v in list(historical_compare.get("next_moves") or []) if str(v).strip()]
     if historical_moves:
         parts.append("Historical next moves: " + "; ".join(_clip_text(v, 140) for v in historical_moves[:3]))
+    if operator_summary:
+        parts.append("Operator summary: " + operator_summary)
+    if operator_mission:
+        parts.append("Operator mission: " + operator_mission)
+    if operator_directive:
+        parts.append("Operator directive: " + operator_directive)
+    if operator_guardrails:
+        parts.append("Operator guardrails: " + "; ".join(_clip_text(v, 140) for v in operator_guardrails[:6]))
+    if operator_target_niches:
+        parts.append("Priority niches from operator: " + ", ".join(_clip_text(v, 60) for v in operator_target_niches[:6]))
     promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
     demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
     overused_shorts_angles = [str(v).strip() for v in list(memory_public.get("overused_shorts_angles") or []) if str(v).strip()]
