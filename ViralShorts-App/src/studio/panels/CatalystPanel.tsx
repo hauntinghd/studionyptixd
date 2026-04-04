@@ -16,6 +16,23 @@ type CatalystChannel = {
         top_video_titles?: string[];
         packaging_learnings?: string[];
         retention_learnings?: string[];
+        series_clusters?: Array<Record<string, any>>;
+        channel_audit?: {
+            summary?: string;
+            strengths?: string[];
+            warnings?: string[];
+            next_moves?: string[];
+            strongest_arc?: string;
+            weakest_arc?: string;
+            latest_failure_mode_label?: string;
+            best_recent_title?: string;
+            worst_recent_title?: string;
+            coverage?: {
+                recent_uploads?: number;
+                top_videos?: number;
+                series_clusters?: number;
+            };
+        };
         historical_compare?: {
             winner_vs_loser_summary?: string;
             next_moves?: string[];
@@ -372,6 +389,7 @@ export default function CatalystPanel() {
         [selectedWorkspaceId]
     );
     const canLaunchLongform = Boolean(selectedChannelId && ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId));
+    const channelAudit = selectedChannel?.analytics_snapshot?.channel_audit || null;
 
     if (!session) return null;
 
@@ -625,6 +643,21 @@ export default function CatalystPanel() {
                                         {selectedChannel.analytics_snapshot.historical_compare.winner_vs_loser_summary}
                                     </div>
                                 )}
+                                {channelAudit?.summary && (
+                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
+                                        {channelAudit.summary}
+                                    </div>
+                                )}
+                                {(channelAudit?.coverage?.recent_uploads || channelAudit?.coverage?.top_videos || channelAudit?.coverage?.series_clusters) ? (
+                                    <div className="grid gap-3 sm:grid-cols-3">
+                                        <StatCard label="Recent Uploads" value={String(channelAudit?.coverage?.recent_uploads || 0)} />
+                                        <StatCard label="Top Videos" value={String(channelAudit?.coverage?.top_videos || 0)} />
+                                        <StatCard label="Active Arcs" value={String(channelAudit?.coverage?.series_clusters || 0)} />
+                                    </div>
+                                ) : null}
+                                <DetailGroup title="Audit Strengths" values={channelAudit?.strengths || []} accent="emerald" />
+                                <DetailGroup title="Audit Warnings" values={channelAudit?.warnings || []} accent="amber" />
+                                <DetailGroup title="Audit Next Moves" values={channelAudit?.next_moves || []} accent="cyan" />
                                 {selectedChannel.last_outcome_sync_at ? (
                                     <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-xs text-gray-300">
                                         Last outcome sync: {formatWhen(selectedChannel.last_outcome_sync_at)}{selectedChannel.last_outcome_sync_count ? ` | ${selectedChannel.last_outcome_sync_count} videos` : ''}

@@ -1066,7 +1066,9 @@ def _youtube_connection_public_view(record: dict) -> dict:
             "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
             "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
             "top_videos": list(analytics_snapshot.get("top_videos") or []),
+            "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
             "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
+            "channel_audit": dict(analytics_snapshot.get("channel_audit") or _youtube_build_channel_audit(analytics_snapshot)),
         },
     }
 
@@ -7046,6 +7048,83 @@ def _youtube_build_historical_compare(videos: list[dict]) -> dict:
     }
 
 
+def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
+    payload = dict(snapshot or {})
+    historical_compare = dict(payload.get("historical_compare") or {})
+    recent_titles = [str(v).strip() for v in list(payload.get("recent_upload_titles") or []) if str(v).strip()]
+    top_titles = [str(v).strip() for v in list(payload.get("top_video_titles") or []) if str(v).strip()]
+    packaging_learnings = [str(v).strip() for v in list(payload.get("packaging_learnings") or []) if str(v).strip()]
+    retention_learnings = [str(v).strip() for v in list(payload.get("retention_learnings") or []) if str(v).strip()]
+    title_pattern_hints = [str(v).strip() for v in list(payload.get("title_pattern_hints") or []) if str(v).strip()]
+    series_clusters = [dict(v or {}) for v in list(payload.get("series_clusters") or []) if isinstance(v, dict)]
+    top_videos = [dict(v or {}) for v in list(payload.get("top_videos") or []) if isinstance(v, dict)]
+    latest_video = dict(historical_compare.get("latest_video") or {})
+    previous_video = dict(historical_compare.get("previous_video") or {})
+    best_recent_video = dict(historical_compare.get("best_recent_video") or {})
+    worst_recent_video = dict(historical_compare.get("worst_recent_video") or {})
+    latest_failure_mode = str(latest_video.get("failure_mode_label", "") or "").strip()
+    strongest_arc = str((series_clusters[0] or {}).get("label", "") or "").strip() if series_clusters else ""
+    weakest_arc = str((series_clusters[-1] or {}).get("label", "") or "").strip() if len(series_clusters) > 1 else ""
+    strengths = _dedupe_clip_list(
+        [
+            *title_pattern_hints[:2],
+            *packaging_learnings[:2],
+            *retention_learnings[:2],
+            (f"Best recent title: {best_recent_video.get('title', '')}" if best_recent_video.get("title") else ""),
+            (f"Strongest active arc: {strongest_arc}" if strongest_arc else ""),
+        ],
+        max_items=6,
+    )
+    warnings = _dedupe_clip_list(
+        [
+            (f"Latest upload is currently classified as {latest_failure_mode}." if latest_failure_mode else ""),
+            (f"Weakest recent title/package: {worst_recent_video.get('title', '')}" if worst_recent_video.get("title") else ""),
+            (f"Weakest active arc: {weakest_arc}" if weakest_arc else ""),
+            *[item for item in retention_learnings if "weak" in item.lower() or "watchout" in item.lower()][:2],
+            *[item for item in packaging_learnings if "historical next moves" in item.lower()][:1],
+        ],
+        max_items=6,
+    )
+    next_moves = _dedupe_clip_list(
+        [
+            *list(historical_compare.get("next_moves") or []),
+            *packaging_learnings[:2],
+            *retention_learnings[:2],
+        ],
+        max_items=6,
+    )
+    coverage = {
+        "recent_uploads": len(recent_titles),
+        "top_videos": len(top_videos),
+        "series_clusters": len(series_clusters),
+    }
+    summary_parts = [
+        f"Audited {coverage['recent_uploads']} recent uploads and {coverage['top_videos']} top videos.",
+        (f"Strongest arc: {strongest_arc}." if strongest_arc else ""),
+        (f"Weakest arc: {weakest_arc}." if weakest_arc else ""),
+        str(historical_compare.get("winner_vs_loser_summary", "") or "").strip(),
+        (f"Latest failure mode: {latest_failure_mode}." if latest_failure_mode else ""),
+    ]
+    if latest_video and previous_video:
+        latest_views = int(latest_video.get("views", 0) or 0)
+        previous_views = int(previous_video.get("views", 0) or 0)
+        summary_parts.append(
+            f"Latest vs previous: {latest_views:,} vs {previous_views:,} views."
+        )
+    return {
+        "summary": _clip_text(" ".join(part for part in summary_parts if part).strip(), 480),
+        "strengths": strengths,
+        "warnings": warnings,
+        "next_moves": next_moves,
+        "strongest_arc": strongest_arc,
+        "weakest_arc": weakest_arc,
+        "latest_failure_mode_label": latest_failure_mode,
+        "best_recent_title": str(best_recent_video.get("title", "") or "").strip(),
+        "worst_recent_title": str(worst_recent_video.get("title", "") or "").strip(),
+        "coverage": coverage,
+    }
+
+
 async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -> dict:
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=90)
@@ -7257,7 +7336,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         f"Active arcs: {', '.join(str((cluster or {}).get('label', '') or '').strip() for cluster in list(series_clusters)[:3] if str((cluster or {}).get('label', '') or '').strip())}" if series_clusters else "",
         _clip_text(str(series_cluster_playbook.get("summary", "") or "").strip(), 220) if str(series_cluster_playbook.get("summary", "") or "").strip() else "",
     ]
-    return {
+    snapshot = {
         "channel_summary": " | ".join(part for part in summary_parts if part),
         "recent_upload_titles": recent_titles[:12],
         "top_video_titles": popular_titles[:12],
@@ -7269,6 +7348,8 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         "series_cluster_playbook": series_cluster_playbook,
         "historical_compare": historical_compare,
     }
+    snapshot["channel_audit"] = _youtube_build_channel_audit(snapshot)
+    return snapshot
 
 
 async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
@@ -7356,6 +7437,7 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
         "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
         "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
+        "channel_audit": dict(analytics_snapshot.get("channel_audit") or _youtube_build_channel_audit(analytics_snapshot)),
         "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
     }
 
@@ -7880,6 +7962,7 @@ async def _derive_longform_seed_from_catalyst_hub(
     top_titles = [str(v).strip() for v in list(channel_context.get("top_video_titles") or []) if str(v).strip()]
     packaging_learnings = [str(v).strip() for v in list(channel_context.get("packaging_learnings") or []) if str(v).strip()]
     retention_learnings = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()]
+    channel_audit = dict(channel_context.get("channel_audit") or {})
     reference_summary = _clip_text(str(playbook.get("summary", "") or memory_public.get("reference_playbook_summary", "") or "").strip(), 600)
     best_moves = [str(v).strip() for v in list(memory_public.get("next_video_moves") or []) if str(v).strip()]
     strongest_signals = [str(v).strip() for v in list(memory_public.get("wins_to_keep") or []) if str(v).strip()]
@@ -7931,6 +8014,10 @@ async def _derive_longform_seed_from_catalyst_hub(
                     ("Recent titles: " + " | ".join(recent_titles[:6])) if recent_titles else "",
                     ("Packaging learnings: " + "; ".join(packaging_learnings[:4])) if packaging_learnings else "",
                     ("Retention learnings: " + "; ".join(retention_learnings[:4])) if retention_learnings else "",
+                    ("Channel audit: " + _clip_text(str(channel_audit.get("summary", "") or "").strip(), 380)) if channel_audit.get("summary") else "",
+                    ("Audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:3])) if channel_audit.get("strengths") else "",
+                    ("Audit warnings: " + "; ".join(list(channel_audit.get("warnings") or [])[:3])) if channel_audit.get("warnings") else "",
+                    ("Audit next moves: " + "; ".join(list(channel_audit.get("next_moves") or [])[:4])) if channel_audit.get("next_moves") else "",
                     ("Reference playbook: " + reference_summary) if reference_summary else "",
                     ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
                     ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
@@ -22498,6 +22585,8 @@ async def catalyst_hub_launch_longform(
         ("Guardrails: " + "; ".join(guardrails[:6])) if guardrails else "",
         ("Priority niches: " + ", ".join(target_niches[:6])) if target_niches else "",
         ("Channel summary: " + _clip_text(str(channel_context.get("summary", "") or "").strip(), 600)) if channel_context.get("summary") else "",
+        ("Channel audit: " + _clip_text(str((channel_context.get("channel_audit") or {}).get("summary", "") or "").strip(), 480)) if (channel_context.get("channel_audit") or {}).get("summary") else "",
+        ("Channel audit next moves: " + "; ".join(list((channel_context.get("channel_audit") or {}).get("next_moves") or [])[:4])) if list((channel_context.get("channel_audit") or {}).get("next_moves") or []) else "",
         ("Catalyst memory summary: " + _clip_text(str(memory_public.get("summary", "") or "").strip(), 400)) if memory_public.get("summary") else "",
         ("Catalyst playbook summary: " + _clip_text(str(playbook.get("summary", "") or "").strip(), 400)) if playbook.get("summary") else "",
         "Launch intent: Build the next strongest long-form video for this channel using connected-channel memory, public benchmark mining, and Catalyst operator guidance.",
