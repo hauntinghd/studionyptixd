@@ -8609,6 +8609,19 @@ async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> d
     return _youtube_connection_public_view(refreshed)
 
 
+async def _youtube_connected_channel_public_view(user_id: str, channel_id: str) -> dict:
+    user_key = str(user_id or "").strip()
+    channel_key = str(channel_id or "").strip()
+    if not user_key or not channel_key:
+        return {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
+    if not record:
+        return {}
+    return _youtube_connection_public_view(record)
+
+
 CATALYST_MARKETING_DOCTRINE = [
     "Be active in the Daily Marketing Channel.",
     "Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn't. Think about how you could improve it.",
