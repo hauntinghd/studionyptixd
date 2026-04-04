@@ -18945,9 +18945,20 @@ def _coerce_empire_longform_channel_memory(
     return updated
 
 
-def _longform_hosted_image_model_candidates(template: str, format_preset: str = "") -> list[str]:
+def _longform_hosted_image_model_candidates(
+    template: str,
+    format_preset: str = "",
+    *,
+    reference_image_url: str = "",
+) -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        candidates = ["seedream45", "imagen4_ultra", "recraft_v4_pro", "grok_imagine"]
+        # Seedream is reserved for thumbnails/package exploration, not long-form scenes.
+        # Reference-conditioned documentary scenes should prefer Grok first because
+        # it accepts image_url conditioning directly in the scene lane.
+        if str(reference_image_url or "").strip():
+            candidates = ["grok_imagine", "imagen4_ultra", "recraft_v4"]
+        else:
+            candidates = ["imagen4_ultra", "grok_imagine", "recraft_v4"]
     else:
         candidates = ["grok_imagine"]
     deduped: list[str] = []
@@ -18972,7 +18983,11 @@ async def _longform_generate_scene_image(
 ) -> dict:
     errors: list[str] = []
     documentary_passthrough = _longform_prefers_3d_documentary_visuals(template, format_preset)
-    for model_id in _longform_hosted_image_model_candidates(template, format_preset):
+    for model_id in _longform_hosted_image_model_candidates(
+        template,
+        format_preset,
+        reference_image_url=reference_image_url,
+    ):
         for attempt in range(2):
             try:
                 return await generate_scene_image(
