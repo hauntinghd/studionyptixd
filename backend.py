@@ -238,6 +238,8 @@ from backend_models import (
     CatalystOutcomeIngestRequest,
     CatalystAutoOutcomeHarvestRequest,
     CatalystChannelOutcomeSyncRequest,
+    CatalystHubDirectiveRequest,
+    CatalystHubRefreshRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -7795,6 +7797,222 @@ async def _persist_public_shorts_playbook_memory(
         "playbook": public_shorts_playbook,
         "memory_key": memory_key,
         "memory_public": _catalyst_channel_memory_public_view(updated_memory),
+    }
+
+
+CATALYST_HUB_SHORT_WORKSPACES = ["story", "motivation", "skeleton", "daytrading", "chatstory"]
+CATALYST_HUB_LONGFORM_WORKSPACES = ["documentary", "recap", "explainer", "story_channel"]
+
+
+def _catalyst_hub_workspace_ids_for_scope(scope: str) -> list[str]:
+    normalized = re.sub(r"[^a-z_]+", "", str(scope or "").strip().lower())
+    if not normalized or normalized == "all":
+        return [*CATALYST_HUB_SHORT_WORKSPACES, *CATALYST_HUB_LONGFORM_WORKSPACES]
+    if normalized == "shorts":
+        return list(CATALYST_HUB_SHORT_WORKSPACES)
+    if normalized == "longform":
+        return list(CATALYST_HUB_LONGFORM_WORKSPACES)
+    if normalized in {*(CATALYST_HUB_SHORT_WORKSPACES), *(CATALYST_HUB_LONGFORM_WORKSPACES)}:
+        return [normalized]
+    return [*CATALYST_HUB_SHORT_WORKSPACES, *CATALYST_HUB_LONGFORM_WORKSPACES]
+
+
+def _apply_catalyst_operator_directives(
+    existing: dict | None,
+    *,
+    channel_id: str = "",
+    format_preset: str = "",
+    directive: str = "",
+    mission: str = "",
+    guardrails: list[str] | None = None,
+    target_niches: list[str] | None = None,
+    apply_scope: str = "all",
+) -> dict:
+    updated = dict(existing or {})
+    directive_text = _clip_text(str(directive or "").strip(), 2400)
+    mission_text = _clip_text(str(mission or "").strip(), 320)
+    guardrail_list = _dedupe_preserve_order(
+        [str(v).strip() for v in list(guardrails or []) if str(v).strip()],
+        max_items=10,
+        max_chars=180,
+    )
+    niche_list = _dedupe_preserve_order(
+        [str(v).strip() for v in list(target_niches or []) if str(v).strip()],
+        max_items=8,
+        max_chars=80,
+    )
+    summary_bits = [
+        mission_text,
+        directive_text,
+        ("Guardrails: " + "; ".join(guardrail_list[:4])) if guardrail_list else "",
+        ("Priority niches: " + ", ".join(niche_list[:5])) if niche_list else "",
+    ]
+    updated["channel_id"] = str(channel_id or updated.get("channel_id", "") or "").strip()
+    updated["format_preset"] = str(format_preset or updated.get("format_preset", "") or "").strip()
+    updated["operator_directive"] = directive_text
+    updated["operator_mission"] = mission_text
+    updated["operator_guardrails"] = guardrail_list
+    updated["operator_target_niches"] = niche_list
+    updated["operator_apply_scope"] = str(apply_scope or updated.get("operator_apply_scope", "") or "").strip().lower() or "all"
+    updated["operator_summary"] = _clip_text(" ".join(bit for bit in summary_bits if bit), 320)
+    updated["operator_updated_at"] = time.time()
+    updated["updated_at"] = time.time()
+    return updated
+
+
+def _catalyst_recent_learning_records_for_channel(channel_id: str, *, limit: int = 12) -> list[dict]:
+    channel_key = str(channel_id or "").strip()
+    if not channel_key:
+        return []
+    rows: list[dict] = []
+    for raw in list((_catalyst_learning_records or {}).values()):
+        payload = dict(raw or {})
+        if str(payload.get("channel_id", "") or "").strip() != channel_key:
+            continue
+        rows.append(
+            {
+                "session_id": str(payload.get("session_id", "") or "").strip(),
+                "mode": str(payload.get("mode", "") or "").strip(),
+                "format_preset": str(payload.get("format_preset", "") or "").strip(),
+                "created_at": float(payload.get("created_at", 0.0) or 0.0),
+                "outcome_summary": _clip_text(str(payload.get("outcome_summary", "") or "").strip(), 240),
+                "selected_title": _clip_text(str(payload.get("selected_title", "") or "").strip(), 180),
+                "last_failure_mode_key": str(payload.get("last_failure_mode_key", "") or "").strip(),
+                "last_failure_mode_label": _catalyst_failure_mode_label(str(payload.get("last_failure_mode_key", "") or "").strip()),
+                "chapter_score_average": float(payload.get("chapter_score_average", 0.0) or 0.0),
+                "preview_success_rate": float(payload.get("preview_success_rate", 0.0) or 0.0),
+                "wins_to_keep": list(payload.get("wins_to_keep") or [])[:4],
+                "mistakes_to_avoid": list(payload.get("mistakes_to_avoid") or [])[:4],
+                "next_video_moves": list(payload.get("next_video_moves") or [])[:5],
+            }
+        )
+    rows.sort(key=lambda row: (-float(row.get("created_at", 0.0) or 0.0), str(row.get("session_id", "") or "").lower()))
+    return rows[: max(1, min(int(limit or 12), 24))]
+
+
+async def _build_catalyst_hub_payload(
+    *,
+    user: dict,
+    channel_id: str = "",
+    include_public_benchmarks: bool = False,
+    refresh_outcomes: bool = False,
+) -> dict:
+    user_id = str(user.get("id", "") or "").strip()
+    selected_channel_id = str(channel_id or "").strip()
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
+        channels_map = {str(k): dict(v or {}) for k, v in dict(bucket.get("channels") or {}).items()}
+    if not selected_channel_id:
+        selected_channel_id = default_channel_id
+    if selected_channel_id and selected_channel_id in channels_map:
+        try:
+            channels_map[selected_channel_id] = await _youtube_sync_and_persist_for_user(user_id, selected_channel_id)
+        except Exception as e:
+            stale = dict(channels_map.get(selected_channel_id) or {})
+            stale["last_sync_error"] = _clip_text(str(e), 220)
+            channels_map[selected_channel_id] = stale
+    public_channels = [
+        _youtube_connection_public_view(record) if ("analytics_snapshot" in record or "access_token" in record) else dict(record)
+        for record in channels_map.values()
+    ]
+    public_channels.sort(key=lambda row: (0 if str(row.get("channel_id", "") or "").strip() == selected_channel_id else 1, str(row.get("title", "") or "").lower()))
+    selected_channel = next((dict(row) for row in public_channels if str(row.get("channel_id", "") or "").strip() == selected_channel_id), {})
+    if refresh_outcomes and selected_channel_id and _longform_owner_beta_enabled(user):
+        try:
+            await _harvest_catalyst_outcomes_for_channel(
+                user_id=user_id,
+                channel_id=selected_channel_id,
+                candidate_limit=18,
+                refresh_existing=False,
+            )
+        except Exception as e:
+            refreshed = dict(selected_channel or {})
+            refreshed["last_outcome_sync_error"] = _clip_text(str(e), 220)
+            selected_channel = refreshed
+    channel_context = {}
+    if selected_channel_id:
+        try:
+            channel_context = await _youtube_selected_channel_context(user, selected_channel_id)
+        except Exception:
+            channel_context = {}
+    workspace_snapshots: dict[str, dict] = {}
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        memory_store = {str(k): dict(v or {}) for k, v in dict(_catalyst_channel_memory or {}).items()}
+        learning_rows = _catalyst_recent_learning_records_for_channel(selected_channel_id, limit=12)
+    for workspace_id in CATALYST_HUB_SHORT_WORKSPACES:
+        memory_key = _catalyst_channel_memory_key(user_id, selected_channel_id, workspace_id)
+        memory_bucket = dict(memory_store.get(memory_key) or {})
+        playbook: dict = {}
+        selected_cluster: dict = {}
+        if selected_channel_id and include_public_benchmarks:
+            try:
+                persisted = await _persist_public_shorts_playbook_memory(
+                    user=user,
+                    template=workspace_id,
+                    topic="",
+                    preferred_channel_id=selected_channel_id,
+                    trend_hunt_enabled=True,
+                    channel_context=channel_context,
+                )
+                playbook = dict(persisted.get("playbook") or {})
+                selected_cluster = dict(persisted.get("selected_cluster") or {})
+                memory_bucket = dict(memory_store.get(memory_key) or {})
+                if not memory_bucket:
+                    memory_bucket = dict((_catalyst_channel_memory or {}).get(memory_key) or {})
+            except Exception as e:
+                playbook = {"summary": _clip_text(f"Catalyst refresh failed for {workspace_id}: {e}", 220)}
+        memory_public = _catalyst_channel_memory_public_view(memory_bucket)
+        workspace_snapshots[workspace_id] = {
+            "workspace_id": workspace_id,
+            "kind": "shorts",
+            "memory_key": memory_key,
+            "memory_public": memory_public,
+            "playbook": playbook or _public_shorts_playbook_from_memory_view(memory_public),
+            "selected_cluster": selected_cluster,
+        }
+    for workspace_id in CATALYST_HUB_LONGFORM_WORKSPACES:
+        memory_key = _catalyst_channel_memory_key(user_id, selected_channel_id, workspace_id)
+        memory_bucket = dict(memory_store.get(memory_key) or {})
+        series_context = _resolve_catalyst_series_context(
+            channel_context,
+            channel_memory=memory_bucket,
+            topic="",
+            source_title="",
+            input_title="",
+            input_description="",
+            format_preset=workspace_id,
+        ) if channel_context else {}
+        memory_public = dict(series_context.get("memory_view") or _catalyst_channel_memory_public_view(memory_bucket))
+        workspace_snapshots[workspace_id] = {
+            "workspace_id": workspace_id,
+            "kind": "longform",
+            "memory_key": memory_key,
+            "memory_public": memory_public,
+            "selected_cluster": dict(series_context.get("selected_cluster") or {}),
+            "cluster_context": _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320),
+            "reference_summary": _clip_text(str((memory_public.get("reference_summary") if isinstance(memory_public, dict) else "") or ""), 320),
+        }
+    default_workspace_id = next(
+        (
+            wid
+            for wid in [*CATALYST_HUB_SHORT_WORKSPACES, *CATALYST_HUB_LONGFORM_WORKSPACES]
+            if dict(workspace_snapshots.get(wid) or {}).get("memory_public")
+        ),
+        "skeleton",
+    )
+    return {
+        "ok": True,
+        "default_channel_id": default_channel_id,
+        "selected_channel_id": selected_channel_id,
+        "selected_channel": selected_channel,
+        "channels": public_channels,
+        "workspace_snapshots": workspace_snapshots,
+        "recent_learning": learning_rows,
+        "default_workspace_id": default_workspace_id,
+        "generated_at": time.time(),
     }
 
 
@@ -21769,6 +21987,78 @@ async def google_youtube_oauth_callback(
         return RedirectResponse(_youtube_redirect_target(next_url, True, "YouTube channel connected"), status_code=302)
     except Exception as e:
         return RedirectResponse(_youtube_redirect_target(next_url, False, str(e)), status_code=302)
+
+
+@app.get("/api/catalyst/hub")
+async def catalyst_hub_snapshot(
+    request: Request,
+    channel_id: str = "",
+    refresh: bool = False,
+):
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    return await _build_catalyst_hub_payload(
+        user=user,
+        channel_id=str(channel_id or "").strip(),
+        include_public_benchmarks=bool(refresh),
+        refresh_outcomes=False,
+    )
+
+
+@app.post("/api/catalyst/hub/refresh")
+async def catalyst_hub_refresh(
+    req: CatalystHubRefreshRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    return await _build_catalyst_hub_payload(
+        user=user,
+        channel_id=str((req or {}).channel_id or "").strip(),
+        include_public_benchmarks=bool((req or {}).include_public_benchmarks),
+        refresh_outcomes=bool((req or {}).refresh_outcomes),
+    )
+
+
+@app.post("/api/catalyst/hub/instructions")
+async def catalyst_hub_save_instructions(
+    req: CatalystHubDirectiveRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    user_id = str(user.get("id", "") or "").strip()
+    channel_id = str((req or {}).channel_id or "").strip()
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    workspace_ids = _catalyst_hub_workspace_ids_for_scope(str((req or {}).apply_scope or "").strip())
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        for workspace_id in workspace_ids:
+            memory_key = _catalyst_channel_memory_key(user_id, channel_id, workspace_id)
+            existing = dict(_catalyst_channel_memory.get(memory_key) or {})
+            updated = _apply_catalyst_operator_directives(
+                existing,
+                channel_id=channel_id,
+                format_preset=workspace_id,
+                directive=str((req or {}).directive or "").strip(),
+                mission=str((req or {}).mission or "").strip(),
+                guardrails=list((req or {}).guardrails or []),
+                target_niches=list((req or {}).target_niches or []),
+                apply_scope=str((req or {}).apply_scope or "all").strip().lower() or "all",
+            )
+            updated["key"] = memory_key
+            _catalyst_channel_memory[memory_key] = updated
+        _save_catalyst_memory()
+    return await _build_catalyst_hub_payload(
+        user=user,
+        channel_id=channel_id,
+        include_public_benchmarks=False,
+        refresh_outcomes=False,
+    )
 
 
 @app.get("/api/youtube/channels")

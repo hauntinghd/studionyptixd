@@ -1,16 +1,17 @@
-import { useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { BarChart3, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
+import { useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
+import { BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
 import AutoClipperPanel from '../panels/AutoClipperPanel';
+import CatalystPanel from '../panels/CatalystPanel';
 import ClonePanel from '../panels/ClonePanel';
 import CreatePanel from '../panels/CreatePanel';
 import DemoPanel from '../panels/DemoPanel';
 import LongFormPanel from '../panels/LongFormPanel';
 import ThumbnailPanel from '../panels/ThumbnailPanel';
 
-type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics';
+type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst';
 
 type SidebarItem = {
     id: DashboardTab;
@@ -28,6 +29,7 @@ const OWNER_ALL_ACCESS = {
     demo: true,
     autoclipper: true,
     analytics: true,
+    catalyst: true,
 };
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -54,6 +56,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (hour < 18) return 'Good afternoon';
         return 'Good evening';
     }, []);
+    const isTabUnlocked = useCallback((nextTab: DashboardTab) => {
+        if (nextTab === 'create') return true;
+        if (nextTab === 'analytics' || nextTab === 'catalyst') return isAdmin;
+        return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
+    }, [isAdmin, laneAccess]);
 
     useEffect(() => {
         if (!session) onNavigate('auth');
@@ -64,22 +71,22 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         const params = new URLSearchParams(window.location.search);
         const requestedTab = String(params.get('tab') || params.get('focus') || '').trim().toLowerCase();
         if (!requestedTab) return;
-        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics']);
+        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst']);
         if (!allowedTabs.has(requestedTab as DashboardTab)) return;
         const nextTab = requestedTab as DashboardTab;
-        const unlocked = nextTab === 'create' || Boolean((laneAccess as Record<string, boolean>)[nextTab]);
+        const unlocked = isTabUnlocked(nextTab);
         if (!unlocked) return;
         setTab(nextTab);
         setCreateWorkspaceOpen(nextTab === 'create');
-    }, [laneAccess]);
+    }, [isTabUnlocked]);
 
     useEffect(() => {
         if (tab === 'create') return;
-        if (!Boolean((laneAccess as Record<string, boolean>)[tab])) {
+        if (!isTabUnlocked(tab)) {
             setTab('create');
             setCreateWorkspaceOpen(false);
         }
-    }, [laneAccess, tab]);
+    }, [isTabUnlocked, tab]);
 
     if (!session) return null;
 
@@ -117,6 +124,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         label: 'Product Analytics',
         icon: BarChart3,
         hidden: !isAdmin,
+    }, {
+        id: 'catalyst',
+        label: 'Catalyst',
+        icon: BrainCircuit,
+        hidden: !isAdmin,
     }] as SidebarItem[]).filter((item) => !item.hidden);
 
     const openCreateWorkspace = () => {
@@ -130,7 +142,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             openCreateWorkspace();
             return;
         }
-        const unlocked = Boolean((laneAccess as Record<string, boolean>)[item.id]);
+        const unlocked = isTabUnlocked(item.id);
         if (unlocked && !item.comingSoon) {
             setTab(item.id);
             setCreateWorkspaceOpen(false);
@@ -143,6 +155,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const panel = (() => {
         if (tab === 'analytics' && isAdmin) return <AdminAnalyticsPanel />;
+        if (tab === 'catalyst' && isAdmin) return <CatalystPanel />;
         if (tab === 'clone' && laneAccess.clone) return <ClonePanel />;
         if (tab === 'longform' && laneAccess.longform) return <LongFormPanel />;
         if (tab === 'thumbnails' && laneAccess.thumbnails) return <ThumbnailPanel />;
@@ -193,7 +206,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         const active = tab === item.id;
                                         const disabled = item.id === 'create'
                                             ? false
-                                            : item.comingSoon || !Boolean((laneAccess as Record<string, boolean>)[item.id]);
+                                            : item.comingSoon || !isTabUnlocked(item.id);
                                         const Icon = item.icon;
                                         return (
                                             <button

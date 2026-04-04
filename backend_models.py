@@ -203,3 +203,18 @@ class CatalystChannelOutcomeSyncRequest(BaseModel):
     session_id: str = ""
     candidate_limit: int = 18
     refresh_existing: bool = False
+
+
+class CatalystHubDirectiveRequest(BaseModel):
+    channel_id: str = ""
+    directive: str = ""
+    mission: str = ""
+    guardrails: list[str] = []
+    target_niches: list[str] = []
+    apply_scope: str = "all"
+
+
+class CatalystHubRefreshRequest(BaseModel):
+    channel_id: str = ""
+    include_public_benchmarks: bool = True
+    refresh_outcomes: bool = False

@@ -21,6 +21,14 @@ def _render_catalyst_channel_memory_context(memory: dict | None, series_anchor_o
     parts: list[str] = []
     if public.get("summary"):
         parts.append("Catalyst channel memory summary: " + _clip_text(str(public.get("summary", "")), 320))
+    if public.get("operator_summary"):
+        parts.append("Operator directive summary: " + _clip_text(str(public.get("operator_summary", "") or ""), 320))
+    if public.get("operator_mission"):
+        parts.append("Operator mission: " + _clip_text(str(public.get("operator_mission", "") or ""), 220))
+    if public.get("operator_guardrails"):
+        parts.append("Operator guardrails: " + "; ".join(list(public.get("operator_guardrails") or [])[:5]))
+    if public.get("operator_target_niches"):
+        parts.append("Priority niches: " + ", ".join(list(public.get("operator_target_niches") or [])[:6]))
     if public.get("series_anchor"):
         parts.append("Series anchor to preserve: " + _clip_text(str(public.get("series_anchor", "") or ""), 120))
     if public.get("niche_label"):
