@@ -9800,7 +9800,8 @@ def _build_longform_scene_execution_prompt(
     art_style: str = "auto",
 ) -> str:
     scene = dict(scene or {})
-    visual_description = _clip_text(str(scene.get("visual_description", "") or "").strip(), 420)
+    visual_description_raw = str(scene.get("visual_description", "") or "").strip()
+    visual_description = _clip_text(_clean_longform_scene_text(visual_description_raw) or visual_description_raw, 420)
     motion_direction = str(scene.get("motion_direction", "") or "").strip()
     execution = _catalyst_scene_execution_profile(
         edit_blueprint=edit_blueprint,
@@ -9819,16 +9820,44 @@ def _build_longform_scene_execution_prompt(
             narration=str(scene.get("narration", "") or ""),
             visual_description=visual_description,
         )
+        documentary_visual_description = visual_description
+        lowered_visual = documentary_visual_description.lower()
+        if (
+            not documentary_visual_description
+            or _longform_text_is_strategy_garbage(documentary_visual_description)
+            or _longform_scene_looks_like_machine_filler(documentary_visual_description, archetype_key=documentary_archetype)
+            or "central mechanism, object, or environment being explained" in lowered_visual
+            or "visual motif" in lowered_visual
+            or "variation rule" in lowered_visual
+            or "hero object" in lowered_visual
+            or "aggressive spotlight" in lowered_visual
+            or "built around" in lowered_visual
+        ):
+            _, documentary_visual_description = _build_documentary_scene_repair(
+                narration=str(scene.get("narration", "") or documentary_visual_description or ""),
+                chapter_blueprint=chapter_blueprint,
+                scene_index=scene_index,
+                total_scenes=total_scenes,
+                topic="",
+                input_title="",
+                archetype_key=documentary_archetype,
+            )
+        documentary_visual_description = re.sub(
+            r"^Fern-grade premium 3D (psychology|systems) documentary scene,\s*obviously CG,[^.]+\.\s*",
+            "",
+            str(documentary_visual_description or "").strip(),
+            flags=re.IGNORECASE,
+        ).strip()
         documentary_prefix = (
             "Fern-grade premium 3D psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
             if documentary_archetype == "psychology_documentary"
             else "Fern-grade premium 3D systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
         )
+        if str(documentary_visual_description or "").strip().lower().startswith("fern-grade premium 3d"):
+            documentary_prefix = ""
         visual_parts = _dedupe_preserve_order([
-            visual_description,
+            documentary_visual_description,
             f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
-            f"Visual motif: {visual_motif}." if visual_motif else "",
-            f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
             "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference.",
@@ -18394,6 +18423,7 @@ def _longform_psychology_focus_phrase(candidate: str, scene_role: str) -> str:
         or _longform_text_is_strategy_garbage(cleaned)
         or len(cleaned.split()) > 9
         or bool(re.search(r"\b(hero[-\s]?object|spotlight|built around|visual motif|framing|proof[-\s]?first)\b", lowered))
+        or "central mechanism, object, or environment being explained" in lowered
         or "your decisions" in lowered
         or "quietly rewriting" in lowered
     ):
