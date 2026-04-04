@@ -143,6 +143,7 @@ export default function CatalystPanel() {
     const [syncingOutcomes, setSyncingOutcomes] = useState(false);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
+    const [stoppingSessionId, setStoppingSessionId] = useState('');
     const [error, setError] = useState('');
 
     const bearerHeaders = useMemo<Record<string, string>>(() => {
@@ -187,6 +188,10 @@ export default function CatalystPanel() {
         () => Object.fromEntries(Object.entries(payload?.workspace_snapshots || {}).map(([key, value]) => [key, value as CatalystWorkspaceSnapshot])),
         [payload]
     );
+    const busyLongformSessionId = useMemo(() => {
+        const match = String(error || '').match(/session\s+(lf_\d+_\d+)/i);
+        return String(match?.[1] || '').trim();
+    }, [error]);
 
     const orderedWorkspaceIds = useMemo(
         () => WORKSPACE_ORDER.filter((workspaceId) => workspaceSnapshots[workspaceId]).concat(
@@ -379,6 +384,25 @@ export default function CatalystPanel() {
         setRefreshingChannels(false);
     };
 
+    const handleStopBusySession = async () => {
+        if (!session || !busyLongformSessionId) return;
+        setStoppingSessionId(busyLongformSessionId);
+        setError('');
+        try {
+            const res = await fetch(`${API}/api/longform/session/${busyLongformSessionId}/stop`, {
+                method: 'POST',
+                headers: jsonHeaders,
+            });
+            const data = await readJsonResponse<any>(res);
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to stop active long-form session'));
+            await loadHub(selectedChannelId || '', false);
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to stop active long-form session'));
+        } finally {
+            setStoppingSessionId('');
+        }
+    };
+
     const channelOptions = payload?.channels || [];
     const selectedChannel = useMemo(
         () => channelOptions.find((row) => String(row.channel_id || '').trim() === String(selectedChannelId || '').trim()) || payload?.selected_channel || null,
@@ -454,7 +478,19 @@ export default function CatalystPanel() {
 
             {error && (
                 <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                    {error}
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>{error}</div>
+                        {busyLongformSessionId ? (
+                            <button
+                                type="button"
+                                onClick={() => void handleStopBusySession()}
+                                disabled={stoppingSessionId === busyLongformSessionId}
+                                className="inline-flex items-center justify-center rounded-xl border border-red-400/30 bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-100 transition hover:border-red-300/50 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                {stoppingSessionId === busyLongformSessionId ? 'Stopping run...' : `Stop ${busyLongformSessionId}`}
+                            </button>
+                        ) : null}
+                    </div>
                 </div>
             )}
 

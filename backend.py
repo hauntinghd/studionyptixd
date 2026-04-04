@@ -19305,6 +19305,8 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 session = dict(_longform_sessions.get(session_id) or {})
             if not session:
                 return
+            if _bool_from_any(session.get("stop_requested"), False) or str(session.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
+                return
 
             template = _normalize_longform_template(session.get("template", "story"))
             format_preset = str(session.get("format_preset", "explainer") or "explainer").strip().lower()
@@ -19381,6 +19383,8 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 live = _longform_sessions.get(session_id)
                 if not isinstance(live, dict):
                     return
+                if _bool_from_any(live.get("stop_requested"), False) or str(live.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
+                    return
                 chapters_live = list(live.get("chapters") or [])
                 if chapter_index >= len(chapters_live):
                     return
@@ -19405,6 +19409,8 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
             async with _longform_sessions_lock:
                 live = _longform_sessions.get(session_id)
                 if isinstance(live, dict):
+                    if _bool_from_any(live.get("stop_requested"), False) or str(live.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
+                        return
                     live["status"] = "error"
                     live["paused_error"] = {
                         "stage": "draft_generation",
@@ -19430,6 +19436,8 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
     async with _longform_sessions_lock:
         live = _longform_sessions.get(session_id)
         if not isinstance(live, dict):
+            return
+        if _bool_from_any(live.get("stop_requested"), False) or str(live.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
             return
         if str(live.get("status", "") or "") == "bootstrapping":
             return
@@ -19562,6 +19570,9 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             if session_id not in _longform_sessions:
                 raise RuntimeError("Long-form session not found")
             session_snapshot = dict(_longform_sessions[session_id])
+        if _bool_from_any(session_snapshot.get("stop_requested"), False) or str(session_snapshot.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
+            await _mark_longform_job_cancelled(job_id, "Stopped by owner.")
+            return
         template = str(session_snapshot.get("template", "story") or "story")
         resolution = str(session_snapshot.get("resolution", "720p_landscape") or "720p_landscape")
         language = _normalize_longform_language(session_snapshot.get("language", "en"))
@@ -19683,6 +19694,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         total_steps = len(scenes) * (2 if animation_enabled else 1)
 
         for i, scene in enumerate(scenes):
+            async with _longform_sessions_lock:
+                live_session = dict(_longform_sessions.get(session_id) or {})
+            if _bool_from_any(live_session.get("stop_requested"), False) or str(live_session.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
+                await _mark_longform_job_cancelled(job_id, "Stopped by owner.")
+                return
             chapter_index = int(scene.get("_chapter_index", 0) or 0)
             scene_num = int(scene.get("scene_num", i + 1) or (i + 1))
             _job_update_scene_pointer(
@@ -20534,7 +20550,11 @@ def _create_longform_bootstrap_placeholder_session(
 
 def _longform_session_uses_isolated_capacity(session: dict | None) -> bool:
     s = dict(session or {})
+    if _bool_from_any(s.get("stop_requested"), False):
+        return False
     status = str(s.get("status", "") or "").strip().lower()
+    if status in {"stopped", "cancelled", "canceled"}:
+        return False
     if status in {"bootstrapping", "draft_generating", "rendering"}:
         return True
     chapters = list(s.get("chapters") or [])
@@ -20543,6 +20563,24 @@ def _longform_session_uses_isolated_capacity(session: dict | None) -> bool:
         if chapter_status in {"regenerating", "draft_generating_images"}:
             return True
     return False
+
+
+async def _mark_longform_job_cancelled(job_id: str, reason: str = "Stopped by owner.") -> None:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return
+    job = dict(jobs.get(normalized_job_id) or {})
+    if not job:
+        persisted = await get_persisted_job_state(normalized_job_id)
+        if isinstance(persisted, dict) and persisted:
+            job = dict(persisted)
+    if not job:
+        return
+    job["status"] = "cancelled"
+    job["error"] = str(reason or "Stopped by owner.").strip()
+    job["cancelled_at"] = time.time()
+    jobs[normalized_job_id] = job
+    await persist_job_state(normalized_job_id, job)
 
 
 async def _recover_stalled_longform_session_for_capacity(session: dict | None, *, now_ts: float | None = None) -> tuple[dict, bool]:
@@ -21427,6 +21465,65 @@ async def longform_finalize(session_id: str, background_tasks: BackgroundTasks, 
         raise HTTPException(403, "Long-form owner beta is restricted")
     job_id = await _start_longform_finalize_internal(session_id, user)
     return {"job_id": job_id}
+
+
+@app.post("/api/longform/session/{session_id}/stop")
+async def longform_stop_session(session_id: str, request: Request = None):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        raise HTTPException(400, "Session id required")
+
+    now_ts = time.time()
+    stopped_session: dict | None = None
+    active_job_id = ""
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session_live = _longform_sessions.get(normalized_session_id)
+        if not isinstance(session_live, dict):
+            raise HTTPException(404, "Long-form session not found")
+        if str((session_live or {}).get("user_id", "") or "").strip() != str(user.get("id", "") or "").strip():
+            raise HTTPException(403, "You do not have access to this long-form session")
+
+        active_job_id = str(session_live.get("job_id", "") or "").strip()
+        session_live["stop_requested"] = True
+        session_live["stop_requested_at"] = now_ts
+        session_live["status"] = "stopped"
+        session_live["job_id"] = ""
+        progress = dict(session_live.get("draft_progress") or {})
+        progress["stage"] = "stopped_by_owner"
+        session_live["draft_progress"] = progress
+        session_live["paused_error"] = {
+            "stage": "stopped",
+            "error": "Stopped by owner.",
+        }
+
+        chapters_live = list(session_live.get("chapters") or [])
+        for idx, raw_chapter in enumerate(chapters_live):
+            chapter = dict(raw_chapter or {})
+            chapter_status = str(chapter.get("status", "") or "").strip().lower()
+            if chapter_status in {"draft_generating", "draft_generating_images", "regenerating", "awaiting_previous_approval"}:
+                chapter["status"] = "pending_review"
+                if not str(chapter.get("last_error", "") or "").strip():
+                    chapter["last_error"] = "Stopped by owner."
+                chapters_live[idx] = chapter
+        session_live["chapters"] = chapters_live
+        session_live["updated_at"] = now_ts
+        _longform_sessions[normalized_session_id] = session_live
+        _save_longform_sessions()
+        stopped_session = dict(session_live)
+
+    await _mark_longform_job_cancelled(active_job_id, "Stopped by owner.")
+    return {
+        "ok": True,
+        "stopped_session_id": normalized_session_id,
+        "session": _longform_public_session(stopped_session or {}),
+    }
 
 
 @app.post("/api/longform/session/{session_id}/outcome")
