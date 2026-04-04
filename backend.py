@@ -8186,10 +8186,19 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Historical next moves: " + "; ".join(_clip_text(v, 140) for v in historical_moves[:3]))
     promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
     demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
+    overused_shorts_angles = [str(v).strip() for v in list(memory_public.get("overused_shorts_angles") or []) if str(v).strip()]
+    retest_shorts_angles = [str(v).strip() for v in list(memory_public.get("retest_shorts_angles") or []) if str(v).strip()]
+    short_angle_rotation_summary = _clip_text(str(memory_public.get("short_angle_rotation_summary", "") or "").strip(), 260)
     if promoted_shorts_angles:
         parts.append("Catalyst promoted short angles: " + "; ".join(_clip_text(v, 120) for v in promoted_shorts_angles[:3]))
     if demoted_shorts_angles:
         parts.append("Catalyst demoted short angles to avoid repeating: " + "; ".join(_clip_text(v, 120) for v in demoted_shorts_angles[:2]))
+    if overused_shorts_angles:
+        parts.append("Catalyst overused short angles right now: " + "; ".join(_clip_text(v, 120) for v in overused_shorts_angles[:3]))
+    if retest_shorts_angles:
+        parts.append("Catalyst retest-worthy short angles: " + "; ".join(_clip_text(v, 120) for v in retest_shorts_angles[:3]))
+    if short_angle_rotation_summary:
+        parts.append(short_angle_rotation_summary)
     if cluster_context:
         parts.append(cluster_context)
     if list(selected_cluster.get("keywords") or []):

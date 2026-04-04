@@ -1,4 +1,5 @@
 import re
+import time
 
 
 def _clip_text(value: str, max_chars: int = 320) -> str:
@@ -1678,6 +1679,45 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "promoted_sound_densities": [str(row.get("value", "") or "").strip() for row in sound_density_rankings[:2] if str(row.get("value", "") or "").strip()],
         "demoted_sound_densities": [str(row.get("value", "") or "").strip() for row in list(reversed(sound_density_rankings[-2:])) if str(row.get("value", "") or "").strip()],
     }
+    now_ts = time.time()
+    overused_shorts_angles: list[str] = []
+    retest_shorts_angles: list[str] = []
+    for raw_row in list(public.get("public_shorts_angle_candidates") or []):
+        row = dict(raw_row or {})
+        angle = str(row.get("angle", "") or "").strip()
+        if not angle:
+            continue
+        times_seen = max(0, int(row.get("times_seen", 0) or 0))
+        last_seen_at = float(row.get("last_seen_at", 0.0) or 0.0)
+        hours_since_seen = ((now_ts - last_seen_at) / 3600.0) if last_seen_at > 0 else 999.0
+        if times_seen >= 3 and hours_since_seen <= 72:
+            overused_shorts_angles.append(angle)
+        elif times_seen <= 3 and 96 <= hours_since_seen <= 336:
+            retest_shorts_angles.append(angle)
+    public["overused_shorts_angles"] = _dedupe_preserve_order(overused_shorts_angles, max_items=4, max_chars=120)
+    public["retest_shorts_angles"] = _dedupe_preserve_order(retest_shorts_angles, max_items=4, max_chars=120)
+    public["short_angle_rotation_summary"] = _clip_text(
+        " ".join(
+            part
+            for part in [
+                (
+                    "Overused short angles right now: "
+                    + "; ".join(public["overused_shorts_angles"][:3])
+                    + "."
+                )
+                if public["overused_shorts_angles"]
+                else "",
+                (
+                    "Retest-worthy short angles: "
+                    + "; ".join(public["retest_shorts_angles"][:3])
+                    + "."
+                )
+                if public["retest_shorts_angles"]
+                else "",
+            ]
+        ),
+        260,
+    )
     ranked_series_memory = _catalyst_rank_series_memory(series_map)
     public["series_rankings"] = ranked_series_memory
     public["promoted_arcs"] = [str(row.get("series_anchor", "") or "").strip() for row in ranked_series_memory[:3] if str(row.get("series_anchor", "") or "").strip()]
