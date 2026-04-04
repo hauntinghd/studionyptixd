@@ -254,6 +254,7 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
     playbook = dict(public_shorts_playbook or {})
     if not playbook:
         return updated
+    now_ts = time.time()
     channel_context = dict(channel_context or {})
     selected_cluster = dict(selected_cluster or {})
     benchmark_titles = _dedupe_preserve_order(
@@ -418,35 +419,69 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
         "updated_at": time.time(),
     })
     merged_angle_map: dict[str, dict] = {}
-    for row in [*angle_candidates, *list(updated.get("public_shorts_angle_candidates") or [])]:
+    for row in list(updated.get("public_shorts_angle_candidates") or []):
+        payload = dict(row or {})
+        angle = _clip_text(str(payload.get("angle", "") or "").strip(), 100)
+        if not angle:
+            continue
+        key = angle.lower()
+        merged_angle_map[key] = {
+            "angle": angle,
+            "source": _clip_text(str(payload.get("source", "") or "").strip(), 24),
+            "score": round(float(payload.get("score", 0.0) or 0.0), 3),
+            "novelty_score": int(payload.get("novelty_score", 0) or 0),
+            "why_now": _clip_text(str(payload.get("why_now", "") or "").strip(), 180),
+            "hook_move": _clip_text(str(payload.get("hook_move", "") or "").strip(), 180),
+            "packaging_move": _clip_text(str(payload.get("packaging_move", "") or "").strip(), 180),
+            "visual_move": _clip_text(str(payload.get("visual_move", "") or "").strip(), 180),
+            "keyword_bias": _dedupe_preserve_order(
+                [str(v).strip() for v in list(payload.get("keyword_bias") or []) if str(v).strip()],
+                max_items=4,
+                max_chars=40,
+            ),
+            "archetype_label": _clip_text(str(payload.get("archetype_label", "") or "").strip(), 60),
+            "times_seen": max(1, int(payload.get("times_seen", 1) or 1)),
+            "first_seen_at": float(payload.get("first_seen_at", now_ts) or now_ts),
+            "last_seen_at": float(payload.get("last_seen_at", now_ts) or now_ts),
+        }
+    for row in angle_candidates:
         payload = dict(row or {})
         angle = _clip_text(str(payload.get("angle", "") or "").strip(), 100)
         if not angle:
             continue
         key = angle.lower()
         current = dict(merged_angle_map.get(key) or {})
-        if not current or float(payload.get("score", 0.0) or 0.0) >= float(current.get("score", 0.0) or 0.0):
-            merged_angle_map[key] = {
-                "angle": angle,
-                "source": _clip_text(str(payload.get("source", "") or "").strip(), 24),
-                "score": round(float(payload.get("score", 0.0) or 0.0), 3),
-                "novelty_score": int(payload.get("novelty_score", 0) or 0),
-                "why_now": _clip_text(str(payload.get("why_now", "") or "").strip(), 180),
-                "hook_move": _clip_text(str(payload.get("hook_move", "") or "").strip(), 180),
-                "packaging_move": _clip_text(str(payload.get("packaging_move", "") or "").strip(), 180),
-                "visual_move": _clip_text(str(payload.get("visual_move", "") or "").strip(), 180),
-                "keyword_bias": _dedupe_preserve_order(
-                    [str(v).strip() for v in list(payload.get("keyword_bias") or []) if str(v).strip()],
-                    max_items=4,
-                    max_chars=40,
-                ),
-                "archetype_label": _clip_text(str(payload.get("archetype_label", "") or "").strip(), 60),
-            }
+        current_score = float(current.get("score", 0.0) or 0.0)
+        new_score = float(payload.get("score", 0.0) or 0.0)
+        blended_score = round(((current_score * 0.72) + (new_score * 0.28)) if current else new_score, 3)
+        merged_angle_map[key] = {
+            "angle": angle,
+            "source": _clip_text(str(payload.get("source", "") or current.get("source", "") or "").strip(), 24),
+            "score": max(blended_score, round(new_score, 3), round(current_score, 3)),
+            "novelty_score": max(int(payload.get("novelty_score", 0) or 0), int(current.get("novelty_score", 0) or 0)),
+            "why_now": _clip_text(str(payload.get("why_now", "") or current.get("why_now", "") or "").strip(), 180),
+            "hook_move": _clip_text(str(payload.get("hook_move", "") or current.get("hook_move", "") or "").strip(), 180),
+            "packaging_move": _clip_text(str(payload.get("packaging_move", "") or current.get("packaging_move", "") or "").strip(), 180),
+            "visual_move": _clip_text(str(payload.get("visual_move", "") or current.get("visual_move", "") or "").strip(), 180),
+            "keyword_bias": _dedupe_preserve_order(
+                [
+                    *[str(v).strip() for v in list(payload.get("keyword_bias") or []) if str(v).strip()],
+                    *[str(v).strip() for v in list(current.get("keyword_bias") or []) if str(v).strip()],
+                ],
+                max_items=4,
+                max_chars=40,
+            ),
+            "archetype_label": _clip_text(str(payload.get("archetype_label", "") or current.get("archetype_label", "") or "").strip(), 60),
+            "times_seen": max(1, int(current.get("times_seen", 0) or 0) + 1),
+            "first_seen_at": float(current.get("first_seen_at", now_ts) or now_ts),
+            "last_seen_at": now_ts,
+        }
     updated["public_shorts_angle_candidates"] = sorted(
         merged_angle_map.values(),
         key=lambda row: (
             -float(row.get("score", 0.0) or 0.0),
             -int(row.get("novelty_score", 0) or 0),
+            -float(row.get("last_seen_at", 0.0) or 0.0),
             str(row.get("angle", "") or "").lower(),
         ),
     )[:8]

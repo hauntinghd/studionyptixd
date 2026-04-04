@@ -1,4 +1,5 @@
 import re
+import time
 
 from backend_catalyst_core import (
     _catalyst_infer_archetype,
@@ -266,10 +267,12 @@ def _catalyst_rank_shorts_angle_candidates(
     recent_short_angles = [str(v).strip() for v in list(memory_public.get("recent_short_angles") or []) if str(v).strip()]
     promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
     demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
+    stored_angle_rows = [dict(v or {}) for v in list(memory_public.get("public_shorts_angle_candidates") or []) if isinstance(v, dict)]
     recent_title_keys = {title.lower() for title in recent_titles}
     recent_short_angle_keys = {title.lower() for title in recent_short_angles}
     promoted_angle_keys = {title.lower() for title in promoted_shorts_angles}
     demoted_angle_keys = {title.lower() for title in demoted_shorts_angles}
+    now_ts = time.time()
     cluster_titles = [str(v).strip() for v in list(selected_cluster.get("sample_titles") or []) if str(v).strip()]
     cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
     inferred = _catalyst_infer_archetype(
@@ -310,9 +313,22 @@ def _catalyst_rank_shorts_angle_candidates(
         promoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in promoted_shorts_angles[:4]), default=0.0)
         demoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in demoted_shorts_angles[:4]), default=0.0)
         fatigue_overlap = max((_catalyst_text_overlap_score(seed, title) for title in recent_short_angles[:5]), default=0.0)
+        matched_memory_row = {}
+        matched_memory_overlap = 0.0
+        for raw_row in stored_angle_rows:
+            memory_angle = str((raw_row or {}).get("angle", "") or "").strip()
+            if not memory_angle:
+                continue
+            overlap = _catalyst_text_overlap_score(seed, memory_angle)
+            if overlap > matched_memory_overlap:
+                matched_memory_overlap = overlap
+                matched_memory_row = dict(raw_row or {})
         exact_recent_repeat = normalized_seed in recent_title_keys or normalized_seed in recent_short_angle_keys
         exact_promoted_match = normalized_seed in promoted_angle_keys
         exact_demoted_match = normalized_seed in demoted_angle_keys
+        memory_times_seen = max(0, int(matched_memory_row.get("times_seen", 0) or 0))
+        memory_last_seen_at = float(matched_memory_row.get("last_seen_at", 0.0) or 0.0)
+        memory_hours_since_seen = ((now_ts - memory_last_seen_at) / 3600.0) if memory_last_seen_at > 0 else 999.0
         keyword_hits = [kw for kw in shared_keywords if kw and kw.lower() in normalized_seed]
         keyword_bonus = min(0.24, len(keyword_hits) * 0.05)
         length_bonus = 0.08 if 24 <= len(seed) <= 72 else (-0.06 if len(seed) > 86 else 0.0)
@@ -327,6 +343,16 @@ def _catalyst_rank_shorts_angle_candidates(
         fatigue_penalty = 0.38 if fatigue_overlap >= 0.76 else (0.16 if fatigue_overlap >= 0.56 else 0.0)
         if exact_recent_repeat:
             fatigue_penalty = max(fatigue_penalty, 0.58)
+        saturation_penalty = 0.0
+        if matched_memory_overlap >= 0.48:
+            saturation_penalty = min(0.26, max(0, memory_times_seen - 1) * 0.045)
+            if memory_hours_since_seen <= 24:
+                saturation_penalty += 0.12
+            elif memory_hours_since_seen <= 72:
+                saturation_penalty += 0.06
+        stale_reactivation_bonus = 0.0
+        if matched_memory_overlap >= 0.48 and 96 <= memory_hours_since_seen <= 336 and memory_times_seen <= 3:
+            stale_reactivation_bonus = 0.06
         overlap_penalty = 0.32 if source == "channel" and overlap_score >= 0.78 else (0.12 if overlap_score >= 0.58 else 0.0)
         score = round(
             base_weight
@@ -335,8 +361,10 @@ def _catalyst_rank_shorts_angle_candidates(
             + novelty_bonus
             + recency_bonus
             + promoted_bonus
+            + stale_reactivation_bonus
             - demoted_penalty
             - fatigue_penalty
+            - saturation_penalty
             - overlap_penalty
             - (index * 0.015),
             3,
@@ -359,8 +387,12 @@ def _catalyst_rank_shorts_angle_candidates(
             why_now = "Fresh breakout public trend title with strong novelty pressure for this lane."
         if exact_recent_repeat or fatigue_overlap >= 0.76:
             why_now = "Too close to a recently used short angle, so Catalyst should only reuse it if nothing fresher ranks higher."
+        elif matched_memory_overlap >= 0.48 and memory_hours_since_seen <= 24:
+            why_now = "Too close to a benchmark angle Catalyst refreshed recently, so it should give fresher variants first."
         elif exact_demoted_match or demoted_overlap >= 0.5:
             why_now = "Similar to a demoted short angle, so it needs a much stronger package if used."
+        elif matched_memory_overlap >= 0.48 and 96 <= memory_hours_since_seen <= 336 and memory_times_seen <= 3:
+            why_now = "This angle family cooled off long enough to retest with a fresher package."
         elif promoted_overlap >= 0.54:
             why_now = "Adjacent to a promoted learned short angle, but fresher than the recent repeats."
         candidates.append(
@@ -375,6 +407,8 @@ def _catalyst_rank_shorts_angle_candidates(
                 "visual_move": _clip_text(visual_moves[min(index, len(visual_moves) - 1)] if visual_moves else (str(inferred.get("visual_rule", "") or "") or "Use one dominant visual symbol with cleaner contrast."), 180),
                 "keyword_bias": keyword_hits[:4] or shared_keywords[:4],
                 "archetype_label": archetype_label,
+                "times_seen": memory_times_seen,
+                "hours_since_seen": round(memory_hours_since_seen, 2) if memory_hours_since_seen < 999 else None,
             }
         )
     candidates.sort(
