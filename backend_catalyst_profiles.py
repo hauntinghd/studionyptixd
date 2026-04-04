@@ -194,6 +194,72 @@ def _normalize_shorts_angle_seed(text: str, max_chars: int = 100) -> str:
     return _clip_text(value, max_chars)
 
 
+def _catalyst_short_memory_execution_overlay(memory_public: dict | None = None) -> dict:
+    public = dict(memory_public or {})
+    execution_playbook = dict(public.get("execution_playbook") or {})
+    strongest_choices = dict(execution_playbook.get("strongest_choices") or {})
+    weakest_choices = dict(execution_playbook.get("weakest_choices") or {})
+    best_archetype_memory = dict(public.get("best_archetype_memory") or {})
+    weakest_archetype_memory = dict(public.get("weakest_archetype_memory") or {})
+
+    field_map: dict[str, tuple[str, int]] = {
+        "opening_intensity": ("preferred_opening_intensity", 40),
+        "interrupt_strength": ("preferred_interrupt_strength", 40),
+        "caption_rhythm": ("preferred_caption_rhythm", 40),
+        "sound_density": ("preferred_sound_density", 40),
+        "cut_profile": ("preferred_cut_profile", 60),
+        "voice_pacing_bias": ("preferred_voice_pacing_bias", 60),
+        "visual_variation_rule": ("preferred_visual_variation_rule", 180),
+    }
+    overlay: dict = {}
+    for field_name, (preferred_key, max_chars) in field_map.items():
+        weakest_value = str(
+            weakest_choices.get(field_name, "")
+            or weakest_archetype_memory.get(preferred_key, "")
+            or ""
+        ).strip().lower()
+        chosen_value = ""
+        for candidate in (
+            strongest_choices.get(field_name, ""),
+            public.get(preferred_key, ""),
+            best_archetype_memory.get(preferred_key, ""),
+        ):
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if weakest_value and text.lower() == weakest_value:
+                continue
+            chosen_value = _clip_text(text, max_chars)
+            break
+        if chosen_value:
+            overlay[field_name] = chosen_value
+
+    preferred_payoff = float(
+        public.get("preferred_payoff_hold_sec", 0.0)
+        or best_archetype_memory.get("preferred_payoff_hold_sec", 0.0)
+        or 0.0
+    )
+    weakest_payoff = float(
+        weakest_archetype_memory.get("preferred_payoff_hold_sec", 0.0) or 0.0
+    )
+    if preferred_payoff > 0.0 and (weakest_payoff <= 0.0 or preferred_payoff > weakest_payoff):
+        overlay["payoff_hold_sec"] = round(preferred_payoff, 2)
+
+    preferred_interval = 0
+    if str(overlay.get("opening_intensity", "")).strip().lower() == "attack":
+        preferred_interval += 1
+    if str(overlay.get("interrupt_strength", "")).strip().lower() == "high":
+        preferred_interval += 1
+    if str(overlay.get("cut_profile", "")).strip().lower() in {"punch-cut", "contrast-cut"}:
+        preferred_interval += 1
+    if preferred_interval >= 2:
+        overlay["pattern_interrupt_interval_sec"] = 8
+    elif preferred_interval == 1:
+        overlay["pattern_interrupt_interval_sec"] = 9
+
+    return overlay
+
+
 def _catalyst_short_execution_pack(
     *,
     template: str,
@@ -201,23 +267,38 @@ def _catalyst_short_execution_pack(
     scene_texts: list[str] | None = None,
     archetype_key: str = "",
     pacing_mode: str = "standard",
+    memory_public: dict | None = None,
 ) -> dict:
     normalized_template = str(template or "").strip().lower()
     scene_texts = [str(v).strip() for v in list(scene_texts or []) if str(v).strip()]
+    memory_public = dict(memory_public or {})
+    best_archetype_memory = dict(memory_public.get("best_archetype_memory") or {})
     inferred = _catalyst_infer_archetype(
         topic,
         " ".join(scene_texts[:6]),
         niche_key="day_trading" if normalized_template == "daytrading" else "",
         format_preset="documentary" if normalized_template == "daytrading" else "",
     )
-    resolved_key = str(archetype_key or inferred.get("key", "") or "").strip().lower()
+    resolved_key = str(
+        archetype_key
+        or memory_public.get("archetype_key", "")
+        or best_archetype_memory.get("archetype_key", "")
+        or inferred.get("key", "")
+        or ""
+    ).strip().lower()
     if not resolved_key:
         resolved_key = "viral_explainer"
-    resolved_label = str(inferred.get("label", "") or resolved_key.replace("_", " ").title()).strip()
+    resolved_label = str(
+        memory_public.get("archetype_label", "")
+        or best_archetype_memory.get("archetype_label", "")
+        or inferred.get("label", "")
+        or resolved_key.replace("_", " ").title()
+    ).strip()
     pack = _merge_short_execution_pack(
         _CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS.get("viral_explainer") or {},
         _CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS.get(resolved_key) or {},
         _CATALYST_SHORT_TEMPLATE_EXECUTION_OVERRIDES.get(normalized_template) or {},
+        _catalyst_short_memory_execution_overlay(memory_public),
     )
     mode = str(pacing_mode or "standard").strip().lower()
     interrupt_interval = max(7, int(pack.get("pattern_interrupt_interval_sec", 9) or 9))

@@ -16288,12 +16288,36 @@ def _short_template_pattern_interrupt_interval_sec(template: str, pacing_mode: s
     return int(base)
 
 
+def _catalyst_short_memory_public_snapshot(
+    *,
+    user_id: str = "",
+    template: str = "",
+    youtube_channel_id: str = "",
+    seed_memory_public: dict | None = None,
+) -> dict:
+    seeded = dict(seed_memory_public or {})
+    if seeded:
+        return seeded
+    user_key = str(user_id or "").strip()
+    channel_key = str(youtube_channel_id or "").strip()
+    template_key = str(template or "").strip().lower() or "shorts"
+    if not user_key or not channel_key:
+        return {}
+    try:
+        _load_catalyst_memory()
+        memory_key = _catalyst_channel_memory_key(user_key, channel_key, template_key)
+        return _catalyst_channel_memory_public_view(dict(_catalyst_channel_memory.get(memory_key) or {}))
+    except Exception:
+        return {}
+
+
 def _apply_short_execution_pacing_profile(
     scenes: list,
     template: str,
     voice_speed: float = 1.0,
     pacing_mode: str = "standard",
     topic: str = "",
+    memory_public: dict | None = None,
 ) -> list:
     if not _short_template_narration_fit_enabled(template):
         return scenes
@@ -16314,6 +16338,7 @@ def _apply_short_execution_pacing_profile(
         topic=topic,
         scene_texts=scene_texts,
         pacing_mode=mode,
+        memory_public=memory_public,
     )
     interrupt_every = max(2, int(round(float(execution_pack.get("pattern_interrupt_interval_sec", 9) or 9) / 5.0)))
     profiled: list[dict] = []
@@ -16754,12 +16779,19 @@ async def run_generation_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
+        catalyst_memory_public = _catalyst_short_memory_public_snapshot(
+            user_id=str(job_state.get("user_id", "") or ""),
+            template=template,
+            youtube_channel_id=youtube_channel_id,
+            seed_memory_public=dict(job_state.get("channel_memory") or {}),
+        )
         scenes = _apply_short_execution_pacing_profile(
             scenes,
             template,
             voice_speed=voice_speed,
             pacing_mode=pacing_mode,
             topic=topic,
+            memory_public=catalyst_memory_public,
         )
         if not scenes:
             raise ValueError("Script generation returned no scenes")
@@ -20742,6 +20774,7 @@ async def _run_creative_pipeline(
         subtitles_enabled = _bool_from_any(session.get("subtitles_enabled"), True)
         image_model_id = _normalize_creative_image_model_id(session.get("image_model_id"), template=template)
         video_model_id = _normalize_creative_video_model_id(session.get("video_model_id"))
+        script_data = dict(session.get("script_data", {}) or {})
         scenes = _normalize_scenes_for_render(session["scenes"])
         prompt_passthrough = _creative_prompt_passthrough_enabled(session)
         if not prompt_passthrough:
@@ -20751,16 +20784,25 @@ async def _run_creative_pipeline(
             scenes = _force_template_scene_duration(scenes, template)
         scenes = _apply_story_pacing(scenes, template, pacing_mode=pacing_mode)
         scenes = _apply_short_scene_narration_fit(scenes, template, voice_speed=voice_speed)
+        catalyst_memory_public = _catalyst_short_memory_public_snapshot(
+            user_id=str(session.get("user_id", "") or ""),
+            template=template,
+            youtube_channel_id=str(session.get("youtube_channel_id", "") or ""),
+            seed_memory_public=dict(
+                session.get("channel_memory")
+                or dict(dict(session.get("metadata_pack") or {}).get("catalyst_channel_memory") or {})
+            ),
+        )
         scenes = _apply_short_execution_pacing_profile(
             scenes,
             template,
             voice_speed=voice_speed,
             pacing_mode=pacing_mode,
             topic=str(session.get("topic", "") or script_data.get("title", "") or ""),
+            memory_public=catalyst_memory_public,
         )
         language = session.get("language", "en")
         scene_images = session.get("scene_images", {})
-        script_data = session.get("script_data", {})
         reference_lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict")
         reference_dna = session.get("reference_dna", {}) if isinstance(session.get("reference_dna"), dict) else {}
         art_style = _normalize_art_style(session.get("art_style", "auto"), template=template)
