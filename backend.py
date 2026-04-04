@@ -7416,6 +7416,7 @@ def _summarize_public_shorts_reference_playbook(
     topic: str = "",
     channel_context: dict | None = None,
     selected_cluster: dict | None = None,
+    memory_public: dict | None = None,
     trend_titles: list[str] | None = None,
     trend_hunt_enabled: bool = False,
 ) -> dict:
@@ -7424,6 +7425,7 @@ def _summarize_public_shorts_reference_playbook(
         return {}
     channel_context = dict(channel_context or {})
     selected_cluster = dict(selected_cluster or {})
+    memory_public = dict(memory_public or {})
     trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
     titles = [str(row.get("title", "") or "").strip() for row in rows if str(row.get("title", "") or "").strip()]
     channels = _dedupe_preserve_order(
@@ -7484,6 +7486,7 @@ def _summarize_public_shorts_reference_playbook(
         topic=topic,
         channel_context=channel_context,
         selected_cluster=selected_cluster,
+        memory_public=memory_public,
         benchmark_titles=benchmark_titles,
         trend_titles=trend_titles,
         hook_moves=hook_moves,
@@ -7616,6 +7619,7 @@ async def _build_shorts_public_reference_playbook(
     topic: str,
     channel_context: dict,
     selected_cluster: dict,
+    memory_public: dict | None = None,
     trend_hunt_enabled: bool = False,
 ) -> dict:
     queries = _build_shorts_reference_queries(
@@ -7654,6 +7658,7 @@ async def _build_shorts_public_reference_playbook(
         topic=topic,
         channel_context=channel_context,
         selected_cluster=selected_cluster,
+        memory_public=memory_public,
         trend_titles=trend_titles,
         trend_hunt_enabled=trend_hunt_enabled,
     )
@@ -7755,6 +7760,7 @@ async def _persist_public_shorts_playbook_memory(
             topic,
             channel_context,
             selected_cluster,
+            memory_public=dict(series_context.get("memory_view") or {}),
             trend_hunt_enabled=trend_hunt_enabled,
         )
     except Exception as e:
@@ -7766,6 +7772,7 @@ async def _persist_public_shorts_playbook_memory(
             "selected_cluster": selected_cluster,
             "playbook": {},
             "memory_key": memory_key,
+            "memory_public": _catalyst_channel_memory_public_view(base_memory),
         }
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
@@ -7787,6 +7794,7 @@ async def _persist_public_shorts_playbook_memory(
         "selected_cluster": selected_cluster,
         "playbook": public_shorts_playbook,
         "memory_key": memory_key,
+        "memory_public": _catalyst_channel_memory_public_view(updated_memory),
     }
 
 
@@ -8056,6 +8064,7 @@ async def _build_shorts_catalyst_extra_instructions(
             topic,
             channel_context,
             selected_cluster,
+            memory_public=memory_public,
             trend_hunt_enabled=trend_hunt_enabled,
         )
     except Exception as e:
@@ -16612,15 +16621,23 @@ async def run_generation_pipeline(
                 channel_context = {}
                 trend_titles: list[str] = []
                 public_shorts_playbook: dict = {}
+                memory_public: dict = {}
                 user_id = str(job_state.get("user_id", "") or "").strip()
                 if user_id and (youtube_channel_id or trend_hunt_enabled):
                     channel_context = await _youtube_selected_channel_context({"id": user_id}, youtube_channel_id)
+                    memory_channel_id = str(channel_context.get("channel_id", "") or youtube_channel_id or "").strip()
+                    if memory_channel_id:
+                        memory_key = _catalyst_channel_memory_key(user_id, memory_channel_id, template)
+                        async with _catalyst_memory_lock:
+                            _load_catalyst_memory()
+                            memory_public = _catalyst_channel_memory_public_view(dict(_catalyst_channel_memory.get(memory_key) or {}))
                 try:
                     public_shorts_playbook = await _build_shorts_public_reference_playbook(
                         template,
                         topic,
                         channel_context,
                         {},
+                        memory_public=memory_public,
                         trend_hunt_enabled=trend_hunt_enabled,
                     )
                 except Exception as inner_exc:
@@ -19635,6 +19652,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
         status_code = getattr(getattr(e, "response", None), "status_code", None)
         if req.template == "skeleton":
             public_shorts_playbook: dict = dict(persisted_public_shorts.get("playbook") or {})
+            memory_public = dict(persisted_public_shorts.get("memory_public") or {})
             try:
                 if not public_shorts_playbook:
                     public_shorts_playbook = await _build_shorts_public_reference_playbook(
@@ -19642,6 +19660,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
                         req.prompt,
                         channel_context,
                         {},
+                        memory_public=memory_public,
                         trend_hunt_enabled=trend_hunt_enabled,
                     )
             except Exception as inner_exc:

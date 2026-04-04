@@ -243,6 +243,7 @@ def _catalyst_rank_shorts_angle_candidates(
     topic: str = "",
     channel_context: dict | None = None,
     selected_cluster: dict | None = None,
+    memory_public: dict | None = None,
     benchmark_titles: list[str] | None = None,
     trend_titles: list[str] | None = None,
     hook_moves: list[str] | None = None,
@@ -254,6 +255,7 @@ def _catalyst_rank_shorts_angle_candidates(
 ) -> list[dict]:
     channel_context = dict(channel_context or {})
     selected_cluster = dict(selected_cluster or {})
+    memory_public = dict(memory_public or {})
     benchmark_titles = [str(v).strip() for v in list(benchmark_titles or []) if str(v).strip()]
     trend_titles = [str(v).strip() for v in list(trend_titles or []) if str(v).strip()]
     hook_moves = [str(v).strip() for v in list(hook_moves or []) if str(v).strip()]
@@ -261,6 +263,13 @@ def _catalyst_rank_shorts_angle_candidates(
     visual_moves = [str(v).strip() for v in list(visual_moves or []) if str(v).strip()]
     keyword_moves = [str(v).strip() for v in list(keyword_moves or []) if str(v).strip()]
     recent_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()]
+    recent_short_angles = [str(v).strip() for v in list(memory_public.get("recent_short_angles") or []) if str(v).strip()]
+    promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
+    demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
+    recent_title_keys = {title.lower() for title in recent_titles}
+    recent_short_angle_keys = {title.lower() for title in recent_short_angles}
+    promoted_angle_keys = {title.lower() for title in promoted_shorts_angles}
+    demoted_angle_keys = {title.lower() for title in demoted_shorts_angles}
     cluster_titles = [str(v).strip() for v in list(selected_cluster.get("sample_titles") or []) if str(v).strip()]
     cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
     inferred = _catalyst_infer_archetype(
@@ -298,13 +307,40 @@ def _catalyst_rank_shorts_angle_candidates(
         seen.add(normalized_seed)
         novelty_score = _catalyst_title_novelty_score(seed, source_title=topic, recent_titles=recent_titles)
         overlap_score = max((_catalyst_text_overlap_score(seed, title) for title in recent_titles[:4]), default=0.0)
+        promoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in promoted_shorts_angles[:4]), default=0.0)
+        demoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in demoted_shorts_angles[:4]), default=0.0)
+        fatigue_overlap = max((_catalyst_text_overlap_score(seed, title) for title in recent_short_angles[:5]), default=0.0)
+        exact_recent_repeat = normalized_seed in recent_title_keys or normalized_seed in recent_short_angle_keys
+        exact_promoted_match = normalized_seed in promoted_angle_keys
+        exact_demoted_match = normalized_seed in demoted_angle_keys
         keyword_hits = [kw for kw in shared_keywords if kw and kw.lower() in normalized_seed]
         keyword_bonus = min(0.24, len(keyword_hits) * 0.05)
         length_bonus = 0.08 if 24 <= len(seed) <= 72 else (-0.06 if len(seed) > 86 else 0.0)
         novelty_bonus = ((float(novelty_score) - 50.0) / 100.0) * 0.5
         recency_bonus = 0.12 if trend_hunt_enabled and source == "trend" else 0.0
+        promoted_bonus = 0.22 if promoted_overlap >= 0.54 else (0.1 if promoted_overlap >= 0.38 else 0.0)
+        if exact_promoted_match:
+            promoted_bonus = max(promoted_bonus, 0.18)
+        demoted_penalty = 0.45 if demoted_overlap >= 0.5 else (0.18 if demoted_overlap >= 0.34 else 0.0)
+        if exact_demoted_match:
+            demoted_penalty = max(demoted_penalty, 0.62)
+        fatigue_penalty = 0.38 if fatigue_overlap >= 0.76 else (0.16 if fatigue_overlap >= 0.56 else 0.0)
+        if exact_recent_repeat:
+            fatigue_penalty = max(fatigue_penalty, 0.58)
         overlap_penalty = 0.32 if source == "channel" and overlap_score >= 0.78 else (0.12 if overlap_score >= 0.58 else 0.0)
-        score = round(base_weight + keyword_bonus + length_bonus + novelty_bonus + recency_bonus - overlap_penalty - (index * 0.015), 3)
+        score = round(
+            base_weight
+            + keyword_bonus
+            + length_bonus
+            + novelty_bonus
+            + recency_bonus
+            + promoted_bonus
+            - demoted_penalty
+            - fatigue_penalty
+            - overlap_penalty
+            - (index * 0.015),
+            3,
+        )
         angle = seed
         template_key = str(template or "").strip().lower()
         if template_key == "skeleton" and not re.search(r"\b(skeleton|bone|bones|skull)\b", angle, flags=re.IGNORECASE):
@@ -321,6 +357,12 @@ def _catalyst_rank_shorts_angle_candidates(
         }.get(source, "Fresh candidate angle.")
         if trend_hunt_enabled and source == "trend":
             why_now = "Fresh breakout public trend title with strong novelty pressure for this lane."
+        if exact_recent_repeat or fatigue_overlap >= 0.76:
+            why_now = "Too close to a recently used short angle, so Catalyst should only reuse it if nothing fresher ranks higher."
+        elif exact_demoted_match or demoted_overlap >= 0.5:
+            why_now = "Similar to a demoted short angle, so it needs a much stronger package if used."
+        elif promoted_overlap >= 0.54:
+            why_now = "Adjacent to a promoted learned short angle, but fresher than the recent repeats."
         candidates.append(
             {
                 "angle": angle,
