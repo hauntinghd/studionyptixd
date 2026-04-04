@@ -19268,6 +19268,8 @@ async def _longform_attach_scene_previews(
                 best_of_enabled=False,
                 salvage_enabled=False,
             )
+            scene["image_provider"] = str((img_result or {}).get("provider", "") or "")
+            scene["image_provider_label"] = str((img_result or {}).get("provider_label", "") or "")
             if Path(output_path).exists():
                 scene["image_url"] = f"{_longform_preview_url(filename)}?v={now_cache_bust}"
                 scene["image_status"] = "ready"

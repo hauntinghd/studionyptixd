@@ -22,6 +22,8 @@ type LongFormChapter = {
         image_url: string;
         image_status: string;
         image_error: string;
+        image_provider?: string;
+        image_provider_label?: string;
     }>;
     last_error: string;
 };
@@ -1877,6 +1879,11 @@ export default function LongFormPanel() {
                                                             <span>Scene {scene.scene_num}</span>
                                                             <span>{Math.round(Number(scene.duration_sec || 5))}s</span>
                                                         </div>
+                                                        {scene.image_provider_label ? (
+                                                            <p className="text-[10px] uppercase tracking-[0.16em] text-cyan-300/80">
+                                                                Provider: {scene.image_provider_label}
+                                                            </p>
+                                                        ) : null}
                                                         <p className="text-[11px] text-gray-500">{scene.narration || 'No narration yet.'}</p>
                                                         {scene.image_error ? <p className="text-[11px] text-red-300">{scene.image_error}</p> : null}
                                                     </div>
