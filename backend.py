@@ -18340,6 +18340,14 @@ _LONGFORM_PROMPT_CONTROL_PATTERNS = [
     r"\bchange staging aggressively\b",
     r"\bkeep the first scene of each chapter\b",
     r"\bopen on a different\b",
+    r"\bhero[-\s]?object\b",
+    r"\baggressive spotlight\b",
+    r"\bbuilt around\b",
+    r"\bvisual motif\b",
+    r"\bvariation rule\b",
+    r"\bavoid repeating the same\b",
+    r"\bproof[-\s]?first\b",
+    r"\barchitectural dolly\b",
 ]
 
 
@@ -18372,10 +18380,30 @@ def _longform_text_is_strategy_garbage(text: str) -> bool:
     if _longform_sentence_is_prompt_control(lowered):
         return True
     return bool(re.search(
-        r"\b(scene-setting|proof mode|opening beat|captions?|chapter|seconds?|setup|packaging|thumbnail|visual lock|hook proof|variation|retention)\b",
+        r"\b(scene-setting|proof mode|opening beat|captions?|chapter|seconds?|setup|packaging|thumbnail|visual lock|hook proof|variation|retention|framing|spotlight|built around|dolly|proof[-\s]?first)\b",
         lowered,
         flags=re.IGNORECASE,
     ))
+
+
+def _longform_psychology_focus_phrase(candidate: str, scene_role: str) -> str:
+    cleaned = _clip_text(_clean_longform_scene_text(candidate), 140)
+    lowered = cleaned.lower()
+    if (
+        not cleaned
+        or _longform_text_is_strategy_garbage(cleaned)
+        or len(cleaned.split()) > 9
+        or bool(re.search(r"\b(hero[-\s]?object|spotlight|built around|visual motif|framing|proof[-\s]?first)\b", lowered))
+        or "your decisions" in lowered
+        or "quietly rewriting" in lowered
+    ):
+        fallbacks = {
+            "opening": "a private decision being quietly steered",
+            "middle": "the hidden trigger behind a confident choice",
+            "closer": "the personal cost of a manipulated decision",
+        }
+        return fallbacks.get(scene_role, "a manipulated choice unfolding in real time")
+    return cleaned
 
 
 def _longform_documentary_archetype(
@@ -18459,34 +18487,35 @@ def _build_documentary_scene_repair(
     input_title: str = "",
     archetype_key: str = "systems_documentary",
 ) -> tuple[str, str]:
+    scene_role = "opening" if scene_index == 0 else ("closer" if total_scenes > 0 and scene_index >= max(total_scenes - 2, 0) else "middle")
     focus_phrase = _longform_scene_focus_phrase(
         narration=narration,
         chapter_blueprint=chapter_blueprint,
         topic=topic,
         input_title=input_title,
     )
-    scene_role = "opening" if scene_index == 0 else ("closer" if total_scenes > 0 and scene_index >= max(total_scenes - 2, 0) else "middle")
     if archetype_key == "psychology_documentary":
+        focus_phrase = _longform_psychology_focus_phrase(focus_phrase, scene_role)
         proof_modes = [
-            "a surveillance-grade dossier room where one subject is caught at the exact moment a hidden trigger lands",
-            "a mirror-and-shadow consequence frame where private choice and outside influence collide",
-            "an upscale social or boardroom setting with an invisible influence web quietly steering one decision",
-            "an archive or interrogation-room proof frame exposing the chain from trigger to consequence",
-            "a dark observation corridor showing leverage points, social pressure, and the human cost of the behavior pattern",
-            "a controlled symbolic mind-world built around reflections, masks, strings, or attention funnels rather than literal anatomy",
+            "a glass-walled boardroom or private office where one person is subtly cornered into the wrong decision",
+            "a surveillance-grade dossier room capturing the exact moment a hidden trigger lands",
+            "a mirror-and-shadow consequence frame where private instinct and outside influence collide",
+            "an upscale dinner, meeting, or interview setting where status pressure quietly redirects one choice",
+            "an archive or interrogation-room evidence frame exposing the chain from trigger to consequence",
+            "a controlled symbolic mind-world of reflections, masks, strings, and attention funnels without literal anatomy",
         ]
         action_line = (
             "Show one human consequence, one hidden trigger, and one visible power imbalance so the manipulation feels personal instead of abstract."
             if scene_role == "opening"
-            else "Show the trigger, the leverage point, and the personal consequence in the same frame so the mechanism feels invasive and real."
+            else "Show the trigger, the leverage point, and the personal consequence in the same frame so the influence feels invasive and real."
             if scene_role == "middle"
             else "Land on a premium consequence or reversal frame that makes the viewer feel the cost of the hidden behavior."
         )
     else:
         proof_modes = [
-            "a premium dossier-table proof frame built around the central mechanism",
+            "a premium dossier-table proof frame inside a real room with one decisive evidence trail",
             "a boardroom power-map composition exposing winners, losers, and hidden leverage",
-            "a macro system cutaway revealing the invisible machine behind the visible outcome",
+            "a system proof frame that shows incentives, pressure, and the visible outcome in one environment",
             "an archive or ledger proof frame that makes control, money flow, or institutional pressure obvious",
             "an infrastructure or network view showing where the system actually routes power",
             "a before-versus-after consequence frame that makes the hidden system legible at a glance",
@@ -18500,15 +18529,32 @@ def _build_documentary_scene_repair(
         )
     proof_mode = proof_modes[scene_index % len(proof_modes)]
     narration_line = (
-        f"What looks natural around {focus_phrase} is actually being steered by a hidden system."
+        (
+            "The decision looks personal, but the pressure shaping it is already in the room."
+            if archetype_key == "psychology_documentary"
+            else f"What looks natural around {focus_phrase} is actually being steered by a hidden system."
+        )
         if scene_role == "opening"
-        else f"The mechanism behind {focus_phrase} becomes obvious once the trigger and consequence are shown together."
+        else (
+            f"The trigger behind {focus_phrase} only makes sense once the leverage and consequence are visible together."
+            if archetype_key == "psychology_documentary"
+            else f"The mechanism behind {focus_phrase} becomes obvious once the trigger and consequence are shown together."
+        )
         if scene_role == "middle"
-        else f"The consequence around {focus_phrase} is already visible by the time the system is noticed."
+        else (
+            "By the time the subject notices the pattern, the consequence is already locked in."
+            if archetype_key == "psychology_documentary"
+            else f"The consequence around {focus_phrase} is already visible by the time the system is noticed."
+        )
     )
     visual_line = (
-        f"Premium 3D {'psychology' if archetype_key == 'psychology_documentary' else 'systems'} documentary frame set in {proof_mode}, visualizing {focus_phrase}. "
-        f"{action_line} Architectural dolly-in, controlled dark-stage contrast, clean premium CG staging, no literal brains, no sterile labs, and no floating machine filler."
+        (
+            f"Fern-grade premium 3D psychology documentary scene set in {proof_mode}. Human-scale, emotionally invasive, and grounded in a real environment around {focus_phrase}. "
+            f"{action_line} Use controlled cinematic CG, clean surveillance or dossier staging, restrained symbolism, no text, no isolated object pedestal, no literal anatomy, and no floating machine filler."
+            if archetype_key == "psychology_documentary"
+            else f"Premium 3D systems documentary frame set in {proof_mode}, visualizing {focus_phrase}. "
+            f"{action_line} Use a real environment, clean premium CG staging, and no isolated object pedestal, sterile lab filler, or floating machine props."
+        )
     )
     return (_clip_text(narration_line, 180), _clip_text(visual_line, 420))
 
