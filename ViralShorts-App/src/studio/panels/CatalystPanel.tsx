@@ -22,6 +22,7 @@ type CatalystChannel = {
             strengths?: string[];
             warnings?: string[];
             next_moves?: string[];
+            next_video_candidates?: string[];
             strongest_arc?: string;
             weakest_arc?: string;
             latest_failure_mode_label?: string;
@@ -660,6 +661,18 @@ export default function CatalystPanel() {
                                 <DetailGroup title="Audit Strengths" values={channelAudit?.strengths || []} accent="emerald" />
                                 <DetailGroup title="Audit Warnings" values={channelAudit?.warnings || []} accent="amber" />
                                 <DetailGroup title="Audit Next Moves" values={channelAudit?.next_moves || []} accent="cyan" />
+                                {Array.isArray(channelAudit?.next_video_candidates) && channelAudit.next_video_candidates.length > 0 && (
+                                    <div>
+                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Suggested Next Videos</div>
+                                        <div className="space-y-2">
+                                            {channelAudit.next_video_candidates.slice(0, 5).map((value) => (
+                                                <div key={value} className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-200">
+                                                    {value}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                                 {selectedChannel.last_outcome_sync_at ? (
                                     <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-xs text-gray-300">
                                         Last outcome sync: {formatWhen(selectedChannel.last_outcome_sync_at)}{selectedChannel.last_outcome_sync_count ? ` | ${selectedChannel.last_outcome_sync_count} videos` : ''}

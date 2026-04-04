@@ -7093,6 +7093,15 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         ],
         max_items=6,
     )
+    best_title = str(best_recent_video.get("title", "") or "").strip()
+    focus_seed = best_title or (top_titles[0] if top_titles else "") or (recent_titles[0] if recent_titles else "")
+    focus_subject = _same_arena_subject({"title": focus_seed}, topic=strongest_arc or focus_seed)
+    next_video_candidates = _same_arena_title_variants(
+        {"title": focus_seed},
+        topic=strongest_arc or focus_subject,
+        format_preset="documentary",
+        max_items=5,
+    ) if focus_seed else []
     coverage = {
         "recent_uploads": len(recent_titles),
         "top_videos": len(top_videos),
@@ -7122,6 +7131,8 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         "best_recent_title": str(best_recent_video.get("title", "") or "").strip(),
         "worst_recent_title": str(worst_recent_video.get("title", "") or "").strip(),
         "coverage": coverage,
+        "focus_subject": focus_subject,
+        "next_video_candidates": next_video_candidates,
     }
 
 
@@ -8018,6 +8029,7 @@ async def _derive_longform_seed_from_catalyst_hub(
                     ("Audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:3])) if channel_audit.get("strengths") else "",
                     ("Audit warnings: " + "; ".join(list(channel_audit.get("warnings") or [])[:3])) if channel_audit.get("warnings") else "",
                     ("Audit next moves: " + "; ".join(list(channel_audit.get("next_moves") or [])[:4])) if channel_audit.get("next_moves") else "",
+                    ("Audit candidate titles: " + " | ".join(list(channel_audit.get("next_video_candidates") or [])[:4])) if channel_audit.get("next_video_candidates") else "",
                     ("Reference playbook: " + reference_summary) if reference_summary else "",
                     ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
                     ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
@@ -22587,6 +22599,7 @@ async def catalyst_hub_launch_longform(
         ("Channel summary: " + _clip_text(str(channel_context.get("summary", "") or "").strip(), 600)) if channel_context.get("summary") else "",
         ("Channel audit: " + _clip_text(str((channel_context.get("channel_audit") or {}).get("summary", "") or "").strip(), 480)) if (channel_context.get("channel_audit") or {}).get("summary") else "",
         ("Channel audit next moves: " + "; ".join(list((channel_context.get("channel_audit") or {}).get("next_moves") or [])[:4])) if list((channel_context.get("channel_audit") or {}).get("next_moves") or []) else "",
+        ("Channel audit candidate titles: " + " | ".join(list((channel_context.get("channel_audit") or {}).get("next_video_candidates") or [])[:4])) if list((channel_context.get("channel_audit") or {}).get("next_video_candidates") or []) else "",
         ("Catalyst memory summary: " + _clip_text(str(memory_public.get("summary", "") or "").strip(), 400)) if memory_public.get("summary") else "",
         ("Catalyst playbook summary: " + _clip_text(str(playbook.get("summary", "") or "").strip(), 400)) if playbook.get("summary") else "",
         "Launch intent: Build the next strongest long-form video for this channel using connected-channel memory, public benchmark mining, and Catalyst operator guidance.",
