@@ -17776,6 +17776,61 @@ def _catalyst_longform_preflight(session: dict) -> dict:
     }
 
 
+def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, manual_note: str = "") -> str:
+    manual = _clip_text(str(manual_note or "").strip(), 1600)
+    if manual:
+        return manual
+    session_snapshot = dict(session or {})
+    edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
+    chapter_blueprint = _catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_index)
+    metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
+    channel_context = dict(metadata_pack.get("youtube_channel") or {})
+    channel_title = _clip_text(
+        str(channel_context.get("channel_title", "") or channel_context.get("title", "") or "").strip(),
+        120,
+    )
+    preflight = _catalyst_longform_preflight(session_snapshot)
+    blockers = [str(v).strip() for v in list(preflight.get("blockers") or []) if str(v).strip()]
+    next_fixes = [str(v).strip() for v in list(preflight.get("next_fixes") or []) if str(v).strip()]
+    memory_view = dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {})
+    rewrite_pressure = dict(memory_view.get("rewrite_pressure") or edit_blueprint.get("rewrite_pressure") or {})
+    rewrite_priorities = [str(v).strip() for v in list(rewrite_pressure.get("next_run_priorities") or []) if str(v).strip()]
+    chapter_focus = _clip_text(str(chapter_blueprint.get("focus", "") or "").strip(), 220)
+    chapter_hook_job = _clip_text(str(chapter_blueprint.get("hook_job", "") or "").strip(), 180)
+    chapter_visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or "").strip(), 220)
+    chapter_motion_note = _clip_text(str(chapter_blueprint.get("motion_note", "") or "").strip(), 180)
+    chapter_improvement = _clip_text(str(chapter_blueprint.get("improvement_focus", "") or "").strip(), 180)
+    format_preset = str(session_snapshot.get("format_preset", "") or "").strip().lower()
+    is_empire_magnates = bool(
+        format_preset == "documentary"
+        and any(
+            token in f"{channel_title} {str(channel_context.get('channel_handle', '') or '').strip()}".lower()
+            for token in ("empire magnates", "@empiremagnates", "empiremagnates")
+        )
+    )
+    note_parts = [
+        f"Regenerate chapter {int(chapter_index) + 1} from the saved Catalyst blueprint, not the previous visual pattern.",
+        blockers[0] if blockers else "",
+        next_fixes[0] if next_fixes else "",
+        next_fixes[1] if len(next_fixes) > 1 else "",
+        rewrite_priorities[0] if rewrite_priorities else "",
+        f"Focus this chapter on {chapter_focus}." if chapter_focus else "",
+        f"Open on: {chapter_hook_job}" if chapter_hook_job else "",
+        f"Visual motif: {chapter_visual_motif}" if chapter_visual_motif else "",
+        f"Motion note: {chapter_motion_note}" if chapter_motion_note else "",
+        f"Improvement target: {chapter_improvement}" if chapter_improvement else "",
+    ]
+    if is_empire_magnates:
+        note_parts.extend(
+            [
+                "For Empire Magnates, use premium 3D business-documentary proof frames only: dossier, boardroom, map, archive, network, mechanism, infrastructure, or consequence imagery.",
+                "Do not use literal brains, textbook anatomy, sterile lab props, or generic floating-object filler unless the narration explicitly requires a symbolic mind-world proof frame.",
+                "Make the opener feel more expensive, more invasive, and more consequence-first than the last run.",
+            ]
+        )
+    return _clip_text(" ".join(part for part in note_parts if part), 1600)
+
+
 def _longform_public_session(session: dict) -> dict:
     s = dict(session or {})
     catalyst_preflight = _catalyst_longform_preflight(s)
@@ -18552,10 +18607,13 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
                 ),
             }
             if catalyst_preflight.get("status") == "blocked" and approved == len(chapters):
+                suggested_fix_note = _catalyst_default_fix_note_for_session(live, 0, "")
                 live["paused_error"] = {
                     "stage": "catalyst_preflight",
                     "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
                     "blockers": list(catalyst_preflight.get("blockers") or []),
+                    "chapter_index": 0,
+                    "suggested_fix_note": suggested_fix_note,
                 }
             elif isinstance(live.get("paused_error"), dict) and str((live.get("paused_error") or {}).get("stage", "") or "") == "catalyst_preflight":
                 live["paused_error"] = None
@@ -20009,9 +20067,11 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
         language=_normalize_longform_language(session_copy.get("language", "en")),
         brand_slot=str(chapter.get("brand_slot", "") or ""),
-        fix_note=str(req.reason or "").strip(),
+        fix_note=_catalyst_default_fix_note_for_session(session_copy, chapter_index, str(req.reason or "").strip()),
         source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
         strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
+        edit_blueprint=dict(session_copy.get("edit_blueprint") or {}),
+        chapter_blueprint=_catalyst_chapter_blueprint_for_index(dict(session_copy.get("edit_blueprint") or {}), chapter_index),
     )
     regenerated = await _longform_attach_scene_previews(
         session_id=session_id,
@@ -20085,7 +20145,7 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         chapter_target_sec=float(chapter.get("target_sec", 70) or 70),
         language=_normalize_longform_language(session_copy.get("language", "en")),
         brand_slot=str(chapter.get("brand_slot", "") or ""),
-        fix_note=str(req.fix_note or "").strip(),
+        fix_note=_catalyst_default_fix_note_for_session(session_copy, chapter_index, str(req.fix_note or "").strip()),
         source_context=str((dict(session_copy.get("metadata_pack") or {})).get("source_context", "") or ""),
         strategy_notes=_marketing_doctrine_text(str(session_copy.get("strategy_notes", "") or "").strip()),
         edit_blueprint=dict(session_copy.get("edit_blueprint") or {}),
@@ -20161,10 +20221,13 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
             )
         catalyst_preflight = _catalyst_longform_preflight(session)
         if catalyst_preflight.get("status") == "blocked":
+            suggested_fix_note = _catalyst_default_fix_note_for_session(session, 0, "")
             session["paused_error"] = {
                 "stage": "catalyst_preflight",
                 "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
                 "blockers": list(catalyst_preflight.get("blockers") or []),
+                "chapter_index": 0,
+                "suggested_fix_note": suggested_fix_note,
             }
             progress = dict(session.get("draft_progress") or {})
             progress["stage"] = "catalyst_preflight_blocked"
@@ -20233,10 +20296,13 @@ async def _auto_finalize_longform_session(session_id: str) -> None:
                 status_code = int(getattr(e, "status_code", 0) or 0)
                 error_text = str(getattr(e, "detail", "") or str(e))
                 if status_code in {400, 409} and "Catalyst preflight blocked finalize" in error_text:
+                    suggested_fix_note = _catalyst_default_fix_note_for_session(session_live, 0, "")
                     session_live["status"] = "draft_review"
                     session_live["paused_error"] = {
                         "stage": "catalyst_preflight",
                         "error": error_text,
+                        "chapter_index": 0,
+                        "suggested_fix_note": suggested_fix_note,
                     }
                     progress = dict(session_live.get("draft_progress") or {})
                     progress["stage"] = "catalyst_preflight_blocked"

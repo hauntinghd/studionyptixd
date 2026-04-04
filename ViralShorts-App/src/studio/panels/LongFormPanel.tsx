@@ -327,6 +327,17 @@ export default function LongFormPanel() {
         return out;
     }, [session]);
 
+    useEffect(() => {
+        const paused = lfSession?.paused_error;
+        if (!paused) {
+            setFixNote('');
+            return;
+        }
+        const suggested = String(paused?.suggested_fix_note || '').trim();
+        if (!suggested) return;
+        setFixNote((current) => (String(current || '').trim() ? current : suggested));
+    }, [lfSession?.paused_error, lfSession?.session_id]);
+
     const apiCall = useCallback(async (path: string, init: RequestInit = {}) => {
         const merged: RequestInit = {
             ...init,
@@ -1369,6 +1380,11 @@ export default function LongFormPanel() {
                                     placeholder="Fix note (what should change in regenerated chapter)"
                                     className="w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white resize-none"
                                 />
+                                {String(lfSession.paused_error?.suggested_fix_note || '').trim() ? (
+                                    <p className="text-[11px] text-white/55">
+                                        Catalyst prefilled a suggested fix note from the blocked preflight issues. Edit it if you want a more specific regeneration.
+                                    </p>
+                                ) : null}
                                 <div className="flex gap-2">
                                     <button
                                         onClick={() => resolvePausedError(false)}

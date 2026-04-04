@@ -64,6 +64,35 @@ def _heuristic_catalyst_edit_blueprint(
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     is_empire_magnates = bool(format_preset == "documentary" and not is_recap_lane and _is_empire_magnates_channel(channel_context))
+    operator_summary = _clip_text(str(memory_view.get("operator_summary", "") or ""), 320)
+    operator_directive = _clip_text(str(memory_view.get("operator_directive", "") or ""), 1200)
+    operator_mission = _clip_text(str(memory_view.get("operator_mission", "") or ""), 220)
+    operator_guardrails = [str(v).strip() for v in list(memory_view.get("operator_guardrails") or []) if str(v).strip()]
+    operator_target_niches = [str(v).strip() for v in list(memory_view.get("operator_target_niches") or []) if str(v).strip()]
+    if is_empire_magnates:
+        archetype_key = "systems_documentary"
+        archetype_label = "Systems Documentary"
+        archetype_hook_rule = _clip_text(
+            operator_mission
+            or "Open on a premium contradiction or consequence frame that exposes the hidden system before any explanation.",
+            220,
+        )
+        archetype_pace_rule = _clip_text(
+            "Use cleaner proof-first pacing: claim, proof, system, consequence, and payoff without generic setup drift.",
+            220,
+        )
+        archetype_visual_rule = _clip_text(
+            "Use premium 3D boardroom, dossier, map, archive, network, infrastructure, and consequence frames instead of literal brains, anatomy, or sterile lab filler.",
+            220,
+        )
+        archetype_sound_rule = _clip_text(
+            "Use expensive documentary tension, controlled low-end pulses, and silence pockets that sharpen the reveal without turning the piece into horror.",
+            220,
+        )
+        archetype_packaging_rule = _clip_text(
+            "Package the video around one sharp contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait.",
+            220,
+        )
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
     same_arena_subject_fn = same_arena_subject_fn or (lambda _source_bundle, topic="": "")
     subject = same_arena_subject_fn({"title": input_title or topic}, topic=topic or input_title) or cluster_label or _clip_text(topic or input_title or "the core subject", 80)
@@ -378,9 +407,14 @@ def _heuristic_catalyst_edit_blueprint(
         archetype_visual_rule,
         archetype_sound_rule,
         archetype_packaging_rule,
+        ("Operator mission: " + operator_mission) if operator_mission else "",
+        ("Operator directive: " + operator_directive) if operator_directive else "",
+        ("Operator summary: " + operator_summary) if operator_summary else "",
+        ("Operator guardrails: " + "; ".join(operator_guardrails[:5])) if operator_guardrails else "",
+        ("Priority niches: " + ", ".join(operator_target_niches[:5])) if operator_target_niches else "",
         _render_catalyst_series_cluster_context(selected_cluster),
         f"Preserve the series anchor {recap_subject} across hook, visuals, and packaging." if is_recap_lane and recap_subject else "",
-    ], max_items=4, max_chars=180)
+    ], max_items=8, max_chars=180)
     if archetype_key == "trading_execution" and not is_recap_lane:
         camera_language = _dedupe_preserve_order([
             "photoreal desk-to-screen moves that feel like a real trading terminal",
@@ -429,6 +463,7 @@ def _heuristic_catalyst_edit_blueprint(
             "Avoid generic floating lab objects, repeated anatomy shots, and sterile explainer filler.",
             "Bias toward premium 3D symbolic hero objects, system boards, power maps, and consequence-first compositions.",
             "Each scene should feel like a crafted business documentary frame, not a generic AI render.",
+            ("Follow operator guardrails: " + "; ".join(operator_guardrails[:4])) if operator_guardrails else "",
             *visual_rules,
         ], max_items=8, max_chars=180)
         mix_notes = _dedupe_preserve_order([
@@ -467,6 +502,8 @@ def _heuristic_catalyst_edit_blueprint(
             "Avoid anatomy, sterile lab, and floating-object filler unless the narration explicitly demands it.",
             "Bias toward premium 3D wealth-system, institution, network, archive, and consequence frames.",
             "Every chapter opener must feel like a distinct premium documentary proof image, not a rephrased repeat.",
+            "Do not use literal brains, textbook neural diagrams, or medical cross-sections as filler for psychology/business beats.",
+            ("Follow operator guardrails: " + "; ".join(operator_guardrails[:5])) if operator_guardrails else "",
             *visual_rules,
         ], max_items=8, max_chars=180)
         mix_notes = _dedupe_preserve_order([
@@ -487,6 +524,7 @@ def _heuristic_catalyst_edit_blueprint(
         niche_execution_notes = _dedupe_preserve_order([
             *niche_execution_notes,
             "For Empire Magnates, push premium business-documentary proof frames, sharper contradictions, and cleaner power-system storytelling than the last run.",
+            "When the topic is psychological, render it as premium symbolic mind-worlds, dossiers, networks, or consequence frames instead of literal anatomy filler.",
         ], max_items=6, max_chars=180)
     if format_preset == "documentary" and not is_recap_lane and timeline_visual_lock > 0 and timeline_visual_lock < 72.0:
         camera_language = _dedupe_preserve_order([
@@ -668,6 +706,9 @@ def _heuristic_catalyst_edit_blueprint(
         "Raise documentary visual lock with more system, dossier, boardroom, map, and infrastructure proof frames." if format_preset == "documentary" and not is_recap_lane and 0.0 < timeline_visual_lock < 72.0 else "",
         "Keep the next documentary run preview-safe so no hook or payoff scene ships without a ready visual." if 0.0 < timeline_preview_success < 90.0 else "",
         "For Empire Magnates, every chapter opener must land on a different premium proof frame before explanation begins." if is_empire_magnates else "",
+        ("Operator mission: " + operator_mission) if operator_mission else "",
+        ("Operator directive: " + operator_directive) if operator_directive else "",
+        ("Honor guardrails: " + "; ".join(operator_guardrails[:5])) if operator_guardrails else "",
     ], max_items=5, max_chars=180)
     return {
         "version": "catalyst_edit_v1",
