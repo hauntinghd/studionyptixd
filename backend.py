@@ -19124,6 +19124,18 @@ async def _longform_attach_scene_previews(
         out["target_sec"] = 0.0
         return out
 
+    session_topic = ""
+    session_input_title = ""
+    channel_context: dict = {}
+    try:
+        async with _longform_sessions_lock:
+            live_session = dict(_longform_sessions.get(session_id) or {})
+        session_topic = str(live_session.get("topic", "") or "").strip()
+        session_input_title = str(live_session.get("input_title", "") or "").strip()
+        channel_context = dict((dict(live_session.get("metadata_pack") or {})).get("youtube_channel") or {})
+    except Exception:
+        pass
+
     neg_prompt = TEMPLATE_NEGATIVE_PROMPTS.get(template, NEGATIVE_PROMPT)
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
         neg_prompt = (
@@ -19157,17 +19169,6 @@ async def _longform_attach_scene_previews(
             neg_prompt
             + ", bright cheerful lighting, warm happy tone, colorful festival mood, comedy framing, daylight beach party aesthetics"
         )
-    session_topic = ""
-    session_input_title = ""
-    channel_context: dict = {}
-    try:
-        async with _longform_sessions_lock:
-            live_session = dict(_longform_sessions.get(session_id) or {})
-        session_topic = str(live_session.get("topic", "") or "").strip()
-        session_input_title = str(live_session.get("input_title", "") or "").strip()
-        channel_context = dict((dict(live_session.get("metadata_pack") or {})).get("youtube_channel") or {})
-    except Exception:
-        pass
     scenes = _repair_longform_generated_scenes(
         scenes,
         template=template,
