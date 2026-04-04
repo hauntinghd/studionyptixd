@@ -17802,6 +17802,7 @@ def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, ma
     if manual:
         return manual
     session_snapshot = dict(session or {})
+    format_preset = str(session_snapshot.get("format_preset", "") or "").strip().lower()
     edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
     chapter_blueprint = _catalyst_chapter_blueprint_for_index(edit_blueprint, chapter_index)
     metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
@@ -17825,7 +17826,6 @@ def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, ma
     chapter_visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or "").strip(), 220)
     chapter_motion_note = _clip_text(str(chapter_blueprint.get("motion_note", "") or "").strip(), 180)
     chapter_improvement = _clip_text(str(chapter_blueprint.get("improvement_focus", "") or "").strip(), 180)
-    format_preset = str(session_snapshot.get("format_preset", "") or "").strip().lower()
     is_empire_magnates = bool(
         format_preset == "documentary"
         and any(
