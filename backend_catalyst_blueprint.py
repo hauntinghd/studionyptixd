@@ -1,5 +1,7 @@
 ﻿import json
 
+import re
+
 from backend_catalyst_core import (
     _clip_text,
     _dedupe_preserve_order,
@@ -69,6 +71,18 @@ def _heuristic_catalyst_edit_blueprint(
     operator_mission = _clip_text(str(memory_view.get("operator_mission", "") or ""), 220)
     operator_guardrails = [str(v).strip() for v in list(memory_view.get("operator_guardrails") or []) if str(v).strip()]
     operator_target_niches = [str(v).strip() for v in list(memory_view.get("operator_target_niches") or []) if str(v).strip()]
+    empire_psychology_mode = False
+    if is_empire_magnates:
+        psychology_haystack = " ".join([
+            str(topic or "").strip().lower(),
+            str(input_title or "").strip().lower(),
+            str(input_description or "").strip().lower(),
+            str(selected_cluster.get("label", "") or "").strip().lower(),
+            str(memory_view.get("selected_cluster_label", "") or "").strip().lower(),
+            str(niche_key or "").strip().lower(),
+            " ".join(str(v).strip().lower() for v in operator_target_niches),
+        ])
+        empire_psychology_mode = bool(re.search(r"\b(psychology|brain|mind|behavior|behaviour|manipulat|bias|blind spot|subconscious|attention|dopamine|control)\b", psychology_haystack))
     if is_empire_magnates:
         archetype_key = "systems_documentary"
         archetype_label = "Systems Documentary"
@@ -82,15 +96,21 @@ def _heuristic_catalyst_edit_blueprint(
             220,
         )
         archetype_visual_rule = _clip_text(
-            "Use premium 3D boardroom, dossier, map, archive, network, infrastructure, and consequence frames instead of literal brains, anatomy, or sterile lab filler.",
+            "Use premium 3D boardroom, dossier, map, archive, network, infrastructure, and consequence frames instead of literal brains, anatomy, or sterile lab filler."
+            if not empire_psychology_mode
+            else "Use premium 3D symbolic mind-worlds, surveillance, social manipulation tableaux, mirror/reversal frames, dossiers, emotional consequence scenes, and hidden-control environments instead of literal brains, anatomy, sterile labs, or generic machine filler.",
             220,
         )
         archetype_sound_rule = _clip_text(
-            "Use expensive documentary tension, controlled low-end pulses, and silence pockets that sharpen the reveal without turning the piece into horror.",
+            "Use expensive documentary tension, controlled low-end pulses, and silence pockets that sharpen the reveal without turning the piece into horror."
+            if not empire_psychology_mode
+            else "Use invasive tension swells, restrained low-end pulses, silence pockets, and intimate reveal accents that feel psychological and premium instead of sci-fi or horror camp.",
             220,
         )
         archetype_packaging_rule = _clip_text(
-            "Package the video around one sharp contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait.",
+            "Package the video around one sharp contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait."
+            if not empire_psychology_mode
+            else "Package the video around one invasive contradiction, one hidden behavior mechanism, and one premium consequence image instead of generic clickbait or textbook psychology framing.",
             220,
         )
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)
@@ -320,6 +340,53 @@ def _heuristic_catalyst_edit_blueprint(
             "Keep the first scene of each chapter consequence-first, not explanation-first.",
             "Bias every chapter toward one premium proof frame before any abstract narration.",
         ]
+        if empire_psychology_mode:
+            empire_opening_jobs = [
+                f"Open on a personal consequence frame showing {subject} quietly hijacking someone's choices before any explanation.",
+                f"Start with an invasive contradiction about what the mind is doing to someone without them noticing.",
+                f"Lead with a social manipulation tableau where one hidden trigger changes the outcome around {subject}.",
+                f"Open on a dossier or surveillance frame that makes the hidden control pattern around {subject} obvious instantly.",
+                f"Start on a mirror, split-self, or reversal frame showing what the person feels versus what is actually controlling them.",
+                f"Lead with a hidden-behavior mechanism reveal, then widen into the real-world consequence around {subject}.",
+                f"Start on the emotional payoff image first, then backfill the invisible manipulation with restraint.",
+                f"Open on one disturbing blind-spot proof image, not a generic brain or machine scene.",
+            ]
+            empire_visual_motifs = [
+                f"premium symbolic mind-world where a hidden trigger quietly bends choices around {subject}",
+                f"social manipulation tableau with one figure subtly steering another inside a designed dark-stage environment about {subject}",
+                f"surveillance-grade dossier board mapping triggers, leverage points, and emotional consequences tied to {subject}",
+                f"mirror or split-reality consequence frame showing what the victim perceives versus the hidden force shaping {subject}",
+                f"clean network of influence around a person, relationship, or decision point connected directly to {subject}",
+                f"archive or interrogation-room style proof frame exposing the hidden behavior mechanism behind {subject}",
+                f"controlled symbolic frame using strings, masks, reflections, shadows, or attention funnels to visualize {subject}",
+                f"premium consequence-first human scene where the emotional fallout of {subject} is unmistakable",
+            ]
+            empire_motion_notes = [
+                "hard first-frame contradiction, then intimate dolly-in toward the hidden trigger",
+                "clean emotional consequence reveal before widening into the invisible pattern",
+                "surveillance-to-consequence contrast reset that makes the hidden behavior feel expensive and legible",
+                "mirror-frame sweep into one dominant manipulation proof image",
+                "dossier push-in, then abrupt reset to the real-world social consequence",
+                "symbolic mind-world reveal followed by a grounded human payoff frame before the viewer settles",
+                "split-reality contrast reset with sharper documentary punctuation",
+                "architectural pull-through into one premium psychological symbol instead of a generic floating object",
+            ]
+            empire_sound_notes = [
+                "controlled invasive pulse, intimate low-end tension, and one silence pocket before the reveal lands",
+                "subtle dread swell under narration, then one sharp documentary hit on the contradiction",
+                "psychological low pulse plus a restrained impact sting when the manipulation proof frame arrives",
+                "ominous bed with a clean reveal accent when the hidden behavior is exposed",
+                "silence pocket before the emotional fallout lands, then a heavy but polished consequence hit",
+                "surveillance hum, restrained low-end, and a premium punctuation on the reversal",
+                "dark-stage tension bed with a hard contrast sting on the payoff image",
+                "quiet invasive tension under the first claim, then one deliberate impact when the blind spot becomes obvious",
+            ]
+            empire_improvement_moves = [
+                "Open on a different consequence or contradiction image every chapter so the sequence never repeats one mind-world opener.",
+                "Rotate aggressively between human consequence, surveillance, dossier, mirror, influence-network, archive, and reversal frames.",
+                "Keep the first scene of each chapter personal and invasive, not abstract or textbook.",
+                "Bias every chapter toward one premium psychological proof image before any explanation.",
+            ]
         empire_blueprints: list[dict] = []
         for idx, raw_blueprint in enumerate(chapter_blueprints):
             chapter = dict(raw_blueprint or {})

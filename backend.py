@@ -7948,6 +7948,25 @@ async def _derive_longform_seed_from_catalyst_hub(
     guardrails: list[str] | None = None,
     target_niches: list[str] | None = None,
 ) -> dict:
+    def _looks_like_operator_goal_text(text: str) -> bool:
+        sample = str(text or "").strip().lower()
+        if not sample:
+            return False
+        if len(sample.split()) > 20:
+            return True
+        if re.search(r"\b(stronger hooks?|better retention|without copying|cleaner systems storytelling|priority niches|guardrails?)\b", sample):
+            return True
+        return bool(re.match(r"^(make|build|create|study|use|avoid|push|keep|launch|optimize)\b", sample))
+
+    def _sanitize_catalyst_topic_text(candidate: str, fallback: str, focus: str) -> str:
+        raw = _clip_text(str(candidate or "").strip(), 180)
+        if not raw or _looks_like_operator_goal_text(raw):
+            return _clip_text(str(fallback or "").strip() or f"The hidden system behind {focus}", 180)
+        cleaned = re.sub(r"\s+", " ", raw).strip(" -,:")
+        if _looks_like_operator_goal_text(cleaned):
+            return _clip_text(str(fallback or "").strip() or f"The hidden system behind {focus}", 180)
+        return cleaned
+
     workspace_key = str(workspace_id or "documentary").strip().lower()
     workspace_label = _catalyst_hub_workspace_label(workspace_key)
     channel_context = dict(channel_context or {})
@@ -7979,7 +7998,13 @@ async def _derive_longform_seed_from_catalyst_hub(
     strongest_signals = [str(v).strip() for v in list(memory_public.get("wins_to_keep") or []) if str(v).strip()]
     weak_points = [str(v).strip() for v in list(memory_public.get("mistakes_to_avoid") or []) if str(v).strip()]
     focus_subject = series_anchor or archetype_label or (niche_list[0] if niche_list else "") or "the strongest winning angle on this channel"
-    fallback_topic = mission_text or f"A stronger {workspace_label.lower()} about {focus_subject}".strip()
+    audit_candidate_titles = [str(v).strip() for v in list(channel_audit.get("next_video_candidates") or []) if str(v).strip()]
+    fallback_topic = _clip_text(
+        audit_candidate_titles[0]
+        if audit_candidate_titles
+        else (f"The hidden system behind {focus_subject}" if focus_subject else f"A stronger {workspace_label.lower()}"),
+        180,
+    )
     fallback_title = _clip_text(
         str(
             memory_public.get("operator_summary")
@@ -8042,7 +8067,7 @@ async def _derive_longform_seed_from_catalyst_hub(
         )
     except Exception:
         payload = {}
-    topic = _clip_text(str(payload.get("topic", "") or fallback_topic).strip(), 180)
+    topic = _sanitize_catalyst_topic_text(str(payload.get("topic", "") or ""), fallback_topic, focus_subject)
     title = _clip_text(str(payload.get("title", "") or fallback_title).strip(), 140)
     description = _clip_text(str(payload.get("description", "") or fallback_description).strip(), 420)
     if not topic:
@@ -9742,25 +9767,21 @@ def _build_longform_scene_execution_prompt(
     scene = dict(scene or {})
     visual_description = str(scene.get("visual_description", "") or "").strip()
     motion_direction = str(scene.get("motion_direction", "") or "").strip()
-    engagement_purpose = str(scene.get("engagement_purpose", "") or "").strip()
     execution = _catalyst_scene_execution_profile(
         edit_blueprint=edit_blueprint,
         chapter_blueprint=chapter_blueprint,
         scene_index=scene_index,
         total_scenes=total_scenes,
     )
+    chapter_blueprint = dict(chapter_blueprint or {})
+    visual_motif = _clip_text(str(chapter_blueprint.get("visual_motif", "") or ""), 180)
+    visual_variation_rule = _clip_text(str(execution.get("visual_variation_rule", "") or ""), 180)
     visual_delta = " ".join(part for part in [
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
-        f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") else "",
-        f"Edit intensity: {execution.get('execution_intensity', '')}." if execution.get("execution_intensity") else "",
-        f"Cut profile: {execution.get('cut_profile', '')}." if execution.get("cut_profile") else "",
-        f"Caption rhythm: {execution.get('caption_rhythm', '')}." if execution.get("caption_rhythm") else "",
-        f"Niche execution: {'; '.join(execution.get('niche_execution_notes') or [])}." if execution.get("niche_execution_notes") else "",
-        f"Motion execution: {'; '.join(execution.get('motion_cues') or [])}." if execution.get("motion_cues") else "",
-        f"Retention objective: {'; '.join(execution.get('retention_cues') or [])}." if execution.get("retention_cues") else "",
-        f"Scene-specific motion beat: {motion_direction}." if motion_direction else "",
-        f"Engagement beat: {engagement_purpose}." if engagement_purpose else "",
+        f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
+        f"Visual motif: {visual_motif}." if visual_motif else "",
+        f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
         "Pattern interrupt required in composition, scale, or contrast." if execution.get("is_interrupt") else "",
         "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
         "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
