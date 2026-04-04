@@ -232,3 +232,5 @@ class CatalystHubLaunchRequest(BaseModel):
     animation_enabled: bool = True
     sfx_enabled: bool = True
     auto_pipeline: bool = True
+    include_public_benchmarks: bool = True
+    refresh_outcomes: bool = True

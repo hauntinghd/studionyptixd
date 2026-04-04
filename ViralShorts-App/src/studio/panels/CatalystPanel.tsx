@@ -348,6 +348,8 @@ export default function CatalystPanel() {
                     animation_enabled: true,
                     sfx_enabled: true,
                     auto_pipeline: true,
+                    include_public_benchmarks: true,
+                    refresh_outcomes: true,
                 }),
             });
             const data = await readJsonResponse<any>(res);
@@ -570,7 +572,7 @@ export default function CatalystPanel() {
                                 className="inline-flex items-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-3 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                             >
                                 {launching ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                                Launch Catalyst Long-Form
+                                Autonomous Launch Long-Form
                             </button>
                             <span className="text-xs text-gray-500">
                                 Saved directives are written into Catalyst channel memory and reused by shorts and long-form guidance.

@@ -22544,8 +22544,8 @@ async def catalyst_hub_launch_longform(
         hub_payload = await _build_catalyst_hub_payload(
             user=user,
             channel_id=channel_id,
-            include_public_benchmarks=True,
-            refresh_outcomes=False,
+            include_public_benchmarks=_bool_from_any((req or {}).include_public_benchmarks, True),
+            refresh_outcomes=_bool_from_any((req or {}).refresh_outcomes, True),
         )
     except Exception as e:
         log.exception("Catalyst hub long-form launch failed to load hub payload")
