@@ -19747,17 +19747,163 @@ def _longform_session_uses_isolated_capacity(session: dict | None) -> bool:
     return False
 
 
+async def _recover_stalled_longform_session_for_capacity(session: dict | None, *, now_ts: float | None = None) -> tuple[dict, bool]:
+    s = dict(session or {})
+    if not s:
+        return s, False
+
+    now = float(now_ts or time.time())
+    changed = False
+    updated_at = float(s.get("updated_at", 0) or 0)
+    stalled_sec = max(0.0, now - updated_at)
+    status = str(s.get("status", "") or "").strip().lower()
+    chapters = list(s.get("chapters") or [])
+    progress = dict(s.get("draft_progress") or {})
+    auto_pipeline = _bool_from_any(s.get("auto_pipeline"), False)
+
+    in_progress_idx = -1
+    in_progress_status = ""
+    for idx, raw_chapter in enumerate(chapters):
+        chapter_status = str((raw_chapter or {}).get("status", "") or "").strip().lower()
+        if chapter_status in {"draft_generating", "draft_generating_images", "regenerating"}:
+            in_progress_idx = idx
+            in_progress_status = chapter_status
+            break
+
+    if in_progress_idx >= 0:
+        chapter_live = dict(chapters[in_progress_idx] or {})
+        chapter_scenes = list(chapter_live.get("scenes") or [])
+        scene_count = len(chapter_scenes)
+        if in_progress_status == "draft_generating" and scene_count <= 0 and stalled_sec > 180.0:
+            chapter_live["status"] = "awaiting_previous_approval"
+            chapter_live["last_error"] = "Recovered from stalled generation task; chapter resumed."
+            chapters[in_progress_idx] = chapter_live
+            s["chapters"] = chapters
+            s["status"] = "draft_review"
+            progress["stage"] = "auto_resume_after_stall_capacity_gate"
+            progress["preview_scene_generated"] = 0
+            s["draft_progress"] = progress
+            s["updated_at"] = now
+            changed = True
+        elif in_progress_status == "draft_generating_images" and scene_count > 0 and stalled_sec > 180.0:
+            ready_count = 0
+            for scene_idx, raw_scene in enumerate(chapter_scenes):
+                scene = dict(raw_scene or {})
+                has_img = bool(str(scene.get("image_url", "") or "").strip())
+                if has_img:
+                    ready_count += 1
+                else:
+                    image_status = str(scene.get("image_status", "") or "").strip().lower()
+                    if image_status != "error":
+                        scene["image_status"] = "error"
+                        scene["image_error"] = "Preview generation stalled; regenerate chapter to refresh this scene."
+                    chapter_scenes[scene_idx] = scene
+            missing_count = max(0, scene_count - ready_count)
+            chapter_live["scenes"] = chapter_scenes
+            chapter_live["status"] = "approved" if (auto_pipeline and missing_count == 0) else "pending_review"
+            chapter_live["last_error"] = (
+                f"Recovered from stalled preview generation ({ready_count}/{scene_count} ready). "
+                f"{missing_count} previews missing; regenerate chapter if needed."
+                if missing_count > 0
+                else "Recovered from stalled preview generation; chapter moved to review."
+            )
+            chapters[in_progress_idx] = chapter_live
+            s["chapters"] = chapters
+            s["status"] = "draft_review"
+            progress["stage"] = "auto_resume_after_preview_stall_capacity_gate"
+            progress["preview_scene_total"] = int(scene_count)
+            progress["preview_scene_generated"] = int(ready_count)
+            progress["generated_chapters"] = int(_longform_generated_chapter_count(chapters))
+            progress["approved_chapters"] = int(_longform_approved_chapter_count(chapters))
+            s["draft_progress"] = progress
+            s["updated_at"] = now
+            changed = True
+        elif in_progress_status == "regenerating" and stalled_sec > 300.0:
+            chapter_live["status"] = "pending_review"
+            chapter_live["last_error"] = "Recovered from stalled chapter regeneration; review or regenerate again."
+            chapters[in_progress_idx] = chapter_live
+            s["chapters"] = chapters
+            s["status"] = "draft_review"
+            progress["stage"] = "auto_resume_after_regeneration_stall_capacity_gate"
+            progress["generated_chapters"] = int(_longform_generated_chapter_count(chapters))
+            progress["approved_chapters"] = int(_longform_approved_chapter_count(chapters))
+            s["draft_progress"] = progress
+            s["updated_at"] = now
+            changed = True
+
+    status = str(s.get("status", "") or "").strip().lower()
+    if status == "bootstrapping" and stalled_sec > 900.0:
+        s["status"] = "error"
+        s["paused_error"] = {
+            "stage": "bootstrapping",
+            "message": "Recovered from stalled long-form bootstrap. Start a new session or retry.",
+        }
+        s["updated_at"] = now
+        changed = True
+    elif status == "rendering":
+        job_id = str(s.get("job_id", "") or "").strip()
+        job = jobs.get(job_id, {}) if job_id else {}
+        if job_id:
+            persisted = await get_persisted_job_state(job_id)
+            if isinstance(persisted, dict) and persisted:
+                jobs[job_id] = persisted
+                job = persisted
+        job_status = str((job or {}).get("status", "") or "").strip().lower()
+        if job_status in {"complete", "completed", "success", "succeeded"}:
+            s["status"] = "complete"
+            s["updated_at"] = now
+            changed = True
+        elif job_status in {"error", "failed", "cancelled", "canceled"}:
+            s["status"] = "error"
+            s["updated_at"] = now
+            changed = True
+        elif stalled_sec > 900.0 and (not job_id or not isinstance(job, dict) or not job):
+            s["status"] = "draft_review"
+            s["job_id"] = ""
+            s["paused_error"] = {
+                "stage": "rendering",
+                "message": "Recovered from stale render job. Retry finalize when ready.",
+            }
+            progress = dict(s.get("draft_progress") or {})
+            progress["stage"] = "stale_render_recovered"
+            s["draft_progress"] = progress
+            s["updated_at"] = now
+            changed = True
+
+    return s, changed
+
+
 async def _active_longform_capacity_session_id(user_id: str) -> str:
     normalized_user_id = str(user_id or "").strip()
     if not normalized_user_id:
         return ""
+    now = time.time()
     async with _longform_sessions_lock:
         _load_longform_sessions()
-        sessions = list(_longform_sessions.values())
+        sessions = [dict(s or {}) for s in _longform_sessions.values()]
     sessions.sort(key=lambda s: float((s or {}).get("updated_at", 0) or 0), reverse=True)
+
+    normalized_sessions: list[dict] = []
+    changed_sessions: dict[str, dict] = {}
     for session in sessions:
         if str((session or {}).get("user_id", "") or "").strip() != normalized_user_id:
             continue
+        recovered, changed = await _recover_stalled_longform_session_for_capacity(session, now_ts=now)
+        if changed:
+            session_id = str((recovered or {}).get("session_id", "") or "").strip()
+            if session_id:
+                changed_sessions[session_id] = recovered
+        normalized_sessions.append(recovered)
+
+    if changed_sessions:
+        async with _longform_sessions_lock:
+            _load_longform_sessions()
+            for session_id, recovered in changed_sessions.items():
+                if session_id in _longform_sessions:
+                    _longform_sessions[session_id] = recovered
+            _save_longform_sessions()
+
+    for session in normalized_sessions:
         if _longform_session_uses_isolated_capacity(session):
             return str((session or {}).get("session_id", "") or "").strip()
     return ""
