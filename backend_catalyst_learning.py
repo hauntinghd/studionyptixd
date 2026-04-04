@@ -560,6 +560,266 @@ def _apply_catalyst_public_shorts_playbook_to_channel_memory(
     )
     return updated
 
+
+def _heuristic_catalyst_longform_execution_qa(
+    *,
+    session_snapshot: dict,
+    edit_blueprint: dict | None = None,
+    package: dict | None = None,
+) -> dict:
+    session_snapshot = dict(session_snapshot or {})
+    edit_blueprint = dict(edit_blueprint or session_snapshot.get("edit_blueprint") or {})
+    package = dict(package or session_snapshot.get("package") or {})
+    chapters = [dict(chapter or {}) for chapter in list(session_snapshot.get("chapters") or []) if isinstance(chapter, dict)]
+    format_preset = str(session_snapshot.get("format_preset", "") or "").strip().lower()
+    motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
+    sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
+    execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
+    hook_strategy = dict(edit_blueprint.get("hook_strategy") or {})
+
+    def _clamp_score(value: float, minimum: float = 20.0, maximum: float = 95.0) -> float:
+        return round(max(minimum, min(maximum, float(value or 0.0))), 2)
+
+    def _signature(text: str, max_words: int = 5) -> str:
+        words = re.findall(r"[A-Za-z0-9']+", str(text or "").strip().lower())
+        return " ".join(words[:max_words]).strip()
+
+    def _avg(values: list[float]) -> float:
+        filtered = [float(v) for v in values if float(v) > 0]
+        if not filtered:
+            return 0.0
+        return round(sum(filtered) / len(filtered), 2)
+
+    documentary_positive_cues = (
+        "system", "network", "map", "diagram", "blueprint", "ledger", "boardroom", "market",
+        "currency", "dossier", "archive", "timeline", "mechanism", "flow", "surveillance",
+        "chart", "grid", "control room", "war room", "city", "headquarters", "server room",
+    )
+    documentary_negative_cues = (
+        "laboratory", "sterile lab", "microscope", "beaker", "petri", "anatomy", "floating object",
+        "operating room", "x-ray", "isolated hero object", "medical textbook", "brain in jar",
+    )
+
+    scene_metrics: list[dict] = []
+    chapter_metrics: list[dict] = []
+    duplicate_visual_hits = 0
+    repeated_opening_hits = 0
+    positive_visual_hits = 0
+    negative_visual_hits = 0
+    preview_total = 0
+    preview_ready = 0
+    preview_failed = 0
+    seen_openings: dict[str, int] = {}
+    recent_visual_signatures: list[str] = []
+
+    for chapter_index, chapter in enumerate(chapters):
+        scenes = [dict(scene or {}) for scene in list(chapter.get("scenes") or []) if isinstance(scene, dict)]
+        chapter_signatures: list[str] = []
+        if not scenes:
+            continue
+        hook_scene = dict(scenes[0] or {})
+        payoff_scene = dict(scenes[-1] or {})
+        opening_sig = _signature(hook_scene.get("narration", ""), 6)
+        if opening_sig:
+            if seen_openings.get(opening_sig, 0) > 0:
+                repeated_opening_hits += 1
+            seen_openings[opening_sig] = int(seen_openings.get(opening_sig, 0) or 0) + 1
+        chapter_preview_ready = 0
+        for scene_index, scene in enumerate(scenes):
+            duration = max(0.0, float(scene.get("duration_sec", 0.0) or 0.0))
+            narration = str(scene.get("narration", "") or "").strip()
+            visual_description = re.sub(r"\s+", " ", str(scene.get("visual_description", "") or "").strip())
+            visual_signature = visual_description.lower()[:160]
+            if visual_signature:
+                chapter_signatures.append(visual_signature)
+                if visual_signature in recent_visual_signatures[-2:]:
+                    duplicate_visual_hits += 1
+                recent_visual_signatures.append(visual_signature)
+            status = str(scene.get("image_status", "") or "").strip().lower()
+            preview_total += 1
+            if status == "ready":
+                preview_ready += 1
+                chapter_preview_ready += 1
+            elif status == "error":
+                preview_failed += 1
+            role = str(scene.get("scene_role", "") or scene.get("_scene_role", "") or "").strip().lower()
+            if not role:
+                if scene_index == 0:
+                    role = "hook"
+                elif scene_index == len(scenes) - 1:
+                    role = "payoff"
+                elif scene_index >= max(1, len(scenes) - 2):
+                    role = "escalation"
+                elif scene_index % 3 == 1:
+                    role = "interrupt"
+                else:
+                    role = "build"
+            lowered_visual = visual_signature
+            if lowered_visual:
+                if any(cue in lowered_visual for cue in documentary_positive_cues):
+                    positive_visual_hits += 1
+                if any(cue in lowered_visual for cue in documentary_negative_cues):
+                    negative_visual_hits += 1
+            scene_metrics.append({
+                "chapter_num": chapter_index + 1,
+                "scene_num": scene_index + 1,
+                "duration_sec": round(duration, 2),
+                "image_status": status,
+                "scene_role": role,
+                "narration_word_count": len(re.findall(r"[A-Za-z0-9']+", narration)),
+                "visual_signature": visual_signature[:120],
+            })
+        unique_signature_count = len(set(chapter_signatures))
+        chapter_metrics.append({
+            "chapter_num": chapter_index + 1,
+            "scene_count": len(scenes),
+            "preview_ready_pct": round((chapter_preview_ready / max(1, len(scenes))) * 100.0, 2),
+            "hook_ready": str(hook_scene.get("image_status", "") or "").strip().lower() == "ready",
+            "payoff_ready": str(payoff_scene.get("image_status", "") or "").strip().lower() == "ready",
+            "visual_variety_pct": round((unique_signature_count / max(1, len(scenes))) * 100.0, 2),
+            "opening_signature": opening_sig,
+        })
+
+    scene_count = len(scene_metrics)
+    chapter_count = len(chapter_metrics)
+    avg_scenes_per_chapter = round(sum(float(row.get("scene_count", 0) or 0) for row in chapter_metrics) / max(1, chapter_count), 2)
+    avg_scene_duration_sec = round(sum(float(row.get("duration_sec", 0.0) or 0.0) for row in scene_metrics) / max(1, scene_count), 2)
+    preview_success_rate = round((preview_ready / max(1, preview_total)) * 100.0, 2)
+    hook_ready_pct = round((sum(1 for row in chapter_metrics if row.get("hook_ready")) / max(1, chapter_count)) * 100.0, 2)
+    payoff_ready_pct = round((sum(1 for row in chapter_metrics if row.get("payoff_ready")) / max(1, chapter_count)) * 100.0, 2)
+    chapter_visual_variety_pct = round(sum(float(row.get("visual_variety_pct", 0.0) or 0.0) for row in chapter_metrics) / max(1, chapter_count), 2)
+
+    chapter_balance_score = _clamp_score(
+        90.0
+        - abs(avg_scenes_per_chapter - 10.0) * 6.5
+        - abs(avg_scene_duration_sec - 5.0) * 8.0
+        - duplicate_visual_hits * 3.5
+        - repeated_opening_hits * 5.0
+    )
+    documentary_visual_lock_score = _clamp_score(
+        46.0
+        + (preview_success_rate * 0.26)
+        + (chapter_visual_variety_pct * 0.18)
+        + ((positive_visual_hits / max(1, scene_count)) * 28.0)
+        - ((negative_visual_hits / max(1, scene_count)) * 34.0)
+        - (duplicate_visual_hits * 3.5)
+    )
+    sound_plan_strength = min(
+        95.0,
+        32.0
+        + (len(list(sound_strategy.get("mix_notes") or [])[:3]) * 11.0)
+        + (len(list(sound_strategy.get("silence_rules") or [])[:2]) * 9.0)
+        + (len(list(sound_strategy.get("voice_direction") or [])[:2]) * 8.0)
+        + (8.0 if str(execution_strategy.get("sound_density", "") or "").strip() else 0.0),
+    )
+    title_value = str(package.get("selected_title", "") or session_snapshot.get("input_title", "") or "").strip()
+    title_variants = [str(v).strip() for v in list(package.get("title_variants") or []) if str(v).strip()]
+    thumbnail_angles = [str(v).strip() for v in list(package.get("thumbnail_angles") or []) if str(v).strip()]
+    tags = [str(v).strip() for v in list(package.get("selected_tags") or package.get("tags") or []) if str(v).strip()]
+    packaging_score = _clamp_score(
+        30.0
+        + (15.0 if title_value else 0.0)
+        + (min(3, len(title_variants)) * 8.0)
+        + (min(3, len(thumbnail_angles)) * 9.0)
+        + (min(6, len(tags)) * 2.0)
+        + (10.0 if 38 <= len(title_value) <= 78 else (4.0 if title_value else 0.0))
+    )
+    hook_score = _clamp_score(
+        28.0
+        + (hook_ready_pct * 0.36)
+        + (8.0 if str(hook_strategy.get("promise", "") or "").strip() else 0.0)
+        + (6.0 if str(hook_strategy.get("first_30s_mission", "") or "").strip() else 0.0)
+        + (6.0 if str(execution_strategy.get("opening_intensity", "") or "").strip() in {"aggressive", "attack"} else 0.0)
+        - (repeated_opening_hits * 6.5)
+    )
+    pacing_score = _clamp_score(
+        18.0
+        + (chapter_balance_score * 0.55)
+        + (payoff_ready_pct * 0.15)
+        + (preview_success_rate * 0.12)
+        + (chapter_visual_variety_pct * 0.08)
+        - (duplicate_visual_hits * 2.8)
+    )
+    visual_score = _clamp_score(
+        (preview_success_rate * 0.34)
+        + (documentary_visual_lock_score * 0.48)
+        + (chapter_visual_variety_pct * 0.18)
+    )
+    sound_score = _clamp_score(
+        (sound_plan_strength * 0.74)
+        + ((payoff_ready_pct + hook_ready_pct) * 0.13)
+    )
+    overall_score = _clamp_score(_avg([hook_score, pacing_score, visual_score, sound_score, packaging_score]), 25.0, 98.0)
+
+    execution_signature = _clip_text(
+        " | ".join(
+            part for part in [
+                str(execution_strategy.get("opening_intensity", "") or "").strip(),
+                str(execution_strategy.get("cut_profile", "") or "").strip(),
+                str(execution_strategy.get("caption_rhythm", "") or "").strip(),
+                str(execution_strategy.get("sound_density", "") or "").strip(),
+                str(execution_strategy.get("voice_pacing_bias", "") or "").strip(),
+            ] if part
+        ),
+        180,
+    )
+
+    wins_to_keep = _dedupe_preserve_order([
+        "Preview coverage is strong enough to preserve the current proof-heavy scene density." if preview_success_rate >= 90.0 else "",
+        "Documentary visual lock is holding; keep the system, map, dossier, and infrastructure framing." if documentary_visual_lock_score >= 72.0 else "",
+        "Hook coverage is strong enough to keep the current opening intensity." if hook_score >= 72.0 else "",
+        "Packaging depth is healthy enough to keep multiple title and thumbnail directions in play." if packaging_score >= 72.0 else "",
+    ], max_items=6, max_chars=180)
+    watchouts = _dedupe_preserve_order([
+        f"Do not repeat opening narration patterns across chapters ({repeated_opening_hits} repeated opening beat{'s' if repeated_opening_hits != 1 else ''})." if repeated_opening_hits > 0 else "",
+        f"Do not reuse near-identical visual framing across adjacent scenes ({duplicate_visual_hits} duplicate hit{'s' if duplicate_visual_hits != 1 else ''})." if duplicate_visual_hits > 0 else "",
+        "Do not let documentary visuals drift into generic lab/anatomy/object filler." if format_preset == "documentary" and documentary_visual_lock_score < 68.0 else "",
+        "Do not accept preview failures inside chapter hooks or payoffs." if preview_failed > 0 else "",
+    ], max_items=6, max_chars=180)
+    next_run_moves = _dedupe_preserve_order([
+        "Raise documentary visual lock with more map, boardroom, dossier, and system-mechanism frames." if format_preset == "documentary" and documentary_visual_lock_score < 72.0 else "",
+        "Force stronger framing changes across adjacent scenes to stop visual parking." if duplicate_visual_hits > 0 else "",
+        "Vary chapter openings so each section starts on a distinct consequence, proof, or contradiction." if repeated_opening_hits > 0 else "",
+        "Increase hook proof density in the first scene of each chapter." if hook_score < 70.0 else "",
+        "Increase packaging iteration depth before finalize so title and thumbnail lanes stay sharper." if packaging_score < 72.0 else "",
+    ], max_items=6, max_chars=180)
+    return {
+        "timeline_qa": {
+            "chapter_count": chapter_count,
+            "scene_count": scene_count,
+            "preview_scene_count": preview_total,
+            "preview_ready_count": preview_ready,
+            "preview_failed_count": preview_failed,
+            "preview_success_rate": preview_success_rate,
+            "average_scenes_per_chapter": avg_scenes_per_chapter,
+            "average_scene_duration_sec": avg_scene_duration_sec,
+            "hook_ready_chapter_pct": hook_ready_pct,
+            "payoff_ready_chapter_pct": payoff_ready_pct,
+            "chapter_visual_variety_pct": chapter_visual_variety_pct,
+            "duplicate_visual_hits": int(duplicate_visual_hits),
+            "repeated_opening_hits": int(repeated_opening_hits),
+            "documentary_positive_visual_hits": int(positive_visual_hits),
+            "documentary_negative_visual_hits": int(negative_visual_hits),
+            "documentary_visual_lock_score": documentary_visual_lock_score,
+            "chapter_balance_score": chapter_balance_score,
+            "scene_metrics": scene_metrics[:18],
+            "chapter_metrics": chapter_metrics[:12],
+        },
+        "execution_scores": {
+            "overall": overall_score,
+            "hook": hook_score,
+            "pacing": pacing_score,
+            "visuals": visual_score,
+            "sound": sound_score,
+            "packaging": packaging_score,
+            "signature": execution_signature,
+        },
+        "wins_to_keep": wins_to_keep,
+        "watchouts": watchouts,
+        "next_run_moves": next_run_moves,
+    }
+
+
 def _heuristic_catalyst_learning_record(
     *,
     session_snapshot: dict,
@@ -603,6 +863,14 @@ def _heuristic_catalyst_learning_record(
     motion_strategy = dict(edit_blueprint.get("motion_strategy") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
     execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
+    format_preset = str(session_snapshot.get("format_preset", "") or "documentary").strip().lower()
+    longform_execution_qa = _heuristic_catalyst_longform_execution_qa(
+        session_snapshot=session_snapshot,
+        edit_blueprint=edit_blueprint,
+        package=package,
+    )
+    timeline_qa = dict(longform_execution_qa.get("timeline_qa") or {})
+    execution_scores = dict(longform_execution_qa.get("execution_scores") or {})
     chapter_count = len(chapters)
     outcome_summary = (
         f"Catalyst built a {session_snapshot.get('format_preset', 'documentary')} follow-up around "
@@ -624,17 +892,21 @@ def _heuristic_catalyst_learning_record(
             _clip_text(str(hook_strategy.get("promise", "") or ""), 180),
             _clip_text(str(sound_strategy.get("music_profile", "") or ""), 120),
             _clip_text(selected_description, 180),
+            *list(longform_execution_qa.get("wins_to_keep") or [])[:3],
         ], max_items=6, max_chars=180),
         "mistakes_to_avoid": _dedupe_preserve_order([
             what_hurt,
             *retention_findings[:3],
             "Do not let packaging or chapter structure drift back toward the source title or source pacing.",
             "Do not accept black or missing scene previews in a publishable run." if preview_failed else "",
+            *list(longform_execution_qa.get("watchouts") or [])[:3],
         ], max_items=6, max_chars=180),
         "hook_adjustments": _dedupe_preserve_order([
             _clip_text(str(hook_strategy.get("first_30s_mission", "") or ""), 180),
             _clip_text(str(hook_strategy.get("open_loop", "") or ""), 180),
             *retention_findings[:2],
+            "Increase chapter-opening proof density and cut the setup faster." if float(execution_scores.get("hook", 0.0) or 0.0) < 70.0 else "",
+            "Vary chapter openings more aggressively so the first beat never feels templated again." if int(timeline_qa.get("repeated_opening_hits", 0) or 0) > 0 else "",
         ], max_items=6, max_chars=180),
         "pacing_adjustments": _dedupe_preserve_order([
             _clip_text(str(pacing_strategy.get("escalation_curve", "") or ""), 160),
@@ -642,6 +914,8 @@ def _heuristic_catalyst_learning_record(
             _clip_text(f"Cut profile: {str(execution_strategy.get('cut_profile', '') or '').strip()}", 120) if str(execution_strategy.get("cut_profile", "") or "").strip() else "",
             _clip_text(f"Voice pacing bias: {str(execution_strategy.get('voice_pacing_bias', '') or '').strip()}", 120) if str(execution_strategy.get("voice_pacing_bias", "") or "").strip() else "",
             f"Keep each chapter near {chapter_count} high-signal beats and avoid dead air." if chapter_count else "",
+            f"Raise chapter balance above {float(timeline_qa.get('chapter_balance_score', 0.0) or 0.0):.1f}/100 by tightening scene rhythm." if float(timeline_qa.get("chapter_balance_score", 0.0) or 0.0) < 72.0 else "",
+            "Cut harder between visually similar scenes to stop pacing drag." if int(timeline_qa.get("duplicate_visual_hits", 0) or 0) > 0 else "",
         ], max_items=6, max_chars=180),
         "visual_adjustments": _dedupe_preserve_order([
             *list(motion_strategy.get("visual_rules") or [])[:3],
@@ -649,6 +923,8 @@ def _heuristic_catalyst_learning_record(
             *list(motion_strategy.get("motion_graphics") or [])[:2],
             _clip_text(str(execution_strategy.get("visual_variation_rule", "") or ""), 180),
             _clip_text(f"Caption rhythm: {str(execution_strategy.get('caption_rhythm', '') or '').strip()}", 120) if str(execution_strategy.get("caption_rhythm", "") or "").strip() else "",
+            "Replace generic lab/object filler with stronger system, map, dossier, and infrastructure proof frames." if format_preset == "documentary" and float(timeline_qa.get("documentary_visual_lock_score", 0.0) or 0.0) < 72.0 else "",
+            "Force stronger visual variety across adjacent scenes." if int(timeline_qa.get("duplicate_visual_hits", 0) or 0) > 0 else "",
         ], max_items=8, max_chars=180),
         "sound_adjustments": _dedupe_preserve_order([
             *list(sound_strategy.get("mix_notes") or [])[:3],
@@ -656,16 +932,19 @@ def _heuristic_catalyst_learning_record(
             *list(sound_strategy.get("voice_direction") or [])[:2],
             _clip_text(f"Sound density: {str(execution_strategy.get('sound_density', '') or '').strip()}", 120) if str(execution_strategy.get("sound_density", "") or "").strip() else "",
             _clip_text(f"Opening intensity: {str(execution_strategy.get('opening_intensity', '') or '').strip()}", 120) if str(execution_strategy.get("opening_intensity", "") or "").strip() else "",
+            "Strengthen the documentary sound bed and silence-pocket contrast so reveals land harder." if float(execution_scores.get("sound", 0.0) or 0.0) < 70.0 else "",
         ], max_items=8, max_chars=180),
         "packaging_adjustments": _dedupe_preserve_order([
             *packaging_findings[:3],
             f"Use the selected title as the lead package direction: {selected_title}" if selected_title else "",
             f"Keep tags aligned with the same arena: {', '.join(list(package.get('selected_tags') or [])[:6])}" if list(package.get("selected_tags") or []) else "",
+            "Increase title and thumbnail iteration depth before finalize." if float(execution_scores.get("packaging", 0.0) or 0.0) < 72.0 else "",
         ], max_items=8, max_chars=180),
         "next_video_moves": _dedupe_preserve_order([
             *improvement_moves[:4],
             "Use channel memory to stay in the same recognizable arena without repeating exact phrasing.",
             "Promote the strongest contrast or hidden mechanism into the next title and thumbnail package.",
+            *list(longform_execution_qa.get("next_run_moves") or [])[:3],
         ], max_items=8, max_chars=180),
         "memory_updates": _dedupe_preserve_order([
             _clip_text(str(channel_context.get("summary", "") or ""), 180),
@@ -675,6 +954,7 @@ def _heuristic_catalyst_learning_record(
             _clip_text(str(execution_strategy.get("cut_profile", "") or ""), 120),
             _clip_text(str(execution_strategy.get("caption_rhythm", "") or ""), 120),
             _clip_text(selected_title, 160),
+            _clip_text(f"Documentary visual lock: {float(timeline_qa.get('documentary_visual_lock_score', 0.0) or 0.0):.1f}/100", 120),
         ], max_items=8, max_chars=180),
         "execution_strategy": {
             "opening_intensity": str(execution_strategy.get("opening_intensity", "") or ""),
@@ -690,6 +970,8 @@ def _heuristic_catalyst_learning_record(
         "selected_description": selected_description,
         "selected_tags": list(package.get("selected_tags") or []),
         "chapter_markers": list(chapter_markers or []),
+        "timeline_qa": timeline_qa,
+        "execution_scores": execution_scores,
     }
 
 
@@ -981,6 +1263,9 @@ def _update_catalyst_channel_memory(
     selected_title = str(learning_record.get("selected_title", "") or package.get("selected_title", "") or "").strip()
     source_title = str(source_video.get("title", "") or "").strip()
     timeline_qa = dict(learning_record.get("timeline_qa") or {})
+    execution_scores = dict(learning_record.get("execution_scores") or {})
+    learning_execution_strategy = dict(learning_record.get("execution_strategy") or execution_strategy or {})
+    execution_signals = _catalyst_execution_signal_payloads(learning_execution_strategy, execution_scores)
     format_preset = str(session_snapshot.get("format_preset", "") or existing.get("format_preset", "") or "documentary")
     niche = _catalyst_infer_niche(
         selected_title,
@@ -1084,6 +1369,61 @@ def _update_catalyst_channel_memory(
     _catalyst_update_weighted_signals(updated, "packaging_wins_map", list(learning_record.get("packaging_adjustments") or [])[:3], 0.35)
     _catalyst_update_weighted_signals(updated, "retention_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:4], 0.35)
     _catalyst_update_weighted_signals(updated, "next_video_moves_map", list(learning_record.get("next_video_moves") or []), 0.35)
+    for field_name, payload in (
+        ("opening_intensity", execution_signals.get("opening_intensity") or {}),
+        ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),
+        ("caption_rhythm", execution_signals.get("caption_rhythm") or {}),
+        ("sound_density", execution_signals.get("sound_density") or {}),
+        ("cut_profile", execution_signals.get("cut_profile") or {}),
+        ("voice_pacing_bias", execution_signals.get("voice_pacing_bias") or {}),
+        ("visual_variation_rule", execution_signals.get("visual_variation_rule") or {}),
+        ("execution_profile", execution_signals.get("execution_profile") or {}),
+    ):
+        _catalyst_update_weighted_signals(updated, f"{field_name}_wins_map", list(payload.get("wins") or []), 0.35)
+        _catalyst_update_weighted_signals(updated, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), 0.35)
+    updated["preferred_cut_profile"] = _catalyst_pick_preferred_choice(
+        updated.get("cut_profile_wins_map") or {},
+        updated.get("cut_profile_watchouts_map") or {},
+        str(updated.get("preferred_cut_profile", "") or ""),
+        max_chars=60,
+    )
+    updated["preferred_caption_rhythm"] = _catalyst_pick_preferred_choice(
+        updated.get("caption_rhythm_wins_map") or {},
+        updated.get("caption_rhythm_watchouts_map") or {},
+        str(updated.get("preferred_caption_rhythm", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_opening_intensity"] = _catalyst_pick_preferred_choice(
+        updated.get("opening_intensity_wins_map") or {},
+        updated.get("opening_intensity_watchouts_map") or {},
+        str(updated.get("preferred_opening_intensity", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_interrupt_strength"] = _catalyst_pick_preferred_choice(
+        updated.get("interrupt_strength_wins_map") or {},
+        updated.get("interrupt_strength_watchouts_map") or {},
+        str(updated.get("preferred_interrupt_strength", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_sound_density"] = _catalyst_pick_preferred_choice(
+        updated.get("sound_density_wins_map") or {},
+        updated.get("sound_density_watchouts_map") or {},
+        str(updated.get("preferred_sound_density", "") or ""),
+        max_chars=40,
+    )
+    updated["preferred_voice_pacing_bias"] = _catalyst_pick_preferred_choice(
+        updated.get("voice_pacing_bias_wins_map") or {},
+        updated.get("voice_pacing_bias_watchouts_map") or {},
+        str(updated.get("preferred_voice_pacing_bias", "") or ""),
+        max_chars=60,
+    )
+    updated["preferred_visual_variation_rule"] = _catalyst_pick_preferred_choice(
+        updated.get("visual_variation_rule_wins_map") or {},
+        updated.get("visual_variation_rule_watchouts_map") or {},
+        str(updated.get("preferred_visual_variation_rule", "") or ""),
+        max_chars=180,
+    )
+    updated["latest_longform_timeline_qa"] = timeline_qa
     public = _catalyst_channel_memory_public_view(updated)
     updated["summary"] = _clip_text(
         "Catalyst has "
@@ -1146,6 +1486,61 @@ def _update_catalyst_channel_memory(
         _catalyst_update_weighted_signals(series_bucket, "packaging_wins_map", list(learning_record.get("packaging_adjustments") or [])[:3], 0.35)
         _catalyst_update_weighted_signals(series_bucket, "retention_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:4], 0.35)
         _catalyst_update_weighted_signals(series_bucket, "next_video_moves_map", list(learning_record.get("next_video_moves") or []), 0.35)
+        for field_name, payload in (
+            ("opening_intensity", execution_signals.get("opening_intensity") or {}),
+            ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),
+            ("caption_rhythm", execution_signals.get("caption_rhythm") or {}),
+            ("sound_density", execution_signals.get("sound_density") or {}),
+            ("cut_profile", execution_signals.get("cut_profile") or {}),
+            ("voice_pacing_bias", execution_signals.get("voice_pacing_bias") or {}),
+            ("visual_variation_rule", execution_signals.get("visual_variation_rule") or {}),
+            ("execution_profile", execution_signals.get("execution_profile") or {}),
+        ):
+            _catalyst_update_weighted_signals(series_bucket, f"{field_name}_wins_map", list(payload.get("wins") or []), 0.35)
+            _catalyst_update_weighted_signals(series_bucket, f"{field_name}_watchouts_map", list(payload.get("watchouts") or []), 0.35)
+        series_bucket["preferred_cut_profile"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("cut_profile_wins_map") or {},
+            series_bucket.get("cut_profile_watchouts_map") or {},
+            str(series_bucket.get("preferred_cut_profile", "") or ""),
+            max_chars=60,
+        )
+        series_bucket["preferred_caption_rhythm"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("caption_rhythm_wins_map") or {},
+            series_bucket.get("caption_rhythm_watchouts_map") or {},
+            str(series_bucket.get("preferred_caption_rhythm", "") or ""),
+            max_chars=40,
+        )
+        series_bucket["preferred_opening_intensity"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("opening_intensity_wins_map") or {},
+            series_bucket.get("opening_intensity_watchouts_map") or {},
+            str(series_bucket.get("preferred_opening_intensity", "") or ""),
+            max_chars=40,
+        )
+        series_bucket["preferred_interrupt_strength"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("interrupt_strength_wins_map") or {},
+            series_bucket.get("interrupt_strength_watchouts_map") or {},
+            str(series_bucket.get("preferred_interrupt_strength", "") or ""),
+            max_chars=40,
+        )
+        series_bucket["preferred_sound_density"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("sound_density_wins_map") or {},
+            series_bucket.get("sound_density_watchouts_map") or {},
+            str(series_bucket.get("preferred_sound_density", "") or ""),
+            max_chars=40,
+        )
+        series_bucket["preferred_voice_pacing_bias"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("voice_pacing_bias_wins_map") or {},
+            series_bucket.get("voice_pacing_bias_watchouts_map") or {},
+            str(series_bucket.get("preferred_voice_pacing_bias", "") or ""),
+            max_chars=60,
+        )
+        series_bucket["preferred_visual_variation_rule"] = _catalyst_pick_preferred_choice(
+            series_bucket.get("visual_variation_rule_wins_map") or {},
+            series_bucket.get("visual_variation_rule_watchouts_map") or {},
+            str(series_bucket.get("preferred_visual_variation_rule", "") or ""),
+            max_chars=180,
+        )
+        series_bucket["latest_longform_timeline_qa"] = timeline_qa
         series_public = _catalyst_channel_memory_public_view(series_bucket, series_anchor_override=series_anchor)
         series_bucket["summary"] = _clip_text(
             f"Catalyst has {series_run_count} run{'s' if series_run_count != 1 else ''} inside {series_anchor}. "
