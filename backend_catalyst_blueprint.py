@@ -106,6 +106,8 @@ def _heuristic_catalyst_edit_blueprint(
         *list(memory_view.get("reference_next_video_moves") or []),
         *list(memory_view.get("next_video_moves") or []),
     ], max_items=8, max_chars=180)
+    latest_timeline_qa = dict(memory_view.get("latest_longform_timeline_qa") or {})
+    latest_timeline_summary = _clip_text(str(memory_view.get("latest_longform_timeline_summary", "") or ""), 220)
     execution_playbook = dict(memory_view.get("execution_playbook") or {})
     execution_playbook_moves = [str(v).strip() for v in list(execution_playbook.get("next_run_moves") or []) if str(v).strip()]
     execution_playbook_summary = _clip_text(str(execution_playbook.get("summary", "") or ""), 220)
@@ -125,11 +127,20 @@ def _heuristic_catalyst_edit_blueprint(
     weakest_voice_pacing_bias = str(weakest_execution_choices.get("voice_pacing_bias", "") or "").strip().lower()
     strongest_visual_variation_rule = _clip_text(str(strongest_execution_choices.get("visual_variation_rule", "") or ""), 220)
     weakest_visual_variation_rule = _clip_text(str(weakest_execution_choices.get("visual_variation_rule", "") or ""), 220)
+    timeline_preview_success = float(latest_timeline_qa.get("preview_success_rate", 0.0) or 0.0)
+    timeline_balance = float(latest_timeline_qa.get("chapter_balance_score", 0.0) or 0.0)
+    timeline_visual_lock = float(latest_timeline_qa.get("documentary_visual_lock_score", 0.0) or 0.0)
+    timeline_duplicate_visuals = int(latest_timeline_qa.get("duplicate_visual_hits", 0) or 0)
+    timeline_repeated_openings = int(latest_timeline_qa.get("repeated_opening_hits", 0) or 0)
     pattern_interrupt_interval = 10 if is_recap_lane else (15 if format_preset == "documentary" else 12)
     if pressure_scores.get("pacing", 0) >= 75:
         pattern_interrupt_interval = 8 if is_recap_lane else 9
     elif pressure_scores.get("pacing", 0) >= 55:
         pattern_interrupt_interval = 9 if is_recap_lane else 11
+    if timeline_balance > 0 and timeline_balance < 72.0:
+        pattern_interrupt_interval = max(8, pattern_interrupt_interval - (2 if format_preset == "documentary" and not is_recap_lane else 1))
+    if timeline_duplicate_visuals > 0:
+        pattern_interrupt_interval = max(8, pattern_interrupt_interval - 1)
     hook_promise = _clip_text(reference_hook_rewrites[0] if reference_hook_rewrites else f"Open on the strongest hidden consequence around {subject}, not generic setup.", 220)
     hook_open_loop = _clip_text(weighted_next_moves[0] if weighted_next_moves else primary_move, 180)
     hook_first30 = _clip_text(reference_hook_rewrites[1] if len(reference_hook_rewrites) > 1 else (hook_watchouts[0] if hook_watchouts else hook_warning), 180)
@@ -169,6 +180,10 @@ def _heuristic_catalyst_edit_blueprint(
         shock_device = "Use one money consequence, execution mistake, or setup edge in the first 10 to 15 seconds."
     elif archetype_key == "power_history":
         shock_device = "Use one power shift, strike, or leadership consequence in the first 10 to 15 seconds."
+    if timeline_repeated_openings > 0:
+        hook_first30 = _clip_text("Open each chapter on a different kind of proof, reversal, or consequence. Do not repeat the same opening beat.", 180)
+    if timeline_preview_success > 0 and timeline_preview_success < 90.0:
+        hook_open_loop = _clip_text("Keep the strongest reveal path simpler and more preview-safe so the next run reaches complete coverage before finalize.", 180)
     if is_recap_lane:
         recap_arc_moves = _dedupe_preserve_order([
             niche_follow_up_rule,
@@ -312,12 +327,14 @@ def _heuristic_catalyst_edit_blueprint(
             "premium 3D documentary camera language with designed dolly-ins, miniature-world sweeps, and hard contrast resets",
             "boardroom, map-room, void-stage, and systems-table staging that feels intentional instead of generic explainer coverage",
             "clean scale shifts from macro system view to human consequence view",
+            "use obvious composition resets between adjacent beats so no two documentary scenes feel parked in the same frame grammar",
             *camera_language,
         ], max_items=8, max_chars=160)
         motion_graphics = _dedupe_preserve_order([
             "use clean system overlays, map cues, and documentary-style interface callouts only when they prove the point",
             "prefer one dominant graphic idea per beat instead of cluttered data walls",
             "make every visual beat feel designed, premium, and obviously CG instead of stock explainer filler",
+            "alternate between boardroom, dossier, map, mechanism, and infrastructure proof language instead of repeating one visual grammar",
             *motion_graphics,
         ], max_items=8, max_chars=180)
         visual_rules = _dedupe_preserve_order([
@@ -345,6 +362,29 @@ def _heuristic_catalyst_edit_blueprint(
             *niche_execution_notes,
             "Push premium 3D documentary motion, cleaner system storytelling, and stronger cinematic consequence framing.",
         ], max_items=5, max_chars=180)
+    if format_preset == "documentary" and not is_recap_lane and timeline_visual_lock > 0 and timeline_visual_lock < 72.0:
+        camera_language = _dedupe_preserve_order([
+            "favor dossier, boardroom, map-table, archive, surveillance, and infrastructure staging before any floating-object metaphor",
+            *camera_language,
+        ], max_items=8, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "every documentary chapter needs at least one map, board, ledger, dossier, system, or mechanism proof beat",
+            *motion_graphics,
+        ], max_items=8, max_chars=180)
+        visual_rules = _dedupe_preserve_order([
+            "Do not let the documentary drift into generic lab, anatomy, or isolated-object filler.",
+            "Prove the concept with systems, institutions, money flows, dossiers, maps, or infrastructure whenever possible.",
+            *visual_rules,
+        ], max_items=8, max_chars=180)
+    if timeline_duplicate_visuals > 0:
+        camera_language = _dedupe_preserve_order([
+            "reset scale, angle, and composition aggressively between adjacent beats",
+            *camera_language,
+        ], max_items=8, max_chars=160)
+        motion_graphics = _dedupe_preserve_order([
+            "when two adjacent beats risk looking similar, force a different proof mode or composition instead of recycling the same frame",
+            *motion_graphics,
+        ], max_items=8, max_chars=180)
     if is_recap_lane:
         camera_language = _dedupe_preserve_order([
             "kinetic manga-recap push-ins on power beats",
@@ -450,6 +490,8 @@ def _heuristic_catalyst_edit_blueprint(
         cut_profile = "contrast-cut"
     if format_preset == "documentary" and not is_recap_lane and cut_profile == "punch-cut":
         cut_profile = "contrast-cut"
+    if timeline_duplicate_visuals > 0 and cut_profile == "cinematic":
+        cut_profile = "contrast-cut"
     if preferred_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and pressure_scores.get("pacing", 0) < 85 and preferred_cut_profile != weakest_cut_profile:
         cut_profile = preferred_cut_profile
     elif strongest_cut_profile in {"cinematic", "punch-cut", "contrast-cut"} and (pressure_scores.get("pacing", 0) >= 60 or not preferred_cut_profile or preferred_cut_profile == weakest_cut_profile):
@@ -472,6 +514,8 @@ def _heuristic_catalyst_edit_blueprint(
         visual_variation_seed = strongest_visual_variation_rule
     if not visual_variation_seed and reference_visual_rewrites:
         visual_variation_seed = str(reference_visual_rewrites[0] or "").strip()
+    if timeline_duplicate_visuals > 0 and not visual_variation_seed:
+        visual_variation_seed = "Change scale, staging, or proof mode every beat so adjacent scenes cannot share the same frame grammar."
     if not visual_variation_seed:
         visual_variation_seed = (
             "Every third beat must reset scale, composition, or symbolism so the viewer cannot settle into one frame grammar."
@@ -479,6 +523,13 @@ def _heuristic_catalyst_edit_blueprint(
             else "Introduce one visible composition or scale reset every few beats."
         )
     visual_variation_rule = _clip_text(visual_variation_seed, 220)
+    director_notes = _dedupe_preserve_order([
+        latest_timeline_summary,
+        "Force stronger chapter-open variation on the next run." if timeline_repeated_openings > 0 else "",
+        "Force harder composition resets on the next run to stop repeated visual framing." if timeline_duplicate_visuals > 0 else "",
+        "Raise documentary visual lock with more system, dossier, boardroom, map, and infrastructure proof frames." if format_preset == "documentary" and not is_recap_lane and 0.0 < timeline_visual_lock < 72.0 else "",
+        "Keep the next documentary run preview-safe so no hook or payoff scene ships without a ready visual." if 0.0 < timeline_preview_success < 90.0 else "",
+    ], max_items=5, max_chars=180)
     return {
         "version": "catalyst_edit_v1",
         "visual_engine": _catalyst_default_visual_engine(template, format_preset),
@@ -501,11 +552,12 @@ def _heuristic_catalyst_edit_blueprint(
             "escalation_curve": "hook -> mechanism -> consequence -> contrast -> payoff",
             "pattern_interrupt_interval_sec": pattern_interrupt_interval,
             "transition_style": transition_style,
-            "micro_escalation_mode": bool(format_preset in {"documentary", "explainer", "recap"}),
+            "micro_escalation_mode": bool(format_preset in {"documentary", "explainer", "recap"} or timeline_duplicate_visuals > 0 or timeline_balance < 72.0),
             "pacing_rules": _dedupe_preserve_order([
                 primary_move,
                 rewrite_priorities[0] if rewrite_priorities else "",
                 execution_playbook_moves[0] if execution_playbook_moves else "",
+                latest_timeline_summary,
                 *reference_pacing_rewrites[:2],
                 *pacing_wins[:2],
                 "Do not spend more than two scenes on the same visual idea.",
@@ -554,11 +606,13 @@ def _heuristic_catalyst_edit_blueprint(
             "measured_ctr_context": f"Measured channel average CTR: {outcome_ctr:.2f}%." if outcome_ctr > 0 else "",
             "measured_retention_context": f"Measured average viewed: {outcome_avp:.2f}%." if outcome_avp > 0 else "",
             "rewrite_pressure_summary": _clip_text(" ".join(part for part in [str(rewrite_pressure.get("summary", "") or "").strip(), execution_playbook_summary] if part), 240),
-            "next_run_priorities": _dedupe_preserve_order([*rewrite_priorities[:5], *execution_playbook_moves[:3]], max_items=6, max_chars=180),
+            "timeline_qa_summary": latest_timeline_summary,
+            "next_run_priorities": _dedupe_preserve_order([*rewrite_priorities[:5], *execution_playbook_moves[:3], *director_notes[:2]], max_items=6, max_chars=180),
         },
         "scoring_rubric": _dedupe_preserve_order([
             *scoring_rubric,
             execution_playbook_summary,
+            *director_notes[:2],
             execution_playbook_moves[0] if execution_playbook_moves else "",
         ], max_items=10, max_chars=180),
         "chapter_blueprints": _heuristic_catalyst_chapter_blueprints(

@@ -1356,6 +1356,12 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
     avg_exec_visual = float(public.get("average_execution_visual_score", 0.0) or 0.0)
     avg_exec_sound = float(public.get("average_execution_sound_score", 0.0) or 0.0)
     avg_exec_packaging = float(public.get("average_execution_packaging_score", 0.0) or 0.0)
+    latest_timeline_qa = dict(public.get("latest_longform_timeline_qa") or {})
+    timeline_preview_success = float(latest_timeline_qa.get("preview_success_rate", 0.0) or 0.0)
+    timeline_balance = float(latest_timeline_qa.get("chapter_balance_score", 0.0) or 0.0)
+    timeline_visual_lock = float(latest_timeline_qa.get("documentary_visual_lock_score", 0.0) or 0.0)
+    timeline_duplicate_visuals = int(latest_timeline_qa.get("duplicate_visual_hits", 0) or 0)
+    timeline_repeated_openings = int(latest_timeline_qa.get("repeated_opening_hits", 0) or 0)
     winning_patterns = _dedupe_preserve_order(
         [
             (
@@ -1370,6 +1376,8 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
             f"Promoted sound density: {best_choices['sound_density']}." if best_choices["sound_density"] else "",
             f"Promoted voice pacing bias: {best_choices['voice_pacing_bias']}." if best_choices["voice_pacing_bias"] else "",
             f"Promoted visual variation rule: {best_choices['visual_variation_rule']}." if best_choices["visual_variation_rule"] else "",
+            f"Latest preview coverage held at {timeline_preview_success:.1f}%." if timeline_preview_success >= 90.0 else "",
+            f"Latest documentary visual lock held at {timeline_visual_lock:.1f}/100." if timeline_visual_lock >= 72.0 else "",
         ],
         max_items=7,
         max_chars=180,
@@ -1389,6 +1397,9 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
             f"Demoted sound density: {weak_choices['sound_density']}." if weak_choices["sound_density"] else "",
             f"Demoted voice pacing bias: {weak_choices['voice_pacing_bias']}." if weak_choices["voice_pacing_bias"] else "",
             f"Demoted visual variation rule: {weak_choices['visual_variation_rule']}." if weak_choices["visual_variation_rule"] else "",
+            f"Latest run repeated {timeline_repeated_openings} opening beat{'s' if timeline_repeated_openings != 1 else ''}." if timeline_repeated_openings > 0 else "",
+            f"Latest run repeated {timeline_duplicate_visuals} adjacent visual frame{'s' if timeline_duplicate_visuals != 1 else ''}." if timeline_duplicate_visuals > 0 else "",
+            f"Latest documentary visual lock fell to {timeline_visual_lock:.1f}/100." if 0.0 < timeline_visual_lock < 72.0 else "",
         ],
         max_items=7,
         max_chars=180,
@@ -1431,9 +1442,48 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
                 if avg_exec_packaging > 0 and avg_exec_packaging < 76
                 else ""
             ),
+            (
+                f"Raise preview coverage back above 90%; the latest run only reached {timeline_preview_success:.1f}% ready scenes."
+                if 0.0 < timeline_preview_success < 90.0
+                else ""
+            ),
+            (
+                f"Raise chapter balance above 72/100; the latest run landed at {timeline_balance:.1f}/100."
+                if 0.0 < timeline_balance < 72.0
+                else ""
+            ),
+            (
+                "Vary chapter openings more aggressively so the next run never reuses the same opening beat."
+                if timeline_repeated_openings > 0
+                else ""
+            ),
+            (
+                "Push harder composition resets between adjacent scenes to stop visual parking."
+                if timeline_duplicate_visuals > 0
+                else ""
+            ),
+            (
+                "Raise documentary visual lock with more map, dossier, boardroom, infrastructure, and mechanism proof frames."
+                if 0.0 < timeline_visual_lock < 72.0
+                else ""
+            ),
         ],
         max_items=8,
         max_chars=180,
+    )
+    latest_timeline_summary = _clip_text(
+        " ".join(
+            part
+            for part in [
+                f"Latest preview success was {timeline_preview_success:.1f}%." if timeline_preview_success > 0 else "",
+                f"Chapter balance was {timeline_balance:.1f}/100." if timeline_balance > 0 else "",
+                f"Documentary visual lock was {timeline_visual_lock:.1f}/100." if timeline_visual_lock > 0 else "",
+                f"Repeated openings: {timeline_repeated_openings}." if timeline_repeated_openings > 0 else "",
+                f"Duplicate adjacent visuals: {timeline_duplicate_visuals}." if timeline_duplicate_visuals > 0 else "",
+            ]
+            if part
+        ),
+        320,
     )
     summary = _clip_text(
         " ".join(
@@ -1447,6 +1497,7 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
                 if str(worst_profile.get("value", "") or "").strip()
                 and str(worst_profile.get("value", "") or "").strip().lower() != str(best_profile.get("value", "") or "").strip().lower()
                 else "",
+                latest_timeline_summary,
                 ("Next move: " + next_run_moves[0]) if next_run_moves else "",
             ]
             if part
@@ -1462,6 +1513,8 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
         "winning_patterns": winning_patterns,
         "losing_patterns": losing_patterns,
         "next_run_moves": next_run_moves,
+        "latest_timeline_summary": latest_timeline_summary,
+        "latest_timeline_qa": latest_timeline_qa,
         "average_execution_overall_score": avg_exec_overall,
         "average_execution_hook_score": avg_exec_hook,
         "average_execution_pacing_score": avg_exec_pacing,
@@ -1650,6 +1703,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "preferred_voice_pacing_bias": str(data.get("preferred_voice_pacing_bias", "") or ""),
         "preferred_payoff_hold_sec": round(float(data.get("preferred_payoff_hold_sec", 0.0) or 0.0), 2),
         "preferred_visual_variation_rule": _clip_text(str(data.get("preferred_visual_variation_rule", "") or ""), 180),
+        "latest_longform_timeline_qa": dict(data.get("latest_longform_timeline_qa") or {}),
         "execution_profile_rankings": execution_profile_rankings,
         "opening_intensity_rankings": opening_intensity_rankings,
         "interrupt_strength_rankings": interrupt_strength_rankings,
@@ -1823,6 +1877,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
     execution_playbook = _build_catalyst_execution_playbook(public)
     public["execution_playbook"] = execution_playbook
     public["execution_playbook_summary"] = _clip_text(str(execution_playbook.get("summary", "") or ""), 320)
+    public["latest_longform_timeline_summary"] = _clip_text(str(execution_playbook.get("latest_timeline_summary", "") or ""), 320)
     public["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(public)
     return public
 
