@@ -8043,9 +8043,18 @@ async def _build_shorts_catalyst_extra_instructions(
     selected_cluster = dict(series_context.get("selected_cluster") or {})
     cluster_context = _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320)
     archetype_label = str(memory_public.get("archetype_label", "") or "").strip()
+    promoted_archetypes = [str(v).strip() for v in list(memory_public.get("promoted_archetypes") or []) if str(v).strip()]
+    demoted_archetypes = [str(v).strip() for v in list(memory_public.get("demoted_archetypes") or []) if str(v).strip()]
+    archetype_memory_summary = _clip_text(str(memory_public.get("archetype_memory_summary", "") or "").strip(), 320)
+    best_archetype_memory = dict(memory_public.get("best_archetype_memory") or {})
+    weakest_archetype_memory = dict(memory_public.get("weakest_archetype_memory") or {})
     archetype_hook_rule = str(memory_public.get("archetype_hook_rule", "") or "").strip()
     archetype_visual_rule = str(memory_public.get("archetype_visual_rule", "") or "").strip()
     archetype_packaging_rule = str(memory_public.get("archetype_packaging_rule", "") or "").strip()
+    best_archetype_hook_wins = [str(v).strip() for v in list(best_archetype_memory.get("hook_wins") or []) if str(v).strip()]
+    best_archetype_packaging_wins = [str(v).strip() for v in list(best_archetype_memory.get("packaging_wins") or []) if str(v).strip()]
+    best_archetype_moves = [str(v).strip() for v in list(best_archetype_memory.get("next_video_moves") or []) if str(v).strip()]
+    best_archetype_keywords = [str(v).strip() for v in list(best_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
     try:
         reference_playbook = _build_catalyst_reference_playbook(
             reference_memory=_catalyst_reference_memory,
@@ -8096,17 +8105,19 @@ async def _build_shorts_catalyst_extra_instructions(
             "hook_moves": _dedupe_preserve_order(
                 [
                     *list(public_shorts_playbook.get("hook_moves") or []),
+                    *best_archetype_hook_wins,
                     *list(stored_public_shorts_playbook.get("hook_moves") or []),
                 ],
-                max_items=6,
+                max_items=8,
                 max_chars=180,
             ),
             "packaging_moves": _dedupe_preserve_order(
                 [
                     *list(public_shorts_playbook.get("packaging_moves") or []),
+                    *best_archetype_packaging_wins,
                     *list(stored_public_shorts_playbook.get("packaging_moves") or []),
                 ],
-                max_items=6,
+                max_items=8,
                 max_chars=180,
             ),
             "visual_moves": _dedupe_preserve_order(
@@ -8120,9 +8131,10 @@ async def _build_shorts_catalyst_extra_instructions(
             "keyword_moves": _dedupe_preserve_order(
                 [
                     *list(public_shorts_playbook.get("keyword_moves") or []),
+                    *best_archetype_keywords,
                     *list(stored_public_shorts_playbook.get("keyword_moves") or []),
                 ],
-                max_items=6,
+                max_items=8,
                 max_chars=40,
             ),
             "trend_titles": _dedupe_preserve_order(
@@ -8147,6 +8159,49 @@ async def _build_shorts_catalyst_extra_instructions(
         }
     elif not public_shorts_playbook:
         public_shorts_playbook = stored_public_shorts_playbook
+    if public_shorts_playbook:
+        public_shorts_playbook = {
+            "summary": _clip_text(
+                str(public_shorts_playbook.get("summary", "") or "") or archetype_memory_summary,
+                320,
+            ),
+            "benchmark_titles": _dedupe_preserve_order(
+                list(public_shorts_playbook.get("benchmark_titles") or []),
+                max_items=6,
+                max_chars=120,
+            ),
+            "benchmark_channels": _dedupe_preserve_order(
+                list(public_shorts_playbook.get("benchmark_channels") or []),
+                max_items=6,
+                max_chars=80,
+            ),
+            "hook_moves": _dedupe_preserve_order(
+                [*list(public_shorts_playbook.get("hook_moves") or []), *best_archetype_hook_wins],
+                max_items=8,
+                max_chars=180,
+            ),
+            "packaging_moves": _dedupe_preserve_order(
+                [*list(public_shorts_playbook.get("packaging_moves") or []), *best_archetype_packaging_wins],
+                max_items=8,
+                max_chars=180,
+            ),
+            "visual_moves": _dedupe_preserve_order(
+                list(public_shorts_playbook.get("visual_moves") or []),
+                max_items=8,
+                max_chars=180,
+            ),
+            "keyword_moves": _dedupe_preserve_order(
+                [*list(public_shorts_playbook.get("keyword_moves") or []), *best_archetype_keywords],
+                max_items=8,
+                max_chars=40,
+            ),
+            "trend_titles": _dedupe_preserve_order(
+                list(public_shorts_playbook.get("trend_titles") or []),
+                max_items=6,
+                max_chars=120,
+            ),
+            "angle_candidates": [dict(v or {}) for v in list(public_shorts_playbook.get("angle_candidates") or []) if isinstance(v, dict)][:8],
+        }
     trend_titles: list[str] = []
     if trend_hunt_enabled:
         trend_query = _build_shorts_trend_query(template, topic, channel_context, selected_cluster)
@@ -8199,6 +8254,26 @@ async def _build_shorts_catalyst_extra_instructions(
         parts.append("Catalyst retest-worthy short angles: " + "; ".join(_clip_text(v, 120) for v in retest_shorts_angles[:3]))
     if short_angle_rotation_summary:
         parts.append(short_angle_rotation_summary)
+    if promoted_archetypes:
+        parts.append("Catalyst promoted archetypes: " + "; ".join(_clip_text(v, 120) for v in promoted_archetypes[:3]))
+    if demoted_archetypes:
+        parts.append("Catalyst demoted archetypes: " + "; ".join(_clip_text(v, 120) for v in demoted_archetypes[:2]))
+    if archetype_memory_summary:
+        parts.append("Archetype memory summary: " + archetype_memory_summary)
+    if best_archetype_hook_wins:
+        parts.append("Best archetype hook wins: " + "; ".join(_clip_text(v, 140) for v in best_archetype_hook_wins[:3]))
+    if best_archetype_packaging_wins:
+        parts.append("Best archetype packaging wins: " + "; ".join(_clip_text(v, 140) for v in best_archetype_packaging_wins[:3]))
+    if best_archetype_moves:
+        parts.append("Best archetype next-video moves: " + "; ".join(_clip_text(v, 140) for v in best_archetype_moves[:3]))
+    if str(weakest_archetype_memory.get("archetype_label", "") or weakest_archetype_memory.get("archetype_key", "") or "").strip():
+        parts.append(
+            "Weak archetype to avoid drifting into: "
+            + _clip_text(
+                str(weakest_archetype_memory.get("archetype_label", "") or weakest_archetype_memory.get("archetype_key", "") or "").strip(),
+                140,
+            )
+        )
     if cluster_context:
         parts.append(cluster_context)
     if list(selected_cluster.get("keywords") or []):
