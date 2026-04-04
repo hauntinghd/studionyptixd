@@ -103,6 +103,7 @@ type LongFormSession = {
     learning_record?: Record<string, any>;
     latest_outcome?: Record<string, any>;
     channel_memory?: Record<string, any>;
+    catalyst_preflight?: Record<string, any>;
     metadata_pack: {
         title_variants?: string[];
         description_variants?: string[];
@@ -759,11 +760,26 @@ export default function LongFormPanel() {
     const referenceComparison = (latestOutcome?.reference_comparison || {}) as Record<string, any>;
     const referenceScores = (referenceComparison?.scores || {}) as Record<string, any>;
     const rewritePressure = (channelMemory?.rewrite_pressure || {}) as Record<string, any>;
+    const catalystPreflight = (lfSession?.catalyst_preflight || {}) as Record<string, any>;
     const rewriteCategories = Array.isArray(rewritePressure?.categories)
         ? rewritePressure.categories.filter((value: any) => value && String(value.key || '').trim())
         : [];
     const rewritePriorities = Array.isArray(rewritePressure?.next_run_priorities)
         ? rewritePressure.next_run_priorities.filter((value: any) => String(value || '').trim())
+        : [];
+    const preflightStatus = String(catalystPreflight?.status || '').trim().toLowerCase();
+    const preflightReadinessScore = Number(catalystPreflight?.readiness_score || 0);
+    const preflightBlockers = Array.isArray(catalystPreflight?.blockers)
+        ? catalystPreflight.blockers.filter((value: any) => String(value || '').trim())
+        : [];
+    const preflightWarnings = Array.isArray(catalystPreflight?.warnings)
+        ? catalystPreflight.warnings.filter((value: any) => String(value || '').trim())
+        : [];
+    const preflightStrengths = Array.isArray(catalystPreflight?.strengths)
+        ? catalystPreflight.strengths.filter((value: any) => String(value || '').trim())
+        : [];
+    const preflightNextFixes = Array.isArray(catalystPreflight?.next_fixes)
+        ? catalystPreflight.next_fixes.filter((value: any) => String(value || '').trim())
         : [];
     const referenceChannels = Array.isArray(referenceComparison?.benchmark_channels)
         ? referenceComparison.benchmark_channels.filter((value: any) => String(value || '').trim())
@@ -1497,6 +1513,77 @@ export default function LongFormPanel() {
                                                 </ul>
                                             </div>
                                         ) : null}
+                                    </div>
+                                ) : null}
+                                {preflightStatus ? (
+                                    <div className={`rounded-lg border p-3 space-y-3 ${
+                                        preflightStatus === 'blocked'
+                                            ? 'border-red-400/20 bg-red-500/5'
+                                            : preflightStatus === 'needs_attention'
+                                                ? 'border-amber-400/20 bg-amber-500/5'
+                                                : 'border-emerald-400/20 bg-emerald-500/5'
+                                    }`}>
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                            <div>
+                                                <p className={`text-xs font-semibold uppercase tracking-[0.18em] ${
+                                                    preflightStatus === 'blocked'
+                                                        ? 'text-red-300'
+                                                        : preflightStatus === 'needs_attention'
+                                                            ? 'text-amber-300'
+                                                            : 'text-emerald-300'
+                                                }`}>Catalyst Preflight</p>
+                                                <p className="mt-2 text-sm text-gray-300">
+                                                    {String(catalystPreflight.summary || 'Catalyst is scoring whether this run is safe to finalize.')}
+                                                </p>
+                                            </div>
+                                            <div className="rounded-lg border border-white/[0.08] bg-black/20 px-3 py-2 text-xs text-gray-200 space-y-1 min-w-[140px]">
+                                                <div className="uppercase tracking-[0.16em] text-[10px] text-gray-500">{preflightStatus.replace('_', ' ')}</div>
+                                                <div className="text-lg font-semibold text-white">{preflightReadinessScore ? preflightReadinessScore.toFixed(0) : 'n/a'}</div>
+                                                <div className="text-gray-400">readiness score</div>
+                                            </div>
+                                        </div>
+                                        <div className="grid gap-3 lg:grid-cols-2">
+                                            {preflightBlockers.length > 0 ? (
+                                                <div className="rounded-lg border border-red-400/20 bg-black/20 p-3">
+                                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-300">Blocking Issues</p>
+                                                    <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                        {preflightBlockers.slice(0, 5).map((item: any, idx: number) => (
+                                                            <li key={`preflight-blocker-${idx}`}>- {String(item)}</li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ) : null}
+                                            {preflightWarnings.length > 0 ? (
+                                                <div className="rounded-lg border border-amber-400/20 bg-black/20 p-3">
+                                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-300">Warnings</p>
+                                                    <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                        {preflightWarnings.slice(0, 5).map((item: any, idx: number) => (
+                                                            <li key={`preflight-warning-${idx}`}>- {String(item)}</li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ) : null}
+                                            {preflightStrengths.length > 0 ? (
+                                                <div className="rounded-lg border border-emerald-400/20 bg-black/20 p-3">
+                                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">What Is Holding Up</p>
+                                                    <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                        {preflightStrengths.slice(0, 5).map((item: any, idx: number) => (
+                                                            <li key={`preflight-strength-${idx}`}>- {String(item)}</li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ) : null}
+                                            {preflightNextFixes.length > 0 ? (
+                                                <div className="rounded-lg border border-cyan-400/20 bg-black/20 p-3">
+                                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">Next Fixes</p>
+                                                    <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                                                        {preflightNextFixes.slice(0, 5).map((item: any, idx: number) => (
+                                                            <li key={`preflight-next-${idx}`}>- {String(item)}</li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ) : null}
+                                        </div>
                                     </div>
                                 ) : null}
                                 {rewriteCategories.length > 0 ? (

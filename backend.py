@@ -209,6 +209,7 @@ from backend_catalyst_learning import (
     _apply_catalyst_public_shorts_playbook_to_channel_memory,
     _apply_catalyst_outcome_to_channel_memory,
     _build_catalyst_outcome_record,
+    _heuristic_catalyst_longform_execution_qa,
     _heuristic_catalyst_learning_record,
     _heuristic_catalyst_short_learning_record,
     _update_catalyst_channel_memory,
@@ -17382,8 +17383,146 @@ def _longform_review_state(session: dict) -> dict:
     }
 
 
+def _catalyst_longform_preflight(session: dict) -> dict:
+    session_snapshot = dict(session or {})
+    edit_blueprint = dict(session_snapshot.get("edit_blueprint") or {})
+    package = dict(session_snapshot.get("package") or {})
+    review = _longform_review_state(session_snapshot)
+    qa = _heuristic_catalyst_longform_execution_qa(
+        session_snapshot=session_snapshot,
+        edit_blueprint=edit_blueprint,
+        package=package,
+    )
+    timeline_qa = dict(qa.get("timeline_qa") or {})
+    execution_scores = dict(qa.get("execution_scores") or {})
+    format_preset = str(session_snapshot.get("format_preset", "") or "documentary").strip().lower()
+    preview_success = float(timeline_qa.get("preview_success_rate", 0.0) or 0.0)
+    preview_failed = int(timeline_qa.get("preview_failed_count", 0) or 0)
+    chapter_balance = float(timeline_qa.get("chapter_balance_score", 0.0) or 0.0)
+    documentary_visual_lock = float(timeline_qa.get("documentary_visual_lock_score", 0.0) or 0.0)
+    duplicate_visual_hits = int(timeline_qa.get("duplicate_visual_hits", 0) or 0)
+    repeated_opening_hits = int(timeline_qa.get("repeated_opening_hits", 0) or 0)
+    overall_score = float(execution_scores.get("overall", 0.0) or 0.0)
+    hook_score = float(execution_scores.get("hook", 0.0) or 0.0)
+    pacing_score = float(execution_scores.get("pacing", 0.0) or 0.0)
+    visual_score = float(execution_scores.get("visuals", 0.0) or 0.0)
+    sound_score = float(execution_scores.get("sound", 0.0) or 0.0)
+    packaging_score = float(execution_scores.get("packaging", 0.0) or 0.0)
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    strengths = _dedupe_preserve_order(
+        [str(v).strip() for v in list(qa.get("wins_to_keep") or []) if str(v).strip()],
+        max_items=4,
+        max_chars=180,
+    )
+    next_fixes = _dedupe_preserve_order(
+        [str(v).strip() for v in list(qa.get("next_run_moves") or []) if str(v).strip()],
+        max_items=5,
+        max_chars=180,
+    )
+
+    if not review.get("all_approved", False):
+        blockers.append(
+            f"Approve all chapters before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved)."
+        )
+    if preview_failed > 0:
+        blockers.append(
+            f"{preview_failed} scene preview{'s' if preview_failed != 1 else ''} failed and must be regenerated before finalize."
+        )
+    if 0.0 < preview_success < 85.0:
+        blockers.append(f"Preview coverage is only {preview_success:.1f}%. Get hook and payoff visuals ready before final render.")
+    elif preview_success < 95.0:
+        warnings.append(f"Preview coverage is {preview_success:.1f}%. Finalize is safer once more scene previews are ready.")
+
+    if chapter_balance > 0.0 and chapter_balance < 65.0:
+        blockers.append(f"Chapter balance is weak at {chapter_balance:.1f}/100. Tighten pacing before final render.")
+    elif chapter_balance > 0.0 and chapter_balance < 78.0:
+        warnings.append(f"Chapter balance is only {chapter_balance:.1f}/100. The current pacing may sag between reveals.")
+
+    if format_preset == "documentary":
+        if documentary_visual_lock > 0.0 and documentary_visual_lock < 60.0:
+            blockers.append(
+                f"Documentary visual lock is only {documentary_visual_lock:.1f}/100. The run is drifting away from premium 3D documentary proof frames."
+            )
+        elif documentary_visual_lock > 0.0 and documentary_visual_lock < 72.0:
+            warnings.append(
+                f"Documentary visual lock is {documentary_visual_lock:.1f}/100. Push more system, dossier, map, and infrastructure frames."
+            )
+
+    if duplicate_visual_hits >= 4:
+        blockers.append(
+            f"{duplicate_visual_hits} repeated visual frame{'s' if duplicate_visual_hits != 1 else ''} were detected. Reset composition before finalize."
+        )
+    elif duplicate_visual_hits > 0:
+        warnings.append(
+            f"{duplicate_visual_hits} repeated visual frame{'s' if duplicate_visual_hits != 1 else ''} were detected across adjacent scenes."
+        )
+
+    if repeated_opening_hits >= 2:
+        blockers.append(
+            f"{repeated_opening_hits} chapters reuse the same opening beat. Increase opening variation before finalize."
+        )
+    elif repeated_opening_hits > 0:
+        warnings.append("Some chapters still reuse opening language. A stronger opener rotation would make the run safer.")
+
+    for label, score in (
+        ("hook", hook_score),
+        ("pacing", pacing_score),
+        ("visual execution", visual_score),
+        ("sound design", sound_score),
+        ("packaging", packaging_score),
+    ):
+        if score > 0.0 and score < 60.0:
+            blockers.append(f"Catalyst scored {label} at {score:.1f}/100. That is too weak for autonomous finalize.")
+        elif score > 0.0 and score < 72.0:
+            warnings.append(f"Catalyst scored {label} at {score:.1f}/100. This can still improve before final render.")
+
+    if overall_score > 0.0 and overall_score < 64.0:
+        blockers.append(f"Overall execution score is only {overall_score:.1f}/100.")
+    elif overall_score > 0.0 and overall_score < 76.0:
+        warnings.append(f"Overall execution score is {overall_score:.1f}/100. The run is usable but not yet clean.")
+
+    selected_title = str(package.get("selected_title", "") or "").strip()
+    title_variants = [str(v).strip() for v in list(package.get("title_variants") or []) if str(v).strip()]
+    if not selected_title and not title_variants:
+        warnings.append("Publish package does not yet have a selected title.")
+    thumbnail_url = str(package.get("thumbnail_url", "") or "").strip()
+    thumbnail_prompt = str(package.get("thumbnail_prompt", "") or "").strip()
+    if not thumbnail_url and not thumbnail_prompt:
+        warnings.append("Publish package does not yet have a resolved thumbnail angle.")
+
+    blockers = _dedupe_preserve_order(blockers, max_items=6, max_chars=180)
+    warnings = _dedupe_preserve_order(warnings, max_items=6, max_chars=180)
+    penalty = len(blockers) * 14 + len(warnings) * 4
+    readiness_score = round(max(5.0, min(99.0, (overall_score or 72.0) - penalty)), 2)
+    if blockers:
+        status = "blocked"
+        summary = "Catalyst preflight blocked finalize. Fix the blocking execution issues before rendering."
+    elif warnings:
+        status = "needs_attention"
+        summary = "Catalyst preflight found quality risks. The run can improve before final render."
+    else:
+        status = "ready"
+        summary = "Catalyst preflight says this run is ready for finalize."
+
+    return {
+        "status": status,
+        "ready_for_finalize": status == "ready",
+        "readiness_score": readiness_score,
+        "summary": summary,
+        "blockers": blockers,
+        "warnings": warnings,
+        "strengths": strengths,
+        "next_fixes": next_fixes,
+        "timeline_qa": timeline_qa,
+        "execution_scores": execution_scores,
+    }
+
+
 def _longform_public_session(session: dict) -> dict:
     s = dict(session or {})
+    catalyst_preflight = _catalyst_longform_preflight(s)
     chapters = []
     for ch in list(s.get("chapters") or []):
         chapter = dict(ch or {})
@@ -17442,6 +17581,7 @@ def _longform_public_session(session: dict) -> dict:
         "learning_record": dict(s.get("learning_record") or {}),
         "latest_outcome": dict(s.get("latest_outcome") or {}),
         "channel_memory": _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
+        "catalyst_preflight": catalyst_preflight,
         "chapters": chapters,
         "review_state": _longform_review_state(s),
         "draft_progress": dict(s.get("draft_progress") or {}),
@@ -18062,14 +18202,27 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
         progress = dict(live.get("draft_progress") or {})
 
         if next_idx is None:
+            catalyst_preflight = _catalyst_longform_preflight(live)
             live["status"] = "draft_review"
             live["draft_progress"] = {
                 "total_chapters": int(len(chapters)),
                 "generated_chapters": int(generated),
                 "approved_chapters": int(approved),
                 "failed_chapters": int(progress.get("failed_chapters", 0) or 0),
-                "stage": "ready_for_finalize" if approved == len(chapters) else ("auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval"),
+                "stage": (
+                    "catalyst_preflight_blocked"
+                    if catalyst_preflight.get("status") == "blocked" and approved == len(chapters)
+                    else ("ready_for_finalize" if approved == len(chapters) else ("auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval"))
+                ),
             }
+            if catalyst_preflight.get("status") == "blocked" and approved == len(chapters):
+                live["paused_error"] = {
+                    "stage": "catalyst_preflight",
+                    "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
+                    "blockers": list(catalyst_preflight.get("blockers") or []),
+                }
+            elif isinstance(live.get("paused_error"), dict) and str((live.get("paused_error") or {}).get("stage", "") or "") == "catalyst_preflight":
+                live["paused_error"] = None
             live["updated_at"] = time.time()
             _save_longform_sessions()
             should_auto_finalize = (
@@ -18079,6 +18232,7 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
                 and not live.get("paused_error")
                 and str(live.get("status", "") or "") != "complete"
                 and not (str(live.get("job_id", "") or "").strip() and str(live.get("status", "") or "") == "rendering")
+                and catalyst_preflight.get("status") != "blocked"
             )
         else:
             if any(str((chapters[j] or {}).get("status", "") or "") != "approved" for j in range(next_idx)):
@@ -19667,6 +19821,26 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
                 400,
                 f"All chapters must be approved before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved).",
             )
+        catalyst_preflight = _catalyst_longform_preflight(session)
+        if catalyst_preflight.get("status") == "blocked":
+            session["paused_error"] = {
+                "stage": "catalyst_preflight",
+                "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
+                "blockers": list(catalyst_preflight.get("blockers") or []),
+            }
+            progress = dict(session.get("draft_progress") or {})
+            progress["stage"] = "catalyst_preflight_blocked"
+            session["draft_progress"] = progress
+            session["status"] = "draft_review"
+            session["updated_at"] = time.time()
+            _save_longform_sessions()
+            blocker_summary = "; ".join([str(v).strip() for v in list(catalyst_preflight.get("blockers") or []) if str(v).strip()][:3])
+            raise HTTPException(
+                409,
+                f"Catalyst preflight blocked finalize. {blocker_summary or str(catalyst_preflight.get('summary', '') or '')}".strip(),
+            )
+        if isinstance(session.get("paused_error"), dict) and str((session.get("paused_error") or {}).get("stage", "") or "") == "catalyst_preflight":
+            session["paused_error"] = None
         current_job_id = str(session.get("job_id", "") or "").strip()
         if current_job_id and str(session.get("status", "") or "") == "rendering":
             return current_job_id
@@ -19718,11 +19892,23 @@ async def _auto_finalize_longform_session(session_id: str) -> None:
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
             if isinstance(session_live, dict) and str(session_live.get("status", "") or "") != "complete":
-                session_live["status"] = "error"
-                session_live["paused_error"] = {
-                    "stage": "auto_finalize",
-                    "error": str(e),
-                }
+                status_code = int(getattr(e, "status_code", 0) or 0)
+                error_text = str(getattr(e, "detail", "") or str(e))
+                if status_code in {400, 409} and "Catalyst preflight blocked finalize" in error_text:
+                    session_live["status"] = "draft_review"
+                    session_live["paused_error"] = {
+                        "stage": "catalyst_preflight",
+                        "error": error_text,
+                    }
+                    progress = dict(session_live.get("draft_progress") or {})
+                    progress["stage"] = "catalyst_preflight_blocked"
+                    session_live["draft_progress"] = progress
+                else:
+                    session_live["status"] = "error"
+                    session_live["paused_error"] = {
+                        "stage": "auto_finalize",
+                        "error": str(e),
+                    }
                 session_live["updated_at"] = time.time()
                 _save_longform_sessions()
 
