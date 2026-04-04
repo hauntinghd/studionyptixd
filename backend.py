@@ -9820,9 +9820,9 @@ def _build_longform_scene_execution_prompt(
             visual_description=visual_description,
         )
         documentary_prefix = (
-            "Premium 3D psychology documentary frame, obviously CG, consequence-first, premium dark systems staging, and no live-action photography."
+            "Fern-grade premium 3D psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
             if documentary_archetype == "psychology_documentary"
-            else "Premium 3D systems documentary frame, obviously CG, proof-first, premium business-documentary staging, and no live-action photography."
+            else "Fern-grade premium 3D systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
         )
         visual_parts = _dedupe_preserve_order([
             visual_description,
@@ -9831,8 +9831,9 @@ def _build_longform_scene_execution_prompt(
             f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
-            "Use the attached reference sheet for framing, lighting, and documentary CG discipline only; never copy any text, logos, UI panels, or layout literally from the reference.",
-            "No text overlays, no chapter cards, no labels, no UI panels, no watermarks.",
+            "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference.",
+            "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects.",
+            "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
         ], max_items=8, max_chars=240)
         visual_delta = " ".join(part for part in visual_parts if part).strip()
         return f"{documentary_prefix} {visual_delta}".strip()
@@ -18649,12 +18650,12 @@ def _longform_fallback_chapter(
     if str(format_preset or "").strip().lower() == "documentary":
         if documentary_archetype == "psychology_documentary":
             visual_modes = [
-                "surveillance-grade dossier room with one hidden trigger landing on a real person",
-                "mirror or split-self consequence frame showing private perception versus hidden control",
-                "social manipulation tableau with one figure subtly steering another",
-                "archive or interrogation-room proof frame exposing the behavior pattern behind the choice",
-                "human-scale influence web around one relationship or decision point",
-                "controlled symbolic mind-world using reflections, masks, strings, or attention funnels rather than literal anatomy",
+                "surveillance-grade dossier room where a hidden trigger lands on a real person making a real decision",
+                "mirror or split-self consequence scene inside a designed room showing private perception versus hidden control",
+                "social manipulation tableau with one figure subtly steering another in a premium office, hallway, or meeting space",
+                "archive or interrogation-room proof scene exposing the behavior pattern behind the choice",
+                "human-scale influence network around one relationship, conversation, or decision point",
+                "controlled symbolic mind-world built into a real architectural environment using reflections, masks, strings, or attention funnels rather than literal anatomy",
             ]
             narration_modes = [
                 "Open on the invasive consequence first so the audience instantly feels the hidden behavior.",
@@ -18666,11 +18667,11 @@ def _longform_fallback_chapter(
             ]
         else:
             visual_modes = [
-                "premium dossier-table proof frame with one dominant evidence thread",
-                "boardroom or institutional power-map composition showing leverage and consequence",
-                "ownership or money-flow network tied directly to the subject",
-                "archive, ledger, or infrastructure proof frame exposing the hidden system",
-                "before-versus-after consequence frame with one sharply legible change",
+                "premium dossier-table proof scene with one dominant evidence thread in a real designed room",
+                "boardroom or institutional power-map scene showing leverage and consequence around real people",
+                "ownership or money-flow network built into a table, wall, or room tied directly to the subject",
+                "archive, ledger, or infrastructure proof scene exposing the hidden system in a cinematic environment",
+                "before-versus-after consequence scene with one sharply legible change in the same designed space",
                 "human consequence scene showing who benefits, who loses, and why the system matters",
             ]
             narration_modes = [
@@ -18708,11 +18709,11 @@ def _longform_fallback_chapter(
             "duration_sec": 5.0,
             "narration": " ".join(part for part in [blueprint_hook or narration_mode, blueprint_focus or blueprint_improvement] if part).strip(),
             "visual_description": (
-                f"Premium 3D documentary explainer frame focused on {topic_focus}. "
-                f"Use {blueprint_visual_motif or visual_mode}, clean cinematic lighting, readable subject hierarchy, strong depth, "
+                f"Fern-grade premium 3D documentary scene focused on {topic_focus}. "
+                f"Use {blueprint_visual_motif or visual_mode}, cinematic environmental storytelling, readable focal hierarchy, strong depth, and at least one grounded human, room, or proof context when relevant, "
                 f"and one unmistakable visual change from the previous beat. Shock device: {blueprint_shock or 'clear escalation or contrast'}. "
                 "Keep the named subject exact; do not substitute a different organ, device, or symbol. "
-                "Make it feel unmistakably designed in 3D, not photographic. No written words, no interface overlays, no chapter cards."
+                "Make it feel unmistakably designed in 3D, not photographic. Avoid isolated floating objects, pedestal product shots, literal brains, sterile labs, and pseudo-text. No written words, no interface overlays, no chapter cards."
             ),
             "text_overlay": "",
             "motion_direction": blueprint_motion or str(motion_strategy.get("transition_style", "") or "controlled push-in and clean contrast cut"),
@@ -18760,6 +18761,8 @@ def _longform_preview_url(filename: str) -> str:
 
 
 CATALYST_REFERENCE_FRAMES_DIR = Path(__file__).resolve().parent / "analysis" / "reference_frames"
+FERN_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "fern_sheet.jpg"
+EMPIRE_FERN_CURATED_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_fern_magnates_curated_test.jpg"
 EMPIRE_PSYCHOLOGY_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_psychology_reference_sheet_v2.jpg"
 EMPIRE_SYSTEMS_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_systems_reference_sheet_v2.jpg"
 _LONGFORM_REFERENCE_IMAGE_CACHE: dict[str, str] = {}
@@ -18790,6 +18793,10 @@ def _longform_documentary_reference_sheet_path(
         narration=narration,
         visual_description=visual_description,
     )
+    if documentary_archetype == "psychology_documentary" and FERN_REFERENCE_SHEET.exists():
+        return FERN_REFERENCE_SHEET
+    if EMPIRE_FERN_CURATED_REFERENCE_SHEET.exists():
+        return EMPIRE_FERN_CURATED_REFERENCE_SHEET
     candidate = (
         EMPIRE_PSYCHOLOGY_REFERENCE_SHEET
         if documentary_archetype == "psychology_documentary"
@@ -18952,13 +18959,10 @@ def _longform_hosted_image_model_candidates(
     reference_image_url: str = "",
 ) -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        # Seedream is reserved for thumbnails/package exploration, not long-form scenes.
-        # Reference-conditioned documentary scenes should prefer Grok first because
-        # it accepts image_url conditioning directly in the scene lane.
-        if str(reference_image_url or "").strip():
-            candidates = ["grok_imagine", "imagen4_ultra", "recraft_v4"]
-        else:
-            candidates = ["imagen4_ultra", "grok_imagine", "recraft_v4"]
+        # Empire / long-form documentary scenes are locked to Grok.
+        # Seedream stays thumbnail-only and Imagen/Recraft do not replace the
+        # Fern-conditioned documentary scene lane.
+        candidates = ["grok_imagine"]
     else:
         candidates = ["grok_imagine"]
     deduped: list[str] = []
@@ -18983,6 +18987,26 @@ async def _longform_generate_scene_image(
 ) -> dict:
     errors: list[str] = []
     documentary_passthrough = _longform_prefers_3d_documentary_visuals(template, format_preset)
+    if documentary_passthrough:
+        grok_profile = dict(CREATIVE_IMAGE_MODEL_MAP.get("grok_imagine") or {})
+        if not bool(grok_profile.get("enabled", False)):
+            raise RuntimeError("Long-form documentary scenes require Grok Imagine, but the Grok lane is not enabled.")
+        try:
+            return await generate_scene_image(
+                prompt,
+                output_path,
+                resolution=resolution,
+                negative_prompt=negative_prompt,
+                template=template,
+                reference_image_url=reference_image_url,
+                reference_lock_mode=reference_lock_mode,
+                best_of_enabled=best_of_enabled,
+                salvage_enabled=salvage_enabled,
+                prompt_passthrough=True,
+                selected_model_id="grok_imagine",
+            )
+        except Exception as e:
+            raise RuntimeError(f"Long-form documentary scene generation requires Grok Imagine and it failed: {e}")
     for model_id in _longform_hosted_image_model_candidates(
         template,
         format_preset,
@@ -19107,6 +19131,11 @@ async def _longform_attach_scene_previews(
             + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
             + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution"
         )
+        if _is_empire_magnates_channel(channel_context):
+            neg_prompt = (
+                neg_prompt
+                + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+            )
     skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
     # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
     reference_image_url = ""
@@ -19682,6 +19711,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
                 + "photographic actor portrait, handheld live-action frame"
             )
+            if _is_empire_magnates_channel(channel_context):
+                neg_prompt = (
+                    neg_prompt
+                    + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+                )
         if render_horror_audio:
             neg_prompt = (
                 neg_prompt

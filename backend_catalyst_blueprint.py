@@ -295,14 +295,14 @@ def _heuristic_catalyst_edit_blueprint(
             f"Open on a concrete incentive contradiction, not a generic scene-setter.",
         ]
         empire_visual_motifs = [
-            f"premium dossier board with one dominant evidence thread built around {subject}",
-            f"boardroom power-map composition showing winners, losers, and hidden leverage around {subject}",
-            f"macro system-mechanism cutaway revealing the invisible machine behind {subject}",
-            f"money-flow or ownership network visualization tied directly to {subject}",
-            f"surveillance-grade archive frame with one premium symbolic object proving the point about {subject}",
+            f"premium dossier room with one dominant evidence thread built around {subject}",
+            f"glass boardroom or institutional war room showing winners, losers, and hidden leverage around {subject}",
+            f"money-flow, ownership-map, or power-network environment tied directly to {subject}",
+            f"archive corridor, records room, or infrastructure proof scene exposing the hidden system behind {subject}",
+            f"surveillance-grade consequence frame proving the point about {subject} through a real person or real decision",
             f"infrastructure or city-scale consequence frame showing the downstream effect of {subject}",
-            f"clean before-versus-after contrast board exposing what {subject} changes in the real world",
-            f"void-stage hero composition with one premium symbol and one hard contradiction around {subject}",
+            f"clean before-versus-after documentary proof scene exposing what {subject} changes in the real world",
+            f"premium human-scale contradiction frame around {subject}, not a pedestal object shot",
         ]
         empire_motion_notes = [
             "hard first-frame reveal, then controlled dolly-in with one decisive proof cutaway",
@@ -352,13 +352,13 @@ def _heuristic_catalyst_edit_blueprint(
                 f"Open on one disturbing blind-spot proof image, not a generic brain or machine scene.",
             ]
             empire_visual_motifs = [
-                f"premium symbolic mind-world where a hidden trigger quietly bends choices around {subject}",
-                f"social manipulation tableau with one figure subtly steering another inside a designed dark-stage environment about {subject}",
-                f"surveillance-grade dossier board mapping triggers, leverage points, and emotional consequences tied to {subject}",
+                f"premium symbolic mind-world built into a real room or environment where a hidden trigger quietly bends choices around {subject}",
+                f"social manipulation tableau with one figure subtly steering another inside a designed office, hallway, or meeting space about {subject}",
+                f"surveillance-grade dossier room mapping triggers, leverage points, and emotional consequences tied to {subject}",
                 f"mirror or split-reality consequence frame showing what the victim perceives versus the hidden force shaping {subject}",
                 f"clean network of influence around a person, relationship, or decision point connected directly to {subject}",
-                f"archive or interrogation-room style proof frame exposing the hidden behavior pattern behind {subject}",
-                f"controlled symbolic frame using strings, masks, reflections, shadows, or attention funnels to visualize {subject}",
+                f"archive or interrogation-room style proof scene exposing the hidden behavior pattern behind {subject}",
+                f"controlled symbolic frame using strings, masks, reflections, shadows, or attention funnels to visualize {subject} without reducing it to a floating object",
                 f"premium consequence-first human scene where the emotional fallout of {subject} is unmistakable",
             ]
             empire_motion_notes = [
@@ -407,8 +407,8 @@ def _heuristic_catalyst_edit_blueprint(
             empire_blueprints.append(chapter)
         chapter_blueprints = empire_blueprints
     camera_language = _dedupe_preserve_order([
-        "controlled dolly pushes into hero objects",
-        "macro cutaways that reveal the hidden mechanism",
+        "controlled dolly pushes into evidence tables, dossiers, rooms, or decisive human moments",
+        "macro environmental cutaways that reveal the hidden mechanism without collapsing into a product shot",
         "miniature-world system sweeps for context",
         "sharp pattern interrupts when the point changes",
         archetype_visual_rule,
@@ -570,6 +570,7 @@ def _heuristic_catalyst_edit_blueprint(
             "Bias toward premium 3D wealth-system, institution, network, archive, and consequence frames.",
             "Every chapter opener must feel like a distinct premium documentary proof image, not a rephrased repeat.",
             "Do not use literal brains, textbook neural diagrams, or medical cross-sections as filler for psychology/business beats.",
+            "Do not use centered object pedestals, glossy product hero shots, or empty void-stage props as scene substitutes.",
             ("Follow operator guardrails: " + "; ".join(operator_guardrails[:5])) if operator_guardrails else "",
             *visual_rules,
         ], max_items=8, max_chars=180)

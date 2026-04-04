@@ -250,6 +250,7 @@ export default function LongFormPanel() {
     const [creating, setCreating] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
     const [finalizing, setFinalizing] = useState(false);
+    const [stopping, setStopping] = useState(false);
     const [actionBusy, setActionBusy] = useState('');
     const [error, setError] = useState('');
     const [projectsError, setProjectsError] = useState('');
@@ -773,6 +774,20 @@ export default function LongFormPanel() {
             setError(e?.message || 'Failed to finalize long-form session');
         } finally {
             setFinalizing(false);
+        }
+    }, [apiCall, lfSession?.session_id, refreshStatus]);
+
+    const stopSession = useCallback(async () => {
+        if (!lfSession?.session_id) return;
+        setStopping(true);
+        setError('');
+        try {
+            await apiCall(`/api/longform/session/${lfSession.session_id}/stop`, { method: 'POST' });
+            await refreshStatus(lfSession.session_id, false);
+        } catch (e: any) {
+            setError(e?.message || 'Failed to stop long-form session');
+        } finally {
+            setStopping(false);
         }
     }, [apiCall, lfSession?.session_id, refreshStatus]);
 
@@ -1790,6 +1805,15 @@ export default function LongFormPanel() {
                             >
                                 {finalizing ? 'Queueing Render...' : 'Finalize & Render'}
                             </button>
+                            {lfSession.status !== 'complete' && lfSession.status !== 'stopped' && (
+                                <button
+                                    onClick={stopSession}
+                                    disabled={stopping}
+                                    className="px-4 py-2 rounded-lg bg-red-600/90 hover:bg-red-500 text-white text-sm font-medium disabled:opacity-50 transition"
+                                >
+                                    {stopping ? 'Stopping...' : 'Stop Session'}
+                                </button>
+                            )}
                             <button
                                 onClick={() => refreshStatus(lfSession.session_id, false)}
                                 disabled={refreshing}
