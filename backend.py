@@ -18526,13 +18526,28 @@ def _build_documentary_scene_repair(
     )
     if archetype_key == "psychology_documentary":
         focus_phrase = _longform_psychology_focus_phrase(focus_phrase, scene_role)
+        if focus_phrase in {
+            "a private decision being quietly steered",
+            "the hidden trigger behind a confident choice",
+            "the personal cost of a manipulated decision",
+            "a manipulated choice unfolding in real time",
+        }:
+            rotating_focuses = [
+                "a private decision being quietly steered",
+                "a planted suggestion taking hold",
+                "status pressure redirecting a confident choice",
+                "a social proof trap closing around the subject",
+                "the moment compliance beats instinct",
+                "the personal cost after the trigger works",
+            ]
+            focus_phrase = rotating_focuses[scene_index % len(rotating_focuses)]
         proof_modes = [
-            "a glass-walled boardroom or private office where one person is subtly cornered into the wrong decision",
-            "a surveillance-grade dossier room capturing the exact moment a hidden trigger lands",
-            "a mirror-and-shadow consequence frame where private instinct and outside influence collide",
-            "an upscale dinner, meeting, or interview setting where status pressure quietly redirects one choice",
-            "an archive or interrogation-room evidence frame exposing the chain from trigger to consequence",
-            "a controlled symbolic mind-world of reflections, masks, strings, and attention funnels without literal anatomy",
+            "a high-rise office or boardroom at dusk where one person is subtly pressured into the wrong decision by status, timing, or social cues",
+            "a surveillance-grade dossier room where evidence, gaze, and body language reveal the exact moment a hidden trigger lands",
+            "a mirror-and-shadow consequence frame where private instinct and outside influence collide inside a real room",
+            "an upscale dinner, interview, or meeting where status pressure quietly redirects one choice while the other person stays in control",
+            "an archive or evidence room where photos, maps, and surveillance fragments expose the chain from trigger to consequence",
+            "a controlled symbolic mind-world embedded in architecture using reflections, masks, strings, split selves, and attention funnels instead of literal anatomy",
         ]
         action_line = (
             "Show one human consequence, one hidden trigger, and one visible power imbalance so the manipulation feels personal instead of abstract."
@@ -18838,6 +18853,7 @@ def _longform_preview_url(filename: str) -> str:
 
 CATALYST_REFERENCE_FRAMES_DIR = Path(__file__).resolve().parent / "analysis" / "reference_frames"
 FERN_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "fern_sheet.jpg"
+FERN_EXACT_PRESIDENT_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "fern_exact_president_sheet.jpg"
 EMPIRE_FERN_CURATED_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_fern_magnates_curated_test.jpg"
 EMPIRE_PSYCHOLOGY_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_psychology_reference_sheet_v2.jpg"
 EMPIRE_SYSTEMS_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_systems_reference_sheet_v2.jpg"
@@ -18869,8 +18885,11 @@ def _longform_documentary_reference_sheet_path(
         narration=narration,
         visual_description=visual_description,
     )
-    if documentary_archetype == "psychology_documentary" and FERN_REFERENCE_SHEET.exists():
-        return FERN_REFERENCE_SHEET
+    if documentary_archetype == "psychology_documentary":
+        if FERN_EXACT_PRESIDENT_REFERENCE_SHEET.exists():
+            return FERN_EXACT_PRESIDENT_REFERENCE_SHEET
+        if FERN_REFERENCE_SHEET.exists():
+            return FERN_REFERENCE_SHEET
     if EMPIRE_FERN_CURATED_REFERENCE_SHEET.exists():
         return EMPIRE_FERN_CURATED_REFERENCE_SHEET
     candidate = (
@@ -19341,7 +19360,7 @@ async def _longform_attach_scene_previews(
                 template=template,
                 format_preset=format_preset,
                 reference_image_url=reference_image_url,
-                reference_lock_mode="inspired",
+                reference_lock_mode="strict",
                 best_of_enabled=False,
                 salvage_enabled=False,
             )
@@ -19855,7 +19874,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 narration=str(scene.get("narration", "") or ""),
                 visual_description=locked_visual,
             )
-            reference_lock_mode = "inspired" if reference_image_url else "strict"
+            reference_lock_mode = "strict"
             if not reference_image_url:
                 reference_image_url = _normalize_reference_with_default(template, "")
             full_prompt = _build_longform_scene_execution_prompt(
