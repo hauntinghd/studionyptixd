@@ -16501,6 +16501,8 @@ async def _persist_catalyst_short_learning_for_render(
         "metadata_pack": {
             "youtube_channel": dict(channel_context or {}),
             "selected_series_cluster": dict(selected_cluster or {}),
+            "catalyst_channel_memory": dict(memory_view or {}),
+            "catalyst_public_shorts_playbook": _public_shorts_playbook_from_memory_view(memory_view),
         },
     }
     learning_record = _heuristic_catalyst_short_learning_record(
@@ -19848,6 +19850,8 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
             "youtube_channel_id": youtube_channel_id,
             "trend_hunt_enabled": trend_hunt_enabled,
             "catalyst_shorts_instructions": catalyst_shorts_instructions,
+            "channel_memory": dict(persisted_public_shorts.get("memory_public") or {}),
+            "catalyst_public_shorts_playbook": dict(persisted_public_shorts.get("playbook") or {}),
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
@@ -19929,8 +19933,9 @@ async def creative_create_session(body: dict, request: Request = None):
     except Exception as e:
         log.warning(f"Creative session Catalyst setup failed for template={template}: {e}")
         catalyst_shorts_instructions = ""
+    persisted_public_shorts: dict = {}
     try:
-        await _persist_public_shorts_playbook_memory(
+        persisted_public_shorts = await _persist_public_shorts_playbook_memory(
             user=user,
             template=template,
             topic=str(body.get("topic", "") or ""),
@@ -19982,6 +19987,8 @@ async def creative_create_session(body: dict, request: Request = None):
             "youtube_channel_id": youtube_channel_id,
             "trend_hunt_enabled": trend_hunt_enabled,
             "catalyst_shorts_instructions": catalyst_shorts_instructions,
+            "channel_memory": dict(persisted_public_shorts.get("memory_public") or {}),
+            "catalyst_public_shorts_playbook": dict(persisted_public_shorts.get("playbook") or {}),
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
@@ -21926,8 +21933,9 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
     except Exception as e:
         log.warning(f"Generate short Catalyst setup failed for template={req.template}: {e}")
         catalyst_shorts_instructions = ""
+    persisted_public_shorts: dict = {}
     try:
-        await _persist_public_shorts_playbook_memory(
+        persisted_public_shorts = await _persist_public_shorts_playbook_memory(
             user=user,
             template=req.template,
             topic=req.prompt,
@@ -22003,6 +22011,8 @@ async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks
         "youtube_channel_id": youtube_channel_id,
         "trend_hunt_enabled": trend_hunt_enabled,
         "catalyst_shorts_instructions": catalyst_shorts_instructions,
+        "channel_memory": dict(persisted_public_shorts.get("memory_public") or {}),
+        "catalyst_public_shorts_playbook": dict(persisted_public_shorts.get("playbook") or {}),
         "reference_image_url": reference_image_url,
         "reference_lock_mode": reference_lock_mode,
         "reference_dna": reference_dna,
