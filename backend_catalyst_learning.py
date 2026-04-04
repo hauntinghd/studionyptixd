@@ -68,6 +68,7 @@ def _resolve_catalyst_short_angle(
     topic: str = "",
     memory_bucket: dict | None = None,
     selected_cluster: dict | None = None,
+    angle_candidates: list | None = None,
 ) -> str:
     normalized_title = _normalize_catalyst_short_angle(title, 100)
     if not normalized_title:
@@ -77,6 +78,13 @@ def _resolve_catalyst_short_angle(
     memory_bucket = dict(memory_bucket or {})
     selected_cluster = dict(selected_cluster or {})
     candidates: list[str] = []
+    for raw in list(angle_candidates or []):
+        if isinstance(raw, dict):
+            value = _normalize_catalyst_short_angle(str(raw.get("angle", "") or ""), 100)
+        else:
+            value = _normalize_catalyst_short_angle(str(raw or ""), 100)
+        if value:
+            candidates.append(value)
     for raw in list(memory_bucket.get("public_shorts_angle_candidates") or []):
         if isinstance(raw, dict):
             value = _normalize_catalyst_short_angle(str(raw.get("angle", "") or ""), 100)
@@ -964,6 +972,7 @@ def _update_catalyst_channel_memory(
     source_video = dict(metadata_pack.get("source_video") or {})
     channel_context = dict(metadata_pack.get("youtube_channel") or {})
     selected_cluster = dict(metadata_pack.get("selected_series_cluster") or {})
+    public_shorts_playbook = dict(metadata_pack.get("catalyst_public_shorts_playbook") or {})
     edit_blueprint = dict(edit_blueprint or session_snapshot.get("edit_blueprint") or {})
     package = dict(package or session_snapshot.get("package") or {})
     sound_strategy = dict(edit_blueprint.get("sound_strategy") or {})
@@ -1006,6 +1015,7 @@ def _update_catalyst_channel_memory(
             topic=str(session_snapshot.get("topic", "") or ""),
             memory_bucket=existing,
             selected_cluster=selected_cluster,
+            angle_candidates=list(public_shorts_playbook.get("angle_candidates") or []),
         ),
         timeline_qa=timeline_qa,
     )
@@ -2075,6 +2085,7 @@ def _apply_catalyst_outcome_to_channel_memory(
     outcome_record = dict(outcome_record or {})
     metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
     selected_cluster = dict(metadata_pack.get("selected_series_cluster") or {})
+    public_shorts_playbook = dict(metadata_pack.get("catalyst_public_shorts_playbook") or {})
     metrics = dict(outcome_record.get("metrics") or {})
     weight = float(outcome_record.get("weight", 1.0) or 1.0)
     reference_comparison = dict(outcome_record.get("reference_comparison") or {})
@@ -2102,6 +2113,7 @@ def _apply_catalyst_outcome_to_channel_memory(
             topic=str(session_snapshot.get("topic", "") or ""),
             memory_bucket=updated,
             selected_cluster=selected_cluster,
+            angle_candidates=list(public_shorts_playbook.get("angle_candidates") or []),
         ),
         failure_mode_key=str(outcome_record.get("failure_mode_key", "") or ""),
         metrics=metrics,
