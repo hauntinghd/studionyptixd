@@ -267,11 +267,21 @@ def _catalyst_rank_shorts_angle_candidates(
     recent_short_angles = [str(v).strip() for v in list(memory_public.get("recent_short_angles") or []) if str(v).strip()]
     promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
     demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
+    best_archetype_memory = dict(memory_public.get("best_archetype_memory") or {})
+    weakest_archetype_memory = dict(memory_public.get("weakest_archetype_memory") or {})
+    best_archetype_angles = [str(v).strip() for v in list(best_archetype_memory.get("preferred_shorts_angles") or []) if str(v).strip()]
+    best_archetype_moves = [str(v).strip() for v in list(best_archetype_memory.get("next_video_moves") or []) if str(v).strip()]
+    best_archetype_hook_wins = [str(v).strip() for v in list(best_archetype_memory.get("hook_wins") or []) if str(v).strip()]
+    best_archetype_packaging_wins = [str(v).strip() for v in list(best_archetype_memory.get("packaging_wins") or []) if str(v).strip()]
+    best_archetype_keywords = [str(v).strip() for v in list(best_archetype_memory.get("proven_keywords") or []) if str(v).strip()]
+    weakest_archetype_angles = [str(v).strip() for v in list(weakest_archetype_memory.get("preferred_shorts_angles") or []) if str(v).strip()]
     stored_angle_rows = [dict(v or {}) for v in list(memory_public.get("public_shorts_angle_candidates") or []) if isinstance(v, dict)]
     recent_title_keys = {title.lower() for title in recent_titles}
     recent_short_angle_keys = {title.lower() for title in recent_short_angles}
     promoted_angle_keys = {title.lower() for title in promoted_shorts_angles}
     demoted_angle_keys = {title.lower() for title in demoted_shorts_angles}
+    best_archetype_angle_keys = {title.lower() for title in best_archetype_angles}
+    weakest_archetype_angle_keys = {title.lower() for title in weakest_archetype_angles}
     now_ts = time.time()
     cluster_titles = [str(v).strip() for v in list(selected_cluster.get("sample_titles") or []) if str(v).strip()]
     cluster_keywords = [str(v).strip() for v in list(selected_cluster.get("keywords") or []) if str(v).strip()]
@@ -286,7 +296,11 @@ def _catalyst_rank_shorts_angle_candidates(
     )
     archetype_label = str(inferred.get("label", "") or "").strip()
     archetype_keywords = [str(v).strip() for v in list(inferred.get("keywords") or []) if str(v).strip()]
-    shared_keywords = _dedupe_preserve_order([*keyword_moves[:6], *cluster_keywords[:6], *archetype_keywords[:4]], max_items=8, max_chars=40)
+    shared_keywords = _dedupe_preserve_order(
+        [*keyword_moves[:6], *cluster_keywords[:6], *archetype_keywords[:4], *best_archetype_keywords[:4]],
+        max_items=8,
+        max_chars=40,
+    )
     seed_rows: list[tuple[str, str, float]] = []
     raw_topic = _normalize_shorts_angle_seed(topic, max_chars=96)
     if raw_topic:
@@ -299,6 +313,10 @@ def _catalyst_rank_shorts_angle_candidates(
         seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "cluster", 0.96))
     for title in recent_titles[:4]:
         seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "channel", 0.9))
+    for title in best_archetype_angles[:4]:
+        seed_rows.append((_normalize_shorts_angle_seed(title, max_chars=96), "archetype-memory", 1.11))
+    for move in best_archetype_moves[:3]:
+        seed_rows.append((_normalize_shorts_angle_seed(move, max_chars=96), "archetype-move", 0.98))
     candidates: list[dict] = []
     seen: set[str] = set()
     for index, (seed, source, base_weight) in enumerate(seed_rows):
@@ -313,6 +331,8 @@ def _catalyst_rank_shorts_angle_candidates(
         promoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in promoted_shorts_angles[:4]), default=0.0)
         demoted_overlap = max((_catalyst_text_overlap_score(seed, title) for title in demoted_shorts_angles[:4]), default=0.0)
         fatigue_overlap = max((_catalyst_text_overlap_score(seed, title) for title in recent_short_angles[:5]), default=0.0)
+        best_archetype_overlap = max((_catalyst_text_overlap_score(seed, title) for title in best_archetype_angles[:4]), default=0.0)
+        weakest_archetype_overlap = max((_catalyst_text_overlap_score(seed, title) for title in weakest_archetype_angles[:4]), default=0.0)
         matched_memory_row = {}
         matched_memory_overlap = 0.0
         for raw_row in stored_angle_rows:
@@ -326,6 +346,8 @@ def _catalyst_rank_shorts_angle_candidates(
         exact_recent_repeat = normalized_seed in recent_title_keys or normalized_seed in recent_short_angle_keys
         exact_promoted_match = normalized_seed in promoted_angle_keys
         exact_demoted_match = normalized_seed in demoted_angle_keys
+        exact_best_archetype_match = normalized_seed in best_archetype_angle_keys
+        exact_weakest_archetype_match = normalized_seed in weakest_archetype_angle_keys
         memory_times_seen = max(0, int(matched_memory_row.get("times_seen", 0) or 0))
         memory_last_seen_at = float(matched_memory_row.get("last_seen_at", 0.0) or 0.0)
         memory_hours_since_seen = ((now_ts - memory_last_seen_at) / 3600.0) if memory_last_seen_at > 0 else 999.0
@@ -337,9 +359,15 @@ def _catalyst_rank_shorts_angle_candidates(
         promoted_bonus = 0.22 if promoted_overlap >= 0.54 else (0.1 if promoted_overlap >= 0.38 else 0.0)
         if exact_promoted_match:
             promoted_bonus = max(promoted_bonus, 0.18)
+        archetype_bonus = 0.18 if best_archetype_overlap >= 0.54 else (0.08 if best_archetype_overlap >= 0.38 else 0.0)
+        if exact_best_archetype_match:
+            archetype_bonus = max(archetype_bonus, 0.16)
         demoted_penalty = 0.45 if demoted_overlap >= 0.5 else (0.18 if demoted_overlap >= 0.34 else 0.0)
         if exact_demoted_match:
             demoted_penalty = max(demoted_penalty, 0.62)
+        weak_archetype_penalty = 0.22 if weakest_archetype_overlap >= 0.5 else (0.08 if weakest_archetype_overlap >= 0.34 else 0.0)
+        if exact_weakest_archetype_match:
+            weak_archetype_penalty = max(weak_archetype_penalty, 0.28)
         fatigue_penalty = 0.38 if fatigue_overlap >= 0.76 else (0.16 if fatigue_overlap >= 0.56 else 0.0)
         if exact_recent_repeat:
             fatigue_penalty = max(fatigue_penalty, 0.58)
@@ -361,8 +389,10 @@ def _catalyst_rank_shorts_angle_candidates(
             + novelty_bonus
             + recency_bonus
             + promoted_bonus
+            + archetype_bonus
             + stale_reactivation_bonus
             - demoted_penalty
+            - weak_archetype_penalty
             - fatigue_penalty
             - saturation_penalty
             - overlap_penalty
@@ -391,8 +421,12 @@ def _catalyst_rank_shorts_angle_candidates(
             why_now = "Too close to a benchmark angle Catalyst refreshed recently, so it should give fresher variants first."
         elif exact_demoted_match or demoted_overlap >= 0.5:
             why_now = "Similar to a demoted short angle, so it needs a much stronger package if used."
+        elif exact_weakest_archetype_match or weakest_archetype_overlap >= 0.5:
+            why_now = "Too close to a weak archetype angle family, so Catalyst should prefer stronger adjacent hooks."
         elif matched_memory_overlap >= 0.48 and 96 <= memory_hours_since_seen <= 336 and memory_times_seen <= 3:
             why_now = "This angle family cooled off long enough to retest with a fresher package."
+        elif exact_best_archetype_match or best_archetype_overlap >= 0.54:
+            why_now = "Borrowed from the strongest archetype memory, but kept fresh enough for a new run."
         elif promoted_overlap >= 0.54:
             why_now = "Adjacent to a promoted learned short angle, but fresher than the recent repeats."
         candidates.append(
@@ -402,8 +436,26 @@ def _catalyst_rank_shorts_angle_candidates(
                 "score": score,
                 "novelty_score": novelty_score,
                 "why_now": why_now,
-                "hook_move": _clip_text(hook_moves[min(index, len(hook_moves) - 1)] if hook_moves else (str(inferred.get("hook_rule", "") or "") or "Lead with the cleanest hidden payoff first."), 180),
-                "packaging_move": _clip_text(packaging_moves[min(index, len(packaging_moves) - 1)] if packaging_moves else (str(inferred.get("packaging_rule", "") or "") or "Keep the package cleaner and sharper than the current lane."), 180),
+                "hook_move": _clip_text(
+                    hook_moves[min(index, len(hook_moves) - 1)]
+                    if hook_moves
+                    else (
+                        best_archetype_hook_wins[min(index, len(best_archetype_hook_wins) - 1)]
+                        if best_archetype_hook_wins
+                        else (str(inferred.get("hook_rule", "") or "") or "Lead with the cleanest hidden payoff first.")
+                    ),
+                    180,
+                ),
+                "packaging_move": _clip_text(
+                    packaging_moves[min(index, len(packaging_moves) - 1)]
+                    if packaging_moves
+                    else (
+                        best_archetype_packaging_wins[min(index, len(best_archetype_packaging_wins) - 1)]
+                        if best_archetype_packaging_wins
+                        else (str(inferred.get("packaging_rule", "") or "") or "Keep the package cleaner and sharper than the current lane.")
+                    ),
+                    180,
+                ),
                 "visual_move": _clip_text(visual_moves[min(index, len(visual_moves) - 1)] if visual_moves else (str(inferred.get("visual_rule", "") or "") or "Use one dominant visual symbol with cleaner contrast."), 180),
                 "keyword_bias": keyword_hits[:4] or shared_keywords[:4],
                 "archetype_label": archetype_label,
