@@ -1530,6 +1530,7 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
     voice_pacing_rankings = _catalyst_rank_weighted_choices(data.get("voice_pacing_bias_wins_map") or {}, data.get("voice_pacing_bias_watchouts_map") or {}, max_items=4, max_chars=60)
     visual_variation_rankings = _catalyst_rank_weighted_choices(data.get("visual_variation_rule_wins_map") or {}, data.get("visual_variation_rule_watchouts_map") or {}, max_items=4, max_chars=120)
     execution_profile_rankings = _catalyst_rank_weighted_choices(data.get("execution_profile_wins_map") or {}, data.get("execution_profile_watchouts_map") or {}, max_items=4, max_chars=140)
+    short_angle_rankings = _catalyst_rank_weighted_choices(data.get("short_angle_wins_map") or {}, data.get("short_angle_watchouts_map") or {}, max_items=6, max_chars=100)
     failure_mode_rankings = [
         {
             **dict(row or {}),
@@ -1617,6 +1618,8 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "public_shorts_trend_titles": list(data.get("public_shorts_trend_titles") or []),
         "public_shorts_updated_at": float(data.get("public_shorts_updated_at", 0.0) or 0.0),
         "preferred_shorts_angles": list(data.get("preferred_shorts_angles") or []),
+        "recent_short_angles": list(data.get("recent_short_angles") or []),
+        "last_short_angle": str(data.get("last_short_angle", "") or ""),
         "last_outcome_summary": _clip_text(str(data.get("last_outcome_summary", "") or ""), 220),
         "last_failure_mode_key": str(data.get("last_failure_mode_key", "") or ""),
         "last_failure_mode_label": _catalyst_failure_mode_label(str(data.get("last_failure_mode_key", "") or "")),
@@ -1647,8 +1650,27 @@ def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_over
         "cut_profile_rankings": cut_profile_rankings,
         "voice_pacing_bias_rankings": voice_pacing_rankings,
         "visual_variation_rankings": visual_variation_rankings,
-        "promoted_execution_profiles": [str(row.get("value", "") or "").strip() for row in execution_profile_rankings[:2] if str(row.get("value", "") or "").strip()],
-        "demoted_execution_profiles": [str(row.get("value", "") or "").strip() for row in list(reversed(execution_profile_rankings[-2:])) if str(row.get("value", "") or "").strip()],
+        "short_angle_rankings": short_angle_rankings,
+        "promoted_execution_profiles": [
+            str(row.get("value", "") or "").strip()
+            for row in execution_profile_rankings[:2]
+            if str(row.get("value", "") or "").strip() and float(row.get("score", 0.0) or 0.0) > 0
+        ],
+        "demoted_execution_profiles": [
+            str(row.get("value", "") or "").strip()
+            for row in list(reversed(execution_profile_rankings[-2:]))
+            if str(row.get("value", "") or "").strip() and float(row.get("score", 0.0) or 0.0) < 0
+        ],
+        "promoted_shorts_angles": [
+            str(row.get("value", "") or "").strip()
+            for row in short_angle_rankings[:3]
+            if str(row.get("value", "") or "").strip() and float(row.get("score", 0.0) or 0.0) > 0
+        ],
+        "demoted_shorts_angles": [
+            str(row.get("value", "") or "").strip()
+            for row in list(reversed(short_angle_rankings[-3:]))
+            if str(row.get("value", "") or "").strip() and float(row.get("score", 0.0) or 0.0) < 0
+        ],
         "promoted_cut_profiles": [str(row.get("value", "") or "").strip() for row in cut_profile_rankings[:2] if str(row.get("value", "") or "").strip()],
         "demoted_cut_profiles": [str(row.get("value", "") or "").strip() for row in list(reversed(cut_profile_rankings[-2:])) if str(row.get("value", "") or "").strip()],
         "promoted_caption_rhythms": [str(row.get("value", "") or "").strip() for row in caption_rhythm_rankings[:2] if str(row.get("value", "") or "").strip()],

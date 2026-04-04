@@ -7661,6 +7661,33 @@ async def _build_shorts_public_reference_playbook(
 
 def _public_shorts_playbook_from_memory_view(memory_public: dict | None) -> dict:
     public = dict(memory_public or {})
+    angle_candidates = [dict(v or {}) for v in list(public.get("public_shorts_angle_candidates") or []) if isinstance(v, dict)]
+    promoted_angles = [str(v).strip() for v in list(public.get("promoted_shorts_angles") or []) if str(v).strip()]
+    existing_angle_keys = {
+        str((row or {}).get("angle", "") or "").strip().lower()
+        for row in angle_candidates
+        if isinstance(row, dict) and str((row or {}).get("angle", "") or "").strip()
+    }
+    for index, angle in enumerate(promoted_angles):
+        lowered = angle.lower()
+        if lowered in existing_angle_keys:
+            continue
+        angle_candidates.insert(
+            index,
+            {
+                "angle": _clip_text(angle, 100),
+                "source": "catalyst-memory",
+                "score": round(999.0 - index, 3),
+                "novelty_score": 100,
+                "why_now": "Catalyst promoted this short angle from measured channel learning.",
+                "hook_move": "",
+                "packaging_move": "",
+                "visual_move": "",
+                "keyword_bias": [],
+                "archetype_label": _clip_text(str(public.get("archetype_label", "") or "").strip(), 60),
+            },
+        )
+        existing_angle_keys.add(lowered)
     playbook = {
         "summary": _clip_text(str(public.get("public_shorts_summary", "") or "").strip(), 320),
         "benchmark_titles": [
@@ -7675,7 +7702,7 @@ def _public_shorts_playbook_from_memory_view(memory_public: dict | None) -> dict
         ],
         "visual_moves": [str(v).strip() for v in list(public.get("public_shorts_visual_moves") or []) if str(v).strip()],
         "keyword_moves": [str(v).strip() for v in list(public.get("public_shorts_keyword_moves") or []) if str(v).strip()],
-        "angle_candidates": [dict(v or {}) for v in list(public.get("public_shorts_angle_candidates") or []) if isinstance(v, dict)],
+        "angle_candidates": angle_candidates[:8],
         "trend_titles": [str(v).strip() for v in list(public.get("public_shorts_trend_titles") or []) if str(v).strip()],
     }
     if not any(playbook.values()):
@@ -8148,6 +8175,12 @@ async def _build_shorts_catalyst_extra_instructions(
     historical_moves = [str(v).strip() for v in list(historical_compare.get("next_moves") or []) if str(v).strip()]
     if historical_moves:
         parts.append("Historical next moves: " + "; ".join(_clip_text(v, 140) for v in historical_moves[:3]))
+    promoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("promoted_shorts_angles") or []) if str(v).strip()]
+    demoted_shorts_angles = [str(v).strip() for v in list(memory_public.get("demoted_shorts_angles") or []) if str(v).strip()]
+    if promoted_shorts_angles:
+        parts.append("Catalyst promoted short angles: " + "; ".join(_clip_text(v, 120) for v in promoted_shorts_angles[:3]))
+    if demoted_shorts_angles:
+        parts.append("Catalyst demoted short angles to avoid repeating: " + "; ".join(_clip_text(v, 120) for v in demoted_shorts_angles[:2]))
     if cluster_context:
         parts.append(cluster_context)
     if list(selected_cluster.get("keywords") or []):

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from backend_catalyst_core import (
     _clip_text,
+    _catalyst_rank_weighted_choices,
     _dedupe_preserve_order,
     _catalyst_archetype_memory_key,
     _catalyst_channel_memory_public_view,
@@ -15,6 +16,7 @@ from backend_catalyst_core import (
     _catalyst_outcome_weight,
     _catalyst_pick_preferred_choice,
     _catalyst_series_memory_key,
+    _catalyst_text_overlap_score,
     _catalyst_update_weighted_signals,
     _extract_catalyst_keywords,
 )
@@ -54,6 +56,188 @@ def _catalyst_classify_outcome_failure_mode(metrics: dict | None) -> dict:
         "has_retention_signal": has_retention_signal,
         "enough_viewer_signal": has_distribution_signal or has_retention_signal,
     }
+
+
+def _normalize_catalyst_short_angle(text: str, max_chars: int = 100) -> str:
+    return _clip_text(re.sub(r"\s+", " ", str(text or "")).strip(), max_chars)
+
+
+def _resolve_catalyst_short_angle(
+    *,
+    title: str,
+    topic: str = "",
+    memory_bucket: dict | None = None,
+    selected_cluster: dict | None = None,
+) -> str:
+    normalized_title = _normalize_catalyst_short_angle(title, 100)
+    if not normalized_title:
+        normalized_title = _normalize_catalyst_short_angle(topic, 100)
+    if not normalized_title:
+        return ""
+    memory_bucket = dict(memory_bucket or {})
+    selected_cluster = dict(selected_cluster or {})
+    candidates: list[str] = []
+    for raw in list(memory_bucket.get("public_shorts_angle_candidates") or []):
+        if isinstance(raw, dict):
+            value = _normalize_catalyst_short_angle(str(raw.get("angle", "") or ""), 100)
+        else:
+            value = _normalize_catalyst_short_angle(str(raw or ""), 100)
+        if value:
+            candidates.append(value)
+    candidates.extend(_normalize_catalyst_short_angle(str(v or ""), 100) for v in list(memory_bucket.get("preferred_shorts_angles") or []))
+    candidates.extend(_normalize_catalyst_short_angle(str(v or ""), 100) for v in list(memory_bucket.get("recent_short_angles") or []))
+    candidates.extend(_normalize_catalyst_short_angle(str(v or ""), 100) for v in list(selected_cluster.get("sample_titles") or [])[:4])
+    best_match = normalized_title
+    best_score = 0.0
+    for raw in candidates:
+        candidate = _normalize_catalyst_short_angle(raw, 100)
+        if not candidate:
+            continue
+        if candidate.lower() == normalized_title.lower():
+            return candidate
+        similarity = float(_catalyst_text_overlap_score(normalized_title, candidate) or 0.0)
+        if similarity > best_score:
+            best_score = similarity
+            best_match = candidate
+    return best_match if best_score >= 0.52 else normalized_title
+
+
+def _build_catalyst_short_angle_signal(
+    *,
+    angle: str,
+    timeline_qa: dict | None = None,
+    failure_mode_key: str = "",
+    metrics: dict | None = None,
+    reference_comparison: dict | None = None,
+) -> dict:
+    canonical_angle = _normalize_catalyst_short_angle(angle, 100)
+    if not canonical_angle:
+        return {"angle": "", "wins": [], "watchouts": [], "score": 0.0}
+    timeline_qa = dict(timeline_qa or {})
+    metrics = dict(metrics or {})
+    reference_comparison = dict(reference_comparison or {})
+    reference_scores = dict(reference_comparison.get("scores") or {})
+    score = 0.0
+    avg_fill_ratio = float(timeline_qa.get("average_scene_fill_ratio", 0.0) or 0.0)
+    max_dead_air_sec = float(timeline_qa.get("max_dead_air_sec", 0.0) or 0.0)
+    beat_density_score = float(timeline_qa.get("beat_density_score", 0.0) or 0.0)
+    sfx_coverage = float(timeline_qa.get("sfx_scene_coverage_pct", 0.0) or 0.0)
+    duplicate_visual_hits = int(timeline_qa.get("duplicate_visual_hits", 0) or 0)
+    if avg_fill_ratio >= 0.92:
+        score += 0.7
+    elif avg_fill_ratio < 0.82:
+        score -= 0.8
+    if max_dead_air_sec <= 0.45:
+        score += 0.75
+    elif max_dead_air_sec > 0.85:
+        score -= 1.0
+    if beat_density_score >= 78.0:
+        score += 0.55
+    elif beat_density_score < 64.0:
+        score -= 0.6
+    if sfx_coverage >= 75.0:
+        score += 0.25
+    elif sfx_coverage < 40.0:
+        score -= 0.25
+    if timeline_qa.get("bgm_enabled") is True:
+        score += 0.12
+    elif timeline_qa:
+        score -= 0.12
+    if timeline_qa.get("captions_enabled") is True:
+        score += 0.08
+    if duplicate_visual_hits > 0:
+        score -= min(0.45, duplicate_visual_hits * 0.2)
+
+    failure_mode = str(failure_mode_key or "").strip().lower()
+    if failure_mode == "healthy":
+        score += 1.4
+    elif failure_mode == "mixed":
+        score += 0.15
+    elif failure_mode == "retention_fail":
+        score += 0.1
+    elif failure_mode == "packaging_fail":
+        score -= 1.15
+    elif failure_mode == "no_distribution":
+        score -= 0.85
+
+    views = float(metrics.get("views", 0.0) or 0.0)
+    ctr = float(metrics.get("impression_click_through_rate", 0.0) or 0.0)
+    avp = float(metrics.get("average_percentage_viewed", 0.0) or 0.0)
+    if views >= 100:
+        score += 0.35
+    if ctr >= 4.0:
+        score += 0.35
+    elif 0 < ctr < 2.5:
+        score -= 0.35
+    if avp >= 48.0:
+        score += 0.2
+    elif 0 < avp < 35.0:
+        score -= 0.2
+
+    packaging_score = float(reference_scores.get("packaging", 0.0) or 0.0)
+    novelty_score = float(reference_scores.get("title_novelty", 0.0) or 0.0)
+    if packaging_score >= 60.0:
+        score += 0.35
+    elif packaging_score < 40.0 and packaging_score > 0:
+        score -= 0.35
+    if novelty_score >= 65.0:
+        score += 0.2
+    elif novelty_score < 35.0 and novelty_score > 0:
+        score -= 0.2
+
+    score = round(score, 3)
+    wins = [canonical_angle] if score >= 0.85 else []
+    watchouts = [canonical_angle] if score <= -0.55 else []
+    return {
+        "angle": canonical_angle,
+        "wins": wins,
+        "watchouts": watchouts,
+        "score": score,
+    }
+
+
+def _apply_catalyst_short_angle_learning(
+    bucket: dict | None,
+    *,
+    angle_signal: dict | None,
+    weight: float = 1.0,
+) -> dict:
+    updated = dict(bucket or {})
+    signal = dict(angle_signal or {})
+    angle = _normalize_catalyst_short_angle(str(signal.get("angle", "") or ""), 100)
+    if not angle:
+        return updated
+    updated["last_short_angle"] = angle
+    updated["recent_short_angles"] = _dedupe_preserve_order(
+        [angle, *list(updated.get("recent_short_angles") or [])],
+        max_items=10,
+        max_chars=100,
+    )
+    _catalyst_update_weighted_signals(
+        updated,
+        "short_angle_wins_map",
+        [str(v).strip() for v in list(signal.get("wins") or []) if str(v).strip()],
+        max(0.15, float(weight or 1.0)),
+    )
+    _catalyst_update_weighted_signals(
+        updated,
+        "short_angle_watchouts_map",
+        [str(v).strip() for v in list(signal.get("watchouts") or []) if str(v).strip()],
+        max(0.15, float(weight or 1.0)),
+    )
+    angle_rankings = _catalyst_rank_weighted_choices(
+        updated.get("short_angle_wins_map") or {},
+        updated.get("short_angle_watchouts_map") or {},
+        max_items=6,
+        max_chars=100,
+    )
+    promoted = [str((row or {}).get("value", "") or "").strip() for row in list(angle_rankings[:3]) if str((row or {}).get("value", "") or "").strip()]
+    updated["preferred_shorts_angles"] = _dedupe_preserve_order(
+        [*promoted, *list(updated.get("preferred_shorts_angles") or [])],
+        max_items=8,
+        max_chars=100,
+    )
+    return updated
 
 
 def _apply_catalyst_public_shorts_playbook_to_channel_memory(
@@ -752,6 +936,7 @@ def _update_catalyst_channel_memory(
     execution_strategy = dict(edit_blueprint.get("execution_strategy") or {})
     selected_title = str(learning_record.get("selected_title", "") or package.get("selected_title", "") or "").strip()
     source_title = str(source_video.get("title", "") or "").strip()
+    timeline_qa = dict(learning_record.get("timeline_qa") or {})
     format_preset = str(session_snapshot.get("format_preset", "") or existing.get("format_preset", "") or "documentary")
     niche = _catalyst_infer_niche(
         selected_title,
@@ -779,6 +964,15 @@ def _update_catalyst_channel_memory(
         source_title,
         *list(package.get("selected_tags") or []),
         *list(channel_context.get("recent_upload_titles") or [])[:4],
+    )
+    short_angle_signal = _build_catalyst_short_angle_signal(
+        angle=_resolve_catalyst_short_angle(
+            title=selected_title,
+            topic=str(session_snapshot.get("topic", "") or ""),
+            memory_bucket=existing,
+            selected_cluster=selected_cluster,
+        ),
+        timeline_qa=timeline_qa,
     )
     updated = dict(existing)
     run_count = int(updated.get("run_count", 0) or 0) + 1
@@ -836,6 +1030,7 @@ def _update_catalyst_channel_memory(
     updated["packaging_learnings"] = _dedupe_preserve_order([*list(learning_record.get("packaging_adjustments") or []), *list(source_analysis.get("packaging_findings") or [])[:2], *list(updated.get("packaging_learnings") or [])], max_items=10, max_chars=180)
     updated["retention_watchouts"] = _dedupe_preserve_order([*list(learning_record.get("mistakes_to_avoid") or []), *list(source_analysis.get("retention_findings") or [])[:2], *list(updated.get("retention_watchouts") or [])], max_items=10, max_chars=180)
     updated["next_video_moves"] = _dedupe_preserve_order([*list(learning_record.get("next_video_moves") or []), *list(updated.get("next_video_moves") or [])], max_items=10, max_chars=180)
+    updated = _apply_catalyst_short_angle_learning(updated, angle_signal=short_angle_signal, weight=0.45)
     _catalyst_update_weighted_signals(updated, "hook_wins_map", list(learning_record.get("wins_to_keep") or [])[:2] + list(learning_record.get("hook_adjustments") or []), 0.35)
     _catalyst_update_weighted_signals(updated, "hook_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:2], 0.35)
     _catalyst_update_weighted_signals(updated, "pacing_wins_map", list(learning_record.get("pacing_adjustments") or []), 0.35)
@@ -897,6 +1092,7 @@ def _update_catalyst_channel_memory(
         series_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(learning_record.get("packaging_adjustments") or []), *list(source_analysis.get("packaging_findings") or [])[:2], *list(series_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
         series_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(learning_record.get("mistakes_to_avoid") or []), *list(source_analysis.get("retention_findings") or [])[:2], *list(series_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
         series_bucket["next_video_moves"] = _dedupe_preserve_order([*list(learning_record.get("next_video_moves") or []), *list(series_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        series_bucket = _apply_catalyst_short_angle_learning(series_bucket, angle_signal=short_angle_signal, weight=0.45)
         _catalyst_update_weighted_signals(series_bucket, "hook_wins_map", list(learning_record.get("wins_to_keep") or [])[:2] + list(learning_record.get("hook_adjustments") or []), 0.35)
         _catalyst_update_weighted_signals(series_bucket, "hook_watchouts_map", list(learning_record.get("mistakes_to_avoid") or [])[:2], 0.35)
         _catalyst_update_weighted_signals(series_bucket, "pacing_wins_map", list(learning_record.get("pacing_adjustments") or []), 0.35)
@@ -1865,6 +2061,17 @@ def _apply_catalyst_outcome_to_channel_memory(
     updated["last_failure_mode_key"] = str(outcome_record.get("failure_mode_key", "") or "")
     updated["last_failure_mode_label"] = str(outcome_record.get("failure_mode_label", "") or "")
     updated["last_failure_mode_summary"] = _clip_text(str(outcome_record.get("failure_mode_summary", "") or ""), 220)
+    short_angle_signal = _build_catalyst_short_angle_signal(
+        angle=_resolve_catalyst_short_angle(
+            title=str(outcome_record.get("title_used", "") or ""),
+            topic=str(session_snapshot.get("topic", "") or ""),
+            memory_bucket=updated,
+            selected_cluster=selected_cluster,
+        ),
+        failure_mode_key=str(outcome_record.get("failure_mode_key", "") or ""),
+        metrics=metrics,
+        reference_comparison=reference_comparison,
+    )
     updated["recent_selected_titles"] = _dedupe_preserve_order(
         [str(outcome_record.get("title_used", "") or "").strip(), *list(updated.get("recent_selected_titles") or [])],
         max_items=10,
@@ -1908,6 +2115,7 @@ def _apply_catalyst_outcome_to_channel_memory(
     updated["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(updated.get("packaging_learnings") or [])], max_items=10, max_chars=180)
     updated["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(updated.get("retention_watchouts") or [])], max_items=10, max_chars=180)
     updated["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(updated.get("next_video_moves") or [])], max_items=10, max_chars=180)
+    updated = _apply_catalyst_short_angle_learning(updated, angle_signal=short_angle_signal, weight=weight)
     updated["reference_benchmark_channels"] = _dedupe_preserve_order([
         *list(reference_comparison.get("benchmark_channels") or []),
         *list(updated.get("reference_benchmark_channels") or []),
@@ -2072,6 +2280,7 @@ def _apply_catalyst_outcome_to_channel_memory(
         series_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(series_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
         series_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(series_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
         series_bucket["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(series_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        series_bucket = _apply_catalyst_short_angle_learning(series_bucket, angle_signal=short_angle_signal, weight=weight)
         series_bucket["reference_benchmark_channels"] = _dedupe_preserve_order([
             *list(reference_comparison.get("benchmark_channels") or []),
             *list(series_bucket.get("reference_benchmark_channels") or []),
@@ -2203,6 +2412,7 @@ def _apply_catalyst_outcome_to_channel_memory(
         archetype_bucket["packaging_learnings"] = _dedupe_preserve_order([*list(outcome_record.get("packaging_wins") or []), *list(archetype_bucket.get("packaging_learnings") or [])], max_items=10, max_chars=180)
         archetype_bucket["retention_watchouts"] = _dedupe_preserve_order([*list(outcome_record.get("retention_watchouts") or []), *list(archetype_bucket.get("retention_watchouts") or [])], max_items=10, max_chars=180)
         archetype_bucket["next_video_moves"] = _dedupe_preserve_order([*list(outcome_record.get("next_video_moves") or []), *list(archetype_bucket.get("next_video_moves") or [])], max_items=10, max_chars=180)
+        archetype_bucket = _apply_catalyst_short_angle_learning(archetype_bucket, angle_signal=short_angle_signal, weight=weight)
         archetype_bucket["reference_benchmark_channels"] = _dedupe_preserve_order(
             [*list(reference_comparison.get("benchmark_channels") or []), *list(archetype_bucket.get("reference_benchmark_channels") or [])],
             max_items=8,
