@@ -7127,6 +7127,49 @@ async def _youtube_fetch_channel_search(access_token: str, channel_id: str, orde
     return await _youtube_fetch_videos(access_token, video_ids)
 
 
+async def _youtube_fetch_owned_channel_videos(
+    access_token: str,
+    channel_id: str,
+    *,
+    max_results: int = 250,
+) -> list[dict]:
+    clean_channel_id = str(channel_id or "").strip()
+    if not clean_channel_id:
+        return []
+    remaining = max(1, min(int(max_results or 250), 500))
+    page_token = ""
+    video_ids: list[str] = []
+    seen_ids: set[str] = set()
+    while remaining > 0:
+        params = {
+            "part": "snippet",
+            "forMine": "true",
+            "type": "video",
+            "order": "date",
+            "maxResults": min(50, remaining),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        payload = await _youtube_api_get(access_token, "/search", params=params)
+        for raw in list(payload.get("items") or []):
+            if not isinstance(raw, dict):
+                continue
+            snippet = dict(raw.get("snippet") or {})
+            snippet_channel_id = str(snippet.get("channelId", "") or "").strip()
+            if snippet_channel_id and snippet_channel_id != clean_channel_id:
+                continue
+            vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+            video_ids.append(vid)
+        remaining = int(max_results or 250) - len(video_ids)
+        page_token = str(payload.get("nextPageToken", "") or "").strip()
+        if not page_token or remaining <= 0:
+            break
+    return await _youtube_fetch_videos(access_token, video_ids)
+
+
 async def _youtube_fetch_video_analytics_bulk(
     access_token: str,
     channel_id: str,
@@ -7602,12 +7645,31 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     upload_inventory_target = max(int(float(channel_meta.get("video_count", 0) or 0)), 50)
     upload_inventory_target = min(upload_inventory_target, 500)
     uploaded_videos = await _youtube_fetch_uploads_playlist_videos(access_token, uploads_playlist_id, max_results=upload_inventory_target)
+    owned_channel_videos: list[dict] = []
+    try:
+        owned_channel_videos = await _youtube_fetch_owned_channel_videos(
+            access_token,
+            channel_id,
+            max_results=upload_inventory_target,
+        )
+    except Exception:
+        owned_channel_videos = []
+    owned_public_videos = [
+        dict(row or {})
+        for row in list(owned_channel_videos or [])
+        if isinstance(row, dict) and str((row or {}).get("privacy_status", "") or "").strip().lower() in {"", "public"}
+    ]
     public_uploaded_videos = [
         dict(row or {})
         for row in list(uploaded_videos or [])
         if isinstance(row, dict) and str((row or {}).get("privacy_status", "") or "").strip().lower() in {"", "public"}
     ]
-    inventory_rows = public_uploaded_videos or [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
+    inventory_rows = (
+        owned_public_videos
+        or [dict(row or {}) for row in list(owned_channel_videos or []) if isinstance(row, dict)]
+        or public_uploaded_videos
+        or [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
+    )
     recent_uploads = [dict(row or {}) for row in list(inventory_rows or [])[:20] if isinstance(row, dict)]
     popular_uploads = []
     if inventory_rows:
