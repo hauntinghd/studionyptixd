@@ -19,6 +19,10 @@ type CatalystChannel = {
         series_clusters?: Array<Record<string, any>>;
         channel_audit?: {
             summary?: string;
+            honesty_note?: string;
+            measured_facts?: string[];
+            inferred_notes?: string[];
+            limitations?: string[];
             strengths?: string[];
             warnings?: string[];
             next_moves?: string[];
@@ -36,6 +40,10 @@ type CatalystChannel = {
         };
         historical_compare?: {
             winner_vs_loser_summary?: string;
+            measured_summary?: string;
+            inference_summary?: string;
+            honesty_note?: string;
+            limitations?: string[];
             next_moves?: string[];
         };
     };
@@ -61,8 +69,24 @@ type CatalystWorkspaceSnapshot = {
             duration_sec?: number;
         };
         frame_metrics?: Record<string, any>;
+        evidence?: {
+            analysis_mode?: string;
+            analysis_mode_label?: string;
+            confidence_label?: string;
+            honesty_note?: string;
+            measured_facts?: string[];
+            inferred_notes?: string[];
+            limitations?: string[];
+            heuristic_used?: boolean;
+        };
         analysis?: {
             summary?: string;
+            honesty_note?: string;
+            confidence_label?: string;
+            analysis_mode_label?: string;
+            measured_facts?: string[];
+            inferred_notes?: string[];
+            limitations?: string[];
             why_it_worked?: string[];
             what_hurt_weaker_upload?: string[];
             hook_system?: string[];
@@ -471,6 +495,11 @@ export default function CatalystPanel() {
     );
     const canLaunchLongform = Boolean(selectedChannelId && ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId));
     const channelAudit = selectedChannel?.analytics_snapshot?.channel_audit || null;
+    const historicalCompare = selectedChannel?.analytics_snapshot?.historical_compare || null;
+    const referenceEvidence = referenceVideoAnalysis?.evidence || null;
+    const referenceMeasuredFacts = referenceEvidence?.measured_facts || referenceVideoAnalysis?.analysis?.measured_facts || [];
+    const referenceInferredNotes = referenceEvidence?.inferred_notes || referenceVideoAnalysis?.analysis?.inferred_notes || [];
+    const referenceLimitations = referenceEvidence?.limitations || referenceVideoAnalysis?.analysis?.limitations || [];
 
     if (!session) return null;
 
@@ -735,19 +764,14 @@ export default function CatalystPanel() {
                                     <div className="text-lg font-semibold text-white">{selectedChannel.title}</div>
                                     {selectedChannel.channel_handle && <div className="mt-1 text-sm text-gray-400">{selectedChannel.channel_handle}</div>}
                                 </div>
-                                {selectedChannel.analytics_snapshot?.channel_summary && (
-                                    <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-                                        {selectedChannel.analytics_snapshot.channel_summary}
-                                    </div>
-                                )}
-                                {selectedChannel.analytics_snapshot?.historical_compare?.winner_vs_loser_summary && (
-                                    <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-50">
-                                        {selectedChannel.analytics_snapshot.historical_compare.winner_vs_loser_summary}
-                                    </div>
-                                )}
                                 {channelAudit?.summary && (
                                     <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
                                         {channelAudit.summary}
+                                    </div>
+                                )}
+                                {(channelAudit?.honesty_note || historicalCompare?.honesty_note) && (
+                                    <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+                                        {channelAudit?.honesty_note || historicalCompare?.honesty_note}
                                     </div>
                                 )}
                                 {(channelAudit?.coverage?.recent_uploads || channelAudit?.coverage?.top_videos || channelAudit?.coverage?.series_clusters) ? (
@@ -757,12 +781,15 @@ export default function CatalystPanel() {
                                         <StatCard label="Active Arcs" value={String(channelAudit?.coverage?.series_clusters || 0)} />
                                     </div>
                                 ) : null}
-                                <DetailGroup title="Audit Strengths" values={channelAudit?.strengths || []} accent="emerald" />
-                                <DetailGroup title="Audit Warnings" values={channelAudit?.warnings || []} accent="amber" />
-                                <DetailGroup title="Audit Next Moves" values={channelAudit?.next_moves || []} accent="cyan" />
+                                <DetailList title="Measured Channel Data" values={channelAudit?.measured_facts || []} accent="emerald" />
+                                <DetailList title="Catalyst Inference" values={channelAudit?.inferred_notes || []} accent="violet" />
+                                <DetailList title="Channel Limitations" values={channelAudit?.limitations || historicalCompare?.limitations || []} accent="amber" />
+                                <DetailGroup title="Catalyst Strength Signals" values={channelAudit?.strengths || []} accent="emerald" />
+                                <DetailGroup title="Catalyst Risk Signals" values={channelAudit?.warnings || []} accent="amber" />
+                                <DetailGroup title="Catalyst Suggested Next Moves" values={channelAudit?.next_moves || historicalCompare?.next_moves || []} accent="cyan" />
                                 {Array.isArray(channelAudit?.next_video_candidates) && channelAudit.next_video_candidates.length > 0 && (
                                     <div>
-                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Suggested Next Videos</div>
+                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Catalyst Suggested Next Videos</div>
                                         <div className="space-y-2">
                                             {channelAudit.next_video_candidates.slice(0, 5).map((value) => (
                                                 <div key={value} className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-200">
@@ -793,7 +820,26 @@ export default function CatalystPanel() {
                                         {referenceVideoAnalysis.video?.title && (
                                             <div className="mt-3 text-sm font-semibold text-white">{referenceVideoAnalysis.video.title}</div>
                                         )}
+                                        {(referenceEvidence?.analysis_mode_label || referenceEvidence?.confidence_label) && (
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                {referenceEvidence?.analysis_mode_label && (
+                                                    <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                                        Evidence: {referenceEvidence.analysis_mode_label}
+                                                    </span>
+                                                )}
+                                                {referenceEvidence?.confidence_label && (
+                                                    <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-100">
+                                                        Confidence: {referenceEvidence.confidence_label}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
                                         <div className="mt-2 text-sm text-violet-50">{referenceVideoAnalysis.analysis.summary}</div>
+                                        {(referenceEvidence?.honesty_note || referenceVideoAnalysis.analysis.honesty_note) && (
+                                            <div className="mt-3 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+                                                {referenceEvidence?.honesty_note || referenceVideoAnalysis.analysis.honesty_note}
+                                            </div>
+                                        )}
                                         {(referenceVideoAnalysis.video?.views || referenceVideoAnalysis.video?.average_view_percentage || referenceVideoAnalysis.video?.impression_click_through_rate) ? (
                                             <div className="mt-3 grid gap-3 sm:grid-cols-3">
                                                 <StatCard label="Views" value={String(referenceVideoAnalysis.video?.views || 0)} />
@@ -801,9 +847,12 @@ export default function CatalystPanel() {
                                                 <StatCard label="CTR" value={referenceVideoAnalysis.video?.impression_click_through_rate ? `${Number(referenceVideoAnalysis.video.impression_click_through_rate).toFixed(2)}%` : 'N/A'} />
                                             </div>
                                         ) : null}
-                                        <DetailGroup title="Why It Worked" values={referenceVideoAnalysis.analysis.why_it_worked || []} accent="emerald" />
-                                        <DetailGroup title="What Hurt The Weak Upload" values={referenceVideoAnalysis.analysis.what_hurt_weaker_upload || []} accent="amber" />
-                                        <DetailGroup title="3D Translation Moves" values={referenceVideoAnalysis.analysis.threed_translation_moves || []} accent="cyan" />
+                                        <DetailList title="Measured Reference Evidence" values={referenceMeasuredFacts} accent="emerald" />
+                                        <DetailList title="Catalyst Reference Inference" values={referenceInferredNotes} accent="violet" />
+                                        <DetailList title="Reference Limitations" values={referenceLimitations} accent="amber" />
+                                        <DetailGroup title="Catalyst Inference: Why It Likely Worked" values={referenceVideoAnalysis.analysis.why_it_worked || []} accent="emerald" />
+                                        <DetailGroup title="Catalyst Inference: What Likely Hurt The Weak Upload" values={referenceVideoAnalysis.analysis.what_hurt_weaker_upload || []} accent="amber" />
+                                        <DetailGroup title="Catalyst Suggestions: 3D Translation Moves" values={referenceVideoAnalysis.analysis.threed_translation_moves || []} accent="cyan" />
                                     </div>
                                 )}
                             </div>
@@ -841,6 +890,11 @@ export default function CatalystPanel() {
                                 {referenceVideoAnalysis?.analysis?.summary && (
                                     <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
                                         {referenceVideoAnalysis.analysis.summary}
+                                    </div>
+                                )}
+                                {(referenceEvidence?.honesty_note || referenceVideoAnalysis?.analysis?.honesty_note) && (
+                                    <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+                                        {referenceEvidence?.honesty_note || referenceVideoAnalysis?.analysis?.honesty_note}
                                     </div>
                                 )}
                                 <div className="grid gap-3 sm:grid-cols-2">
@@ -932,6 +986,37 @@ function DetailGroup({ title, values, accent }: { title: string; values: string[
                     <span key={value} className={`rounded-full border px-3 py-1.5 text-xs ${palette}`}>
                         {value}
                     </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function DetailList({
+    title,
+    values,
+    accent,
+}: {
+    title: string;
+    values: string[];
+    accent: 'emerald' | 'amber' | 'cyan' | 'violet';
+}) {
+    const palette = accent === 'emerald'
+        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-50'
+        : accent === 'amber'
+            ? 'border-amber-500/20 bg-amber-500/10 text-amber-50'
+            : accent === 'violet'
+                ? 'border-violet-500/20 bg-violet-500/10 text-violet-50'
+                : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-50';
+    if (!Array.isArray(values) || values.length === 0) return null;
+    return (
+        <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{title}</div>
+            <div className="space-y-2">
+                {values.slice(0, 8).map((value) => (
+                    <div key={value} className={`rounded-2xl border px-4 py-3 text-sm ${palette}`}>
+                        {value}
+                    </div>
                 ))}
             </div>
         </div>

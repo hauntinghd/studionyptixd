@@ -7029,16 +7029,23 @@ def _youtube_build_historical_compare(videos: list[dict]) -> dict:
     loser_series = str(worst_view.get("series_anchor", "") or "").strip()
     winner_mode = str(best_view.get("failure_mode_label", "") or "").strip()
     loser_mode = str(worst_view.get("failure_mode_label", "") or "").strip()
-    summary_parts = []
+    measured_parts: list[str] = []
+    inference_parts: list[str] = []
+    limitations: list[str] = []
     if latest_view and previous_view:
-        summary_parts.append(
+        measured_parts.append(
             f"Latest upload '{latest_view.get('title', '')}' currently has {int(latest_view.get('views', 0) or 0)} views"
             + (f", {int(latest_view.get('impressions', 0) or 0)} impressions, and {float(latest_view.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR" if float(latest_view.get('impression_click_through_rate', 0.0) or 0.0) > 0 or int(latest_view.get('impressions', 0) or 0) > 0 else "")
             + f"; previous upload '{previous_view.get('title', '')}' has {int(previous_view.get('views', 0) or 0)} views."
         )
+    elif latest_view:
+        measured_parts.append(
+            f"Latest upload '{latest_view.get('title', '')}' currently has {int(latest_view.get('views', 0) or 0)} views"
+            + (f", {int(latest_view.get('impressions', 0) or 0)} impressions, and {float(latest_view.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if float(latest_view.get('impression_click_through_rate', 0.0) or 0.0) > 0 or int(latest_view.get('impressions', 0) or 0) > 0 else ".")
+        )
     if winner_title and loser_title:
-        summary_parts.append(
-            f"Best recent package is '{winner_title}' ({winner_mode}), while weakest is '{loser_title}' ({loser_mode})."
+        inference_parts.append(
+            f"Catalyst currently ranks '{winner_title}' as the strongest recent package signal ({winner_mode}) and '{loser_title}' as the weakest ({loser_mode})."
         )
     learnings: list[str] = []
     if winner_len and loser_len and winner_len + 8 < loser_len:
@@ -7055,12 +7062,24 @@ def _youtube_build_historical_compare(videos: list[dict]) -> dict:
     if str(worst_view.get("failure_mode_key", "") or "") == "packaging_fail":
         next_moves.append("Push a cleaner curiosity gap with one conflict, one victim, and one payoff instead of stacked lore descriptors.")
     next_moves.append("Favor human conflict or betrayal framing over abstract lore stacking when titling recap uploads.")
+    if int(latest_view.get("impressions", 0) or 0) <= 0 and float(latest_view.get("impression_click_through_rate", 0.0) or 0.0) <= 0:
+        limitations.append("Recent impression and CTR data are missing or zero, so packaging judgments are less certain.")
+    if len(rows) < 5:
+        limitations.append("Only a small recent sample is available, so strongest/weakest comparisons are based on limited history.")
+    honesty_note = (
+        "Views, impressions, CTR, average viewed, and upload counts are measured YouTube metrics when available. "
+        "Best/worst package labels and failure-mode labels are Catalyst classifications from those metrics, not direct YouTube labels."
+    )
     return {
         "latest_video": latest_view,
         "previous_video": previous_view,
         "best_recent_video": best_view,
         "worst_recent_video": worst_view,
-        "winner_vs_loser_summary": " ".join(part for part in summary_parts if part).strip(),
+        "winner_vs_loser_summary": " ".join(part for part in [*measured_parts, *inference_parts] if part).strip(),
+        "measured_summary": " ".join(part for part in measured_parts if part).strip(),
+        "inference_summary": " ".join(part for part in inference_parts if part).strip(),
+        "honesty_note": honesty_note,
+        "limitations": _dedupe_clip_list(limitations, max_items=4),
         "winner_patterns": _dedupe_clip_list(learnings, max_items=4),
         "next_moves": _dedupe_clip_list(next_moves, max_items=4),
     }
@@ -7103,6 +7122,36 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         ],
         max_items=6,
     )
+    measured_facts = _dedupe_clip_list(
+        [
+            str(historical_compare.get("measured_summary", "") or "").strip(),
+            (f"Average percentage viewed is about {float(payload.get('average_view_percentage', 0.0) or 0.0):.2f}%." if float(payload.get("average_view_percentage", 0.0) or 0.0) > 0 else ""),
+            (f"Average view duration is about {int(float(payload.get('average_view_duration_sec', 0) or 0))} seconds." if int(float(payload.get("average_view_duration_sec", 0) or 0)) > 0 else ""),
+            f"Audited {len(recent_titles)} recent uploads and {len(top_videos)} top videos.",
+        ],
+        max_items=6,
+    )
+    inferred_notes = _dedupe_clip_list(
+        [
+            (f"Catalyst currently identifies '{strongest_arc}' as the strongest active arc." if strongest_arc else ""),
+            (f"Catalyst currently identifies '{weakest_arc}' as the weakest active arc." if weakest_arc else ""),
+            str(historical_compare.get("inference_summary", "") or "").strip(),
+            *strengths[:3],
+            *warnings[:2],
+        ],
+        max_items=8,
+    )
+    limitations = _dedupe_clip_list(
+        [
+            *list(historical_compare.get("limitations") or []),
+            ("No active arc clustering is available yet, so series judgments are weaker." if not series_clusters else ""),
+            ("CTR is missing or zero for the sampled uploads, so package labels are less certain." if not float(payload.get("average_ctr", 0.0) or 0.0) else ""),
+        ],
+        max_items=6,
+    )
+    honesty_note = (
+        "Measured channel facts are shown separately below. Arc labels, strongest/weakest package calls, failure modes, and suggested next videos are Catalyst inferences."
+    )
     next_moves = _dedupe_clip_list(
         [
             *list(historical_compare.get("next_moves") or []),
@@ -7126,10 +7175,10 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         "series_clusters": len(series_clusters),
     }
     summary_parts = [
-        f"Audited {coverage['recent_uploads']} recent uploads and {coverage['top_videos']} top videos.",
+        f"Catalyst inference summary: audited {coverage['recent_uploads']} recent uploads and {coverage['top_videos']} top videos.",
         (f"Strongest arc: {strongest_arc}." if strongest_arc else ""),
         (f"Weakest arc: {weakest_arc}." if weakest_arc else ""),
-        str(historical_compare.get("winner_vs_loser_summary", "") or "").strip(),
+        str(historical_compare.get("inference_summary", "") or "").strip(),
         (f"Latest failure mode: {latest_failure_mode}." if latest_failure_mode else ""),
     ]
     if latest_video and previous_video:
@@ -7140,6 +7189,10 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         )
     return {
         "summary": _clip_text(" ".join(part for part in summary_parts if part).strip(), 480),
+        "honesty_note": honesty_note,
+        "measured_facts": measured_facts,
+        "inferred_notes": inferred_notes,
+        "limitations": limitations,
         "strengths": strengths,
         "warnings": warnings,
         "next_moves": next_moves,
@@ -8326,7 +8379,7 @@ async def _build_catalyst_hub_payload(
             "selected_cluster": dict(series_context.get("selected_cluster") or {}),
             "cluster_context": _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320),
             "reference_summary": _clip_text(str((memory_public.get("reference_summary") if isinstance(memory_public, dict) else "") or ""), 320),
-            "reference_video_analysis": dict(memory_bucket.get("reference_video_analysis") or {}),
+            "reference_video_analysis": _catalyst_reference_video_analysis_public_view(memory_bucket.get("reference_video_analysis") or {}),
         }
     default_workspace_id = next(
         (
@@ -25418,6 +25471,9 @@ def _normalize_catalyst_reference_video_analysis(raw: dict | None) -> dict:
     )
     normalized = {
         "summary": _clip_text(str(payload.get("summary", "") or "").strip(), 420),
+        "honesty_note": _clip_text(str(payload.get("honesty_note", "") or "").strip(), 320),
+        "confidence_label": _clip_text(str(payload.get("confidence_label", "") or "").strip(), 40),
+        "analysis_mode_label": _clip_text(str(payload.get("analysis_mode_label", "") or "").strip(), 60),
     }
     for field_name in list_fields:
         normalized[field_name] = _dedupe_preserve_order(
@@ -25425,7 +25481,145 @@ def _normalize_catalyst_reference_video_analysis(raw: dict | None) -> dict:
             max_items=8 if field_name != "candidate_titles" else 5,
             max_chars=180 if field_name != "candidate_titles" else 140,
         )
+    normalized["measured_facts"] = _dedupe_preserve_order(
+        [str(v).strip() for v in list(payload.get("measured_facts") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=180,
+    )
+    normalized["inferred_notes"] = _dedupe_preserve_order(
+        [str(v).strip() for v in list(payload.get("inferred_notes") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=180,
+    )
+    normalized["limitations"] = _dedupe_preserve_order(
+        [str(v).strip() for v in list(payload.get("limitations") or []) if str(v).strip()],
+        max_items=8,
+        max_chars=180,
+    )
     return normalized
+
+
+def _catalyst_reference_analysis_confidence_label(
+    analysis_mode: str,
+    *,
+    heuristic_used: bool,
+    frame_metrics: dict | None,
+    transcript_excerpt: str = "",
+    audio_summary: str = "",
+) -> str:
+    mode = str(analysis_mode or "").strip().lower()
+    sampled_frames = int(float((frame_metrics or {}).get("sampled_frames", 0) or 0))
+    has_text = bool(str(transcript_excerpt or "").strip() or str(audio_summary or "").strip())
+    if mode == "direct_media" and sampled_frames >= 8 and has_text and not heuristic_used:
+        return "High"
+    if mode == "stream_clip" and sampled_frames >= 6 and not heuristic_used:
+        return "Medium-High"
+    if mode == "preview_frames" and sampled_frames >= 4:
+        return "Medium-Low"
+    return "Low"
+
+
+def _build_catalyst_reference_analysis_evidence(
+    *,
+    analysis_mode: str,
+    frame_metrics: dict | None,
+    selected_video: dict | None,
+    transcript_excerpt: str = "",
+    audio_summary: str = "",
+    heuristic_used: bool = False,
+) -> dict:
+    metrics = dict(frame_metrics or {})
+    selected = dict(selected_video or {})
+    mode = str(analysis_mode or "unknown").strip().lower()
+    mode_label = {
+        "direct_media": "Direct Video Sample",
+        "stream_clip": "Stream Clip Sample",
+        "preview_frames": "Preview Frames Only",
+    }.get(mode, "Unknown")
+    sampled_frames = int(float(metrics.get("sampled_frames", 0) or 0))
+    analysis_seconds = float(metrics.get("analysis_seconds", 0.0) or 0.0)
+    confidence_label = _catalyst_reference_analysis_confidence_label(
+        mode,
+        heuristic_used=heuristic_used,
+        frame_metrics=metrics,
+        transcript_excerpt=transcript_excerpt,
+        audio_summary=audio_summary,
+    )
+    measured_facts = _dedupe_clip_list(
+        [
+            f"Catalyst analyzed this reference in {mode_label.lower()} mode.",
+            (f"Sampled about {analysis_seconds:.1f} seconds and {sampled_frames} frames." if analysis_seconds > 0 or sampled_frames > 0 else ""),
+            (f"Measured cut density from sampled media is about {float(metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute." if float(metrics.get("cuts_per_minute", 0.0) or 0.0) > 0 else ""),
+            (f"Connected-channel metrics for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
+            ("Catalyst extracted real audio/transcript context from the sampled media." if str(audio_summary or "").strip() else ""),
+        ],
+        max_items=6,
+    )
+    inferred_notes = _dedupe_clip_list(
+        [
+            "The hook, pacing, visual, sound, transition, and 3D translation systems below are Catalyst interpretations of the sampled material.",
+            ("Part of this breakdown used heuristic fallback language." if heuristic_used else ""),
+        ],
+        max_items=4,
+    )
+    limitations = _dedupe_clip_list(
+        [
+            ("YouTube blocked full media download, so Catalyst had to analyze a shorter stream clip instead of the entire file." if mode == "stream_clip" else ""),
+            ("YouTube blocked direct media sampling, so Catalyst had to rely on preview frames instead of full moving video." if mode == "preview_frames" else ""),
+            ("No transcript or audio summary was available, so spoken pacing and narration conclusions are weaker." if not str(transcript_excerpt or "").strip() and not str(audio_summary or "").strip() else ""),
+            ("CTR is missing or zero for this video, so packaging conclusions are less certain." if float(selected.get("impression_click_through_rate", 0.0) or 0.0) <= 0 else ""),
+            ("This analysis uses a sampled window, not the full runtime." if analysis_seconds > 0 else ""),
+        ],
+        max_items=6,
+    )
+    honesty_note = (
+        "Measured facts below come from connected YouTube metrics when available plus Catalyst's sampled-frame/audio extraction. "
+        "The playbook and breakdown text are Catalyst inferences, not direct YouTube labels."
+    )
+    return {
+        "analysis_mode": mode,
+        "analysis_mode_label": mode_label,
+        "confidence_label": confidence_label,
+        "heuristic_used": bool(heuristic_used),
+        "measured_facts": measured_facts,
+        "inferred_notes": inferred_notes,
+        "limitations": limitations,
+        "honesty_note": honesty_note,
+    }
+
+
+def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
+    payload = dict(raw or {})
+    if not payload:
+        return {}
+    video = dict(payload.get("video") or {})
+    if not video:
+        video = {
+            "video_id": str(payload.get("video_id", "") or "").strip(),
+            "title": _clip_text(str(payload.get("video_title", "") or "").strip(), 180),
+            "url": str(payload.get("video_url", "") or "").strip(),
+            "views": int(float(payload.get("views", 0) or 0) or 0),
+            "average_view_percentage": round(float(payload.get("average_view_percentage", 0.0) or 0.0), 2),
+            "impression_click_through_rate": round(float(payload.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "duration_sec": int(float(payload.get("duration_sec", 0) or 0) or 0),
+        }
+    analysis = _normalize_catalyst_reference_video_analysis(payload.get("analysis") or {})
+    evidence = dict(payload.get("evidence") or {})
+    if not evidence:
+        evidence = _build_catalyst_reference_analysis_evidence(
+            analysis_mode=str((payload.get("frame_metrics") or {}).get("analysis_mode", "") or ""),
+            frame_metrics=dict(payload.get("frame_metrics") or {}),
+            selected_video=video,
+            transcript_excerpt=str(payload.get("transcript_excerpt", "") or "").strip(),
+            heuristic_used=bool(payload.get("heuristic_used", False)),
+        )
+    return {
+        "video": video,
+        "frame_metrics": dict(payload.get("frame_metrics") or {}),
+        "analysis": analysis,
+        "evidence": evidence,
+        "analyzed_at": float(payload.get("analyzed_at", 0.0) or 0.0),
+    }
 
 
 def _heuristic_catalyst_reference_video_analysis(
@@ -25461,8 +25655,8 @@ def _heuristic_catalyst_reference_video_analysis(
         max_items=5,
     )
     summary_bits = [
-        f"The strongest current Empire video is '{title}' in the {str(archetype.get('label', '') or 'documentary').strip()} lane.",
-        "It works because the promise is obvious immediately, the subject is emotionally invasive, and the frame language stays premium and human-scale.",
+        f"Catalyst currently estimates that '{title}' is the strongest current Empire reference in the {str(archetype.get('label', '') or 'documentary').strip()} lane.",
+        "This estimate is based on connected-channel metrics plus sampled video evidence, not on a frame-perfect manual editorial review.",
         "Catalyst should translate that into sharper fully 3D pressure scenes, not static dossier tables or empty archive rooms.",
     ]
     if cuts_per_minute > 0:
@@ -25539,6 +25733,7 @@ def _heuristic_catalyst_reference_video_analysis(
     return _normalize_catalyst_reference_video_analysis(
         {
             "summary": " ".join(summary_bits),
+            "honesty_note": "This reference breakdown is Catalyst inference built from sampled video evidence and connected-channel metrics, not a direct YouTube label set.",
             "why_it_worked": why_it_worked,
             "what_hurt_weaker_upload": what_hurt_weaker_upload,
             "hook_system": hook_system,
@@ -25565,6 +25760,7 @@ async def _persist_catalyst_reference_video_analysis(
     selected_video: dict,
     frame_metrics: dict,
     analysis: dict,
+    evidence: dict | None = None,
 ) -> dict:
     memory_key = _catalyst_channel_memory_key(user_id, channel_id, workspace_id)
     async with _catalyst_memory_lock:
@@ -25572,19 +25768,32 @@ async def _persist_catalyst_reference_video_analysis(
         existing = dict(_catalyst_channel_memory.get(memory_key) or {})
         updated = dict(existing)
         summary = _clip_text(str((analysis or {}).get("summary", "") or "").strip(), 420)
-        updated["reference_video_analysis"] = {
-            "video_id": str(selected_video.get("video_id", "") or source_bundle.get("source_url_video_id", "") or "").strip(),
-            "video_title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
-            "video_url": str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip(),
-            "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
-            "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
-            "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
-            "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+        reference_video_payload = {
+            "video": {
+                "video_id": str(selected_video.get("video_id", "") or source_bundle.get("source_url_video_id", "") or "").strip(),
+                "title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
+                "url": str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip(),
+                "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
+                "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
+                "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
+                "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            },
             "transcript_excerpt": _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 2400),
             "public_summary": _clip_text(str(source_bundle.get("public_summary", "") or "").strip(), 480),
             "frame_metrics": dict(frame_metrics or {}),
             "analysis": dict(analysis or {}),
+            "evidence": dict(evidence or {}),
             "analyzed_at": time.time(),
+        }
+        updated["reference_video_analysis"] = {
+            **reference_video_payload,
+            "video_id": str(reference_video_payload["video"]["video_id"] or "").strip(),
+            "video_title": str(reference_video_payload["video"]["title"] or "").strip(),
+            "video_url": str(reference_video_payload["video"]["url"] or "").strip(),
+            "duration_sec": int(reference_video_payload["video"]["duration_sec"] or 0),
+            "views": int(reference_video_payload["video"]["views"] or 0),
+            "average_view_percentage": float(reference_video_payload["video"]["average_view_percentage"] or 0.0),
+            "impression_click_through_rate": float(reference_video_payload["video"]["impression_click_through_rate"] or 0.0),
         }
         updated["reference_summary"] = summary
         updated["last_reference_summary"] = summary
@@ -25658,6 +25867,7 @@ async def _build_catalyst_reference_video_analysis(
     analysis_seconds = max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0))
     audio_summary = ""
     analysis_mode = "direct_media"
+    heuristic_used = False
     if not video_path and download_info:
         stream_clip = await _extract_reference_video_stream_clip(
             download_info,
@@ -25763,12 +25973,21 @@ async def _build_catalyst_reference_video_analysis(
         analysis = _normalize_catalyst_reference_video_analysis(raw_analysis)
     except Exception as e:
         log.warning(f"Catalyst reference video multimodal analysis fell back to heuristic mode: {e}")
+        heuristic_used = True
         analysis = _heuristic_catalyst_reference_video_analysis(
             source_bundle=source_bundle,
             selected_video=selected_video,
             channel_context=channel_context,
             frame_metrics=frame_metrics,
         )
+    evidence = _build_catalyst_reference_analysis_evidence(
+        analysis_mode=analysis_mode,
+        frame_metrics=frame_metrics,
+        selected_video=selected_video,
+        transcript_excerpt=str(source_bundle.get("transcript_excerpt", "") or "").strip(),
+        audio_summary=audio_summary,
+        heuristic_used=heuristic_used,
+    )
     updated_memory = await _persist_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
         channel_id=channel_id,
@@ -25777,6 +25996,7 @@ async def _build_catalyst_reference_video_analysis(
         selected_video=selected_video,
         frame_metrics=frame_metrics,
         analysis=analysis,
+        evidence=evidence,
     )
     return {
         "video": {
@@ -25790,6 +26010,7 @@ async def _build_catalyst_reference_video_analysis(
         },
         "frame_metrics": frame_metrics,
         "analysis": analysis,
+        "evidence": evidence,
         "frame_paths": frame_paths[:14],
         "memory": _catalyst_channel_memory_public_view(updated_memory),
     }
