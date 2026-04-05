@@ -9792,6 +9792,8 @@ def _build_longform_scene_execution_prompt(
     scene: dict,
     template: str,
     format_preset: str,
+    topic: str = "",
+    input_title: str = "",
     edit_blueprint: dict | None = None,
     chapter_blueprint: dict | None = None,
     scene_index: int = 0,
@@ -9826,6 +9828,7 @@ def _build_longform_scene_execution_prompt(
             not documentary_visual_description
             or _longform_text_is_strategy_garbage(documentary_visual_description)
             or _longform_scene_looks_like_machine_filler(documentary_visual_description, archetype_key=documentary_archetype)
+            or (documentary_archetype == "psychology_documentary" and _longform_psychology_scene_too_generic(documentary_visual_description))
             or "central mechanism, object, or environment being explained" in lowered_visual
             or "visual motif" in lowered_visual
             or "variation rule" in lowered_visual
@@ -9838,8 +9841,8 @@ def _build_longform_scene_execution_prompt(
                 chapter_blueprint=chapter_blueprint,
                 scene_index=scene_index,
                 total_scenes=total_scenes,
-                topic="",
-                input_title="",
+                topic=topic,
+                input_title=input_title,
                 archetype_key=documentary_archetype,
             )
         documentary_visual_description = re.sub(
@@ -9855,13 +9858,18 @@ def _build_longform_scene_execution_prompt(
         )
         if str(documentary_visual_description or "").strip().lower().startswith("fern-grade premium 3d"):
             documentary_prefix = ""
+        documentary_environment_guidance = (
+            "Prefer active human pressure scenes, mirrored conversations, surveillance moments, executive meetings, interviews, and consequence frames over empty rooms, untouched desks, or static dossier tables."
+            if documentary_archetype == "psychology_documentary"
+            else "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects."
+        )
         visual_parts = _dedupe_preserve_order([
             documentary_visual_description,
             f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
             "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference.",
-            "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects.",
+            documentary_environment_guidance,
             "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
         ], max_items=8, max_chars=240)
         visual_delta = " ".join(part for part in visual_parts if part).strip()
@@ -18436,6 +18444,57 @@ def _longform_psychology_focus_phrase(candidate: str, scene_role: str) -> str:
     return cleaned
 
 
+def _longform_psychology_topic_subject(topic: str, input_title: str, scene_role: str) -> str:
+    haystack = " ".join([str(topic or "").strip(), str(input_title or "").strip()]).lower()
+    if re.search(r"\b(decision|decisions|choice|choices)\b", haystack):
+        variants = {
+            "opening": "a confident decision being quietly rewritten by status pressure and social cues",
+            "middle": "the instant a private choice stops being private and starts being steered",
+            "closer": "the personal cost after someone realizes the decision was never fully their own",
+        }
+        return variants.get(scene_role, "a confident decision being quietly rewritten by status pressure and social cues")
+    if re.search(r"\b(attention|focus|distraction|notice|noticed)\b", haystack):
+        variants = {
+            "opening": "attention being hijacked before the subject notices",
+            "middle": "the exact cue that redirects attention away from the truth",
+            "closer": "the cost of realizing attention was manipulated too late",
+        }
+        return variants.get(scene_role, "attention being hijacked before the subject notices")
+    if re.search(r"\b(memory|remember|recall|false memory)\b", haystack):
+        variants = {
+            "opening": "memory being quietly reshaped in a conversation that feels harmless",
+            "middle": "the subtle cue that changes what the subject thinks they remember",
+            "closer": "the fallout after a rewritten memory gets treated as truth",
+        }
+        return variants.get(scene_role, "memory being quietly reshaped in a conversation that feels harmless")
+    if re.search(r"\b(bias|blind spot|subconscious|belief|beliefs)\b", haystack):
+        variants = {
+            "opening": "a blind spot being exploited before the subject can defend against it",
+            "middle": "the invisible cue that makes a bad belief feel self-generated",
+            "closer": "the consequence of discovering a bias only after it made the decision",
+        }
+        return variants.get(scene_role, "a blind spot being exploited before the subject can defend against it")
+    if re.search(r"\b(manipulat|influence|control|obey|compliance|status|pressure)\b", haystack):
+        variants = {
+            "opening": "a subtle manipulation landing in a room where nobody looks openly dangerous",
+            "middle": "the exact social cue that flips confidence into compliance",
+            "closer": "the moment the manipulation becomes visible only after the damage is done",
+        }
+        return variants.get(scene_role, "a subtle manipulation landing in a room where nobody looks openly dangerous")
+    if re.search(r"\b(brain|mind|psychology|behavior|behaviour)\b", haystack):
+        variants = {
+            "opening": "the hidden cue that makes the mind accept a bad decision as its own idea",
+            "middle": "the moment a normal-looking environment quietly rewires what feels like free choice",
+            "closer": "the human consequence after the mind follows a script it never noticed",
+        }
+        return variants.get(scene_role, "the hidden cue that makes the mind accept a bad decision as its own idea")
+    return {
+        "opening": "a private choice being invisibly steered in a real room",
+        "middle": "the trigger that quietly redirects a human decision",
+        "closer": "the cost of realizing the decision was manipulated",
+    }.get(scene_role, "a private choice being invisibly steered in a real room")
+
+
 def _longform_documentary_archetype(
     *,
     edit_blueprint: dict | None = None,
@@ -18507,6 +18566,23 @@ def _longform_scene_looks_like_machine_filler(text: str, archetype_key: str = ""
     return False
 
 
+def _longform_psychology_scene_too_generic(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    generic_room = bool(re.search(r"\b(dossier room|surveillance[-\s]?grade|archive room|evidence room|boardroom|office|meeting room|interrogation room|archive|backroom)\b", lowered))
+    human_action = bool(re.search(r"\b(person|people|executive|subject|man|woman|faces?|hands?|body language|conversation|meeting|dinner|interview|pressured|steered|manipulator|gaze|posture|choice|decision|consequence|compliance)\b", lowered))
+    abstract_trigger = bool(re.search(r"\b(hidden trigger|social cue|pressure shaping|influence|leverage point)\b", lowered))
+    static_prop_bias = bool(re.search(r"\b(table|desk|room|archive|dossier|surveillance)\b", lowered)) and not human_action
+    if generic_room and not human_action:
+        return True
+    if abstract_trigger and not human_action:
+        return True
+    if static_prop_bias:
+        return True
+    return False
+
+
 def _build_documentary_scene_repair(
     *,
     narration: str,
@@ -18526,35 +18602,28 @@ def _build_documentary_scene_repair(
     )
     if archetype_key == "psychology_documentary":
         focus_phrase = _longform_psychology_focus_phrase(focus_phrase, scene_role)
+        topic_subject = _longform_psychology_topic_subject(topic, input_title, scene_role)
         if focus_phrase in {
             "a private decision being quietly steered",
             "the hidden trigger behind a confident choice",
             "the personal cost of a manipulated decision",
             "a manipulated choice unfolding in real time",
         }:
-            rotating_focuses = [
-                "a private decision being quietly steered",
-                "a planted suggestion taking hold",
-                "status pressure redirecting a confident choice",
-                "a social proof trap closing around the subject",
-                "the moment compliance beats instinct",
-                "the personal cost after the trigger works",
-            ]
-            focus_phrase = rotating_focuses[scene_index % len(rotating_focuses)]
+            focus_phrase = topic_subject
         proof_modes = [
-            "a high-rise office or boardroom at dusk where one person is subtly pressured into the wrong decision by status, timing, or social cues",
-            "a surveillance-grade dossier room where evidence, gaze, and body language reveal the exact moment a hidden trigger lands",
-            "a mirror-and-shadow consequence frame where private instinct and outside influence collide inside a real room",
-            "an upscale dinner, interview, or meeting where status pressure quietly redirects one choice while the other person stays in control",
-            "an archive or evidence room where photos, maps, and surveillance fragments expose the chain from trigger to consequence",
-            "a controlled symbolic mind-world embedded in architecture using reflections, masks, strings, split selves, and attention funnels instead of literal anatomy",
+            "a high-rise office or boardroom at dusk where two or three people are mid-conversation and one person is being quietly pushed toward the wrong choice by timing, status, and body language",
+            "a surveillance-led evidence room where screens, photos, and posture reveal the instant a planted suggestion takes hold in a real person",
+            "a mirror-and-shadow consequence setup where a subject faces the split between private instinct and outside pressure inside a believable room",
+            "an upscale dinner, interview, or executive meeting where one calm manipulator quietly steers another person's decision without raising their voice",
+            "an archive, backroom, or intelligence-style office where fragments of evidence expose how a trigger became a consequence for a real person",
+            "a symbolic but human-scale psychology environment built into architecture using reflections, masks, strings, split selves, and attention funnels with people still present in frame",
         ]
         action_line = (
-            "Show one human consequence, one hidden trigger, and one visible power imbalance so the manipulation feels personal instead of abstract."
+            "Show one human consequence, one hidden trigger, and one visible power imbalance. At least one person must be clearly visible; no empty rooms, no untouched desks, and no static prop-only staging."
             if scene_role == "opening"
-            else "Show the trigger, the leverage point, and the personal consequence in the same frame so the influence feels invasive and real."
+            else "Show the trigger, the leverage point, and the personal consequence in the same frame. Keep readable faces, hands, posture, and eye lines so the influence feels invasive and real."
             if scene_role == "middle"
-            else "Land on a premium consequence or reversal frame that makes the viewer feel the cost of the hidden behavior."
+            else "Land on a premium consequence or reversal frame with a real person carrying the cost of the hidden behavior. No empty aftermath room unless the narration is explicitly about absence."
         )
     else:
         proof_modes = [
@@ -18594,8 +18663,9 @@ def _build_documentary_scene_repair(
     )
     visual_line = (
         (
-            f"Fern-grade premium 3D psychology documentary scene set in {proof_mode}. Human-scale, emotionally invasive, and grounded in a real environment around {focus_phrase}. "
-            f"{action_line} Use controlled cinematic CG, clean surveillance or dossier staging, restrained symbolism, no text, no isolated object pedestal, no literal anatomy, and no floating machine filler."
+            f"Fern-grade premium 3D psychology documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
+            f"{action_line} Use controlled cinematic CG, premium human-scale interiors, restrained symbolism, and real social pressure instead of abstract props. "
+            f"No empty room, no untouched table, no static dossier still life, no isolated object pedestal, no literal anatomy, and no floating machine filler."
             if archetype_key == "psychology_documentary"
             else f"Premium 3D systems documentary frame set in {proof_mode}, visualizing {focus_phrase}. "
             f"{action_line} Use a real environment, clean premium CG staging, and no isolated object pedestal, sterile lab filler, or floating machine props."
@@ -18637,6 +18707,7 @@ def _repair_longform_generated_scenes(
         narration_contaminated = bool(narration) and (not cleaned_narration or cleaned_narration != narration)
         visual_contaminated = bool(visual_description) and (not cleaned_visual or cleaned_visual != visual_description)
         visual_filler = _longform_scene_looks_like_machine_filler(cleaned_visual or visual_description, archetype_key=archetype_key)
+        visual_generic = archetype_key == "psychology_documentary" and _longform_psychology_scene_too_generic(cleaned_visual or visual_description)
         if allow_narration_rewrite and (not cleaned_narration or narration_contaminated):
             repaired_narration, repaired_visual = _build_documentary_scene_repair(
                 narration=cleaned_narration or narration or visual_description,
@@ -18648,9 +18719,9 @@ def _repair_longform_generated_scenes(
                 archetype_key=archetype_key,
             )
             cleaned_narration = repaired_narration
-            if visual_contaminated or visual_filler or not cleaned_visual:
+            if visual_contaminated or visual_filler or visual_generic or not cleaned_visual:
                 cleaned_visual = repaired_visual
-        elif visual_contaminated or visual_filler or not cleaned_visual:
+        elif visual_contaminated or visual_filler or visual_generic or not cleaned_visual:
             _, repaired_visual = _build_documentary_scene_repair(
                 narration=cleaned_narration or narration or visual_description,
                 chapter_blueprint=chapter_blueprint,
@@ -19342,6 +19413,8 @@ async def _longform_attach_scene_previews(
             scene=scene,
             template=template,
             format_preset=format_preset,
+            topic=session_topic,
+            input_title=session_input_title,
             edit_blueprint=edit_blueprint,
             chapter_blueprint=chapter_blueprint,
             scene_index=scene_idx,
@@ -19881,6 +19954,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 scene=scene,
                 template=template,
                 format_preset=format_preset,
+                topic=topic,
+                input_title=input_title,
                 edit_blueprint=edit_blueprint,
                 chapter_blueprint=chapter_blueprint,
                 scene_index=i,
