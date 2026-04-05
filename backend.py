@@ -1060,6 +1060,7 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "last_outcome_sync_error": str(data.get("last_outcome_sync_error", "") or ""),
         "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
         "analytics_snapshot": {
+            "channel_video_count": int(analytics_snapshot.get("channel_video_count", 0) or 0),
             "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
             "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
             "historical_compare": _youtube_historical_compare_measured_public_view(
@@ -6742,7 +6743,7 @@ async def _youtube_fetch_videos(access_token: str, video_ids: list[str]) -> list
         access_token,
         "/videos",
         params={
-            "part": "snippet,statistics,contentDetails",
+            "part": "snippet,statistics,contentDetails,status",
             "id": ",".join(ids[:50]),
             "maxResults": min(50, len(ids)),
         },
@@ -6754,6 +6755,7 @@ async def _youtube_fetch_videos(access_token: str, video_ids: list[str]) -> list
         vid = str(raw.get("id", "") or "").strip()
         snippet = dict(raw.get("snippet") or {})
         stats = dict(raw.get("statistics") or {})
+        status = dict(raw.get("status") or {})
         items_by_id[vid] = {
             "video_id": vid,
             "title": str(snippet.get("title", "") or "").strip(),
@@ -6765,8 +6767,42 @@ async def _youtube_fetch_videos(access_token: str, video_ids: list[str]) -> list
             "views": int(float(stats.get("viewCount", 0) or 0)),
             "likes": int(float(stats.get("likeCount", 0) or 0)),
             "comments": int(float(stats.get("commentCount", 0) or 0)),
+            "privacy_status": str(status.get("privacyStatus", "") or "").strip(),
         }
     return [items_by_id[vid] for vid in ids if vid in items_by_id]
+
+
+async def _youtube_fetch_uploads_playlist_videos(
+    access_token: str,
+    uploads_playlist_id: str,
+    max_results: int = 25,
+) -> list[dict]:
+    playlist_id = str(uploads_playlist_id or "").strip()
+    if not playlist_id:
+        return []
+    remaining = max(1, min(int(max_results or 25), 50))
+    page_token = ""
+    video_ids: list[str] = []
+    while remaining > 0:
+        params = {
+            "part": "contentDetails,snippet",
+            "playlistId": playlist_id,
+            "maxResults": min(50, remaining),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        payload = await _youtube_api_get(access_token, "/playlistItems", params=params)
+        for item in list(payload.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            vid = str(((item.get("contentDetails") or {}).get("videoId")) or "").strip()
+            if vid:
+                video_ids.append(vid)
+        remaining = max_results - len(video_ids)
+        page_token = str(payload.get("nextPageToken", "") or "").strip()
+        if not page_token or remaining <= 0:
+            break
+    return await _youtube_fetch_videos(access_token, _dedupe_preserve_order(video_ids, max_items=max_results, max_chars=24))
 
 
 def _parse_youtube_iso8601_duration(raw_duration: str) -> int:
@@ -7251,6 +7287,9 @@ def _youtube_channel_audit_measured_public_view(payload: dict | None) -> dict:
 
 
 async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -> dict:
+    channels = await _youtube_fetch_my_channels(access_token)
+    channel_meta = next((dict(row) for row in channels if str(row.get("channel_id", "") or "").strip() == str(channel_id or "").strip()), {})
+    uploads_playlist_id = str(channel_meta.get("uploads_playlist_id", "") or "").strip()
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=90)
     summary_payload = {}
@@ -7324,7 +7363,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
 
     top_video_ids = [str(row[0] or "").strip() for row in top_rows if isinstance(row, list) and row]
     top_video_meta = {str(v.get("video_id", "")): v for v in await _youtube_fetch_videos(access_token, top_video_ids)}
-    top_videos: list[dict] = []
+    analytics_top_videos: list[dict] = []
     for row in top_rows:
         if not isinstance(row, list) or not row:
             continue
@@ -7338,7 +7377,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             except Exception:
                 pass
         meta = dict(top_video_meta.get(video_id) or {})
-        top_videos.append(
+        analytics_top_videos.append(
             {
                 "video_id": video_id,
                 "title": str(meta.get("title", "") or "").strip(),
@@ -7352,19 +7391,32 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             }
         )
 
-    recent_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="date", max_results=12)
-    popular_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="viewCount", max_results=12)
+    uploaded_videos = await _youtube_fetch_uploads_playlist_videos(access_token, uploads_playlist_id, max_results=25)
+    recent_uploads = [dict(row or {}) for row in list(uploaded_videos or [])[:12] if isinstance(row, dict)]
+    popular_uploads = []
+    if uploaded_videos:
+        popular_uploads = sorted(
+            [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)],
+            key=lambda row: (
+                -int(float(row.get("views", 0) or 0)),
+                -int(float(row.get("likes", 0) or 0)),
+                str(row.get("published_at", "") or ""),
+            ),
+        )[:12]
+    else:
+        recent_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="date", max_results=12)
+        popular_uploads = await _youtube_fetch_channel_search(access_token, channel_id, order="viewCount", max_results=12)
     candidate_video_ids = _dedupe_preserve_order(
         [
             *[str((row or {}).get("video_id", "") or "").strip() for row in list(recent_uploads or [])],
             *[str((row or {}).get("video_id", "") or "").strip() for row in list(popular_uploads or [])],
-            *[str((row or {}).get("video_id", "") or "").strip() for row in list(top_videos or [])],
+            *[str((row or {}).get("video_id", "") or "").strip() for row in list(analytics_top_videos or [])],
         ],
         max_items=18,
         max_chars=24,
     )
     bulk_video_metrics = await _youtube_fetch_video_analytics_bulk(access_token, channel_id, candidate_video_ids)
-    for bucket in (recent_uploads, popular_uploads, top_videos):
+    for bucket in (recent_uploads, popular_uploads, analytics_top_videos):
         for row in list(bucket or []):
             if not isinstance(row, dict):
                 continue
@@ -7393,7 +7445,8 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
                 " ".join(list(row.get("tags") or [])),
                 niche_key=str(row.get("niche_key", "") or "").strip().lower(),
             )
-    popular_titles = [str(v.get("title", "") or "").strip() for v in popular_uploads if str(v.get("title", "") or "").strip()]
+    top_videos = [dict(v or {}) for v in list(popular_uploads or recent_uploads or analytics_top_videos) if isinstance(v, dict)]
+    popular_titles = [str(v.get("title", "") or "").strip() for v in top_videos if str(v.get("title", "") or "").strip()]
     recent_titles = [str(v.get("title", "") or "").strip() for v in recent_uploads if str(v.get("title", "") or "").strip()]
     series_clusters = _catalyst_build_channel_series_clusters(
         [*list(recent_uploads or []), *list(popular_uploads or [])],
@@ -7463,9 +7516,12 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     ]
     snapshot = {
         "channel_summary": " | ".join(part for part in summary_parts if part),
+        "uploads_playlist_id": uploads_playlist_id,
+        "channel_video_count": int(len(uploaded_videos or recent_uploads or [])),
         "recent_upload_titles": recent_titles[:12],
         "top_video_titles": popular_titles[:12],
         "top_videos": top_videos[:10],
+        "uploaded_videos": [dict(v or {}) for v in list(uploaded_videos or recent_uploads or [])[:25] if isinstance(v, dict)],
         "packaging_learnings": _dedupe_clip_list(packaging_learnings, max_items=6),
         "retention_learnings": _dedupe_clip_list(retention_learnings, max_items=6),
         "title_pattern_hints": _dedupe_clip_list(title_pattern_hints, max_items=6),
@@ -7553,7 +7609,9 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "channel_handle": str(refreshed.get("channel_handle", "") or "").strip(),
         "channel_url": str(refreshed.get("channel_url", "") or "").strip(),
         "summary": str(analytics_snapshot.get("channel_summary", "") or "").strip(),
+        "channel_video_count": int(analytics_snapshot.get("channel_video_count", 0) or 0),
         "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+        "uploaded_videos": list(analytics_snapshot.get("uploaded_videos") or []),
         "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
         "top_videos": list(analytics_snapshot.get("top_videos") or []),
         "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
@@ -25034,7 +25092,24 @@ def _youtube_watch_url(video_id: str) -> str:
 def _pick_catalyst_reference_video(channel_context: dict | None, requested_video_id: str = "") -> dict:
     context = dict(channel_context or {})
     requested = str(requested_video_id or "").strip()
+    uploaded_videos = [dict(v or {}) for v in list(context.get("uploaded_videos") or []) if isinstance(v, dict)]
+    measured_recent = sorted(
+        uploaded_videos,
+        key=lambda row: str(row.get("published_at", "") or ""),
+        reverse=True,
+    )
+    measured_best = sorted(
+        uploaded_videos,
+        key=lambda row: (
+            -int(float(row.get("views", 0) or 0)),
+            -int(float(row.get("likes", 0) or 0)),
+            -float(row.get("average_view_percentage", 0.0) or 0.0),
+            str(row.get("published_at", "") or ""),
+        ),
+    )
     candidate_rows = [
+        *measured_best[:5],
+        *measured_recent[:5],
         *[dict(v or {}) for v in list(context.get("top_videos") or []) if isinstance(v, dict)],
         dict((context.get("historical_compare") or {}).get("best_recent_video") or {}),
         dict((context.get("historical_compare") or {}).get("latest_video") or {}),
