@@ -24972,6 +24972,186 @@ def _reference_video_analysis_dir(user_id: str, channel_id: str, workspace_id: s
     return path
 
 
+def _reference_preview_frame_family_key(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+        stem = str(Path(parsed.path).stem or "").strip().lower()
+    except Exception:
+        stem = ""
+    if not stem:
+        return raw.lower()
+    normalized = re.sub(r"^(mq|hq|sd|maxres)", "", stem)
+    normalized = normalized or stem
+    if normalized == "default":
+        return "0"
+    return normalized
+
+
+def _reference_preview_frame_rank(url: str) -> tuple[int, int]:
+    lower = str(url or "").strip().lower()
+    if not lower:
+        return (99, 99)
+    checks = [
+        (0, ["/3.", "/mq3.", "/hq3.", "/sd3.", "/maxres3."]),
+        (1, ["/2.", "/mq2.", "/hq2.", "/sd2.", "/maxres2."]),
+        (2, ["/1.", "/mq1.", "/hq1.", "/sd1.", "/maxres1."]),
+        (3, ["/0.", "/default.", "/mqdefault.", "/hqdefault.", "/sddefault.", "/maxresdefault."]),
+    ]
+    for bucket, patterns in checks:
+        if any(pattern in lower for pattern in patterns):
+            quality_bonus = 0
+            if "/maxres" in lower:
+                quality_bonus = -3
+            elif "/sd" in lower:
+                quality_bonus = -2
+            elif "/hq" in lower:
+                quality_bonus = -1
+            return (bucket, quality_bonus)
+    return (8, 0)
+
+
+def _pick_reference_preview_frame_urls(
+    source_bundle: dict | None,
+    info: dict | None,
+    *,
+    max_items: int = 6,
+) -> list[str]:
+    source_bundle = dict(source_bundle or {})
+    info = dict(info or {})
+    candidates: list[dict] = []
+    for thumb in list(info.get("thumbnails") or []):
+        if not isinstance(thumb, dict):
+            continue
+        url = str(thumb.get("url", "") or "").strip()
+        if not url:
+            continue
+        candidates.append(
+            {
+                "url": url,
+                "family": _reference_preview_frame_family_key(url),
+                "rank": _reference_preview_frame_rank(url),
+            }
+        )
+    thumb_url = str(source_bundle.get("thumbnail_url", "") or "").strip()
+    if thumb_url:
+        candidates.append(
+            {
+                "url": thumb_url,
+                "family": _reference_preview_frame_family_key(thumb_url),
+                "rank": _reference_preview_frame_rank(thumb_url),
+            }
+        )
+    ranked = sorted(candidates, key=lambda item: (item.get("rank") or (99, 99), len(str(item.get("url", "") or ""))))
+    selected: list[str] = []
+    seen_families: set[str] = set()
+    seen_urls: set[str] = set()
+    for item in ranked:
+        url = str(item.get("url", "") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        family = str(item.get("family", "") or "").strip()
+        if family and family in seen_families:
+            continue
+        selected.append(url)
+        seen_urls.add(url)
+        if family:
+            seen_families.add(family)
+        if len(selected) >= max(3, int(max_items or 6)):
+            break
+    return selected
+
+
+async def _extract_reference_preview_frames_from_urls(
+    frame_urls: list[str] | None,
+    output_dir: Path,
+    *,
+    duration_sec: float = 0.0,
+    max_seconds: float = 180.0,
+) -> dict:
+    urls = [str(v).strip() for v in list(frame_urls or []) if str(v).strip()]
+    if not urls:
+        return {"frame_paths": [], "metrics": {"error": "missing_preview_frames", "analysis_mode": "preview_frames"}}
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    frame_paths: list[str] = []
+    sharpness_values: list[float] = []
+    contrast_values: list[float] = []
+    saturation_values: list[float] = []
+    variance_values: list[float] = []
+    prev_small = None
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for idx, url in enumerate(urls):
+            try:
+                resp = await client.get(url)
+            except Exception:
+                continue
+            if resp.status_code != 200 or not resp.content:
+                continue
+            try:
+                if Image is None:
+                    continue
+                img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+            except Exception:
+                continue
+            out_path = output_dir / f"preview_{idx:02d}.png"
+            try:
+                img.save(out_path, format="PNG")
+            except Exception:
+                continue
+            frame_paths.append(str(out_path))
+
+            if np is None:
+                continue
+            try:
+                rgb = np.array(img)
+                if rgb.size == 0:
+                    continue
+                if cv2 is not None:
+                    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+                    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+                    sharpness_values.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+                    saturation_values.append(float(np.mean(hsv[:, :, 1])))
+                    small = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
+                else:
+                    gray = np.dot(rgb[..., :3], [0.299, 0.587, 0.114]).astype("float32")
+                    sharpness_values.append(float(np.var(gray)))
+                    saturation_values.append(0.0)
+                    small = gray[:: max(1, gray.shape[0] // 90 or 1), :: max(1, gray.shape[1] // 160 or 1)]
+                contrast_values.append(float(np.std(gray)))
+                if prev_small is not None:
+                    variance_values.append(float(np.mean(np.abs(small.astype("float32") - prev_small.astype("float32")))))
+                prev_small = small
+            except Exception:
+                continue
+
+    def _avg(values: list[float]) -> float:
+        return round(float(sum(values) / max(len(values), 1)), 3) if values else 0.0
+
+    analyzed_seconds = min(float(max_seconds or 180.0), float(duration_sec or 0.0) or float(max_seconds or 180.0))
+    metrics = {
+        "analysis_mode": "preview_frames",
+        "preview_only": True,
+        "duration_sec": round(float(duration_sec or 0.0), 3),
+        "analysis_seconds": round(float(analyzed_seconds or 0.0), 3),
+        "sampled_frames": len(frame_paths),
+        "preview_frame_count": len(frame_paths),
+        "avg_motion": 0.0,
+        "avg_sharpness": _avg(sharpness_values),
+        "avg_contrast": _avg(contrast_values),
+        "avg_saturation": _avg(saturation_values),
+        "avg_frame_variance": _avg(variance_values),
+        "cut_events": 0,
+        "cuts_per_minute": 0.0,
+        "hook_motion_avg_first_30_sec": 0.0,
+        "hook_sharpness_avg_first_30_sec": _avg(sharpness_values[:3]),
+    }
+    return {"frame_paths": frame_paths, "metrics": metrics}
+
+
 async def _download_youtube_video_for_reference_analysis(source_url: str, output_dir: Path) -> dict:
     normalized_url = _normalize_external_source_url(source_url)
     if not normalized_url:
@@ -24982,6 +25162,12 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _download() -> dict:
+        info = {}
+        extract_error = ""
+        try:
+            info = _yt_dlp_extract_info_blocking(normalized_url)
+        except Exception as e:
+            extract_error = str(e)
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -24990,14 +25176,22 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
             "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(normalized_url, download=True) or {}
-        video_id = str(info.get("id", "") or "").strip()
-        files = sorted(output_dir.glob(f"{video_id}*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
+        video_file = None
+        download_error = extract_error
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                download_info = ydl.extract_info(normalized_url, download=True) or {}
+            if isinstance(download_info, dict) and download_info:
+                info = download_info
+            video_id = str(info.get("id", "") or "").strip()
+            files = sorted(output_dir.glob(f"{video_id}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
+        except Exception as e:
+            download_error = str(e or download_error)
         return {
             "info": info,
             "video_path": str(video_file) if video_file else "",
+            "download_error": str(download_error or "").strip(),
         }
 
     return await asyncio.to_thread(_download)
@@ -25372,20 +25566,44 @@ async def _build_catalyst_reference_video_analysis(
     source_bundle["source_url_video_id"] = selected_video_id
 
     download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
+    download_info = dict(download.get("info") or {})
+    download_error = _clip_text(str(download.get("download_error", "") or "").strip(), 420)
     video_path = str(download.get("video_path", "") or "").strip()
-    if not video_path:
-        raise HTTPException(500, "Failed to download the connected-channel reference video for analysis")
-
-    audio_path = await extract_audio_from_video(video_path) or ""
-    audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
-    frame_pack = await _extract_reference_video_sample_frames(
-        video_path,
-        work_dir / "frames",
-        max_frames=14,
-        max_seconds=max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0)),
-    )
+    analysis_seconds = max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0))
+    audio_summary = ""
+    if video_path:
+        audio_path = await extract_audio_from_video(video_path) or ""
+        audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+        frame_pack = await _extract_reference_video_sample_frames(
+            video_path,
+            work_dir / "frames",
+            max_frames=14,
+            max_seconds=analysis_seconds,
+        )
+    else:
+        preview_urls = _pick_reference_preview_frame_urls(source_bundle, download_info, max_items=6)
+        frame_pack = await _extract_reference_preview_frames_from_urls(
+            preview_urls,
+            work_dir / "frames",
+            duration_sec=float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0.0),
+            max_seconds=analysis_seconds,
+        )
+        transcript_excerpt = _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 1200)
+        if transcript_excerpt:
+            audio_summary = f"Reference analysis used public captions excerpt because direct media download was blocked. {transcript_excerpt}"
+        if download_error:
+            source_bundle["public_summary"] = " | ".join(
+                part
+                for part in [
+                    str(source_bundle.get("public_summary", "") or "").strip(),
+                    "Direct media download was blocked by YouTube, so Catalyst switched to preview-frame analysis.",
+                ]
+                if part
+            )
     frame_paths = [str(v).strip() for v in list(frame_pack.get("frame_paths") or []) if str(v).strip()]
     frame_metrics = dict(frame_pack.get("metrics") or {})
+    if download_error:
+        frame_metrics["download_error"] = download_error
     historical_compare = dict(channel_context.get("historical_compare") or {})
     latest_video = dict(historical_compare.get("latest_video") or {})
     previous_video = dict(historical_compare.get("previous_video") or {})
@@ -25403,6 +25621,7 @@ async def _build_catalyst_reference_video_analysis(
             f"Top reference video URL: {source_url}",
             f"Top reference video public summary: {_clip_text(str(source_bundle.get('public_summary', '') or '').strip(), 700)}",
             f"Top reference video transcript excerpt: {_clip_text(str(source_bundle.get('transcript_excerpt', '') or '').strip(), 2800)}",
+            ("Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked.") if frame_metrics.get("preview_only") else "Reference analysis mode: direct media frames + audio extraction.",
             ("Audio summary: " + audio_summary) if audio_summary else "",
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
             ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
