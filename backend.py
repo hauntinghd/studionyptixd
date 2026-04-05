@@ -8987,6 +8987,42 @@ async def _build_catalyst_hub_payload(
             channel_context = await _youtube_selected_channel_context(user, selected_channel_id)
         except Exception:
             channel_context = {}
+    if selected_channel and channel_context and str(channel_context.get("channel_id", "") or "").strip() == selected_channel_id:
+        refreshed_snapshot = {
+            "channel_video_count": int(channel_context.get("channel_video_count", 0) or 0),
+            "recent_upload_titles": list(channel_context.get("recent_upload_titles") or []),
+            "uploaded_videos": [
+                {
+                    "video_id": str((row or {}).get("video_id", "") or "").strip(),
+                    "title": _clip_text(str((row or {}).get("title", "") or "").strip(), 180),
+                    "published_at": str((row or {}).get("published_at", "") or "").strip(),
+                    "thumbnail_url": str((row or {}).get("thumbnail_url", "") or "").strip(),
+                    "views": int(float((row or {}).get("views", 0) or 0) or 0),
+                    "average_view_percentage": round(float((row or {}).get("average_view_percentage", 0.0) or 0.0), 2),
+                    "impression_click_through_rate": round(float((row or {}).get("impression_click_through_rate", 0.0) or 0.0), 2),
+                    "duration_sec": int(float((row or {}).get("duration_sec", 0) or 0) or 0),
+                    "privacy_status": str((row or {}).get("privacy_status", "") or "").strip(),
+                }
+                for row in list(channel_context.get("uploaded_videos") or [])[:250]
+                if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+            ],
+            "top_video_titles": list(channel_context.get("top_video_titles") or []),
+            "historical_compare": _youtube_historical_compare_measured_public_view(
+                channel_context.get("historical_compare") or {}
+            ),
+            "channel_audit": _youtube_channel_audit_measured_public_view(
+                channel_context.get("channel_audit") or {}
+            ),
+        }
+        selected_channel["analytics_snapshot"] = refreshed_snapshot
+        selected_channel["last_sync_error"] = str(channel_context.get("last_sync_error", "") or "").strip()
+        for idx, row in enumerate(list(public_channels or [])):
+            if str((row or {}).get("channel_id", "") or "").strip() == selected_channel_id:
+                refreshed_row = dict(row or {})
+                refreshed_row["analytics_snapshot"] = refreshed_snapshot
+                refreshed_row["last_sync_error"] = str(channel_context.get("last_sync_error", "") or "").strip()
+                public_channels[idx] = refreshed_row
+                break
     workspace_snapshots: dict[str, dict] = {}
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
