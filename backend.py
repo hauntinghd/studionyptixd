@@ -243,6 +243,7 @@ from backend_models import (
     CatalystHubRefreshRequest,
     CatalystHubLaunchRequest,
     CatalystHubReferenceVideoAnalysisRequest,
+    CatalystHubReferenceVideoClearRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -7654,22 +7655,41 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         )
     except Exception:
         owned_channel_videos = []
-    owned_public_videos = [
-        dict(row or {})
-        for row in list(owned_channel_videos or [])
-        if isinstance(row, dict) and str((row or {}).get("privacy_status", "") or "").strip().lower() in {"", "public"}
-    ]
     public_uploaded_videos = [
         dict(row or {})
         for row in list(uploaded_videos or [])
         if isinstance(row, dict) and str((row or {}).get("privacy_status", "") or "").strip().lower() in {"", "public"}
     ]
-    inventory_rows = (
-        owned_public_videos
-        or [dict(row or {}) for row in list(owned_channel_videos or []) if isinstance(row, dict)]
-        or public_uploaded_videos
-        or [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
-    )
+    uploads_inventory_rows = [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
+    owned_video_by_id = {
+        str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
+        for row in list(owned_channel_videos or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    }
+
+    def _merge_owned_video_details(row: dict) -> dict:
+        base = dict(row or {})
+        clean_video_id = str(base.get("video_id", "") or "").strip()
+        if not clean_video_id:
+            return base
+        owned_row = dict(owned_video_by_id.get(clean_video_id) or {})
+        if not owned_row:
+            return base
+        merged = dict(base)
+        for key, value in owned_row.items():
+            if value not in (None, "", [], {}):
+                merged[key] = value
+        if str(base.get("privacy_status", "") or "").strip():
+            merged["privacy_status"] = str(base.get("privacy_status", "") or "").strip()
+        return merged
+
+    # Treat the uploads playlist as the canonical Studio inventory for this channel.
+    inventory_rows = [_merge_owned_video_details(row) for row in list(public_uploaded_videos or uploads_inventory_rows)]
+    if not inventory_rows:
+        inventory_rows = [
+            _merge_owned_video_details(row)
+            for row in list(uploads_inventory_rows)
+        ]
     recent_uploads = [dict(row or {}) for row in list(inventory_rows or [])[:20] if isinstance(row, dict)]
     popular_uploads = []
     if inventory_rows:
@@ -8772,10 +8792,20 @@ async def _build_catalyst_hub_payload(
     for workspace_id in CATALYST_HUB_LONGFORM_WORKSPACES:
         memory_key = _catalyst_channel_memory_key(user_id, selected_channel_id, workspace_id)
         memory_bucket = dict(memory_store.get(memory_key) or {})
-        memory_bucket["reference_video_analysis"] = _reconcile_reference_video_analysis_with_inventory(
+        reconciled_reference_video_analysis = _reconcile_reference_video_analysis_with_inventory(
             memory_bucket.get("reference_video_analysis") or {},
             channel_context,
         )
+        memory_bucket["reference_video_analysis"] = reconciled_reference_video_analysis
+        if not reconciled_reference_video_analysis:
+            for stale_key in (
+                "reference_summary",
+                "last_reference_summary",
+                "reference_video_title",
+                "reference_video_url",
+                "reference_video_id",
+            ):
+                memory_bucket.pop(stale_key, None)
         series_context = _resolve_catalyst_series_context(
             channel_context,
             channel_memory=memory_bucket,
@@ -24603,6 +24633,42 @@ async def catalyst_hub_reference_video_analysis(
         raise HTTPException(500, _clip_text(f"Catalyst reference analysis failed: {e}", 220))
 
 
+@app.post("/api/catalyst/hub/reference-video-analysis/clear")
+async def catalyst_hub_clear_reference_video_analysis(
+    req: CatalystHubReferenceVideoClearRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    channel_id = str((req or {}).channel_id or "").strip()
+    workspace_id = str((req or {}).workspace_id or "documentary").strip().lower() or "documentary"
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
+        raise HTTPException(400, "Reference video clear currently supports long-form workspaces only")
+    try:
+        await _clear_catalyst_reference_video_analysis(
+            user_id=str(user.get("id", "") or "").strip(),
+            channel_id=channel_id,
+            workspace_id=workspace_id,
+        )
+        payload = await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=False,
+            refresh_outcomes=False,
+        )
+        return {
+            "ok": True,
+            "payload": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Catalyst reference video clear failed")
+        raise HTTPException(500, _clip_text(f"Catalyst reference clear failed: {e}", 220))
+
+
 @app.post("/api/catalyst/hub/instructions")
 async def catalyst_hub_save_instructions(
     req: CatalystHubDirectiveRequest,
@@ -26110,7 +26176,7 @@ def _reconcile_reference_video_analysis_with_inventory(raw: dict | None, channel
         if isinstance(v, dict) and str((v or {}).get("video_id", "") or "").strip()
     ]
     if not uploaded_rows:
-        return payload
+        return {}
     inventory_by_id = {
         str(row.get("video_id", "") or "").strip(): dict(row)
         for row in uploaded_rows
@@ -26352,6 +26418,42 @@ async def _persist_catalyst_reference_video_analysis(
         return dict(updated)
 
 
+async def _clear_catalyst_reference_video_analysis(
+    *,
+    user_id: str,
+    channel_id: str,
+    workspace_id: str,
+) -> dict:
+    memory_key = _catalyst_channel_memory_key(user_id, channel_id, workspace_id)
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        existing = dict(_catalyst_channel_memory.get(memory_key) or {})
+        if not existing:
+            return {}
+        updated = dict(existing)
+        for stale_key in (
+            "reference_video_analysis",
+            "reference_summary",
+            "last_reference_summary",
+            "reference_video_title",
+            "reference_video_url",
+            "reference_video_id",
+            "reference_hook_rules",
+            "reference_pacing_rules",
+            "reference_visual_rules",
+            "reference_sound_rules",
+            "reference_transition_rules",
+            "reference_structure_map",
+            "reference_title_thumbnail_rules",
+            "reference_next_video_moves",
+        ):
+            updated.pop(stale_key, None)
+        updated["updated_at"] = time.time()
+        _catalyst_channel_memory[memory_key] = updated
+        _save_catalyst_memory()
+        return dict(updated)
+
+
 async def _build_catalyst_reference_video_analysis(
     *,
     user: dict,
@@ -26360,6 +26462,11 @@ async def _build_catalyst_reference_video_analysis(
     video_id: str = "",
     max_analysis_minutes: float = 3.0,
 ) -> dict:
+    await _clear_catalyst_reference_video_analysis(
+        user_id=str(user.get("id", "") or "").strip(),
+        channel_id=channel_id,
+        workspace_id=workspace_id,
+    )
     channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
     if not channel_context:
         raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")

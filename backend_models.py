@@ -241,3 +241,8 @@ class CatalystHubReferenceVideoAnalysisRequest(BaseModel):
     workspace_id: str = ""
     video_id: str = ""
     max_analysis_minutes: float = 3.0
+
+
+class CatalystHubReferenceVideoClearRequest(BaseModel):
+    channel_id: str = ""
+    workspace_id: str = ""

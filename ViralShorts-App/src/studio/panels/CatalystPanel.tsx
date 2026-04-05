@@ -194,6 +194,7 @@ export default function CatalystPanel() {
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [syncingOutcomes, setSyncingOutcomes] = useState(false);
     const [analyzingReference, setAnalyzingReference] = useState(false);
+    const [clearingReference, setClearingReference] = useState(false);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
     const [stoppingSessionId, setStoppingSessionId] = useState('');
@@ -461,6 +462,29 @@ export default function CatalystPanel() {
         }
     };
 
+    const handleClearReferenceVideo = async () => {
+        if (!session || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) return;
+        setClearingReference(true);
+        setError('');
+        try {
+            const res = await fetch(`${API}/api/catalyst/hub/reference-video-analysis/clear`, {
+                method: 'POST',
+                headers: jsonHeaders,
+                body: JSON.stringify({
+                    channel_id: selectedChannelId,
+                    workspace_id: selectedWorkspaceId,
+                }),
+            });
+            const data = await readJsonResponse<any>(res);
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to clear the channel reference video'));
+            if (data?.payload) setPayload(data.payload as CatalystHubPayload);
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to clear the channel reference video'));
+        } finally {
+            setClearingReference(false);
+        }
+    };
+
     const handleStopBusySession = async () => {
         if (!session || !busyLongformSessionId) return;
         setStoppingSessionId(busyLongformSessionId);
@@ -557,11 +581,20 @@ export default function CatalystPanel() {
                         <button
                             type="button"
                             onClick={() => void handleAnalyzeReferenceVideo()}
-                            disabled={analyzingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
+                            disabled={analyzingReference || clearingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
                             className="inline-flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
                             Analyze Best Video
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleClearReferenceVideo()}
+                            disabled={clearingReference || analyzingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-100 transition hover:border-rose-400/50 hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            {clearingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                            Clear Reference
                         </button>
                     </div>
                 </div>
