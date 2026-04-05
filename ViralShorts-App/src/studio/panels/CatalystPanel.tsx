@@ -497,8 +497,8 @@ export default function CatalystPanel() {
     const channelAudit = selectedChannel?.analytics_snapshot?.channel_audit || null;
     const historicalCompare = selectedChannel?.analytics_snapshot?.historical_compare || null;
     const referenceEvidence = referenceVideoAnalysis?.evidence || null;
+    const referenceAnalysis = referenceVideoAnalysis?.analysis || null;
     const referenceMeasuredFacts = referenceEvidence?.measured_facts || referenceVideoAnalysis?.analysis?.measured_facts || [];
-    const referenceInferredNotes = referenceEvidence?.inferred_notes || referenceVideoAnalysis?.analysis?.inferred_notes || [];
     const referenceLimitations = referenceEvidence?.limitations || referenceVideoAnalysis?.analysis?.limitations || [];
 
     if (!session) return null;
@@ -764,11 +764,6 @@ export default function CatalystPanel() {
                                     <div className="text-lg font-semibold text-white">{selectedChannel.title}</div>
                                     {selectedChannel.channel_handle && <div className="mt-1 text-sm text-gray-400">{selectedChannel.channel_handle}</div>}
                                 </div>
-                                {channelAudit?.summary && (
-                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
-                                        {channelAudit.summary}
-                                    </div>
-                                )}
                                 {(channelAudit?.honesty_note || historicalCompare?.honesty_note) && (
                                     <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
                                         {channelAudit?.honesty_note || historicalCompare?.honesty_note}
@@ -782,23 +777,7 @@ export default function CatalystPanel() {
                                     </div>
                                 ) : null}
                                 <DetailList title="Measured Channel Data" values={channelAudit?.measured_facts || []} accent="emerald" />
-                                <DetailList title="Catalyst Inference" values={channelAudit?.inferred_notes || []} accent="violet" />
                                 <DetailList title="Channel Limitations" values={channelAudit?.limitations || historicalCompare?.limitations || []} accent="amber" />
-                                <DetailGroup title="Catalyst Strength Signals" values={channelAudit?.strengths || []} accent="emerald" />
-                                <DetailGroup title="Catalyst Risk Signals" values={channelAudit?.warnings || []} accent="amber" />
-                                <DetailGroup title="Catalyst Suggested Next Moves" values={channelAudit?.next_moves || historicalCompare?.next_moves || []} accent="cyan" />
-                                {Array.isArray(channelAudit?.next_video_candidates) && channelAudit.next_video_candidates.length > 0 && (
-                                    <div>
-                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Catalyst Suggested Next Videos</div>
-                                        <div className="space-y-2">
-                                            {channelAudit.next_video_candidates.slice(0, 5).map((value) => (
-                                                <div key={value} className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-200">
-                                                    {value}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
                                 {selectedChannel.last_outcome_sync_at ? (
                                     <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-xs text-gray-300">
                                         Last outcome sync: {formatWhen(selectedChannel.last_outcome_sync_at)}{selectedChannel.last_outcome_sync_count ? ` | ${selectedChannel.last_outcome_sync_count} videos` : ''}
@@ -814,7 +793,7 @@ export default function CatalystPanel() {
                                         {selectedChannel.last_outcome_sync_error}
                                     </div>
                                 )}
-                                {referenceVideoAnalysis?.analysis?.summary && (
+                                {(referenceMeasuredFacts.length > 0 || referenceLimitations.length > 0 || referenceVideoAnalysis?.video?.title) && referenceVideoAnalysis && (
                                     <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4">
                                         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Reference Video Breakdown</div>
                                         {referenceVideoAnalysis.video?.title && (
@@ -834,10 +813,9 @@ export default function CatalystPanel() {
                                                 )}
                                             </div>
                                         )}
-                                        <div className="mt-2 text-sm text-violet-50">{referenceVideoAnalysis.analysis.summary}</div>
-                                        {(referenceEvidence?.honesty_note || referenceVideoAnalysis.analysis.honesty_note) && (
+                                        {(referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note) && (
                                             <div className="mt-3 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-                                                {referenceEvidence?.honesty_note || referenceVideoAnalysis.analysis.honesty_note}
+                                                {referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note}
                                             </div>
                                         )}
                                         {(referenceVideoAnalysis.video?.views || referenceVideoAnalysis.video?.average_view_percentage || referenceVideoAnalysis.video?.impression_click_through_rate) ? (
@@ -848,11 +826,7 @@ export default function CatalystPanel() {
                                             </div>
                                         ) : null}
                                         <DetailList title="Measured Reference Evidence" values={referenceMeasuredFacts} accent="emerald" />
-                                        <DetailList title="Catalyst Reference Inference" values={referenceInferredNotes} accent="violet" />
                                         <DetailList title="Reference Limitations" values={referenceLimitations} accent="amber" />
-                                        <DetailGroup title="Catalyst Inference: Why It Likely Worked" values={referenceVideoAnalysis.analysis.why_it_worked || []} accent="emerald" />
-                                        <DetailGroup title="Catalyst Inference: What Likely Hurt The Weak Upload" values={referenceVideoAnalysis.analysis.what_hurt_weaker_upload || []} accent="amber" />
-                                        <DetailGroup title="Catalyst Suggestions: 3D Translation Moves" values={referenceVideoAnalysis.analysis.threed_translation_moves || []} accent="cyan" />
                                     </div>
                                 )}
                             </div>
@@ -887,14 +861,9 @@ export default function CatalystPanel() {
                                         {memory.operator_summary}
                                     </div>
                                 )}
-                                {referenceVideoAnalysis?.analysis?.summary && (
-                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
-                                        {referenceVideoAnalysis.analysis.summary}
-                                    </div>
-                                )}
-                                {(referenceEvidence?.honesty_note || referenceVideoAnalysis?.analysis?.honesty_note) && (
+                                {(referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note) && (
                                     <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-                                        {referenceEvidence?.honesty_note || referenceVideoAnalysis?.analysis?.honesty_note}
+                                        {referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note}
                                     </div>
                                 )}
                                 <div className="grid gap-3 sm:grid-cols-2">
