@@ -16,7 +16,7 @@ import zipfile
 import html as html_lib
 import httpx
 import jwt
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
