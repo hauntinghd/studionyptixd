@@ -8710,6 +8710,10 @@ async def _build_catalyst_hub_payload(
     for workspace_id in CATALYST_HUB_LONGFORM_WORKSPACES:
         memory_key = _catalyst_channel_memory_key(user_id, selected_channel_id, workspace_id)
         memory_bucket = dict(memory_store.get(memory_key) or {})
+        memory_bucket["reference_video_analysis"] = _reconcile_reference_video_analysis_with_inventory(
+            memory_bucket.get("reference_video_analysis") or {},
+            channel_context,
+        )
         series_context = _resolve_catalyst_series_context(
             channel_context,
             channel_memory=memory_bucket,
@@ -25359,20 +25363,29 @@ def _pick_catalyst_reference_video(channel_context: dict | None, requested_video
     ]
     if not uploaded_videos:
         uploaded_videos = [dict(v or {}) for v in list(context.get("uploaded_videos") or []) if isinstance(v, dict)]
-    measured_recent = sorted(
-        uploaded_videos,
-        key=lambda row: str(row.get("published_at", "") or ""),
-        reverse=True,
-    )
+    measured_recent = sorted(uploaded_videos, key=lambda row: str(row.get("published_at", "") or ""), reverse=True)
     measured_best = sorted(
         uploaded_videos,
         key=lambda row: (
             -int(float(row.get("views", 0) or 0)),
-            -int(float(row.get("likes", 0) or 0)),
             -float(row.get("average_view_percentage", 0.0) or 0.0),
+            -int(float(row.get("likes", 0) or 0)),
             str(row.get("published_at", "") or ""),
         ),
     )
+    if measured_best:
+        if requested:
+            match = next(
+                (
+                    dict(row)
+                    for row in measured_best
+                    if str(row.get("video_id", "") or "").strip() == requested
+                ),
+                None,
+            )
+            if match:
+                return match
+        return dict(measured_best[0] or {})
     candidate_rows = [
         *measured_best[:25],
         *measured_recent[:25],
@@ -25393,8 +25406,6 @@ def _pick_catalyst_reference_video(channel_context: dict | None, requested_video
         match = next((dict(row) for row in deduped if str(row.get("video_id", "") or "").strip() == requested), None)
         if match:
             return match
-    if measured_best:
-        return dict(measured_best[0] or {})
     return dict(deduped[0] or {}) if deduped else {}
 
 
@@ -26024,6 +26035,52 @@ def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
         "evidence": evidence,
         "analyzed_at": float(payload.get("analyzed_at", 0.0) or 0.0),
     }
+
+
+def _reconcile_reference_video_analysis_with_inventory(raw: dict | None, channel_context: dict | None) -> dict:
+    payload = dict(raw or {})
+    context = dict(channel_context or {})
+    if not payload:
+        return {}
+    uploaded_rows = [
+        dict(v or {})
+        for v in list(context.get("uploaded_videos") or [])
+        if isinstance(v, dict) and str((v or {}).get("video_id", "") or "").strip()
+    ]
+    if not uploaded_rows:
+        return payload
+    inventory_by_id = {
+        str(row.get("video_id", "") or "").strip(): dict(row)
+        for row in uploaded_rows
+        if str(row.get("video_id", "") or "").strip()
+    }
+    current_video = dict(payload.get("video") or {})
+    reference_video_id = str(
+        current_video.get("video_id", "")
+        or payload.get("video_id", "")
+        or ""
+    ).strip()
+    if not reference_video_id:
+        return {}
+    inventory_row = dict(inventory_by_id.get(reference_video_id) or {})
+    if not inventory_row:
+        return {}
+    current_video["video_id"] = reference_video_id
+    current_video["title"] = _clip_text(str(inventory_row.get("title", "") or current_video.get("title", "") or "").strip(), 180)
+    current_video["url"] = _youtube_watch_url(reference_video_id)
+    current_video["duration_sec"] = int(float(inventory_row.get("duration_sec", current_video.get("duration_sec", 0)) or 0) or 0)
+    current_video["views"] = int(float(inventory_row.get("views", current_video.get("views", 0)) or 0) or 0)
+    current_video["average_view_percentage"] = round(float(inventory_row.get("average_view_percentage", current_video.get("average_view_percentage", 0.0)) or 0.0), 2)
+    current_video["impression_click_through_rate"] = round(float(inventory_row.get("impression_click_through_rate", current_video.get("impression_click_through_rate", 0.0)) or 0.0), 2)
+    payload["video"] = current_video
+    payload["video_id"] = reference_video_id
+    payload["video_title"] = str(current_video.get("title", "") or "").strip()
+    payload["video_url"] = str(current_video.get("url", "") or "").strip()
+    payload["duration_sec"] = int(current_video.get("duration_sec", 0) or 0)
+    payload["views"] = int(current_video.get("views", 0) or 0)
+    payload["average_view_percentage"] = float(current_video.get("average_view_percentage", 0.0) or 0.0)
+    payload["impression_click_through_rate"] = float(current_video.get("impression_click_through_rate", 0.0) or 0.0)
+    return payload
 
 
 def _heuristic_catalyst_reference_video_analysis(
