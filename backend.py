@@ -7017,6 +7017,53 @@ async def _youtube_fetch_public_channel_search_api_key(channel_id: str, order: s
     return await _youtube_fetch_public_videos_api_key(video_ids)
 
 
+def _youtube_channel_videos_page_url(channel_url: str, channel_id: str) -> str:
+    base = str(channel_url or "").strip()
+    if base:
+        return base.rstrip("/") + "/videos"
+    clean_channel_id = str(channel_id or "").strip()
+    return f"https://www.youtube.com/channel/{clean_channel_id}/videos" if clean_channel_id else ""
+
+
+def _youtube_extract_video_ids_from_channel_page(html: str) -> list[str]:
+    text = str(html or "")
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r'"videoId":"([A-Za-z0-9_-]{11})"', text):
+        video_id = str(match.group(1) or "").strip()
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        ids.append(video_id)
+    return ids
+
+
+async def _youtube_fetch_public_channel_page_videos(
+    access_token: str,
+    *,
+    channel_url: str = "",
+    channel_id: str = "",
+    max_results: int = 100,
+) -> list[dict]:
+    page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
+    if not page_url:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(
+                page_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+            )
+        if resp.status_code != 200:
+            return []
+        video_ids = _youtube_extract_video_ids_from_channel_page(resp.text)
+        if not video_ids:
+            return []
+        return await _youtube_fetch_videos(access_token, video_ids[: max(1, min(int(max_results or 100), 100))])
+    except Exception:
+        return []
+
+
 def _youtube_caption_language_candidates(language: str = "en") -> list[str]:
     preferred: list[str] = []
     for raw in [str(language or "").strip().lower(), "en", "en-us", "en-gb"]:
@@ -7749,6 +7796,12 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
 
     upload_inventory_target = max(int(float(channel_meta.get("video_count", 0) or 0)), 50)
     upload_inventory_target = min(upload_inventory_target, 500)
+    public_page_rows: list[dict] = await _youtube_fetch_public_channel_page_videos(
+        access_token,
+        channel_url=str(channel_meta.get("channel_url", "") or "").strip(),
+        channel_id=channel_id,
+        max_results=max(3, min(upload_inventory_target, 100)),
+    )
     uploaded_videos = await _youtube_fetch_uploads_playlist_videos(access_token, uploads_playlist_id, max_results=upload_inventory_target)
     owned_channel_videos: list[dict] = []
     try:
@@ -7823,6 +7876,15 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         reverse=True,
     )
     owned_public_rows = [dict(row or {}) for row in list(owned_inventory_rows or []) if _is_public_studio_video(row)]
+    public_page_inventory_rows = [
+        dict(row or {})
+        for row in list(public_page_rows or [])
+        if (
+            isinstance(row, dict)
+            and str((row or {}).get("video_id", "") or "").strip()
+            and _is_public_studio_video(row)
+        )
+    ]
     public_search_inventory_rows = [
         dict(row or {})
         for row in list(public_search_rows or [])
@@ -7833,7 +7895,17 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         )
     ]
 
-    if public_search_inventory_rows:
+    if public_page_inventory_rows:
+        inventory_rows = []
+        for row in list(public_page_inventory_rows or []):
+            merged = dict(row or {})
+            clean_video_id = str(merged.get("video_id", "") or "").strip()
+            if clean_video_id and clean_video_id in owned_video_by_id:
+                for key, value in dict(owned_video_by_id.get(clean_video_id) or {}).items():
+                    if value not in (None, "", [], {}):
+                        merged[key] = value
+            inventory_rows.append(merged)
+    elif public_search_inventory_rows:
         inventory_rows = []
         for row in list(public_search_inventory_rows or []):
             merged = dict(row or {})
