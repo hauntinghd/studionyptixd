@@ -7038,6 +7038,58 @@ def _youtube_extract_video_ids_from_channel_page(html: str) -> list[str]:
     return ids
 
 
+def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
+    text = str(html or "")
+    initial_data_match = (
+        re.search(r"var ytInitialData = (\{.*?\});", text)
+        or re.search(r"ytInitialData\s*=\s*(\{.*?\});", text)
+    )
+    if not initial_data_match:
+        return []
+    try:
+        payload = json.loads(str(initial_data_match.group(1) or "{}"))
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    seen_ids: set[str] = set()
+
+    def _walk(node: object) -> None:
+        if isinstance(node, dict):
+            video_renderer = dict(node.get("videoRenderer") or {})
+            if video_renderer:
+                video_id = str(video_renderer.get("videoId", "") or "").strip()
+                if video_id and video_id not in seen_ids:
+                    seen_ids.add(video_id)
+                    title_runs = list((video_renderer.get("title") or {}).get("runs") or [])
+                    title = "".join(str(run.get("text", "") or "") for run in title_runs).strip()
+                    if not title:
+                        title = str((video_renderer.get("title") or {}).get("simpleText", "") or "").strip()
+                    thumbnail_url = ""
+                    thumb_candidates = list((video_renderer.get("thumbnail") or {}).get("thumbnails") or [])
+                    if thumb_candidates:
+                        thumbnail_url = str((thumb_candidates[-1] or {}).get("url", "") or "").strip()
+                    published_label = str((video_renderer.get("publishedTimeText") or {}).get("simpleText", "") or "").strip()
+                    rows.append(
+                        {
+                            "video_id": video_id,
+                            "title": title,
+                            "published_at": "",
+                            "published_label": published_label,
+                            "thumbnail_url": thumbnail_url,
+                            "privacy_status": "public",
+                        }
+                    )
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(payload)
+    return rows
+
+
 async def _youtube_fetch_public_channel_page_videos(
     access_token: str,
     *,
@@ -7056,10 +7108,54 @@ async def _youtube_fetch_public_channel_page_videos(
             )
         if resp.status_code != 200:
             return []
-        video_ids = _youtube_extract_video_ids_from_channel_page(resp.text)
-        if not video_ids:
+        page_rows = _youtube_extract_public_channel_page_rows(resp.text)
+        if not page_rows:
+            video_ids = _youtube_extract_video_ids_from_channel_page(resp.text)
+            page_rows = [
+                {
+                    "video_id": str(video_id or "").strip(),
+                    "title": "",
+                    "published_at": "",
+                    "published_label": "",
+                    "thumbnail_url": "",
+                    "privacy_status": "public",
+                }
+                for video_id in video_ids
+                if str(video_id or "").strip()
+            ]
+        if not page_rows:
             return []
-        return await _youtube_fetch_videos(access_token, video_ids[: max(1, min(int(max_results or 100), 100))])
+        page_rows = page_rows[: max(1, min(int(max_results or 100), 100))]
+        page_ids = [str((row or {}).get("video_id", "") or "").strip() for row in list(page_rows or []) if str((row or {}).get("video_id", "") or "").strip()]
+        hydrated_rows: list[dict] = []
+        if page_ids:
+            try:
+                hydrated_rows = await _youtube_fetch_public_videos_api_key(page_ids)
+            except Exception:
+                hydrated_rows = []
+            if not hydrated_rows and access_token:
+                try:
+                    hydrated_rows = await _youtube_fetch_videos(access_token, page_ids)
+                except Exception:
+                    hydrated_rows = []
+        if not hydrated_rows:
+            return page_rows
+        hydrated_by_id = {
+            str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
+            for row in list(hydrated_rows or [])
+            if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+        }
+        merged_rows: list[dict] = []
+        for row in list(page_rows or []):
+            clean_video_id = str((row or {}).get("video_id", "") or "").strip()
+            merged = dict(row or {})
+            if clean_video_id and clean_video_id in hydrated_by_id:
+                merged = {
+                    **merged,
+                    **dict(hydrated_by_id.get(clean_video_id) or {}),
+                }
+            merged_rows.append(merged)
+        return merged_rows
     except Exception:
         return []
 
