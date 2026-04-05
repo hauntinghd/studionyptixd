@@ -1064,6 +1064,21 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "analytics_snapshot": {
             "channel_video_count": int(analytics_snapshot.get("channel_video_count", 0) or 0),
             "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+            "uploaded_videos": [
+                {
+                    "video_id": str((row or {}).get("video_id", "") or "").strip(),
+                    "title": _clip_text(str((row or {}).get("title", "") or "").strip(), 180),
+                    "published_at": str((row or {}).get("published_at", "") or "").strip(),
+                    "thumbnail_url": str((row or {}).get("thumbnail_url", "") or "").strip(),
+                    "views": int(float((row or {}).get("views", 0) or 0) or 0),
+                    "average_view_percentage": round(float((row or {}).get("average_view_percentage", 0.0) or 0.0), 2),
+                    "impression_click_through_rate": round(float((row or {}).get("impression_click_through_rate", 0.0) or 0.0), 2),
+                    "duration_sec": int(float((row or {}).get("duration_sec", 0) or 0) or 0),
+                    "privacy_status": str((row or {}).get("privacy_status", "") or "").strip(),
+                }
+                for row in list(analytics_snapshot.get("uploaded_videos") or [])[:250]
+                if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+            ],
             "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
             "historical_compare": _youtube_historical_compare_measured_public_view(
                 analytics_snapshot.get("historical_compare") or {}

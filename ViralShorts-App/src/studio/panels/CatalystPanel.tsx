@@ -13,6 +13,17 @@ type CatalystChannel = {
     analytics_snapshot?: {
         channel_summary?: string;
         recent_upload_titles?: string[];
+        uploaded_videos?: Array<{
+            video_id?: string;
+            title?: string;
+            published_at?: string;
+            thumbnail_url?: string;
+            views?: number;
+            average_view_percentage?: number;
+            impression_click_through_rate?: number;
+            duration_sec?: number;
+            privacy_status?: string;
+        }>;
         top_video_titles?: string[];
         packaging_learnings?: string[];
         retention_learnings?: string[];
@@ -195,6 +206,7 @@ export default function CatalystPanel() {
     const [syncingOutcomes, setSyncingOutcomes] = useState(false);
     const [analyzingReference, setAnalyzingReference] = useState(false);
     const [clearingReference, setClearingReference] = useState(false);
+    const [selectedReferenceVideoId, setSelectedReferenceVideoId] = useState('');
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
     const [stoppingSessionId, setStoppingSessionId] = useState('');
@@ -449,6 +461,7 @@ export default function CatalystPanel() {
                 body: JSON.stringify({
                     channel_id: selectedChannelId,
                     workspace_id: selectedWorkspaceId,
+                    video_id: selectedReferenceVideoId || '',
                     max_analysis_minutes: 3.0,
                 }),
             });
@@ -523,6 +536,29 @@ export default function CatalystPanel() {
     const referenceAnalysis = referenceVideoAnalysis?.analysis || null;
     const referenceMeasuredFacts = referenceEvidence?.measured_facts || referenceVideoAnalysis?.analysis?.measured_facts || [];
     const referenceLimitations = referenceEvidence?.limitations || referenceVideoAnalysis?.analysis?.limitations || [];
+    const uploadedVideoOptions = useMemo(
+        () => (
+            Array.isArray(selectedChannel?.analytics_snapshot?.uploaded_videos)
+                ? [...selectedChannel.analytics_snapshot.uploaded_videos]
+                : []
+        )
+            .filter((row) => String(row?.video_id || '').trim())
+            .sort((a, b) => String(a?.published_at || '').localeCompare(String(b?.published_at || ''))),
+        [selectedChannel]
+    );
+
+    useEffect(() => {
+        const currentReferenceVideoId = String(referenceVideoAnalysis?.video?.video_id || '').trim();
+        if (currentReferenceVideoId) {
+            setSelectedReferenceVideoId(currentReferenceVideoId);
+            return;
+        }
+        if (uploadedVideoOptions.length > 0) {
+            setSelectedReferenceVideoId(String(uploadedVideoOptions[0]?.video_id || '').trim());
+            return;
+        }
+        setSelectedReferenceVideoId('');
+    }, [referenceVideoAnalysis?.video?.video_id, uploadedVideoOptions]);
 
     if (!session) return null;
 
@@ -823,6 +859,45 @@ export default function CatalystPanel() {
                                 {selectedChannel.last_outcome_sync_error && (
                                     <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
                                         {selectedChannel.last_outcome_sync_error}
+                                    </div>
+                                )}
+                                {uploadedVideoOptions.length > 0 && (
+                                    <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+                                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Measured Uploaded Videos</div>
+                                        <div className="mt-3 grid gap-3 md:grid-cols-[1fr,auto]">
+                                            <select
+                                                value={selectedReferenceVideoId}
+                                                onChange={(e) => setSelectedReferenceVideoId(e.target.value)}
+                                                className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
+                                                style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
+                                            >
+                                                {uploadedVideoOptions.map((video) => {
+                                                    const published = String(video.published_at || '').trim();
+                                                    const title = String(video.title || '').trim() || String(video.video_id || '').trim();
+                                                    const meta = [
+                                                        published ? new Date(published).toLocaleDateString() : '',
+                                                        typeof video.views === 'number' ? `${video.views} views` : '',
+                                                    ].filter(Boolean).join(' | ');
+                                                    return (
+                                                        <option key={video.video_id} value={video.video_id} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
+                                                            {meta ? `${title} (${meta})` : title}
+                                                        </option>
+                                                    );
+                                                })}
+                                            </select>
+                                            <button
+                                                type="button"
+                                                onClick={() => void handleAnalyzeReferenceVideo()}
+                                                disabled={analyzingReference || clearingReference || !selectedReferenceVideoId}
+                                                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+                                                Analyze Selected
+                                            </button>
+                                        </div>
+                                        <div className="mt-2 text-xs text-gray-500">
+                                            Pick the exact measured upload you want Catalyst to analyze. The first item is your oldest uploaded video.
+                                        </div>
                                     </div>
                                 )}
                                 {(referenceMeasuredFacts.length > 0 || referenceLimitations.length > 0 || referenceVideoAnalysis?.video?.title) && referenceVideoAnalysis && (
