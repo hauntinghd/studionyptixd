@@ -9148,6 +9148,74 @@ async def _build_catalyst_hub_payload(
             channel_context = await _youtube_selected_channel_context(user, selected_channel_id)
         except Exception:
             channel_context = {}
+    if selected_channel_id and channel_context:
+        try:
+            access_token, token_record = await _youtube_connected_channel_access_token(user, selected_channel_id)
+            public_page_rows = await _youtube_fetch_public_channel_page_videos(
+                access_token,
+                channel_url=str((token_record or {}).get("channel_url", "") or str(channel_context.get("channel_url", "") or "")).strip(),
+                channel_id=selected_channel_id,
+                max_results=max(int(channel_context.get("channel_video_count", 0) or 0), 25),
+            )
+        except Exception:
+            public_page_rows = []
+        if public_page_rows:
+            current_rows = [
+                dict(row or {})
+                for row in list(channel_context.get("uploaded_videos") or [])
+                if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+            ]
+            current_ids = [str((row or {}).get("video_id", "") or "").strip() for row in current_rows]
+            public_ids = [str((row or {}).get("video_id", "") or "").strip() for row in public_page_rows]
+            if public_ids and public_ids != current_ids:
+                current_by_id = {str((row or {}).get("video_id", "") or "").strip(): dict(row or {}) for row in current_rows}
+                merged_rows: list[dict] = []
+                for row in list(public_page_rows or []):
+                    clean_video_id = str((row or {}).get("video_id", "") or "").strip()
+                    merged = dict(current_by_id.get(clean_video_id) or {})
+                    merged.update(dict(row or {}))
+                    merged_rows.append(merged)
+                merged_recent_titles = [
+                    str((row or {}).get("title", "") or "").strip()
+                    for row in list(merged_rows[:12])
+                    if str((row or {}).get("title", "") or "").strip()
+                ]
+                merged_top_rows = sorted(
+                    [dict(row or {}) for row in list(merged_rows or []) if isinstance(row, dict)],
+                    key=lambda row: (
+                        -int(float((row or {}).get("views", 0) or 0) or 0),
+                        str((row or {}).get("published_at", "") or ""),
+                    ),
+                )
+                raw_snapshot = {
+                    "channel_summary": str(channel_context.get("summary", "") or "").strip(),
+                    "channel_video_count": len(merged_rows),
+                    "recent_upload_titles": merged_recent_titles,
+                    "uploaded_videos": merged_rows[:250],
+                    "top_video_titles": [
+                        str((row or {}).get("title", "") or "").strip()
+                        for row in list(merged_top_rows[:12])
+                        if str((row or {}).get("title", "") or "").strip()
+                    ],
+                    "top_videos": merged_top_rows[:10],
+                    "title_pattern_hints": list(channel_context.get("title_pattern_hints") or []),
+                    "packaging_learnings": list(channel_context.get("packaging_learnings") or []),
+                    "retention_learnings": list(channel_context.get("retention_learnings") or []),
+                    "series_clusters": list(channel_context.get("series_clusters") or []),
+                    "series_cluster_playbook": dict(channel_context.get("series_cluster_playbook") or {}),
+                    "historical_compare": _youtube_build_historical_compare(merged_rows[:20]),
+                }
+                raw_snapshot["channel_audit"] = _youtube_build_channel_audit(raw_snapshot)
+                channel_context = {
+                    **dict(channel_context or {}),
+                    "channel_video_count": raw_snapshot["channel_video_count"],
+                    "recent_upload_titles": list(raw_snapshot.get("recent_upload_titles") or []),
+                    "uploaded_videos": list(raw_snapshot.get("uploaded_videos") or []),
+                    "top_video_titles": list(raw_snapshot.get("top_video_titles") or []),
+                    "top_videos": list(raw_snapshot.get("top_videos") or []),
+                    "historical_compare": dict(raw_snapshot.get("historical_compare") or {}),
+                    "channel_audit": dict(raw_snapshot.get("channel_audit") or {}),
+                }
     if selected_channel and channel_context and str(channel_context.get("channel_id", "") or "").strip() == selected_channel_id:
         refreshed_snapshot = {
             "channel_video_count": int(channel_context.get("channel_video_count", 0) or 0),
