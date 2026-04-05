@@ -6979,6 +6979,36 @@ async def _youtube_download_caption_vtt(access_token: str, caption_id: str) -> s
     return _parse_vtt_text(text)
 
 
+async def _youtube_download_public_timedtext_transcript(video_id: str, language: str = "en") -> str:
+    clean_id = str(video_id or "").strip()
+    if not clean_id:
+        return ""
+    param_variants: list[dict[str, str]] = []
+    seen_keys: set[tuple[tuple[str, str], ...]] = set()
+    for lang in _youtube_caption_language_candidates(language):
+        for base_params in (
+            {"v": clean_id, "lang": lang, "fmt": "vtt"},
+            {"v": clean_id, "lang": lang, "fmt": "vtt", "kind": "asr"},
+        ):
+            key = tuple(sorted((str(k), str(v)) for k, v in base_params.items()))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            param_variants.append(base_params)
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        for params in param_variants:
+            try:
+                resp = await client.get("https://www.youtube.com/api/timedtext", params=params)
+            except Exception:
+                continue
+            if resp.status_code != 200 or not str(resp.text or "").strip():
+                continue
+            transcript_excerpt = _parse_vtt_text(resp.text)
+            if transcript_excerpt:
+                return transcript_excerpt
+    return ""
+
+
 async def _youtube_fetch_owned_video_bundle_oauth(
     access_token: str,
     video_id: str,
@@ -7021,6 +7051,11 @@ async def _youtube_fetch_owned_video_bundle_oauth(
             transcript_excerpt = await _youtube_download_caption_vtt(access_token, str(best_track.get("id", "") or "").strip())
     except Exception:
         transcript_excerpt = ""
+    if not transcript_excerpt:
+        try:
+            transcript_excerpt = await _youtube_download_public_timedtext_transcript(clean_id, language=language)
+        except Exception:
+            transcript_excerpt = ""
     title = str(snippet.get("title", "") or "").strip()
     description = str(snippet.get("description", "") or "").strip()
     channel = str(snippet.get("channelTitle", "") or "").strip()
@@ -9624,6 +9659,14 @@ def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
         "skip_download": True,
         "noplaylist": True,
         "extract_flat": False,
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/135.0.0.0 Safari/537.36"
+            )
+        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(source_url, download=False) or {}
@@ -24465,12 +24508,16 @@ async def catalyst_hub_reference_video_analysis(
     if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
         raise HTTPException(400, "Reference video analysis currently supports long-form workspaces only")
     try:
+        try:
+            await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id)
+        except Exception:
+            pass
         analysis_result = await _build_catalyst_reference_video_analysis(
             user=user,
             channel_id=channel_id,
             workspace_id=workspace_id,
             video_id=str((req or {}).video_id or "").strip(),
-            max_analysis_minutes=max(1.0, min(float((req or {}).max_analysis_minutes or 3.0), 6.0)),
+            max_analysis_minutes=max(1.0, min(float((req or {}).max_analysis_minutes or 6.0), 6.0)),
         )
         payload = await _build_catalyst_hub_payload(
             user=user,
@@ -25567,6 +25614,14 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
             "merge_output_format": "mp4",
             "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/135.0.0.0 Safari/537.36"
+                )
+            },
         }
         video_file = None
         download_error = extract_error
@@ -25877,6 +25932,7 @@ def _build_catalyst_reference_analysis_evidence(
     }.get(mode, "Unknown")
     sampled_frames = int(float(metrics.get("sampled_frames", 0) or 0))
     analysis_seconds = float(metrics.get("analysis_seconds", 0.0) or 0.0)
+    video_duration_sec = float(selected.get("duration_sec", 0.0) or 0.0)
     confidence_label = _catalyst_reference_analysis_confidence_label(
         mode,
         heuristic_used=heuristic_used,
@@ -25907,7 +25963,7 @@ def _build_catalyst_reference_analysis_evidence(
             ("YouTube blocked direct media sampling, so Catalyst had to rely on preview frames instead of full moving video." if mode == "preview_frames" else ""),
             ("No transcript or audio summary was available, so spoken pacing and narration conclusions are weaker." if not str(transcript_excerpt or "").strip() and not str(audio_summary or "").strip() else ""),
             ("CTR is missing or zero for this video, so packaging conclusions are less certain." if float(selected.get("impression_click_through_rate", 0.0) or 0.0) <= 0 else ""),
-            ("This analysis uses a sampled window, not the full runtime." if analysis_seconds > 0 else ""),
+            ("This analysis uses a sampled window, not the full runtime." if analysis_seconds > 0 and (video_duration_sec <= 0 or analysis_seconds + 5.0 < video_duration_sec) else ""),
         ],
         max_items=6,
     )
@@ -26228,12 +26284,46 @@ async def _build_catalyst_reference_video_analysis(
         source_bundle = {"source_url": source_url}
     source_bundle["source_url"] = source_url
     source_bundle["source_url_video_id"] = selected_video_id
+    if oauth_access_token and selected_video_id:
+        selected_video_meta = dict(selected_video or {})
+        published_hint = str(
+            selected_video_meta.get("published_at", "")
+            or source_bundle.get("upload_date", "")
+            or ""
+        ).strip()
+        if published_hint:
+            selected_video_meta["published_at"] = published_hint
+        try:
+            refreshed_video_metrics = await _youtube_fetch_video_analytics_bulk(
+                oauth_access_token,
+                channel_context.get("channel_id", channel_id),
+                [selected_video_id],
+                video_meta={selected_video_id: selected_video_meta},
+            )
+        except Exception:
+            refreshed_video_metrics = {}
+        metric_row = dict(refreshed_video_metrics.get(selected_video_id) or {})
+        if metric_row:
+            selected_video.update(
+                {
+                    "views": int(metric_row.get("views", selected_video.get("views", 0) or 0) or 0),
+                    "average_view_duration_sec": int(metric_row.get("averageViewDuration", selected_video.get("average_view_duration_sec", 0) or 0) or 0),
+                    "average_view_percentage": round(float(metric_row.get("averageViewPercentage", selected_video.get("average_view_percentage", 0.0) or 0.0) or 0.0), 2),
+                    "impressions": int(metric_row.get("impressions", selected_video.get("impressions", 0) or 0) or 0),
+                    "impression_click_through_rate": round(float(metric_row.get("impressionClickThroughRate", selected_video.get("impression_click_through_rate", 0.0) or 0.0) or 0.0), 2),
+                }
+            )
 
     download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
     download_info = dict(download.get("info") or {})
     download_error = _clip_text(str(download.get("download_error", "") or "").strip(), 420)
     video_path = str(download.get("video_path", "") or "").strip()
-    analysis_seconds = max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0))
+    analysis_seconds = max(60.0, min(float(max_analysis_minutes or 6.0) * 60.0, 600.0))
+    selected_duration_sec = float(
+        source_bundle.get("duration_sec", selected_video.get("duration_sec", 0.0)) or 0.0
+    )
+    if selected_duration_sec > 0:
+        analysis_seconds = min(analysis_seconds, selected_duration_sec)
     audio_summary = ""
     analysis_mode = "direct_media"
     heuristic_used = False
