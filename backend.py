@@ -7122,24 +7122,38 @@ async def _youtube_fetch_owned_video_bundle_oauth(
 
 
 async def _youtube_fetch_channel_search(access_token: str, channel_id: str, order: str = "date", max_results: int = 12) -> list[dict]:
-    payload = await _youtube_api_get(
-        access_token,
-        "/search",
-        params={
-            "part": "snippet",
-            "channelId": channel_id,
-            "order": order,
-            "maxResults": max(1, min(25, int(max_results or 12))),
-            "type": "video",
-        },
-    )
-    video_ids = []
-    for raw in list(payload.get("items") or []):
-        if not isinstance(raw, dict):
-            continue
-        vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
-        if vid:
+    clean_channel_id = str(channel_id or "").strip()
+    if not clean_channel_id:
+        return []
+    remaining = max(1, min(int(max_results or 12), 250))
+    page_token = ""
+    video_ids: list[str] = []
+    seen_ids: set[str] = set()
+    while remaining > 0:
+        payload = await _youtube_api_get(
+            access_token,
+            "/search",
+            params={
+                "part": "snippet",
+                "channelId": clean_channel_id,
+                "order": order,
+                "maxResults": min(50, remaining),
+                "type": "video",
+                **({"pageToken": page_token} if page_token else {}),
+            },
+        )
+        for raw in list(payload.get("items") or []):
+            if not isinstance(raw, dict):
+                continue
+            vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
             video_ids.append(vid)
+        remaining = int(max_results or 12) - len(video_ids)
+        page_token = str(payload.get("nextPageToken", "") or "").strip()
+        if not page_token or remaining <= 0:
+            break
     return await _youtube_fetch_videos(access_token, video_ids)
 
 
@@ -7670,12 +7684,21 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         )
     except Exception:
         owned_channel_videos = []
+    public_search_rows: list[dict] = []
+    try:
+        public_search_rows = await _youtube_fetch_channel_search(
+            access_token,
+            channel_id,
+            order="date",
+            max_results=max(3, min(upload_inventory_target, 100)),
+        )
+    except Exception:
+        public_search_rows = []
     owned_video_by_id = {
         str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
         for row in list(owned_channel_videos or [])
         if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
     }
-
     def _is_public_studio_video(row: dict) -> bool:
         privacy = str((row or {}).get("privacy_status", "") or "").strip().lower()
         return privacy in {"", "public"}
@@ -7716,8 +7739,23 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         reverse=True,
     )
     owned_public_rows = [dict(row or {}) for row in list(owned_inventory_rows or []) if _is_public_studio_video(row)]
+    public_search_inventory_rows = [
+        dict(row or {})
+        for row in list(public_search_rows or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    ]
 
-    if owned_inventory_rows:
+    if public_search_inventory_rows:
+        inventory_rows = []
+        for row in list(public_search_inventory_rows or []):
+            merged = dict(row or {})
+            clean_video_id = str(merged.get("video_id", "") or "").strip()
+            if clean_video_id and clean_video_id in owned_video_by_id:
+                for key, value in dict(owned_video_by_id.get(clean_video_id) or {}).items():
+                    if value not in (None, "", [], {}):
+                        merged[key] = value
+            inventory_rows.append(merged)
+    elif owned_inventory_rows:
         inventory_rows = [dict(row or {}) for row in list(owned_public_rows or owned_inventory_rows)]
     else:
         inventory_rows = [_merge_owned_video_details(row) for row in list(public_uploaded_videos or uploads_inventory_rows)]
