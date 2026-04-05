@@ -6942,6 +6942,81 @@ async def _youtube_fetch_public_video_bundle_api_key(source_url: str) -> dict:
     }
 
 
+async def _youtube_fetch_public_videos_api_key(video_ids: list[str]) -> list[dict]:
+    ids = [str(v).strip() for v in list(video_ids or []) if str(v).strip()]
+    if not ids:
+        return []
+    items_by_id: dict[str, dict] = {}
+    for start in range(0, len(ids), 50):
+        chunk = ids[start : start + 50]
+        payload, _active_key = await _youtube_public_api_get(
+            "/videos",
+            params={
+                "part": "snippet,statistics,contentDetails,status",
+                "id": ",".join(chunk),
+                "maxResults": min(50, len(chunk)),
+            },
+        )
+        for raw in list(payload.get("items") or []):
+            if not isinstance(raw, dict):
+                continue
+            vid = str(raw.get("id", "") or "").strip()
+            if not vid:
+                continue
+            snippet = dict(raw.get("snippet") or {})
+            stats = dict(raw.get("statistics") or {})
+            status = dict(raw.get("status") or {})
+            items_by_id[vid] = {
+                "video_id": vid,
+                "title": str(snippet.get("title", "") or "").strip(),
+                "description": str(snippet.get("description", "") or "").strip(),
+                "published_at": str(snippet.get("publishedAt", "") or "").strip(),
+                "thumbnail_url": str((((snippet.get("thumbnails") or {}).get("high") or {}).get("url") or "")).strip(),
+                "tags": [str(tag).strip() for tag in list(snippet.get("tags") or []) if str(tag).strip()][:20],
+                "duration_sec": _parse_youtube_iso8601_duration(str((raw.get("contentDetails") or {}).get("duration", "") or "")),
+                "views": int(float(stats.get("viewCount", 0) or 0)),
+                "likes": int(float(stats.get("likeCount", 0) or 0)),
+                "comments": int(float(stats.get("commentCount", 0) or 0)),
+                "privacy_status": str(status.get("privacyStatus", "") or "").strip(),
+            }
+    return [items_by_id[vid] for vid in ids if vid in items_by_id]
+
+
+async def _youtube_fetch_public_channel_search_api_key(channel_id: str, order: str = "date", max_results: int = 12) -> list[dict]:
+    clean_channel_id = str(channel_id or "").strip()
+    if not clean_channel_id:
+        return []
+    remaining = max(1, min(int(max_results or 12), 250))
+    page_token = ""
+    video_ids: list[str] = []
+    seen_ids: set[str] = set()
+    while remaining > 0:
+        payload, _active_key = await _youtube_public_api_get(
+            "/search",
+            params={
+                "part": "snippet",
+                "channelId": clean_channel_id,
+                "order": order,
+                "maxResults": min(50, remaining),
+                "type": "video",
+                **({"pageToken": page_token} if page_token else {}),
+            },
+        )
+        for raw in list(payload.get("items") or []):
+            if not isinstance(raw, dict):
+                continue
+            vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+            video_ids.append(vid)
+        remaining = int(max_results or 12) - len(video_ids)
+        page_token = str(payload.get("nextPageToken", "") or "").strip()
+        if not page_token or remaining <= 0:
+            break
+    return await _youtube_fetch_public_videos_api_key(video_ids)
+
+
 def _youtube_caption_language_candidates(language: str = "en") -> list[str]:
     preferred: list[str] = []
     for raw in [str(language or "").strip().lower(), "en", "en-us", "en-gb"]:
@@ -7686,14 +7761,23 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         owned_channel_videos = []
     public_search_rows: list[dict] = []
     try:
-        public_search_rows = await _youtube_fetch_channel_search(
-            access_token,
+        public_search_rows = await _youtube_fetch_public_channel_search_api_key(
             channel_id,
             order="date",
             max_results=max(3, min(upload_inventory_target, 100)),
         )
     except Exception:
         public_search_rows = []
+    if not public_search_rows:
+        try:
+            public_search_rows = await _youtube_fetch_channel_search(
+                access_token,
+                channel_id,
+                order="date",
+                max_results=max(3, min(upload_inventory_target, 100)),
+            )
+        except Exception:
+            public_search_rows = []
     owned_video_by_id = {
         str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
         for row in list(owned_channel_videos or [])
