@@ -242,6 +242,7 @@ from backend_models import (
     CatalystHubDirectiveRequest,
     CatalystHubRefreshRequest,
     CatalystHubLaunchRequest,
+    CatalystHubReferenceVideoAnalysisRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -7978,6 +7979,7 @@ async def _derive_longform_seed_from_catalyst_hub(
     channel_context: dict | None = None,
     memory_public: dict | None = None,
     playbook: dict | None = None,
+    reference_video_analysis: dict | None = None,
     mission: str = "",
     directive: str = "",
     guardrails: list[str] | None = None,
@@ -8007,6 +8009,9 @@ async def _derive_longform_seed_from_catalyst_hub(
     channel_context = dict(channel_context or {})
     memory_public = dict(memory_public or {})
     playbook = dict(playbook or {})
+    reference_video_analysis = dict(reference_video_analysis or {})
+    reference_video_payload = dict(reference_video_analysis.get("analysis") or {})
+    reference_video_meta = dict(reference_video_analysis.get("video") or {})
     mission_text = _clip_text(str(mission or "").strip(), 320)
     directive_text = _clip_text(str(directive or "").strip(), 2400)
     guardrail_list = [str(v).strip() for v in list(guardrails or []) if str(v).strip()]
@@ -8032,10 +8037,24 @@ async def _derive_longform_seed_from_catalyst_hub(
     best_moves = [str(v).strip() for v in list(memory_public.get("next_video_moves") or []) if str(v).strip()]
     strongest_signals = [str(v).strip() for v in list(memory_public.get("wins_to_keep") or []) if str(v).strip()]
     weak_points = [str(v).strip() for v in list(memory_public.get("mistakes_to_avoid") or []) if str(v).strip()]
+    reference_summary = _clip_text(
+        str(reference_video_payload.get("summary", "") or "").strip() or reference_summary,
+        600,
+    )
+    reference_hook_rules = [str(v).strip() for v in list(reference_video_payload.get("hook_system") or []) if str(v).strip()]
+    reference_pacing_rules = [str(v).strip() for v in list(reference_video_payload.get("pacing_system") or []) if str(v).strip()]
+    reference_visual_rules = [str(v).strip() for v in list(reference_video_payload.get("visual_system") or []) if str(v).strip()]
+    reference_sound_rules = [str(v).strip() for v in list(reference_video_payload.get("sound_system") or []) if str(v).strip()]
+    reference_transition_rules = [str(v).strip() for v in list(reference_video_payload.get("transition_system") or []) if str(v).strip()]
+    reference_structure_map = [str(v).strip() for v in list(reference_video_payload.get("structure_map") or []) if str(v).strip()]
+    reference_next_video_moves = [str(v).strip() for v in list(reference_video_payload.get("next_video_moves") or []) if str(v).strip()]
+    reference_candidate_titles = [str(v).strip() for v in list(reference_video_payload.get("candidate_titles") or []) if str(v).strip()]
     focus_subject = series_anchor or archetype_label or (niche_list[0] if niche_list else "") or "the strongest winning angle on this channel"
     audit_candidate_titles = [str(v).strip() for v in list(channel_audit.get("next_video_candidates") or []) if str(v).strip()]
     fallback_topic = _clip_text(
-        audit_candidate_titles[0]
+        reference_candidate_titles[0]
+        if reference_candidate_titles
+        else audit_candidate_titles[0]
         if audit_candidate_titles
         else (f"The hidden system behind {focus_subject}" if focus_subject else f"A stronger {workspace_label.lower()}"),
         180,
@@ -8091,6 +8110,16 @@ async def _derive_longform_seed_from_catalyst_hub(
                     ("Audit next moves: " + "; ".join(list(channel_audit.get("next_moves") or [])[:4])) if channel_audit.get("next_moves") else "",
                     ("Audit candidate titles: " + " | ".join(list(channel_audit.get("next_video_candidates") or [])[:4])) if channel_audit.get("next_video_candidates") else "",
                     ("Reference playbook: " + reference_summary) if reference_summary else "",
+                    ("Reference video title: " + _clip_text(str(reference_video_meta.get("title", "") or "").strip(), 180)) if reference_video_meta.get("title") else "",
+                    ("Reference video summary: " + reference_summary) if reference_summary else "",
+                    ("Reference hook system: " + "; ".join(reference_hook_rules[:4])) if reference_hook_rules else "",
+                    ("Reference pacing system: " + "; ".join(reference_pacing_rules[:4])) if reference_pacing_rules else "",
+                    ("Reference visual system: " + "; ".join(reference_visual_rules[:4])) if reference_visual_rules else "",
+                    ("Reference sound system: " + "; ".join(reference_sound_rules[:4])) if reference_sound_rules else "",
+                    ("Reference transition system: " + "; ".join(reference_transition_rules[:4])) if reference_transition_rules else "",
+                    ("Reference structure map: " + "; ".join(reference_structure_map[:5])) if reference_structure_map else "",
+                    ("Reference next moves: " + "; ".join(reference_next_video_moves[:5])) if reference_next_video_moves else "",
+                    ("Reference candidate titles: " + " | ".join(reference_candidate_titles[:4])) if reference_candidate_titles else "",
                     ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
                     ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
                     ("Next moves: " + "; ".join(best_moves[:5])) if best_moves else "",
@@ -8297,6 +8326,7 @@ async def _build_catalyst_hub_payload(
             "selected_cluster": dict(series_context.get("selected_cluster") or {}),
             "cluster_context": _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320),
             "reference_summary": _clip_text(str((memory_public.get("reference_summary") if isinstance(memory_public, dict) else "") or ""), 320),
+            "reference_video_analysis": dict(memory_bucket.get("reference_video_analysis") or {}),
         }
     default_workspace_id = next(
         (
@@ -24054,6 +24084,45 @@ async def catalyst_hub_refresh(
         raise HTTPException(500, _clip_text(f"Catalyst hub refresh failed: {e}", 220))
 
 
+@app.post("/api/catalyst/hub/reference-video-analysis")
+async def catalyst_hub_reference_video_analysis(
+    req: CatalystHubReferenceVideoAnalysisRequest,
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    channel_id = str((req or {}).channel_id or "").strip()
+    workspace_id = str((req or {}).workspace_id or "documentary").strip().lower() or "documentary"
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
+        raise HTTPException(400, "Reference video analysis currently supports long-form workspaces only")
+    try:
+        analysis_result = await _build_catalyst_reference_video_analysis(
+            user=user,
+            channel_id=channel_id,
+            workspace_id=workspace_id,
+            video_id=str((req or {}).video_id or "").strip(),
+            max_analysis_minutes=max(1.0, min(float((req or {}).max_analysis_minutes or 3.0), 6.0)),
+        )
+        payload = await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=False,
+            refresh_outcomes=False,
+        )
+        return {
+            "ok": True,
+            "analysis": analysis_result,
+            "payload": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Catalyst reference video analysis failed")
+        raise HTTPException(500, _clip_text(f"Catalyst reference analysis failed: {e}", 220))
+
+
 @app.post("/api/catalyst/hub/instructions")
 async def catalyst_hub_save_instructions(
     req: CatalystHubDirectiveRequest,
@@ -24135,6 +24204,19 @@ async def catalyst_hub_launch_longform(
     channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
     if not channel_context:
         raise HTTPException(400, "Connect and sync the YouTube channel before launching Catalyst long-form")
+    reference_video_analysis = dict(workspace_snapshot.get("reference_video_analysis") or {})
+    if workspace_id == "documentary" and not dict(reference_video_analysis.get("analysis") or {}):
+        try:
+            reference_video_analysis = await _build_catalyst_reference_video_analysis(
+                user=user,
+                channel_id=channel_id,
+                workspace_id=workspace_id,
+                video_id="",
+                max_analysis_minutes=3.0,
+            )
+        except Exception as e:
+            log.warning(f"Catalyst documentary reference video analysis auto-build failed: {e}")
+            reference_video_analysis = {}
     mission = _clip_text(str((req or {}).mission or memory_public.get("operator_mission", "") or "").strip(), 320)
     directive = _clip_text(str((req or {}).directive or memory_public.get("operator_directive", "") or "").strip(), 2400)
     guardrails = _dedupe_preserve_order(
@@ -24152,6 +24234,7 @@ async def catalyst_hub_launch_longform(
         channel_context=channel_context,
         memory_public=memory_public,
         playbook=playbook,
+        reference_video_analysis=reference_video_analysis,
         mission=mission,
         directive=directive,
         guardrails=guardrails,
@@ -24169,6 +24252,12 @@ async def catalyst_hub_launch_longform(
         ("Channel audit candidate titles: " + " | ".join(list((channel_context.get("channel_audit") or {}).get("next_video_candidates") or [])[:4])) if list((channel_context.get("channel_audit") or {}).get("next_video_candidates") or []) else "",
         ("Catalyst memory summary: " + _clip_text(str(memory_public.get("summary", "") or "").strip(), 400)) if memory_public.get("summary") else "",
         ("Catalyst playbook summary: " + _clip_text(str(playbook.get("summary", "") or "").strip(), 400)) if playbook.get("summary") else "",
+        ("Reference video summary: " + _clip_text(str((dict(reference_video_analysis.get("analysis") or {})).get("summary", "") or "").strip(), 480)) if (dict(reference_video_analysis.get("analysis") or {})).get("summary") else "",
+        ("Reference hook system: " + "; ".join(list((dict(reference_video_analysis.get("analysis") or {})).get("hook_system") or [])[:4])) if list((dict(reference_video_analysis.get("analysis") or {})).get("hook_system") or []) else "",
+        ("Reference pacing system: " + "; ".join(list((dict(reference_video_analysis.get("analysis") or {})).get("pacing_system") or [])[:4])) if list((dict(reference_video_analysis.get("analysis") or {})).get("pacing_system") or []) else "",
+        ("Reference visual system: " + "; ".join(list((dict(reference_video_analysis.get("analysis") or {})).get("visual_system") or [])[:4])) if list((dict(reference_video_analysis.get("analysis") or {})).get("visual_system") or []) else "",
+        ("Reference sound system: " + "; ".join(list((dict(reference_video_analysis.get("analysis") or {})).get("sound_system") or [])[:4])) if list((dict(reference_video_analysis.get("analysis") or {})).get("sound_system") or []) else "",
+        ("Reference next moves: " + "; ".join(list((dict(reference_video_analysis.get("analysis") or {})).get("next_video_moves") or [])[:5])) if list((dict(reference_video_analysis.get("analysis") or {})).get("next_video_moves") or []) else "",
         "Launch intent: Build the next strongest long-form video for this channel using connected-channel memory, public benchmark mining, and Catalyst operator guidance.",
     ]
     session_public = await _create_longform_session_internal(
@@ -24832,6 +24921,545 @@ async def transcribe_audio_with_grok(audio_path: str) -> str:
         except Exception:
             pass
     return f"Audio duration: {duration:.1f}s"
+
+
+def _slugify_file_component(value: str, fallback: str = "item", max_len: int = 64) -> str:
+    raw = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "").strip()).strip("-").lower()
+    raw = re.sub(r"-{2,}", "-", raw)
+    raw = raw[:max_len].strip("-")
+    return raw or fallback
+
+
+def _youtube_watch_url(video_id: str) -> str:
+    clean = str(video_id or "").strip()
+    return f"https://www.youtube.com/watch?v={clean}" if clean else ""
+
+
+def _pick_catalyst_reference_video(channel_context: dict | None, requested_video_id: str = "") -> dict:
+    context = dict(channel_context or {})
+    requested = str(requested_video_id or "").strip()
+    candidate_rows = [
+        *[dict(v or {}) for v in list(context.get("top_videos") or []) if isinstance(v, dict)],
+        dict((context.get("historical_compare") or {}).get("best_recent_video") or {}),
+        dict((context.get("historical_compare") or {}).get("latest_video") or {}),
+        dict((context.get("historical_compare") or {}).get("previous_video") or {}),
+    ]
+    deduped: list[dict] = []
+    seen_ids: set[str] = set()
+    for row in candidate_rows:
+        video_id = str(row.get("video_id", "") or "").strip()
+        if not video_id or video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
+        deduped.append(row)
+    if requested:
+        match = next((dict(row) for row in deduped if str(row.get("video_id", "") or "").strip() == requested), None)
+        if match:
+            return match
+    return dict(deduped[0] or {}) if deduped else {}
+
+
+def _reference_video_analysis_dir(user_id: str, channel_id: str, workspace_id: str, video_id: str) -> Path:
+    root = TEMP_DIR / "catalyst_reference_video"
+    bucket = (
+        _slugify_file_component(user_id or "owner", fallback="owner", max_len=48),
+        _slugify_file_component(channel_id or "channel", fallback="channel", max_len=48),
+        _slugify_file_component(workspace_id or "documentary", fallback="documentary", max_len=32),
+        _slugify_file_component(video_id or "video", fallback="video", max_len=32),
+    )
+    path = root.joinpath(*bucket)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def _download_youtube_video_for_reference_analysis(source_url: str, output_dir: Path) -> dict:
+    normalized_url = _normalize_external_source_url(source_url)
+    if not normalized_url:
+        raise RuntimeError("Source URL missing for reference analysis")
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not available for reference analysis")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _download() -> dict:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "merge_output_format": "mp4",
+            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(normalized_url, download=True) or {}
+        video_id = str(info.get("id", "") or "").strip()
+        files = sorted(output_dir.glob(f"{video_id}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
+        return {
+            "info": info,
+            "video_path": str(video_file) if video_file else "",
+        }
+
+    return await asyncio.to_thread(_download)
+
+
+async def _extract_reference_video_sample_frames(
+    video_path: str,
+    output_dir: Path,
+    *,
+    max_frames: int = 12,
+    max_seconds: float = 180.0,
+) -> dict:
+    if cv2 is None or np is None:
+        return {"frame_paths": [], "metrics": {"error": "opencv_unavailable"}}
+    source_path = str(video_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return {"frame_paths": [], "metrics": {"error": "missing_video"}}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _run() -> dict:
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            return {"frame_paths": [], "metrics": {"error": "cannot_open_video"}}
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_sec = (total_frames / fps) if fps > 0 and total_frames > 0 else 0.0
+        analysis_seconds = min(float(max_seconds or 180.0), duration_sec or float(max_seconds or 180.0))
+        if fps <= 0:
+            fps = 24.0
+        max_frame_index = min(total_frames - 1, max(0, int(round(analysis_seconds * fps)) - 1)) if total_frames > 0 else 0
+        sample_count = max(6, min(int(max_frames or 12), 18))
+        target_indices = sorted({
+            int(round((max_frame_index * idx) / max(sample_count - 1, 1)))
+            for idx in range(sample_count)
+        })
+        stride = max(1, int(round(fps / 2.0)))
+        prev_gray = None
+        idx = 0
+        motion_rows: list[dict] = []
+        frame_paths: list[str] = []
+        saved_indices: set[int] = set()
+        target_set = set(target_indices)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if idx > max_frame_index:
+                break
+            should_analyze = (idx % stride == 0) or (idx in target_set)
+            gray = None
+            if should_analyze:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                motion = 0.0 if prev_gray is None else float(np.mean(cv2.absdiff(gray, prev_gray)))
+                sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                contrast = float(np.std(gray))
+                saturation = float(np.mean(hsv[:, :, 1]))
+                motion_rows.append(
+                    {
+                        "frame_index": idx,
+                        "timestamp_sec": round(idx / fps, 3),
+                        "motion": round(motion, 3),
+                        "sharpness": round(sharpness, 3),
+                        "contrast": round(contrast, 3),
+                        "saturation": round(saturation, 3),
+                    }
+                )
+                prev_gray = gray
+            if idx in target_set and idx not in saved_indices:
+                frame_path = output_dir / f"frame_{idx:06d}.jpg"
+                cv2.imwrite(str(frame_path), frame)
+                frame_paths.append(str(frame_path))
+                saved_indices.add(idx)
+            idx += 1
+        cap.release()
+
+        if not motion_rows:
+            return {
+                "frame_paths": frame_paths,
+                "metrics": {
+                    "duration_sec": round(duration_sec, 2),
+                    "analysis_seconds": round(analysis_seconds, 2),
+                    "sampled_frames": len(frame_paths),
+                    "error": "no_metrics",
+                },
+            }
+
+        avg_motion = sum(float(row.get("motion", 0.0) or 0.0) for row in motion_rows) / max(len(motion_rows), 1)
+        avg_sharpness = sum(float(row.get("sharpness", 0.0) or 0.0) for row in motion_rows) / max(len(motion_rows), 1)
+        avg_contrast = sum(float(row.get("contrast", 0.0) or 0.0) for row in motion_rows) / max(len(motion_rows), 1)
+        avg_saturation = sum(float(row.get("saturation", 0.0) or 0.0) for row in motion_rows) / max(len(motion_rows), 1)
+        cut_events = [row for row in motion_rows if float(row.get("motion", 0.0) or 0.0) >= 18.0]
+        hook_rows = [row for row in motion_rows if float(row.get("timestamp_sec", 0.0) or 0.0) <= 30.0]
+        top_motion = sorted(motion_rows, key=lambda row: (-float(row.get("motion", 0.0) or 0.0), float(row.get("timestamp_sec", 0.0) or 0.0)))[:6]
+        low_motion = sorted(motion_rows, key=lambda row: (float(row.get("motion", 0.0) or 0.0), float(row.get("timestamp_sec", 0.0) or 0.0)))[:6]
+        return {
+            "frame_paths": frame_paths[:18],
+            "metrics": {
+                "duration_sec": round(duration_sec, 2),
+                "analysis_seconds": round(analysis_seconds, 2),
+                "fps": round(fps, 2),
+                "sampled_frames": len(frame_paths),
+                "analyzed_steps": len(motion_rows),
+                "avg_motion": round(avg_motion, 3),
+                "avg_sharpness": round(avg_sharpness, 3),
+                "avg_contrast": round(avg_contrast, 3),
+                "avg_saturation": round(avg_saturation, 3),
+                "cut_events": len(cut_events),
+                "cuts_per_minute": round((len(cut_events) / max(analysis_seconds, 1.0)) * 60.0, 2),
+                "hook_motion_avg_first_30_sec": round(sum(float(row.get("motion", 0.0) or 0.0) for row in hook_rows) / max(len(hook_rows), 1), 3) if hook_rows else 0.0,
+                "hook_sharpness_avg_first_30_sec": round(sum(float(row.get("sharpness", 0.0) or 0.0) for row in hook_rows) / max(len(hook_rows), 1), 3) if hook_rows else 0.0,
+                "top_motion_moments": top_motion,
+                "lowest_motion_moments": low_motion,
+            },
+        }
+
+    return await asyncio.to_thread(_run)
+
+
+def _normalize_catalyst_reference_video_analysis(raw: dict | None) -> dict:
+    payload = dict(raw or {})
+    list_fields = (
+        "why_it_worked",
+        "what_hurt_weaker_upload",
+        "hook_system",
+        "pacing_system",
+        "visual_system",
+        "sound_system",
+        "transition_system",
+        "structure_map",
+        "threed_translation_moves",
+        "title_thumbnail_rules",
+        "next_video_moves",
+        "avoid_rules",
+        "candidate_titles",
+    )
+    normalized = {
+        "summary": _clip_text(str(payload.get("summary", "") or "").strip(), 420),
+    }
+    for field_name in list_fields:
+        normalized[field_name] = _dedupe_preserve_order(
+            [str(v).strip() for v in list(payload.get(field_name) or []) if str(v).strip()],
+            max_items=8 if field_name != "candidate_titles" else 5,
+            max_chars=180 if field_name != "candidate_titles" else 140,
+        )
+    return normalized
+
+
+def _heuristic_catalyst_reference_video_analysis(
+    *,
+    source_bundle: dict | None,
+    selected_video: dict | None,
+    channel_context: dict | None,
+    frame_metrics: dict | None,
+) -> dict:
+    source_bundle = dict(source_bundle or {})
+    selected_video = dict(selected_video or {})
+    channel_context = dict(channel_context or {})
+    frame_metrics = dict(frame_metrics or {})
+    title = _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180)
+    description = _clip_text(str(source_bundle.get("description", "") or "").strip(), 700)
+    transcript_excerpt = _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 1800)
+    niche = _catalyst_infer_niche(title, description, transcript_excerpt, format_preset="documentary")
+    archetype = _catalyst_infer_archetype(
+        title,
+        description,
+        transcript_excerpt,
+        niche_key=str(niche.get("key", "") or "").strip().lower(),
+        format_preset="documentary",
+    )
+    avg_motion = float(frame_metrics.get("avg_motion", 0.0) or 0.0)
+    cuts_per_minute = float(frame_metrics.get("cuts_per_minute", 0.0) or 0.0)
+    hook_motion = float(frame_metrics.get("hook_motion_avg_first_30_sec", 0.0) or 0.0)
+    title_focus = re.sub(r"\s*\|.*$", "", title).strip()
+    candidate_titles = _same_arena_title_variants(
+        {"title": title_focus, "description": description},
+        topic=title_focus,
+        format_preset="documentary",
+        max_items=5,
+    )
+    summary_bits = [
+        f"The strongest current Empire video is '{title}' in the {str(archetype.get('label', '') or 'documentary').strip()} lane.",
+        "It works because the promise is obvious immediately, the subject is emotionally invasive, and the frame language stays premium and human-scale.",
+        "Catalyst should translate that into sharper fully 3D pressure scenes, not static dossier tables or empty archive rooms.",
+    ]
+    if cuts_per_minute > 0:
+        summary_bits.append(f"Current sampled cut density is about {cuts_per_minute:.1f} cuts per minute, so the next run should preserve consequence-first movement instead of drifting into static proof boards.")
+    if hook_motion > 0:
+        summary_bits.append(f"Hook motion in the first 30 seconds is about {hook_motion:.1f}, which means the opener needs visible human pressure and a quick payoff image, not a slow setup room.")
+    why_it_worked = [
+        "The title promise is immediate, invasive, and easy to understand at a glance.",
+        "The winning lane stays inside one clear arena: hidden psychology and personal manipulation.",
+        "Frames feel expensive when they center on people under pressure instead of empty objects or generic mechanism props.",
+        "The opening should deliver claim, proof, and personal consequence quickly instead of warming up slowly.",
+    ]
+    what_hurt_weaker_upload = [
+        "Static archive rooms, untouched tables, and generic dossier setups dilute the topic instead of explaining it.",
+        "Prop-first staging without a visible human consequence makes the image feel off-topic even when the prompt sounds correct.",
+        "Overusing the same room grammar lowers visual score and makes the documentary feel templated instead of engineered.",
+    ]
+    if avg_motion < 6.0:
+        what_hurt_weaker_upload.append("Low frame motion in sampled scenes suggests the video can easily slip into dead visual air if Catalyst leans too hard on static proof frames.")
+    hook_system = [
+        "Open on a person already under pressure, not an empty room explaining the idea.",
+        "Land the contradiction immediately: the viewer sees a wrong decision happening before the narration explains why.",
+        "Use one obvious human power imbalance in the first frame so the topic reads instantly on a phone screen.",
+    ]
+    pacing_system = [
+        "Deliver proof every 5 to 10 seconds: claim, visible trigger, leverage, consequence, reset.",
+        "Escalate from one personal manipulation moment into a broader system, not from one static room into another static room.",
+        "Avoid repeating the same boardroom or archive composition back-to-back.",
+    ]
+    visual_system = [
+        "Use Fern-grade human-scale psychological pressure scenes: executive meetings, interviews, mirrored conversations, surveillance reveals, and consequence rooms.",
+        "Keep people, posture, gaze, hierarchy, distance, and timing visible in frame; that is the topic.",
+        "Avoid empty dossier rooms, untouched desks, centered props, literal anatomy, and generic machine filler.",
+    ]
+    sound_system = [
+        "Use low-end tension pulses, restrained silence pockets, and precise reveal accents instead of horror-camp textures.",
+        "Sound should tighten around the moment status or social pressure flips the decision.",
+        "Keep the bed expensive and controlled; do not drown narration in constant noise.",
+    ]
+    transition_system = [
+        "Use Magnates-style consequence resets between beats, not soft dissolves between similar rooms.",
+        "Cut from pressure moment to proof frame, then from proof frame to consequence frame.",
+        "Every transition should clarify leverage, not just vary the angle.",
+    ]
+    structure_map = [
+        "Hook: invasive decision already happening.",
+        "Proof: reveal the hidden pressure or trigger.",
+        "Mechanism: explain the manipulation cleanly.",
+        "Consequence: show what it costs the victim.",
+        "Escalation: widen from one scene to the bigger system.",
+        "Payoff: return to the viewer with a sharper practical implication.",
+    ]
+    threed_translation_moves = [
+        "Translate the winner into premium CG with designed glass offices, surveillance reflections, evidence overlays, and human-scale staging.",
+        "Use architectural Fern-style lighting and disciplined composition, but keep Magnates-style consequence cuts between proof beats.",
+        "Build the 3D around power dynamics and emotional cost, not around props or anatomy substitutes.",
+    ]
+    title_thumbnail_rules = [
+        "Keep the title promise short, invasive, and personal.",
+        "Thumbnail direction should show a human under pressure, one dominant power cue, and one obvious consequence.",
+        "Avoid lore chains, textbook phrasing, and generic 'brain facts' packaging.",
+    ]
+    next_video_moves = [
+        "Use the strongest Empire video as the narrative benchmark, but make the next run more human, more expensive, and more 3D.",
+        "Anchor every chapter opener in a visible manipulation moment before explanation.",
+        "Replace archive filler with pressure scenes, consequence scenes, and controlled symbolic mind-worlds.",
+    ]
+    avoid_rules = [
+        "No empty dossier rooms as the main beat.",
+        "No repeated boardroom still lifes.",
+        "No centered prop pedestal shots.",
+        "No literal exposed-brain or anatomy fallback unless the narration explicitly demands it.",
+    ]
+    return _normalize_catalyst_reference_video_analysis(
+        {
+            "summary": " ".join(summary_bits),
+            "why_it_worked": why_it_worked,
+            "what_hurt_weaker_upload": what_hurt_weaker_upload,
+            "hook_system": hook_system,
+            "pacing_system": pacing_system,
+            "visual_system": visual_system,
+            "sound_system": sound_system,
+            "transition_system": transition_system,
+            "structure_map": structure_map,
+            "threed_translation_moves": threed_translation_moves,
+            "title_thumbnail_rules": title_thumbnail_rules,
+            "next_video_moves": next_video_moves,
+            "avoid_rules": avoid_rules,
+            "candidate_titles": candidate_titles,
+        }
+    )
+
+
+async def _persist_catalyst_reference_video_analysis(
+    *,
+    user_id: str,
+    channel_id: str,
+    workspace_id: str,
+    source_bundle: dict,
+    selected_video: dict,
+    frame_metrics: dict,
+    analysis: dict,
+) -> dict:
+    memory_key = _catalyst_channel_memory_key(user_id, channel_id, workspace_id)
+    async with _catalyst_memory_lock:
+        _load_catalyst_memory()
+        existing = dict(_catalyst_channel_memory.get(memory_key) or {})
+        updated = dict(existing)
+        summary = _clip_text(str((analysis or {}).get("summary", "") or "").strip(), 420)
+        updated["reference_video_analysis"] = {
+            "video_id": str(selected_video.get("video_id", "") or source_bundle.get("source_url_video_id", "") or "").strip(),
+            "video_title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
+            "video_url": str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip(),
+            "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
+            "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
+            "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
+            "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "transcript_excerpt": _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 2400),
+            "public_summary": _clip_text(str(source_bundle.get("public_summary", "") or "").strip(), 480),
+            "frame_metrics": dict(frame_metrics or {}),
+            "analysis": dict(analysis or {}),
+            "analyzed_at": time.time(),
+        }
+        updated["reference_summary"] = summary
+        updated["last_reference_summary"] = summary
+        updated["reference_video_title"] = _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180)
+        updated["reference_video_url"] = str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip()
+        updated["reference_video_id"] = str(selected_video.get("video_id", "") or "").strip()
+        updated["reference_hook_rules"] = list(analysis.get("hook_system") or [])
+        updated["reference_pacing_rules"] = list(analysis.get("pacing_system") or [])
+        updated["reference_visual_rules"] = list(analysis.get("visual_system") or [])
+        updated["reference_sound_rules"] = list(analysis.get("sound_system") or [])
+        updated["reference_transition_rules"] = list(analysis.get("transition_system") or [])
+        updated["reference_structure_map"] = list(analysis.get("structure_map") or [])
+        updated["reference_title_thumbnail_rules"] = list(analysis.get("title_thumbnail_rules") or [])
+        updated["reference_next_video_moves"] = list(analysis.get("next_video_moves") or [])
+        updated["wins_to_keep"] = _dedupe_preserve_order(
+            [*list(analysis.get("why_it_worked") or []), *list(existing.get("wins_to_keep") or [])],
+            max_items=10,
+            max_chars=180,
+        )
+        updated["mistakes_to_avoid"] = _dedupe_preserve_order(
+            [*list(analysis.get("what_hurt_weaker_upload") or []), *list(analysis.get("avoid_rules") or []), *list(existing.get("mistakes_to_avoid") or [])],
+            max_items=10,
+            max_chars=180,
+        )
+        updated["next_video_moves"] = _dedupe_preserve_order(
+            [*list(analysis.get("next_video_moves") or []), *list(existing.get("next_video_moves") or [])],
+            max_items=10,
+            max_chars=180,
+        )
+        updated["updated_at"] = time.time()
+        _catalyst_channel_memory[memory_key] = updated
+        _save_catalyst_memory()
+        return dict(updated)
+
+
+async def _build_catalyst_reference_video_analysis(
+    *,
+    user: dict,
+    channel_id: str,
+    workspace_id: str,
+    video_id: str = "",
+    max_analysis_minutes: float = 3.0,
+) -> dict:
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
+    if not channel_context:
+        raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")
+    selected_video = _pick_catalyst_reference_video(channel_context, requested_video_id=video_id)
+    if not selected_video:
+        raise HTTPException(404, "No connected-channel top video was available to analyze")
+    selected_video_id = str(selected_video.get("video_id", "") or "").strip()
+    source_url = _youtube_watch_url(selected_video_id)
+    if not source_url:
+        raise HTTPException(404, "Reference video is missing a usable YouTube video id")
+
+    work_dir = _reference_video_analysis_dir(
+        str(user.get("id", "") or "").strip(),
+        channel_id,
+        workspace_id,
+        selected_video_id,
+    )
+    source_bundle = await _fetch_source_video_bundle(source_url, language="en")
+    if not source_bundle:
+        source_bundle = {"source_url": source_url}
+    source_bundle["source_url"] = source_url
+    source_bundle["source_url_video_id"] = selected_video_id
+
+    download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
+    video_path = str(download.get("video_path", "") or "").strip()
+    if not video_path:
+        raise HTTPException(500, "Failed to download the connected-channel reference video for analysis")
+
+    audio_path = await extract_audio_from_video(video_path) or ""
+    audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+    frame_pack = await _extract_reference_video_sample_frames(
+        video_path,
+        work_dir / "frames",
+        max_frames=14,
+        max_seconds=max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0)),
+    )
+    frame_paths = [str(v).strip() for v in list(frame_pack.get("frame_paths") or []) if str(v).strip()]
+    frame_metrics = dict(frame_pack.get("metrics") or {})
+    historical_compare = dict(channel_context.get("historical_compare") or {})
+    latest_video = dict(historical_compare.get("latest_video") or {})
+    previous_video = dict(historical_compare.get("previous_video") or {})
+    worst_recent_video = dict(historical_compare.get("worst_recent_video") or {})
+    channel_audit = dict(channel_context.get("channel_audit") or {})
+
+    analysis_prompt = "\n".join(
+        part for part in [
+            "Reference video objective: break down the connected channel's strongest current video so Catalyst can rebuild it as a better fully 3D documentary without copying it literally.",
+            f"Channel summary: {_clip_text(str(channel_context.get('summary', '') or '').strip(), 700)}",
+            ("Channel audit: " + _clip_text(str(channel_audit.get("summary", "") or "").strip(), 520)) if channel_audit.get("summary") else "",
+            ("Channel audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:4])) if channel_audit.get("strengths") else "",
+            ("Channel audit warnings: " + "; ".join(list(channel_audit.get("warnings") or [])[:4])) if channel_audit.get("warnings") else "",
+            f"Top reference video title: {_clip_text(str(selected_video.get('title', '') or source_bundle.get('title', '') or '').strip(), 220)}",
+            f"Top reference video URL: {source_url}",
+            f"Top reference video public summary: {_clip_text(str(source_bundle.get('public_summary', '') or '').strip(), 700)}",
+            f"Top reference video transcript excerpt: {_clip_text(str(source_bundle.get('transcript_excerpt', '') or '').strip(), 2800)}",
+            ("Audio summary: " + audio_summary) if audio_summary else "",
+            ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
+            ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
+            ("Previous upload: " + _clip_text(str(previous_video.get("title", "") or "").strip(), 220)) if previous_video else "",
+            ("Weakest recent package: " + _clip_text(str(worst_recent_video.get("title", "") or "").strip(), 220)) if worst_recent_video else "",
+            "Return strict JSON with keys: summary, why_it_worked, what_hurt_weaker_upload, hook_system, pacing_system, visual_system, sound_system, transition_system, structure_map, threed_translation_moves, title_thumbnail_rules, next_video_moves, avoid_rules, candidate_titles.",
+            "Focus on what makes the best video work, what the weaker upload is missing, and how to translate the winner into a stronger Fern-grade fully 3D Empire Magnates video.",
+        ]
+        if part
+    )
+    try:
+        raw_analysis = await _xai_json_completion_multimodal(
+            system_prompt=(
+                "You are Catalyst's reference-video analyst for NYPTID Studio. "
+                "Analyze the provided winning YouTube documentary frames plus metadata, transcript excerpt, and frame metrics. "
+                "Be specific about hook timing, narrative escalation, visual framing, transition rhythm, sound design, and how to rebuild this into a premium fully 3D documentary. "
+                "Do not describe generic explainer advice. Output strict JSON only."
+            ),
+            user_prompt=analysis_prompt,
+            image_paths=frame_paths[:14],
+            temperature=0.25,
+            timeout_sec=180,
+            model="grok-4",
+        )
+        analysis = _normalize_catalyst_reference_video_analysis(raw_analysis)
+    except Exception as e:
+        log.warning(f"Catalyst reference video multimodal analysis fell back to heuristic mode: {e}")
+        analysis = _heuristic_catalyst_reference_video_analysis(
+            source_bundle=source_bundle,
+            selected_video=selected_video,
+            channel_context=channel_context,
+            frame_metrics=frame_metrics,
+        )
+    updated_memory = await _persist_catalyst_reference_video_analysis(
+        user_id=str(user.get("id", "") or "").strip(),
+        channel_id=channel_id,
+        workspace_id=workspace_id,
+        source_bundle=source_bundle,
+        selected_video=selected_video,
+        frame_metrics=frame_metrics,
+        analysis=analysis,
+    )
+    return {
+        "video": {
+            "video_id": selected_video_id,
+            "title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
+            "url": source_url,
+            "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
+            "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
+            "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
+        },
+        "frame_metrics": frame_metrics,
+        "analysis": analysis,
+        "frame_paths": frame_paths[:14],
+        "memory": _catalyst_channel_memory_public_view(updated_memory),
+    }
 
 
 async def analyze_viral_video(topic: str, video_description: str, transcript_hint: str = "", source_notes: str = "") -> dict:

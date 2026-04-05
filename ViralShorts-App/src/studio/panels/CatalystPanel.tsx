@@ -50,6 +50,34 @@ type CatalystWorkspaceSnapshot = {
     selected_cluster?: Record<string, any>;
     cluster_context?: string;
     reference_summary?: string;
+    reference_video_analysis?: {
+        video?: {
+            video_id?: string;
+            title?: string;
+            url?: string;
+            views?: number;
+            average_view_percentage?: number;
+            impression_click_through_rate?: number;
+            duration_sec?: number;
+        };
+        frame_metrics?: Record<string, any>;
+        analysis?: {
+            summary?: string;
+            why_it_worked?: string[];
+            what_hurt_weaker_upload?: string[];
+            hook_system?: string[];
+            pacing_system?: string[];
+            visual_system?: string[];
+            sound_system?: string[];
+            transition_system?: string[];
+            structure_map?: string[];
+            threed_translation_moves?: string[];
+            title_thumbnail_rules?: string[];
+            next_video_moves?: string[];
+            avoid_rules?: string[];
+            candidate_titles?: string[];
+        };
+    };
 };
 
 type CatalystLearningRow = {
@@ -141,6 +169,7 @@ export default function CatalystPanel() {
     const [refreshingChannels, setRefreshingChannels] = useState(false);
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [syncingOutcomes, setSyncingOutcomes] = useState(false);
+    const [analyzingReference, setAnalyzingReference] = useState(false);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
     const [stoppingSessionId, setStoppingSessionId] = useState('');
@@ -384,6 +413,30 @@ export default function CatalystPanel() {
         setRefreshingChannels(false);
     };
 
+    const handleAnalyzeReferenceVideo = async () => {
+        if (!session || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) return;
+        setAnalyzingReference(true);
+        setError('');
+        try {
+            const res = await fetch(`${API}/api/catalyst/hub/reference-video-analysis`, {
+                method: 'POST',
+                headers: jsonHeaders,
+                body: JSON.stringify({
+                    channel_id: selectedChannelId,
+                    workspace_id: selectedWorkspaceId,
+                    max_analysis_minutes: 3.0,
+                }),
+            });
+            const data = await readJsonResponse<any>(res);
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to analyze the channel reference video'));
+            if (data?.payload) setPayload(data.payload as CatalystHubPayload);
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to analyze the channel reference video'));
+        } finally {
+            setAnalyzingReference(false);
+        }
+    };
+
     const handleStopBusySession = async () => {
         if (!session || !busyLongformSessionId) return;
         setStoppingSessionId(busyLongformSessionId);
@@ -410,6 +463,7 @@ export default function CatalystPanel() {
     );
     const memory = selectedWorkspace?.memory_public || {};
     const playbook = selectedWorkspace?.playbook || {};
+    const referenceVideoAnalysis = selectedWorkspace?.reference_video_analysis || null;
     const recentLearning = payload?.recent_learning || [];
     const applyScopeOptions = useMemo(
         () => [...APPLY_SCOPE_OPTIONS, { value: 'current', label: `Only this workspace (${WORKSPACE_LABELS[selectedWorkspaceId] || selectedWorkspaceId})` }],
@@ -471,6 +525,15 @@ export default function CatalystPanel() {
                         >
                             {syncingOutcomes ? <Loader2 className="h-4 w-4 animate-spin" /> : <Youtube className="h-4 w-4" />}
                             Sync Outcomes
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleAnalyzeReferenceVideo()}
+                            disabled={analyzingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+                            Analyze Best Video
                         </button>
                     </div>
                 </div>
@@ -724,6 +787,25 @@ export default function CatalystPanel() {
                                         {selectedChannel.last_outcome_sync_error}
                                     </div>
                                 )}
+                                {referenceVideoAnalysis?.analysis?.summary && (
+                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4">
+                                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Reference Video Breakdown</div>
+                                        {referenceVideoAnalysis.video?.title && (
+                                            <div className="mt-3 text-sm font-semibold text-white">{referenceVideoAnalysis.video.title}</div>
+                                        )}
+                                        <div className="mt-2 text-sm text-violet-50">{referenceVideoAnalysis.analysis.summary}</div>
+                                        {(referenceVideoAnalysis.video?.views || referenceVideoAnalysis.video?.average_view_percentage || referenceVideoAnalysis.video?.impression_click_through_rate) ? (
+                                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                                <StatCard label="Views" value={String(referenceVideoAnalysis.video?.views || 0)} />
+                                                <StatCard label="Avg Viewed" value={referenceVideoAnalysis.video?.average_view_percentage ? `${Number(referenceVideoAnalysis.video.average_view_percentage).toFixed(2)}%` : 'N/A'} />
+                                                <StatCard label="CTR" value={referenceVideoAnalysis.video?.impression_click_through_rate ? `${Number(referenceVideoAnalysis.video.impression_click_through_rate).toFixed(2)}%` : 'N/A'} />
+                                            </div>
+                                        ) : null}
+                                        <DetailGroup title="Why It Worked" values={referenceVideoAnalysis.analysis.why_it_worked || []} accent="emerald" />
+                                        <DetailGroup title="What Hurt The Weak Upload" values={referenceVideoAnalysis.analysis.what_hurt_weaker_upload || []} accent="amber" />
+                                        <DetailGroup title="3D Translation Moves" values={referenceVideoAnalysis.analysis.threed_translation_moves || []} accent="cyan" />
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -756,21 +838,33 @@ export default function CatalystPanel() {
                                         {memory.operator_summary}
                                     </div>
                                 )}
+                                {referenceVideoAnalysis?.analysis?.summary && (
+                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
+                                        {referenceVideoAnalysis.analysis.summary}
+                                    </div>
+                                )}
                                 <div className="grid gap-3 sm:grid-cols-2">
                                     <StatCard label="Archetype" value={String(memory.archetype_label || 'Unclassified')} />
                                     <StatCard label="Series / Arc" value={String(memory.series_anchor || memory.selected_cluster_label || 'General')} />
                                     <StatCard label="Avg CTR" value={memory.average_ctr ? `${Number(memory.average_ctr).toFixed(2)}%` : 'N/A'} />
                                     <StatCard label="Avg Viewed" value={memory.average_average_percentage_viewed ? `${Number(memory.average_average_percentage_viewed).toFixed(2)}%` : 'N/A'} />
                                 </div>
+                                <DetailGroup title="Reference Hook System" values={referenceVideoAnalysis?.analysis?.hook_system || []} accent="cyan" />
+                                <DetailGroup title="Reference Pacing System" values={referenceVideoAnalysis?.analysis?.pacing_system || []} accent="cyan" />
+                                <DetailGroup title="Reference Visual System" values={referenceVideoAnalysis?.analysis?.visual_system || []} accent="cyan" />
+                                <DetailGroup title="Reference Sound System" values={referenceVideoAnalysis?.analysis?.sound_system || []} accent="cyan" />
+                                <DetailGroup title="Reference Transition System" values={referenceVideoAnalysis?.analysis?.transition_system || []} accent="cyan" />
+                                <DetailGroup title="Reference Structure Map" values={referenceVideoAnalysis?.analysis?.structure_map || []} accent="cyan" />
                                 <DetailGroup title="Promoted Angles" values={memory.promoted_shorts_angles || memory.promoted_arcs || []} accent="emerald" />
                                 <DetailGroup title="Demoted Angles" values={memory.demoted_shorts_angles || memory.demoted_arcs || []} accent="amber" />
                                 <DetailGroup title="Promoted Archetypes" values={memory.promoted_archetypes || []} accent="emerald" />
                                 <DetailGroup title="Demoted Archetypes" values={memory.demoted_archetypes || []} accent="amber" />
                                 <DetailGroup title="Promoted Execution Profiles" values={memory.promoted_execution_profiles || []} accent="emerald" />
                                 <DetailGroup title="Demoted Execution Profiles" values={memory.demoted_execution_profiles || []} accent="amber" />
+                                <DetailGroup title="Reference Title / Thumbnail Rules" values={referenceVideoAnalysis?.analysis?.title_thumbnail_rules || []} accent="cyan" />
                                 <DetailGroup title="Guardrails" values={memory.operator_guardrails || []} accent="cyan" />
                                 <DetailGroup title="Priority Niches" values={memory.operator_target_niches || []} accent="cyan" />
-                                <DetailGroup title="Next Video Moves" values={memory.next_video_moves || []} accent="cyan" />
+                                <DetailGroup title="Next Video Moves" values={(referenceVideoAnalysis?.analysis?.next_video_moves || memory.next_video_moves || []) as string[]} accent="cyan" />
                                 {Array.isArray(playbook.angle_candidates) && playbook.angle_candidates.length > 0 && (
                                     <div>
                                         <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Ranked Angle Candidates</div>

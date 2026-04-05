@@ -234,3 +234,10 @@ class CatalystHubLaunchRequest(BaseModel):
     auto_pipeline: bool = True
     include_public_benchmarks: bool = True
     refresh_outcomes: bool = True
+
+
+class CatalystHubReferenceVideoAnalysisRequest(BaseModel):
+    channel_id: str = ""
+    workspace_id: str = ""
+    video_id: str = ""
+    max_analysis_minutes: float = 3.0
