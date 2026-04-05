@@ -7670,17 +7670,22 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         )
     except Exception:
         owned_channel_videos = []
-    public_uploaded_videos = [
-        dict(row or {})
-        for row in list(uploaded_videos or [])
-        if isinstance(row, dict) and str((row or {}).get("privacy_status", "") or "").strip().lower() in {"", "public"}
-    ]
-    uploads_inventory_rows = [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
     owned_video_by_id = {
         str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
         for row in list(owned_channel_videos or [])
         if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
     }
+
+    def _is_public_studio_video(row: dict) -> bool:
+        privacy = str((row or {}).get("privacy_status", "") or "").strip().lower()
+        return privacy in {"", "public"}
+
+    uploads_inventory_rows = [dict(row or {}) for row in list(uploaded_videos or []) if isinstance(row, dict)]
+    public_uploaded_videos = [
+        dict(row or {})
+        for row in list(uploads_inventory_rows or [])
+        if _is_public_studio_video(row)
+    ]
 
     def _merge_owned_video_details(row: dict) -> dict:
         base = dict(row or {})
@@ -7698,13 +7703,29 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             merged["privacy_status"] = str(base.get("privacy_status", "") or "").strip()
         return merged
 
-    # Treat the uploads playlist as the canonical Studio inventory for this channel.
-    inventory_rows = [_merge_owned_video_details(row) for row in list(public_uploaded_videos or uploads_inventory_rows)]
-    if not inventory_rows:
-        inventory_rows = [
-            _merge_owned_video_details(row)
-            for row in list(uploads_inventory_rows)
-        ]
+    owned_inventory_rows = [
+        dict(row or {})
+        for row in list(owned_channel_videos or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    ]
+    owned_inventory_rows.sort(
+        key=lambda row: (
+            str((row or {}).get("published_at", "") or ""),
+            str((row or {}).get("video_id", "") or ""),
+        ),
+        reverse=True,
+    )
+    owned_public_rows = [dict(row or {}) for row in list(owned_inventory_rows or []) if _is_public_studio_video(row)]
+
+    if owned_inventory_rows:
+        inventory_rows = [dict(row or {}) for row in list(owned_public_rows or owned_inventory_rows)]
+    else:
+        inventory_rows = [_merge_owned_video_details(row) for row in list(public_uploaded_videos or uploads_inventory_rows)]
+        if not inventory_rows:
+            inventory_rows = [
+                _merge_owned_video_details(row)
+                for row in list(uploads_inventory_rows)
+            ]
     recent_uploads = [dict(row or {}) for row in list(inventory_rows or [])[:20] if isinstance(row, dict)]
     popular_uploads = []
     if inventory_rows:
