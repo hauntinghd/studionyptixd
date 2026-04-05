@@ -7742,7 +7742,11 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     public_search_inventory_rows = [
         dict(row or {})
         for row in list(public_search_rows or [])
-        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+        if (
+            isinstance(row, dict)
+            and str((row or {}).get("video_id", "") or "").strip()
+            and _is_public_studio_video(row)
+        )
     ]
 
     if public_search_inventory_rows:
