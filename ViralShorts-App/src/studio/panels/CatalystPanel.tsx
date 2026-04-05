@@ -486,7 +486,6 @@ export default function CatalystPanel() {
         [channelOptions, payload?.selected_channel, selectedChannelId]
     );
     const memory = selectedWorkspace?.memory_public || {};
-    const playbook = selectedWorkspace?.playbook || {};
     const referenceVideoAnalysis = selectedWorkspace?.reference_video_analysis || null;
     const recentLearning = payload?.recent_learning || [];
     const applyScopeOptions = useMemo(
@@ -851,16 +850,6 @@ export default function CatalystPanel() {
                         )}
                         {!loading && selectedWorkspace && (
                             <div className="mt-4 space-y-4">
-                                {memory.summary && (
-                                    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-50">
-                                        {memory.summary}
-                                    </div>
-                                )}
-                                {memory.operator_summary && (
-                                    <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-                                        {memory.operator_summary}
-                                    </div>
-                                )}
                                 {(referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note) && (
                                     <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
                                         {referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note}
@@ -872,56 +861,8 @@ export default function CatalystPanel() {
                                     <StatCard label="Avg CTR" value={memory.average_ctr ? `${Number(memory.average_ctr).toFixed(2)}%` : 'N/A'} />
                                     <StatCard label="Avg Viewed" value={memory.average_average_percentage_viewed ? `${Number(memory.average_average_percentage_viewed).toFixed(2)}%` : 'N/A'} />
                                 </div>
-                                <DetailGroup title="Reference Hook System" values={referenceVideoAnalysis?.analysis?.hook_system || []} accent="cyan" />
-                                <DetailGroup title="Reference Pacing System" values={referenceVideoAnalysis?.analysis?.pacing_system || []} accent="cyan" />
-                                <DetailGroup title="Reference Visual System" values={referenceVideoAnalysis?.analysis?.visual_system || []} accent="cyan" />
-                                <DetailGroup title="Reference Sound System" values={referenceVideoAnalysis?.analysis?.sound_system || []} accent="cyan" />
-                                <DetailGroup title="Reference Transition System" values={referenceVideoAnalysis?.analysis?.transition_system || []} accent="cyan" />
-                                <DetailGroup title="Reference Structure Map" values={referenceVideoAnalysis?.analysis?.structure_map || []} accent="cyan" />
-                                <DetailGroup title="Promoted Angles" values={memory.promoted_shorts_angles || memory.promoted_arcs || []} accent="emerald" />
-                                <DetailGroup title="Demoted Angles" values={memory.demoted_shorts_angles || memory.demoted_arcs || []} accent="amber" />
-                                <DetailGroup title="Promoted Archetypes" values={memory.promoted_archetypes || []} accent="emerald" />
-                                <DetailGroup title="Demoted Archetypes" values={memory.demoted_archetypes || []} accent="amber" />
-                                <DetailGroup title="Promoted Execution Profiles" values={memory.promoted_execution_profiles || []} accent="emerald" />
-                                <DetailGroup title="Demoted Execution Profiles" values={memory.demoted_execution_profiles || []} accent="amber" />
-                                <DetailGroup title="Reference Title / Thumbnail Rules" values={referenceVideoAnalysis?.analysis?.title_thumbnail_rules || []} accent="cyan" />
                                 <DetailGroup title="Guardrails" values={memory.operator_guardrails || []} accent="cyan" />
                                 <DetailGroup title="Priority Niches" values={memory.operator_target_niches || []} accent="cyan" />
-                                <DetailGroup title="Next Video Moves" values={(referenceVideoAnalysis?.analysis?.next_video_moves || memory.next_video_moves || []) as string[]} accent="cyan" />
-                                {Array.isArray(playbook.angle_candidates) && playbook.angle_candidates.length > 0 && (
-                                    <div>
-                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Ranked Angle Candidates</div>
-                                        <div className="space-y-2">
-                                            {playbook.angle_candidates.slice(0, 6).map((row: any, index: number) => (
-                                                <div key={`${row.angle}_${index}`} className="rounded-2xl border border-white/[0.08] bg-black/20 p-3">
-                                                    <div className="text-sm font-semibold text-white">{row.angle}</div>
-                                                    <div className="mt-1 text-xs text-gray-500">
-                                                        Score {Number(row.score || 0).toFixed(2)} | Novelty {Number(row.novelty_score || 0)}
-                                                    </div>
-                                                    {row.why_now && <div className="mt-2 text-sm text-gray-300">{row.why_now}</div>}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                                {Array.isArray(memory.short_angle_rankings) && memory.short_angle_rankings.length > 0 && (
-                                    <div>
-                                        <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Learned Angle Rankings</div>
-                                        <div className="space-y-2">
-                                            {memory.short_angle_rankings.slice(0, 6).map((row: any, index: number) => (
-                                                <div key={`${row.value || row.angle || 'angle'}_${index}`} className="rounded-2xl border border-white/[0.08] bg-black/20 p-3">
-                                                    <div className="text-sm font-semibold text-white">{String(row.value || row.angle || 'Untitled angle')}</div>
-                                                    <div className="mt-1 text-xs text-gray-500">Score {Number(row.score || 0).toFixed(2)}</div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                                {selectedWorkspace.cluster_context && (
-                                    <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
-                                        {selectedWorkspace.cluster_context}
-                                    </div>
-                                )}
                             </div>
                         )}
                     </div>

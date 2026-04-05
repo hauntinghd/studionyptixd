@@ -1060,16 +1060,14 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "last_outcome_sync_error": str(data.get("last_outcome_sync_error", "") or ""),
         "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
         "analytics_snapshot": {
-            "channel_summary": str(analytics_snapshot.get("channel_summary", "") or ""),
-            "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
             "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
             "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
-            "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
-            "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
-            "top_videos": list(analytics_snapshot.get("top_videos") or []),
-            "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
-            "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
-            "channel_audit": dict(analytics_snapshot.get("channel_audit") or _youtube_build_channel_audit(analytics_snapshot)),
+            "historical_compare": _youtube_historical_compare_measured_public_view(
+                analytics_snapshot.get("historical_compare") or {}
+            ),
+            "channel_audit": _youtube_channel_audit_measured_public_view(
+                analytics_snapshot.get("channel_audit") or _youtube_build_channel_audit(analytics_snapshot)
+            ),
         },
     }
 
@@ -7204,6 +7202,51 @@ def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
         "coverage": coverage,
         "focus_subject": focus_subject,
         "next_video_candidates": next_video_candidates,
+    }
+
+
+def _youtube_historical_compare_measured_public_view(payload: dict | None) -> dict:
+    raw = dict(payload or {})
+    if not raw:
+        return {}
+    return {
+        "latest_video": _youtube_historical_compare_public_view(raw.get("latest_video") or {}),
+        "previous_video": _youtube_historical_compare_public_view(raw.get("previous_video") or {}),
+        "measured_summary": str(raw.get("measured_summary", "") or "").strip(),
+        "honesty_note": (
+            "This hub view only shows measured YouTube metrics and explicit data limitations. "
+            "Catalyst classifications are kept internal and are not shown here."
+        ),
+        "limitations": _dedupe_clip_list(
+            [str(v).strip() for v in list(raw.get("limitations") or []) if str(v).strip()],
+            max_items=6,
+        ),
+    }
+
+
+def _youtube_channel_audit_measured_public_view(payload: dict | None) -> dict:
+    raw = dict(payload or {})
+    if not raw:
+        return {}
+    coverage = dict(raw.get("coverage") or {})
+    return {
+        "honesty_note": (
+            "This hub view only shows measured channel data, reference evidence, and explicit limitations. "
+            "Catalyst strategy labels and recommendations are kept internal."
+        ),
+        "measured_facts": _dedupe_clip_list(
+            [str(v).strip() for v in list(raw.get("measured_facts") or []) if str(v).strip()],
+            max_items=8,
+        ),
+        "limitations": _dedupe_clip_list(
+            [str(v).strip() for v in list(raw.get("limitations") or []) if str(v).strip()],
+            max_items=6,
+        ),
+        "coverage": {
+            "recent_uploads": int(coverage.get("recent_uploads", 0) or 0),
+            "top_videos": int(coverage.get("top_videos", 0) or 0),
+            "series_clusters": int(coverage.get("series_clusters", 0) or 0),
+        },
     }
 
 
@@ -25616,7 +25659,16 @@ def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
     return {
         "video": video,
         "frame_metrics": dict(payload.get("frame_metrics") or {}),
-        "analysis": analysis,
+        "analysis": {
+            "honesty_note": (
+                "This hub view only shows measured reference evidence and explicit limitations. "
+                "Catalyst playbook interpretation stays internal."
+            ),
+            "measured_facts": list(analysis.get("measured_facts") or []),
+            "limitations": list(analysis.get("limitations") or []),
+            "confidence_label": str(analysis.get("confidence_label", "") or "").strip(),
+            "analysis_mode_label": str(analysis.get("analysis_mode_label", "") or "").strip(),
+        },
         "evidence": evidence,
         "analyzed_at": float(payload.get("analyzed_at", 0.0) or 0.0),
     }
