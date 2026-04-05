@@ -25197,6 +25197,92 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
     return await asyncio.to_thread(_download)
 
 
+def _pick_reference_stream_urls(info: dict | None) -> tuple[str, str]:
+    payload = dict(info or {})
+    requested_formats = [dict(v or {}) for v in list(payload.get("requested_formats") or []) if isinstance(v, dict)]
+    video_url = ""
+    audio_url = ""
+    for fmt in requested_formats:
+        vcodec = str(fmt.get("vcodec", "") or "").strip().lower()
+        acodec = str(fmt.get("acodec", "") or "").strip().lower()
+        url = str(fmt.get("url", "") or "").strip()
+        if not url:
+            continue
+        if not video_url and vcodec and vcodec != "none":
+            video_url = url
+        if not audio_url and acodec and acodec != "none":
+            audio_url = url
+    if video_url:
+        return video_url, audio_url
+
+    formats = [dict(v or {}) for v in list(payload.get("formats") or []) if isinstance(v, dict)]
+    ranked_video = sorted(
+        [
+            fmt
+            for fmt in formats
+            if str(fmt.get("url", "") or "").strip()
+            and str(fmt.get("vcodec", "") or "").strip().lower() not in {"", "none"}
+        ],
+        key=lambda fmt: (
+            abs(int(float(fmt.get("height", 720) or 720)) - 720),
+            int(float(fmt.get("tbr", 0.0) or 0.0)),
+        ),
+    )
+    ranked_audio = sorted(
+        [
+            fmt
+            for fmt in formats
+            if str(fmt.get("url", "") or "").strip()
+            and str(fmt.get("acodec", "") or "").strip().lower() not in {"", "none"}
+            and str(fmt.get("vcodec", "") or "").strip().lower() in {"", "none"}
+        ],
+        key=lambda fmt: -int(float(fmt.get("abr", fmt.get("tbr", 0.0)) or 0.0)),
+    )
+    video_url = str((ranked_video[0] if ranked_video else {}).get("url", "") or "").strip()
+    audio_url = str((ranked_audio[0] if ranked_audio else {}).get("url", "") or "").strip()
+    return video_url, audio_url
+
+
+async def _extract_reference_video_stream_clip(
+    info: dict | None,
+    output_dir: Path,
+    *,
+    max_seconds: float = 180.0,
+) -> dict:
+    payload = dict(info or {})
+    if not payload:
+        return {"video_path": "", "mode": "stream_clip", "error": "missing_stream_info"}
+    if not _ffmpeg_available():
+        return {"video_path": "", "mode": "stream_clip", "error": "ffmpeg_unavailable"}
+
+    video_url, audio_url = _pick_reference_stream_urls(payload)
+    if not video_url:
+        return {"video_path": "", "mode": "stream_clip", "error": "missing_video_stream_url"}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_id = _slugify_file_component(str(payload.get("id", "") or "reference"), fallback="reference", max_len=40)
+    clip_path = output_dir / f"{video_id}_stream_clip.mp4"
+    seconds = max(20.0, min(float(max_seconds or 180.0), 300.0))
+    cmd = ["ffmpeg", "-y", "-t", f"{seconds:.2f}", "-i", video_url]
+    if audio_url:
+        cmd += ["-i", audio_url, "-map", "0:v:0", "-map", "1:a:0"]
+    cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(clip_path)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, stderr = await proc.communicate()
+    error_text = _clip_text(stderr.decode(errors="ignore"), 420)
+    if proc.returncode != 0 or not clip_path.exists() or clip_path.stat().st_size <= 0:
+        try:
+            clip_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {"video_path": "", "mode": "stream_clip", "error": error_text or "ffmpeg_stream_clip_failed"}
+    return {"video_path": str(clip_path), "mode": "stream_clip", "error": ""}
+
+
 async def _extract_reference_video_sample_frames(
     video_path: str,
     output_dir: Path,
@@ -25571,6 +25657,26 @@ async def _build_catalyst_reference_video_analysis(
     video_path = str(download.get("video_path", "") or "").strip()
     analysis_seconds = max(60.0, min(float(max_analysis_minutes or 3.0) * 60.0, 300.0))
     audio_summary = ""
+    analysis_mode = "direct_media"
+    if not video_path and download_info:
+        stream_clip = await _extract_reference_video_stream_clip(
+            download_info,
+            work_dir / "video",
+            max_seconds=analysis_seconds,
+        )
+        stream_error = _clip_text(str(stream_clip.get("error", "") or "").strip(), 420)
+        if str(stream_clip.get("video_path", "") or "").strip():
+            video_path = str(stream_clip.get("video_path", "") or "").strip()
+            analysis_mode = "stream_clip"
+            if download_error:
+                download_error = " | ".join(
+                    part for part in [
+                        download_error,
+                        "Direct media download was blocked, but Catalyst recovered by clipping the reference video from extracted stream URLs.",
+                    ] if part
+                )
+        elif stream_error:
+            download_error = " | ".join(part for part in [download_error, stream_error] if part)
     if video_path:
         audio_path = await extract_audio_from_video(video_path) or ""
         audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
@@ -25581,6 +25687,7 @@ async def _build_catalyst_reference_video_analysis(
             max_seconds=analysis_seconds,
         )
     else:
+        analysis_mode = "preview_frames"
         preview_urls = _pick_reference_preview_frame_urls(source_bundle, download_info, max_items=6)
         frame_pack = await _extract_reference_preview_frames_from_urls(
             preview_urls,
@@ -25602,6 +25709,7 @@ async def _build_catalyst_reference_video_analysis(
             )
     frame_paths = [str(v).strip() for v in list(frame_pack.get("frame_paths") or []) if str(v).strip()]
     frame_metrics = dict(frame_pack.get("metrics") or {})
+    frame_metrics["analysis_mode"] = analysis_mode
     if download_error:
         frame_metrics["download_error"] = download_error
     historical_compare = dict(channel_context.get("historical_compare") or {})
@@ -25621,7 +25729,13 @@ async def _build_catalyst_reference_video_analysis(
             f"Top reference video URL: {source_url}",
             f"Top reference video public summary: {_clip_text(str(source_bundle.get('public_summary', '') or '').strip(), 700)}",
             f"Top reference video transcript excerpt: {_clip_text(str(source_bundle.get('transcript_excerpt', '') or '').strip(), 2800)}",
-            ("Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked.") if frame_metrics.get("preview_only") else "Reference analysis mode: direct media frames + audio extraction.",
+            (
+                "Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked."
+                if analysis_mode == "preview_frames"
+                else "Reference analysis mode: stream-clipped media + audio extraction from yt-dlp stream URLs because direct download was blocked."
+                if analysis_mode == "stream_clip"
+                else "Reference analysis mode: direct media frames + audio extraction."
+            ),
             ("Audio summary: " + audio_summary) if audio_summary else "",
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
             ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
