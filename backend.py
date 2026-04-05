@@ -741,6 +741,7 @@ YOUTUBE_TOKEN_REFRESH_MARGIN_SEC = 120
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 YOUTUBE_AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -6925,6 +6926,150 @@ async def _youtube_fetch_public_video_bundle_api_key(source_url: str) -> dict:
     }
 
 
+def _youtube_caption_language_candidates(language: str = "en") -> list[str]:
+    preferred: list[str] = []
+    for raw in [str(language or "").strip().lower(), "en", "en-us", "en-gb"]:
+        if raw and raw not in preferred:
+            preferred.append(raw)
+        if "-" in raw:
+            base = raw.split("-", 1)[0].strip()
+            if base and base not in preferred:
+                preferred.append(base)
+    return preferred
+
+
+def _youtube_caption_track_sort_key(track: dict, language: str = "en") -> tuple[int, int, int, int, str]:
+    payload = dict(track or {})
+    snippet = dict(payload.get("snippet") or {})
+    lang = str(snippet.get("language", "") or "").strip().lower()
+    status = str(snippet.get("status", "") or "").strip().lower()
+    is_draft = bool(snippet.get("isDraft"))
+    is_auto_synced = bool(snippet.get("isAutoSynced"))
+    language_rank = 99
+    for idx, candidate in enumerate(_youtube_caption_language_candidates(language)):
+        if lang == candidate:
+            language_rank = idx
+            break
+    return (
+        language_rank,
+        0 if status == "serving" else 1,
+        1 if is_draft else 0,
+        0 if is_auto_synced else 1,
+        str(payload.get("id", "") or "").strip(),
+    )
+
+
+async def _youtube_download_caption_vtt(access_token: str, caption_id: str) -> str:
+    clean_id = str(caption_id or "").strip()
+    if not clean_id:
+        return ""
+    url = f"{YOUTUBE_DATA_API_BASE}/captions/{quote(clean_id, safe='')}"
+    async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+        resp = await client.get(
+            url,
+            params={"tfmt": "vtt"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        return ""
+    content_type = str(resp.headers.get("content-type", "") or "").lower()
+    text = resp.text
+    if "json" in content_type:
+        return ""
+    return _parse_vtt_text(text)
+
+
+async def _youtube_fetch_owned_video_bundle_oauth(
+    access_token: str,
+    video_id: str,
+    *,
+    language: str = "en",
+) -> dict:
+    clean_id = str(video_id or "").strip()
+    if not clean_id:
+        return {}
+    payload = await _youtube_api_get(
+        access_token,
+        "/videos",
+        params={
+            "part": "snippet,statistics,contentDetails,status",
+            "id": clean_id,
+            "maxResults": 1,
+        },
+    )
+    items = [dict(v or {}) for v in list(payload.get("items") or []) if isinstance(v, dict)]
+    if not items:
+        return {}
+    raw = dict(items[0] or {})
+    snippet = dict(raw.get("snippet") or {})
+    stats = dict(raw.get("statistics") or {})
+    thumbs = dict(snippet.get("thumbnails") or {})
+    transcript_excerpt = ""
+    try:
+        captions_payload = await _youtube_api_get(
+            access_token,
+            "/captions",
+            params={
+                "part": "snippet",
+                "videoId": clean_id,
+                "maxResults": 50,
+            },
+        )
+        caption_items = [dict(v or {}) for v in list(captions_payload.get("items") or []) if isinstance(v, dict)]
+        if caption_items:
+            best_track = sorted(caption_items, key=lambda row: _youtube_caption_track_sort_key(row, language=language))[0]
+            transcript_excerpt = await _youtube_download_caption_vtt(access_token, str(best_track.get("id", "") or "").strip())
+    except Exception:
+        transcript_excerpt = ""
+    title = str(snippet.get("title", "") or "").strip()
+    description = str(snippet.get("description", "") or "").strip()
+    channel = str(snippet.get("channelTitle", "") or "").strip()
+    duration_sec = _parse_youtube_iso8601_duration(str((raw.get("contentDetails") or {}).get("duration", "") or ""))
+    view_count = int(float(stats.get("viewCount", 0) or 0))
+    like_count = int(float(stats.get("likeCount", 0) or 0))
+    comment_count = int(float(stats.get("commentCount", 0) or 0))
+    tags = [str(tag).strip() for tag in list(snippet.get("tags") or []) if str(tag).strip()][:20]
+    thumb = (
+        ((thumbs.get("maxres") or {}).get("url"))
+        or ((thumbs.get("standard") or {}).get("url"))
+        or ((thumbs.get("high") or {}).get("url"))
+        or ((thumbs.get("medium") or {}).get("url"))
+        or ((thumbs.get("default") or {}).get("url"))
+        or ""
+    )
+    summary_parts = [
+        f"Title: {title}" if title else "",
+        f"Channel: {channel}" if channel else "",
+        f"Duration: {duration_sec}s" if duration_sec > 0 else "",
+        f"Views: {view_count}" if view_count > 0 else "",
+        f"Likes: {like_count}" if like_count > 0 else "",
+        f"Comments: {comment_count}" if comment_count > 0 else "",
+        f"Tags: {', '.join(tags[:8])}" if tags else "",
+        f"Transcript excerpt: {transcript_excerpt}" if transcript_excerpt else "",
+        "Metadata extracted through the connected YouTube OAuth channel.",
+    ]
+    return {
+        "source_url": f"https://www.youtube.com/watch?v={clean_id}",
+        "canonical_url": f"https://www.youtube.com/watch?v={clean_id}",
+        "platform": "youtube_oauth",
+        "title": title,
+        "description": description,
+        "channel": channel,
+        "channel_url": "",
+        "thumbnail_url": str(thumb or "").strip(),
+        "duration_sec": duration_sec,
+        "view_count": view_count,
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "upload_date": str(snippet.get("publishedAt", "") or "").strip(),
+        "tags": tags,
+        "categories": [str(snippet.get("categoryId", "") or "").strip()] if str(snippet.get("categoryId", "") or "").strip() else [],
+        "chapters": [],
+        "transcript_excerpt": transcript_excerpt,
+        "public_summary": " | ".join(part for part in summary_parts if part),
+    }
+
+
 async def _youtube_fetch_channel_search(access_token: str, channel_id: str, order: str = "date", max_results: int = 12) -> list[dict]:
     payload = await _youtube_api_get(
         access_token,
@@ -7669,6 +7814,28 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         "channel_audit": dict(analytics_snapshot.get("channel_audit") or _youtube_build_channel_audit(analytics_snapshot)),
         "last_sync_error": str(refreshed.get("last_sync_error", "") or "").strip(),
     }
+
+
+async def _youtube_connected_channel_access_token(user: dict, channel_id: str) -> tuple[str, dict]:
+    user_id = str((user or {}).get("id", "") or "").strip()
+    chosen_id = str(channel_id or "").strip()
+    if not user_id or not chosen_id:
+        return "", {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        record = dict((bucket.get("channels") or {}).get(chosen_id) or {})
+    if not record:
+        return "", {}
+    try:
+        access_token, updated = await _youtube_ensure_access_token(record)
+    except Exception:
+        return "", record
+    async with _youtube_connections_lock:
+        bucket = _youtube_bucket_for_user(user_id)
+        bucket["channels"][chosen_id] = updated
+        _save_youtube_connections()
+    return str(access_token or "").strip(), dict(updated or {})
 
 
 SHORTS_PUBLIC_REFERENCE_QUERY_SEEDS = {
@@ -26021,6 +26188,7 @@ async def _build_catalyst_reference_video_analysis(
     channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
     if not channel_context:
         raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")
+    oauth_access_token, _oauth_channel_record = await _youtube_connected_channel_access_token(user, channel_id)
     selected_video = _pick_catalyst_reference_video(channel_context, requested_video_id=video_id)
     if not selected_video:
         raise HTTPException(404, "No connected-channel top video was available to analyze")
@@ -26035,7 +26203,27 @@ async def _build_catalyst_reference_video_analysis(
         workspace_id,
         selected_video_id,
     )
-    source_bundle = await _fetch_source_video_bundle(source_url, language="en")
+    source_bundle = {}
+    if oauth_access_token:
+        try:
+            source_bundle = await _youtube_fetch_owned_video_bundle_oauth(
+                oauth_access_token,
+                selected_video_id,
+                language="en",
+            )
+        except Exception:
+            source_bundle = {}
+    fallback_bundle = {}
+    if not source_bundle or not str(source_bundle.get("transcript_excerpt", "") or "").strip():
+        fallback_bundle = await _fetch_source_video_bundle(source_url, language="en")
+    if source_bundle and fallback_bundle:
+        merged_source_bundle = dict(fallback_bundle)
+        merged_source_bundle.update({k: v for k, v in dict(source_bundle).items() if v not in (None, "", [], {})})
+        if str(source_bundle.get("transcript_excerpt", "") or "").strip():
+            merged_source_bundle["transcript_excerpt"] = str(source_bundle.get("transcript_excerpt", "") or "").strip()
+        source_bundle = merged_source_bundle
+    elif fallback_bundle:
+        source_bundle = dict(fallback_bundle)
     if not source_bundle:
         source_bundle = {"source_url": source_url}
     source_bundle["source_url"] = source_url
