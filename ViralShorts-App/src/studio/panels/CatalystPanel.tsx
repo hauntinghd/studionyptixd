@@ -170,6 +170,31 @@ function splitLines(value: string): string[] {
         .filter(Boolean);
 }
 
+function normalizeCatalystText(value: string): string {
+    return String(value || '')
+        .replace(/â€¦/g, '...')
+        .replace(/â€™/g, "'")
+        .replace(/â€œ|â€/g, '"')
+        .replace(/â€/g, '"')
+        .replace(/â€“|â€”/g, '-')
+        .replace(/\uFFFD/g, '')
+        .trim();
+}
+
+function sanitizeUniqueTextList(values: string[] | undefined | null): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const raw of values || []) {
+        const value = normalizeCatalystText(String(raw || ''));
+        if (!value) continue;
+        const key = value.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(value);
+    }
+    return result;
+}
+
 function formatWhen(unix: number): string {
     if (!unix) return 'Never';
     try {
@@ -534,8 +559,35 @@ export default function CatalystPanel() {
     const historicalCompare = selectedChannel?.analytics_snapshot?.historical_compare || null;
     const referenceEvidence = referenceVideoAnalysis?.evidence || null;
     const referenceAnalysis = referenceVideoAnalysis?.analysis || null;
-    const referenceMeasuredFacts = referenceEvidence?.measured_facts || referenceVideoAnalysis?.analysis?.measured_facts || [];
-    const referenceLimitations = referenceEvidence?.limitations || referenceVideoAnalysis?.analysis?.limitations || [];
+    const channelSyncError = useMemo(
+        () => normalizeCatalystText(String(selectedChannel?.last_sync_error || '').trim()),
+        [selectedChannel?.last_sync_error]
+    );
+    const channelOutcomeSyncError = useMemo(
+        () => normalizeCatalystText(String(selectedChannel?.last_outcome_sync_error || '').trim()),
+        [selectedChannel?.last_outcome_sync_error]
+    );
+    const channelMeasuredFacts = useMemo(
+        () => sanitizeUniqueTextList(channelAudit?.measured_facts || []),
+        [channelAudit?.measured_facts]
+    );
+    const channelLimitations = useMemo(() => {
+        const rawLimitations = sanitizeUniqueTextList((channelAudit?.limitations || historicalCompare?.limitations || []) as string[]);
+        const blocked = new Set(
+            [channelSyncError, channelOutcomeSyncError]
+                .filter(Boolean)
+                .map((value) => value.toLowerCase())
+        );
+        return rawLimitations.filter((value) => !blocked.has(value.toLowerCase()));
+    }, [channelAudit?.limitations, historicalCompare?.limitations, channelOutcomeSyncError, channelSyncError]);
+    const referenceMeasuredFacts = useMemo(
+        () => sanitizeUniqueTextList((referenceEvidence?.measured_facts || referenceVideoAnalysis?.analysis?.measured_facts || []) as string[]),
+        [referenceEvidence?.measured_facts, referenceVideoAnalysis?.analysis?.measured_facts]
+    );
+    const referenceLimitations = useMemo(
+        () => sanitizeUniqueTextList((referenceEvidence?.limitations || referenceVideoAnalysis?.analysis?.limitations || []) as string[]),
+        [referenceEvidence?.limitations, referenceVideoAnalysis?.analysis?.limitations]
+    );
     const uploadedVideoOptions = useMemo(
         () => (
             Array.isArray(selectedChannel?.analytics_snapshot?.uploaded_videos)
@@ -843,7 +895,7 @@ export default function CatalystPanel() {
                                 </div>
                                 {(channelAudit?.honesty_note || historicalCompare?.honesty_note) && (
                                     <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-                                        {channelAudit?.honesty_note || historicalCompare?.honesty_note}
+                                        {normalizeCatalystText(String(channelAudit?.honesty_note || historicalCompare?.honesty_note || ''))}
                                     </div>
                                 )}
                                 {(channelAudit?.coverage?.recent_uploads || channelAudit?.coverage?.top_videos || channelAudit?.coverage?.series_clusters) ? (
@@ -853,21 +905,21 @@ export default function CatalystPanel() {
                                         <StatCard label="Active Arcs" value={String(channelAudit?.coverage?.series_clusters || 0)} />
                                     </div>
                                 ) : null}
-                                <DetailList title="Measured Channel Data" values={channelAudit?.measured_facts || []} accent="emerald" />
-                                <DetailList title="Channel Limitations" values={channelAudit?.limitations || historicalCompare?.limitations || []} accent="amber" />
+                                <DetailList title="Measured Channel Data" values={channelMeasuredFacts} accent="emerald" />
+                                <DetailList title="Channel Limitations" values={channelLimitations} accent="amber" />
                                 {selectedChannel.last_outcome_sync_at ? (
                                     <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-xs text-gray-300">
                                         Last outcome sync: {formatWhen(selectedChannel.last_outcome_sync_at)}{selectedChannel.last_outcome_sync_count ? ` | ${selectedChannel.last_outcome_sync_count} videos` : ''}
                                     </div>
                                 ) : null}
-                                {selectedChannel.last_sync_error && (
+                                {channelSyncError && (
                                     <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                                        {selectedChannel.last_sync_error}
+                                        {channelSyncError}
                                     </div>
                                 )}
-                                {selectedChannel.last_outcome_sync_error && (
+                                {channelOutcomeSyncError && (
                                     <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                                        {selectedChannel.last_outcome_sync_error}
+                                        {channelOutcomeSyncError}
                                     </div>
                                 )}
                                 {uploadedVideoOptions.length > 0 && (
@@ -1002,17 +1054,18 @@ function StatCard({ label, value }: { label: string; value: string }) {
 }
 
 function DetailGroup({ title, values, accent }: { title: string; values: string[]; accent: 'emerald' | 'amber' | 'cyan' }) {
+    const cleanValues = sanitizeUniqueTextList(values);
     const palette = accent === 'emerald'
         ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-50'
         : accent === 'amber'
             ? 'border-amber-500/20 bg-amber-500/10 text-amber-50'
             : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-50';
-    if (!Array.isArray(values) || values.length === 0) return null;
+    if (cleanValues.length === 0) return null;
     return (
         <div>
             <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{title}</div>
             <div className="flex flex-wrap gap-2">
-                {values.slice(0, 8).map((value) => (
+                {cleanValues.slice(0, 8).map((value) => (
                     <span key={value} className={`rounded-full border px-3 py-1.5 text-xs ${palette}`}>
                         {value}
                     </span>
@@ -1031,6 +1084,7 @@ function DetailList({
     values: string[];
     accent: 'emerald' | 'amber' | 'cyan' | 'violet';
 }) {
+    const cleanValues = sanitizeUniqueTextList(values);
     const palette = accent === 'emerald'
         ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-50'
         : accent === 'amber'
@@ -1038,12 +1092,12 @@ function DetailList({
             : accent === 'violet'
                 ? 'border-violet-500/20 bg-violet-500/10 text-violet-50'
                 : 'border-cyan-500/20 bg-cyan-500/10 text-cyan-50';
-    if (!Array.isArray(values) || values.length === 0) return null;
+    if (cleanValues.length === 0) return null;
     return (
         <div>
             <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{title}</div>
             <div className="space-y-2">
-                {values.slice(0, 8).map((value) => (
+                {cleanValues.slice(0, 8).map((value) => (
                     <div key={value} className={`rounded-2xl border px-4 py-3 text-sm ${palette}`}>
                         {value}
                     </div>

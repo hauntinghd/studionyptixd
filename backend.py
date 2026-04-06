@@ -1148,10 +1148,17 @@ def _youtube_auth_issue_message() -> str:
     return "Google YouTube OAuth is not configured on the backend yet"
 
 
-def _format_google_oauth_failure(action: str, status_code: int, body: str) -> str:
+def _format_google_oauth_failure(action: str, status_code: int, body: str, oauth_mode: str | None = None) -> str:
     detail = _clip_text(body, 220)
     lower = detail.lower()
+    attempted_mode = str(oauth_mode or "").strip().lower()
+    active_mode = _youtube_active_oauth_mode()
     if "consumer project" in lower or "project_number" in lower or "suspend" in lower:
+        if attempted_mode == "web" and active_mode == "installed" and _youtube_installed_auth_configured():
+            return (
+                f"Google {action} failed ({status_code}): this connected YouTube channel is still tied to the old backend web OAuth client, and that client's Google Cloud project is suspended. "
+                "Reconnect the channel under the installed OAuth flow, or replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET for the old web client."
+            )
         if _youtube_installed_auth_configured():
             return (
                 f"Google {action} failed ({status_code}): the configured backend web OAuth client belongs to a suspended Google Cloud project. "
@@ -1162,6 +1169,11 @@ def _format_google_oauth_failure(action: str, status_code: int, body: str) -> st
             "Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
         )
     if "oauth client was deleted" in lower or "oauth client was disabled" in lower or "deleted_client" in lower or "disabled_client" in lower:
+        if attempted_mode == "web" and active_mode == "installed" and _youtube_installed_auth_configured():
+            return (
+                f"Google {action} failed ({status_code}): this connected YouTube channel is still tied to the old backend web OAuth client, and that client is disabled or deleted. "
+                "Reconnect the channel under the installed OAuth flow, or replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET for the old web client."
+            )
         if _youtube_installed_auth_configured():
             return (
                 f"Google {action} failed ({status_code}): the configured backend web OAuth client is disabled or deleted. "
@@ -7117,7 +7129,7 @@ async def _google_exchange_code_for_tokens(code: str, oauth_mode: str | None = N
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(_format_google_oauth_failure("token exchange", resp.status_code, resp.text))
+        raise RuntimeError(_format_google_oauth_failure("token exchange", resp.status_code, resp.text, oauth_mode))
     payload = resp.json()
     if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
         raise RuntimeError("Google token exchange returned no access token")
@@ -7141,7 +7153,7 @@ async def _google_refresh_access_token(refresh_token: str, oauth_mode: str | Non
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(_format_google_oauth_failure("token refresh", resp.status_code, resp.text))
+        raise RuntimeError(_format_google_oauth_failure("token refresh", resp.status_code, resp.text, oauth_mode))
     payload = resp.json()
     if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
         raise RuntimeError("Google token refresh returned no access token")
@@ -8868,7 +8880,6 @@ async def _youtube_refresh_public_channel_record_without_oauth(record: dict, syn
             [
                 *[str(v).strip() for v in list(historical_compare.get("limitations") or []) if str(v).strip()],
                 ("Private impressions and CTR are unavailable while the connected YouTube OAuth client is failing, so public views are the strongest available signal." if sync_error else ""),
-                sync_error,
             ],
             max_items=6,
         )
@@ -8885,7 +8896,6 @@ async def _youtube_refresh_public_channel_record_without_oauth(record: dict, syn
             [
                 *[str(v).strip() for v in list(channel_audit.get("limitations") or []) if str(v).strip()],
                 ("Private impressions, CTR, and retention metrics are unavailable until the connected YouTube OAuth client is healthy again." if sync_error else ""),
-                sync_error,
             ],
             max_items=6,
         )
@@ -8906,10 +8916,33 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
         return access_token, updated
     if not refresh_token:
         raise RuntimeError("Missing Google refresh token for connected YouTube channel")
-    oauth_mode = str(updated.get("oauth_mode", "") or "").strip().lower()
+    stored_oauth_mode = str(updated.get("oauth_mode", "") or "").strip().lower()
+    active_oauth_mode = _youtube_active_oauth_mode()
+    oauth_mode = stored_oauth_mode if stored_oauth_mode in {"web", "installed"} else str(active_oauth_mode or "").strip().lower()
     if oauth_mode not in {"web", "installed"}:
         oauth_mode = "web"
-    refreshed = await _google_refresh_access_token(refresh_token, oauth_mode)
+    modes_to_try: list[str] = []
+    for candidate in [oauth_mode, str(active_oauth_mode or "").strip().lower()]:
+        if candidate in {"web", "installed"} and candidate not in modes_to_try:
+            modes_to_try.append(candidate)
+    refreshed: dict | None = None
+    last_refresh_error: Exception | None = None
+    for candidate_mode in modes_to_try or [oauth_mode]:
+        try:
+            refreshed = await _google_refresh_access_token(refresh_token, candidate_mode)
+            oauth_mode = candidate_mode
+            break
+        except Exception as e:
+            last_refresh_error = e
+            if (
+                candidate_mode != str(active_oauth_mode or "").strip().lower()
+                and str(active_oauth_mode or "").strip().lower() in {"web", "installed"}
+                and _google_oauth_error_suggests_stale_client(str(e))
+            ):
+                continue
+            raise
+    if not isinstance(refreshed, dict):
+        raise last_refresh_error or RuntimeError("Google token refresh returned no access token")
     updated["access_token"] = str(refreshed.get("access_token", "") or "").strip()
     updated["token_expires_at"] = now + max(300, int(refreshed.get("expires_in", 3600) or 3600))
     if str(refreshed.get("refresh_token", "") or "").strip():
@@ -10707,7 +10740,25 @@ def _clip_text(value: str, max_chars: int = 320) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= max_chars:
         return text
-    return text[: max(0, max_chars - 1)].rstrip() + "â€¦"
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _google_oauth_error_suggests_stale_client(message: str) -> bool:
+    lower = str(message or "").strip().lower()
+    if not lower:
+        return False
+    return any(
+        needle in lower
+        for needle in (
+            "oauth client is disabled or deleted",
+            "oauth client belongs to a suspended",
+            "disabled_client",
+            "deleted_client",
+            "consumer project",
+            "project_number",
+            "suspended google cloud project",
+        )
+    )
 
 
 def _normalize_external_source_url(raw_value: str) -> str:
