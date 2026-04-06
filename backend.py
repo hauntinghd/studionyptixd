@@ -8116,6 +8116,25 @@ def _youtube_historical_video_score(video: dict) -> float:
     return round((views * 0.08) + (likes * 3.0) + (ctr * 20.0) + (avp * 3.0) + min(impressions * 0.02, 40.0), 2)
 
 
+def _youtube_order_inventory_rows(rows: list[dict] | None) -> list[dict]:
+    ordered_rows = [
+        dict(row or {})
+        for row in list(rows or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    ]
+    if not ordered_rows:
+        return []
+    if all(str((row or {}).get("published_at", "") or "").strip() for row in ordered_rows):
+        ordered_rows.sort(
+            key=lambda row: (
+                str((row or {}).get("published_at", "") or ""),
+                str((row or {}).get("video_id", "") or ""),
+            ),
+            reverse=True,
+        )
+    return ordered_rows
+
+
 def _youtube_historical_compare_public_view(video: dict | None) -> dict:
     payload = dict(video or {})
     failure_mode_key, failure_mode_label = _youtube_connected_failure_mode(payload)
@@ -8144,10 +8163,9 @@ def _youtube_historical_compare_public_view(video: dict | None) -> dict:
 
 
 def _youtube_build_historical_compare(videos: list[dict]) -> dict:
-    rows = [dict(v or {}) for v in list(videos or []) if isinstance(v, dict) and str((v or {}).get("video_id", "") or "").strip()]
+    rows = _youtube_order_inventory_rows(videos)
     if not rows:
         return {}
-    rows.sort(key=lambda row: str(row.get("published_at", "") or ""), reverse=True)
     latest = dict(rows[0] or {})
     previous = dict(rows[1] or {}) if len(rows) > 1 else {}
     ranked = sorted(rows, key=_youtube_historical_video_score, reverse=True)
@@ -8259,13 +8277,7 @@ def _youtube_apply_public_inventory_to_snapshot(snapshot: dict | None, public_ro
         ).strip() or "public"
         merged_rows.append(merged)
 
-    merged_rows.sort(
-        key=lambda row: (
-            str((row or {}).get("published_at", "") or ""),
-            str((row or {}).get("video_id", "") or ""),
-        ),
-        reverse=True,
-    )
+    merged_rows = _youtube_order_inventory_rows(merged_rows)
 
     updated_snapshot = dict(base_snapshot)
     updated_snapshot["uploaded_videos"] = merged_rows[:250]
@@ -8639,13 +8651,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         for row in list(owned_channel_videos or [])
         if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
     ]
-    owned_inventory_rows.sort(
-        key=lambda row: (
-            str((row or {}).get("published_at", "") or ""),
-            str((row or {}).get("video_id", "") or ""),
-        ),
-        reverse=True,
-    )
+    owned_inventory_rows = _youtube_order_inventory_rows(owned_inventory_rows)
     owned_public_rows = [dict(row or {}) for row in list(owned_inventory_rows or []) if _is_public_studio_video(row)]
     public_page_inventory_rows = [
         dict(row or {})
@@ -9000,13 +9006,7 @@ async def _youtube_sync_channel_record(record: dict) -> dict:
         else:
             merged_uploaded_rows = [dict(row or {}) for row in list(existing_snapshot.get("uploaded_videos") or []) if isinstance(row, dict)]
 
-        merged_uploaded_rows.sort(
-            key=lambda row: (
-                str((row or {}).get("published_at", "") or ""),
-                str((row or {}).get("video_id", "") or ""),
-            ),
-            reverse=True,
-        )
+        merged_uploaded_rows = _youtube_order_inventory_rows(merged_uploaded_rows)
         fallback_snapshot = dict(existing_snapshot)
         if merged_uploaded_rows:
             fallback_snapshot = _youtube_apply_public_inventory_to_snapshot(fallback_snapshot, merged_uploaded_rows)
@@ -27378,7 +27378,7 @@ def _pick_catalyst_reference_video(channel_context: dict | None, requested_video
     ]
     if not uploaded_videos:
         uploaded_videos = [dict(v or {}) for v in list(context.get("uploaded_videos") or []) if isinstance(v, dict)]
-    measured_recent = sorted(uploaded_videos, key=lambda row: str(row.get("published_at", "") or ""), reverse=True)
+    measured_recent = _youtube_order_inventory_rows(uploaded_videos)
     measured_best = sorted(
         uploaded_videos,
         key=lambda row: (
