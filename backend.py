@@ -10396,6 +10396,34 @@ def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
         except Exception as e:
             last_error = str(e)
             continue
+    yt_dlp_bin = shutil.which("yt-dlp")
+    if yt_dlp_bin:
+        for player_clients in client_sets:
+            cmd = [
+                yt_dlp_bin,
+                "--dump-single-json",
+                "--no-warnings",
+                "--skip-download",
+                "--no-playlist",
+                "--extractor-args",
+                f"youtube:player_client={','.join(player_clients)}",
+                "--add-header",
+                (
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+                ),
+                source_url,
+            ]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0 and str(proc.stdout or "").strip():
+                    info = json.loads(proc.stdout)
+                    if isinstance(info, dict) and info:
+                        return info
+                last_error = _clip_text(str(proc.stderr or proc.stdout or last_error), 220)
+            except Exception as e:
+                last_error = str(e)
+                continue
     raise RuntimeError(last_error or "yt-dlp metadata extraction failed")
 
 
@@ -26476,6 +26504,47 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
             except Exception as e:
                 download_error = str(e or download_error or extract_error)
                 continue
+        if not video_file:
+            yt_dlp_bin = shutil.which("yt-dlp")
+            if yt_dlp_bin:
+                for player_clients in client_sets:
+                    cmd = [
+                        yt_dlp_bin,
+                        "--no-warnings",
+                        "--no-playlist",
+                        "--merge-output-format",
+                        "mp4",
+                        "-f",
+                        "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                        "-o",
+                        str(output_dir / "%(id)s.%(ext)s"),
+                        "--extractor-args",
+                        f"youtube:player_client={','.join(player_clients)}",
+                        "--add-header",
+                        (
+                            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+                        ),
+                        normalized_url,
+                    ]
+                    try:
+                        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=420)
+                        if proc.returncode == 0:
+                            if not info:
+                                try:
+                                    info = _yt_dlp_extract_info_blocking(normalized_url)
+                                except Exception:
+                                    info = {}
+                            video_id = str(info.get("id", "") or "").strip()
+                            files = sorted(output_dir.glob(f"{video_id or '*'}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                            video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
+                            if video_file:
+                                download_error = ""
+                                break
+                        download_error = _clip_text(str(proc.stderr or proc.stdout or download_error), 220)
+                    except Exception as e:
+                        download_error = str(e or download_error or extract_error)
+                        continue
         return {
             "info": info,
             "video_path": str(video_file) if video_file else "",
