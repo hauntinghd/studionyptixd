@@ -302,8 +302,19 @@ try:
 except Exception:
     yt_dlp = None
 
+try:
+    from faster_whisper import WhisperModel as FasterWhisperModel
+except Exception:
+    FasterWhisperModel = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("nyptid-studio")
+
+CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES = 20.0
+CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS = 20.0 * 60.0
+CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS = 2400
+_reference_whisper_model = None
+_reference_whisper_lock = asyncio.Lock()
 
 
 def _ffmpeg_available() -> bool:
@@ -25112,7 +25123,13 @@ async def catalyst_hub_reference_video_analysis(
             channel_id=channel_id,
             workspace_id=workspace_id,
             video_id=str((req or {}).video_id or "").strip(),
-            max_analysis_minutes=max(1.0, min(float((req or {}).max_analysis_minutes or 6.0), 6.0)),
+            max_analysis_minutes=max(
+                1.0,
+                min(
+                    float((req or {}).max_analysis_minutes or CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES),
+                    CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
+                ),
+            ),
         )
         payload = await _build_catalyst_hub_payload(
             user=user,
@@ -25257,7 +25274,7 @@ async def catalyst_hub_launch_longform(
                 channel_id=channel_id,
                 workspace_id=workspace_id,
                 video_id="",
-                max_analysis_minutes=3.0,
+                max_analysis_minutes=CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
             )
         except Exception as e:
             log.warning(f"Catalyst documentary reference video analysis auto-build failed: {e}")
@@ -25952,20 +25969,57 @@ async def extract_audio_from_video(video_path: str) -> str | None:
 
 
 async def transcribe_audio_with_grok(audio_path: str) -> str:
-    """Use ffmpeg to get audio duration then estimate narration from file size for context."""
-    cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(audio_path)]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await proc.communicate()
-    duration = 0
-    if proc.returncode == 0:
+    """Extract a real transcript excerpt from sampled audio when YouTube captions are unavailable."""
+    source_path = str(audio_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return ""
+
+    def _transcribe_blocking() -> str:
+        global _reference_whisper_model
+
+        if FasterWhisperModel is None:
+            return ""
+
         try:
-            data = json.loads(stdout.decode())
-            duration = float(data.get("format", {}).get("duration", 0))
-        except Exception:
-            pass
-    return f"Audio duration: {duration:.1f}s"
+            if _reference_whisper_model is None:
+                model_dir = TEMP_DIR / "whisper_models"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                _reference_whisper_model = FasterWhisperModel(
+                    "tiny.en",
+                    device="cpu",
+                    compute_type="int8",
+                    download_root=str(model_dir),
+                )
+            segments, _info = _reference_whisper_model.transcribe(
+                source_path,
+                language="en",
+                beam_size=1,
+                best_of=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            parts: list[str] = []
+            total_chars = 0
+            for seg in segments:
+                text = re.sub(r"\s+", " ", str(getattr(seg, "text", "") or "").strip())
+                if not text:
+                    continue
+                parts.append(text)
+                total_chars += len(text) + 1
+                if total_chars >= CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS:
+                    break
+            transcript = re.sub(r"\s+", " ", " ".join(parts)).strip()
+            return _clip_text(transcript, CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS)
+        except Exception as e:
+            log.warning(f"Reference audio transcription fallback failed: {e}")
+            return ""
+
+    async with _reference_whisper_lock:
+        transcript = await asyncio.to_thread(_transcribe_blocking)
+    if not transcript:
+        return ""
+    return f"Sampled audio transcript excerpt: {transcript}"
 
 
 def _slugify_file_component(value: str, fallback: str = "item", max_len: int = 64) -> str:
@@ -26959,7 +27013,7 @@ async def _build_catalyst_reference_video_analysis(
     channel_id: str,
     workspace_id: str,
     video_id: str = "",
-    max_analysis_minutes: float = 3.0,
+    max_analysis_minutes: float = CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
 ) -> dict:
     await _clear_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
@@ -27043,7 +27097,10 @@ async def _build_catalyst_reference_video_analysis(
     download_info = dict(download.get("info") or {})
     download_error = _clip_text(str(download.get("download_error", "") or "").strip(), 420)
     video_path = str(download.get("video_path", "") or "").strip()
-    analysis_seconds = max(60.0, min(float(max_analysis_minutes or 6.0) * 60.0, 600.0))
+    analysis_seconds = max(
+        60.0,
+        min(float(max_analysis_minutes or CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES) * 60.0, CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS),
+    )
     selected_duration_sec = float(
         source_bundle.get("duration_sec", selected_video.get("duration_sec", 0.0)) or 0.0
     )

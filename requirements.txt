@@ -10,3 +10,4 @@ redis
 pillow
 pydub
 yt-dlp
+faster-whisper

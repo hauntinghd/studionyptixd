@@ -462,7 +462,7 @@ export default function CatalystPanel() {
                     channel_id: selectedChannelId,
                     workspace_id: selectedWorkspaceId,
                     video_id: selectedReferenceVideoId || '',
-                    max_analysis_minutes: 3.0,
+                    max_analysis_minutes: 20.0,
                 }),
             });
             const data = await readJsonResponse<any>(res);
