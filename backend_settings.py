@@ -152,7 +152,7 @@ def _load_google_oauth_settings() -> dict:
     if not client_id or not client_secret:
         config_issue = "client_secrets_missing_client_credentials"
     elif client_kind != "web":
-        config_issue = "desktop_client_not_supported_for_backend_oauth"
+        config_issue = "" if YOUTUBE_OAUTH_MODE == "installed" else "desktop_client_not_supported_for_backend_oauth"
     elif registered_redirect_uris and env_redirect_uri not in registered_redirect_uris:
         config_issue = "redirect_uri_not_listed_in_google_client"
 

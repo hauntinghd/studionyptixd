@@ -8912,6 +8912,11 @@ async def _youtube_refresh_public_channel_record_without_oauth(record: dict, syn
     return updated
 
 
+def _youtube_mode_is_configured(mode: str | None) -> bool:
+    normalized = str(mode or "").strip().lower()
+    return normalized in {"web", "installed"} and _youtube_active_oauth_mode(normalized) == normalized
+
+
 async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
     updated = dict(record or {})
     access_token = str(updated.get("access_token", "") or "").strip()
@@ -8924,12 +8929,16 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
         raise RuntimeError("Missing Google refresh token for connected YouTube channel")
     stored_oauth_mode = str(updated.get("oauth_mode", "") or "").strip().lower()
     active_oauth_mode = _youtube_active_oauth_mode()
-    oauth_mode = stored_oauth_mode if stored_oauth_mode in {"web", "installed"} else str(active_oauth_mode or "").strip().lower()
+    oauth_mode = (
+        stored_oauth_mode
+        if stored_oauth_mode in {"web", "installed"} and _youtube_mode_is_configured(stored_oauth_mode)
+        else str(active_oauth_mode or "").strip().lower()
+    )
     if oauth_mode not in {"web", "installed"}:
         oauth_mode = "web"
     modes_to_try: list[str] = []
     for candidate in [oauth_mode, str(active_oauth_mode or "").strip().lower()]:
-        if candidate in {"web", "installed"} and candidate not in modes_to_try:
+        if candidate in {"web", "installed"} and _youtube_mode_is_configured(candidate) and candidate not in modes_to_try:
             modes_to_try.append(candidate)
     refreshed: dict | None = None
     last_refresh_error: Exception | None = None
@@ -8946,6 +8955,15 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
                 and _google_oauth_error_suggests_stale_client(str(e))
             ):
                 continue
+            if (
+                stored_oauth_mode == "web"
+                and candidate_mode == "installed"
+                and _google_oauth_error_suggests_reconnect_required(str(e))
+            ):
+                raise RuntimeError(
+                    "This connected YouTube channel is still carrying a refresh token from the old backend web OAuth client. "
+                    "Reconnect the channel under the installed OAuth flow so private YouTube metrics can refresh again."
+                )
             raise
     if not isinstance(refreshed, dict):
         raise last_refresh_error or RuntimeError("Google token refresh returned no access token")
@@ -10757,6 +10775,22 @@ def _google_oauth_error_suggests_stale_client(message: str) -> bool:
             "consumer project",
             "project_number",
             "suspended google cloud project",
+        )
+    )
+
+
+def _google_oauth_error_suggests_reconnect_required(message: str) -> bool:
+    lower = str(message or "").strip().lower()
+    if not lower:
+        return False
+    return any(
+        needle in lower
+        for needle in (
+            "invalid_grant",
+            "token has been expired or revoked",
+            "token has been revoked",
+            "unauthorized_client",
+            "bad request",
         )
     )
 
