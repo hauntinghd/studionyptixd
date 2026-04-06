@@ -234,6 +234,7 @@ from backend_models import (
     LongFormSessionCreateRequest,
     LongFormChapterActionRequest,
     LongFormResolveErrorRequest,
+    LongFormSceneAssignmentRequest,
     YouTubeOAuthStartRequest,
     YouTubeChannelSelectRequest,
     CatalystOutcomeIngestRequest,
@@ -3537,6 +3538,96 @@ def _persist_longform_reference_image(
     if template == "skeleton":
         session["skeleton_reference_image"] = public_url
     return session
+
+
+def _longform_character_reference_public_view(raw_reference: dict) -> dict:
+    ref = dict(raw_reference or {})
+    return {
+        "character_id": str(ref.get("character_id", "") or "").strip(),
+        "name": str(ref.get("name", "") or "").strip(),
+        "reference_image_public_url": str(ref.get("reference_image_public_url", "") or "").strip(),
+        "reference_lock_mode": str(ref.get("reference_lock_mode", "strict") or "strict").strip() or "strict",
+        "reference_quality": dict(ref.get("reference_quality") or {}),
+        "created_at": float(ref.get("created_at", 0.0) or 0.0),
+    }
+
+
+def _persist_longform_character_reference(
+    session: dict,
+    *,
+    name: str,
+    reference_image_url: str,
+    reference_lock_mode: str = "strict",
+) -> tuple[dict, dict]:
+    session = dict(session or {})
+    character_name = _clip_text(str(name or "").strip(), 60)
+    if not character_name:
+        raise HTTPException(400, "Character name is required")
+    data_url = str(reference_image_url or "").strip()
+    if not data_url:
+        raise HTTPException(400, "Reference image is empty or invalid")
+    raw, mime = _decode_data_image_url(data_url)
+    if not raw:
+        raise HTTPException(400, "Reference image is empty or invalid")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(400, "Reference image must be <= 8MB")
+    lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
+    quality = _analyze_reference_quality(raw, lock_mode=lock_mode)
+    if not quality.get("accepted", True) and lock_mode == "strict":
+        raise HTTPException(
+            400,
+            "Character reference quality too low for Strict Reference Lock. Upload a higher-resolution image or switch to Style Inspired mode.",
+        )
+    ext = ".png"
+    if "jpeg" in mime or "jpg" in mime:
+        ext = ".jpg"
+    elif "webp" in mime:
+        ext = ".webp"
+    ref_dir = TEMP_DIR / "longform_references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    session_id = str(session.get("session_id", "") or "").strip() or f"lf_ref_{int(time.time())}_{random.randint(1000, 9999)}"
+    character_id = f"lfc_{int(time.time())}_{random.randint(1000, 9999)}"
+    ref_name = f"{session_id}_{character_id}{ext}"
+    ref_path = ref_dir / ref_name
+    ref_path.write_bytes(raw)
+    public_url = _longform_reference_file_public_url(ref_name)
+    template = str(session.get("template", "story") or "story").strip().lower() or "story"
+    character_reference = {
+        "character_id": character_id,
+        "name": character_name,
+        "reference_image_path": str(ref_path),
+        "reference_image_public_url": public_url,
+        "reference_lock_mode": lock_mode,
+        "reference_quality": quality,
+        "reference_dna": _extract_reference_dna(raw, template=template),
+        "created_at": time.time(),
+    }
+    existing = [
+        dict(item or {})
+        for item in list(session.get("character_references") or [])
+        if isinstance(item, dict) and str((item or {}).get("character_id", "") or "").strip()
+    ]
+    existing.append(character_reference)
+    session["character_references"] = existing
+    return session, character_reference
+
+
+def _longform_scene_assigned_character_reference(session: dict, scene: dict) -> dict:
+    refs = {
+        str((item or {}).get("character_id", "") or "").strip(): dict(item or {})
+        for item in list((dict(session or {})).get("character_references") or [])
+        if isinstance(item, dict) and str((item or {}).get("character_id", "") or "").strip()
+    }
+    scene_payload = dict(scene or {})
+    assigned_id = str(scene_payload.get("assigned_character_id", "") or "").strip()
+    if not assigned_id:
+        assigned_ids = [
+            str(item or "").strip()
+            for item in list(scene_payload.get("assigned_character_ids") or [])
+            if str(item or "").strip()
+        ]
+        assigned_id = assigned_ids[0] if assigned_ids else ""
+    return dict(refs.get(assigned_id) or {})
 
 
 def _extract_reference_dna(raw: bytes, template: str = "skeleton") -> dict:
@@ -11077,6 +11168,7 @@ def _build_longform_scene_execution_prompt(
     skeleton_anchor: str = "",
     art_style: str = "auto",
     has_subject_reference: bool = False,
+    subject_reference_name: str = "",
 ) -> str:
     scene = dict(scene or {})
     visual_description_raw = str(scene.get("visual_description", "") or "").strip()
@@ -11140,16 +11232,19 @@ def _build_longform_scene_execution_prompt(
             if documentary_archetype == "psychology_documentary"
             else "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects."
         )
+        subject_reference_phrase = (
+            f"Use the attached subject reference image for {subject_reference_name} only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            if has_subject_reference and str(subject_reference_name or "").strip()
+            else "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            if has_subject_reference
+            else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
+        )
         visual_parts = _dedupe_preserve_order([
             documentary_visual_description,
             f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
-            (
-                "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
-                if has_subject_reference
-                else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
-            ),
+            subject_reference_phrase,
             documentary_environment_guidance,
             "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
         ], max_items=8, max_chars=240)
@@ -11159,7 +11254,13 @@ def _build_longform_scene_execution_prompt(
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
         f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
-        "Preserve the exact same subject identity from the attached reference image whenever that person appears." if has_subject_reference else "",
+        (
+            f"Preserve the exact same subject identity for {subject_reference_name} from the attached reference image whenever that person appears."
+            if has_subject_reference and str(subject_reference_name or "").strip()
+            else "Preserve the exact same subject identity from the attached reference image whenever that person appears."
+            if has_subject_reference
+            else ""
+        ),
         f"Visual motif: {visual_motif}." if visual_motif else "",
         f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
         "Pattern interrupt required in composition, scale, or contrast." if execution.get("is_interrupt") else "",
@@ -19255,6 +19356,32 @@ def _catalyst_longform_preflight(session: dict) -> dict:
     visual_score = float(execution_scores.get("visuals", 0.0) or 0.0)
     sound_score = float(execution_scores.get("sound", 0.0) or 0.0)
     packaging_score = float(execution_scores.get("packaging", 0.0) or 0.0)
+    chapters = [dict(chapter or {}) for chapter in list(session_snapshot.get("chapters") or []) if isinstance(chapter, dict)]
+    character_references = [
+        dict(item or {})
+        for item in list(session_snapshot.get("character_references") or [])
+        if isinstance(item, dict) and str((item or {}).get("character_id", "") or "").strip()
+    ]
+    total_scene_count = 0
+    assigned_scene_count = 0
+    missing_character_assignments = 0
+    assigned_character_ids: set[str] = set()
+    available_character_ids = {
+        str((item or {}).get("character_id", "") or "").strip()
+        for item in character_references
+        if str((item or {}).get("character_id", "") or "").strip()
+    }
+    for chapter in chapters:
+        for raw_scene in list(chapter.get("scenes") or []):
+            scene = dict(raw_scene or {})
+            total_scene_count += 1
+            assigned_id = str(scene.get("assigned_character_id", "") or "").strip()
+            if assigned_id:
+                if assigned_id in available_character_ids:
+                    assigned_scene_count += 1
+                    assigned_character_ids.add(assigned_id)
+                else:
+                    missing_character_assignments += 1
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -19329,6 +19456,20 @@ def _catalyst_longform_preflight(session: dict) -> dict:
         blockers.append(f"Overall execution score is only {overall_score:.1f}/100.")
     elif overall_score > 0.0 and overall_score < 76.0:
         warnings.append(f"Overall execution score is {overall_score:.1f}/100. The run is usable but not yet clean.")
+
+    if character_references:
+        if missing_character_assignments > 0:
+            blockers.append(
+                f"{missing_character_assignments} scene assignment{'s' if missing_character_assignments != 1 else ''} reference missing character IDs. Re-save the cast assignments before finalize."
+            )
+        if assigned_scene_count == 0:
+            warnings.append("Character references are uploaded, but no scenes are explicitly assigned to them yet.")
+        elif total_scene_count > 0 and assigned_scene_count < max(2, math.ceil(total_scene_count * 0.2)):
+            warnings.append(
+                f"Only {assigned_scene_count}/{total_scene_count} scenes have explicit character assignments. Identity continuity may still drift."
+            )
+        if len(assigned_character_ids) == 1 and total_scene_count > 0 and assigned_scene_count >= max(3, math.ceil(total_scene_count * 0.35)):
+            strengths.append("A recurring subject is explicitly assigned across multiple scenes, which gives Catalyst a stronger identity continuity anchor.")
 
     selected_title = str(
         package.get("selected_title", "")
@@ -19482,6 +19623,16 @@ def _longform_public_session(session: dict) -> dict:
         format_preset=str(s.get("format_preset", "") or "documentary"),
     )
     chapters = []
+    public_character_references = [
+        _longform_character_reference_public_view(item)
+        for item in list(s.get("character_references") or [])
+        if isinstance(item, dict) and str((item or {}).get("character_id", "") or "").strip()
+    ]
+    character_name_by_id = {
+        str(item.get("character_id", "") or "").strip(): str(item.get("name", "") or "").strip()
+        for item in public_character_references
+        if str(item.get("character_id", "") or "").strip()
+    }
     for ch in list(s.get("chapters") or []):
         chapter = dict(ch or {})
         chapter_scenes = []
@@ -19496,9 +19647,17 @@ def _longform_public_session(session: dict) -> dict:
                 "motion_direction": str(scene.get("motion_direction", "") or ""),
                 "sfx_direction": str(scene.get("sfx_direction", "") or ""),
                 "engagement_purpose": str(scene.get("engagement_purpose", "") or ""),
+                "assigned_character_id": str(scene.get("assigned_character_id", "") or ""),
+                "assigned_character_name": str(
+                    scene.get("assigned_character_name", "")
+                    or character_name_by_id.get(str(scene.get("assigned_character_id", "") or "").strip(), "")
+                    or ""
+                ),
                 "image_url": str(scene.get("image_url", "") or ""),
                 "image_status": str(scene.get("image_status", "missing") or "missing"),
                 "image_error": str(scene.get("image_error", "") or ""),
+                "image_provider": str(scene.get("image_provider", "") or ""),
+                "image_provider_label": str(scene.get("image_provider_label", "") or ""),
             })
         chapters.append({
             "index": int(chapter.get("index", 0) or 0),
@@ -19541,6 +19700,7 @@ def _longform_public_session(session: dict) -> dict:
         "reference_image_uploaded": bool(s.get("reference_image_uploaded", False)),
         "reference_image_public_url": str(s.get("reference_image_public_url", "") or ""),
         "reference_lock_mode": str(s.get("reference_lock_mode", "strict") or "strict"),
+        "character_references": public_character_references,
         "metadata_pack": dict(s.get("metadata_pack") or {}),
         "edit_blueprint": dict(s.get("edit_blueprint") or {}),
         "learning_record": dict(s.get("learning_record") or {}),
@@ -20342,6 +20502,29 @@ def _longform_session_subject_reference_image_url(session: dict | None, template
     return ""
 
 
+def _longform_scene_reference_bundle(session: dict | None, scene: dict | None, template: str = "") -> dict:
+    session_payload = dict(session or {})
+    scene_payload = dict(scene or {})
+    assigned_reference = _longform_scene_assigned_character_reference(session_payload, scene_payload)
+    if assigned_reference:
+        return {
+            "reference_image_url": str(assigned_reference.get("reference_image_public_url", "") or "").strip(),
+            "reference_lock_mode": _normalize_reference_lock_mode(
+                assigned_reference.get("reference_lock_mode"),
+                default=_normalize_reference_lock_mode(session_payload.get("reference_lock_mode"), default="strict"),
+            ),
+            "reference_name": str(assigned_reference.get("name", "") or "").strip(),
+            "has_subject_reference": True,
+        }
+    session_reference_image_url = _longform_session_subject_reference_image_url(session_payload, template)
+    return {
+        "reference_image_url": session_reference_image_url,
+        "reference_lock_mode": _normalize_reference_lock_mode(session_payload.get("reference_lock_mode"), default="strict"),
+        "reference_name": "",
+        "has_subject_reference": bool(session_reference_image_url),
+    }
+
+
 def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
     channel_context = dict(channel_context or {})
     haystack = " ".join(
@@ -20630,7 +20813,7 @@ async def _longform_attach_scene_previews(
     session_input_title = ""
     channel_context: dict = {}
     session_reference_image_url = ""
-    session_reference_lock_mode = "strict"
+    live_session: dict = {}
     try:
         async with _longform_sessions_lock:
             live_session = dict(_longform_sessions.get(session_id) or {})
@@ -20638,10 +20821,6 @@ async def _longform_attach_scene_previews(
         session_input_title = str(live_session.get("input_title", "") or "").strip()
         channel_context = dict((dict(live_session.get("metadata_pack") or {})).get("youtube_channel") or {})
         session_reference_image_url = _longform_session_subject_reference_image_url(live_session, template)
-        session_reference_lock_mode = _normalize_reference_lock_mode(
-            live_session.get("reference_lock_mode"),
-            default="strict",
-        )
     except Exception:
         pass
 
@@ -20688,6 +20867,28 @@ async def _longform_attach_scene_previews(
         chapter_blueprint=chapter_blueprint,
         allow_narration_rewrite=False,
     )
+    existing_scene_assignments: dict[int, dict] = {}
+    try:
+        async with _longform_sessions_lock:
+            current_session = dict(_longform_sessions.get(session_id) or {})
+        live_chapters = list(current_session.get("chapters") or [])
+        if 0 <= chapter_index < len(live_chapters):
+            for raw_scene in list((dict(live_chapters[chapter_index] or {})).get("scenes") or []):
+                live_scene = dict(raw_scene or {})
+                scene_num = int(live_scene.get("scene_num", 0) or 0)
+                if scene_num <= 0:
+                    continue
+                existing_scene_assignments[scene_num] = {
+                    "assigned_character_id": str(live_scene.get("assigned_character_id", "") or "").strip(),
+                    "assigned_character_ids": [
+                        str(item or "").strip()
+                        for item in list(live_scene.get("assigned_character_ids") or [])
+                        if str(item or "").strip()
+                    ],
+                    "assigned_character_name": str(live_scene.get("assigned_character_name", "") or "").strip(),
+                }
+    except Exception:
+        existing_scene_assignments = {}
 
     scripted_scenes: list[dict] = []
     for scene_idx, raw_scene in enumerate(scenes):
@@ -20703,6 +20904,15 @@ async def _longform_attach_scene_previews(
         scene["image_url"] = ""
         scene["image_status"] = "pending_script_lock"
         scene["image_error"] = ""
+        persisted_assignment = dict(existing_scene_assignments.get(int(scene.get("scene_num", 0) or 0)) or {})
+        if persisted_assignment:
+            scene["assigned_character_id"] = str(persisted_assignment.get("assigned_character_id", "") or "").strip()
+            scene["assigned_character_ids"] = [
+                str(item or "").strip()
+                for item in list(persisted_assignment.get("assigned_character_ids") or [])
+                if str(item or "").strip()
+            ]
+            scene["assigned_character_name"] = str(persisted_assignment.get("assigned_character_name", "") or "").strip()
         scripted_scenes.append(scene)
 
     out["scenes"] = scripted_scenes
@@ -20740,7 +20950,8 @@ async def _longform_attach_scene_previews(
             format_preset=format_preset,
         )
         scene["visual_description"] = visual_desc
-        reference_image_url = session_reference_image_url or _longform_documentary_reference_image_url(
+        scene_reference_bundle = _longform_scene_reference_bundle(live_session, scene, template)
+        reference_image_url = str(scene_reference_bundle.get("reference_image_url", "") or "").strip() or _longform_documentary_reference_image_url(
             template=template,
             format_preset=format_preset,
             channel_context=channel_context,
@@ -20750,6 +20961,13 @@ async def _longform_attach_scene_previews(
             input_title=session_input_title,
             narration=str(scene.get("narration", "") or ""),
             visual_description=visual_desc,
+        )
+        reference_lock_mode = _normalize_reference_lock_mode(
+            scene_reference_bundle.get("reference_lock_mode"),
+            default=_normalize_reference_lock_mode(
+                (dict(live_session or {})).get("reference_lock_mode"),
+                default="strict",
+            ),
         )
 
         prompt = _build_longform_scene_execution_prompt(
@@ -20764,7 +20982,8 @@ async def _longform_attach_scene_previews(
             total_scenes=len(scripted_scenes),
             skeleton_anchor=skeleton_anchor,
             art_style=_longform_default_art_style(template, format_preset),
-            has_subject_reference=bool(session_reference_image_url),
+            has_subject_reference=bool(scene_reference_bundle.get("has_subject_reference", False)),
+            subject_reference_name=str(scene_reference_bundle.get("reference_name", "") or ""),
         )
         filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
         output_path = str(LONGFORM_PREVIEW_DIR / filename)
@@ -20777,7 +20996,7 @@ async def _longform_attach_scene_previews(
                 template=template,
                 format_preset=format_preset,
                 reference_image_url=reference_image_url,
-                reference_lock_mode=session_reference_lock_mode,
+                reference_lock_mode=reference_lock_mode,
                 best_of_enabled=False,
                 salvage_enabled=False,
             )
@@ -21248,11 +21467,6 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             if _bool_from_any(live_session.get("stop_requested"), False) or str(live_session.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
                 await _mark_longform_job_cancelled(job_id, "Stopped by owner.")
                 return
-            session_reference_image_url = _longform_session_subject_reference_image_url(live_session, template)
-            session_reference_lock_mode = _normalize_reference_lock_mode(
-                live_session.get("reference_lock_mode"),
-                default="strict",
-            )
             chapter_index = int(scene.get("_chapter_index", 0) or 0)
             scene_num = int(scene.get("scene_num", i + 1) or (i + 1))
             _job_update_scene_pointer(
@@ -21285,7 +21499,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             scene["_payoff_hold_sec"] = float(execution_profile.get("payoff_hold_sec", 1.1) or 1.1)
             scene["_caption_rhythm"] = str(execution_profile.get("caption_rhythm", "") or "")
             scene["_sound_density"] = str(execution_profile.get("sound_density", "") or "")
-            reference_image_url = session_reference_image_url or _longform_documentary_reference_image_url(
+            scene_reference_bundle = _longform_scene_reference_bundle(live_session, scene, template)
+            reference_image_url = str(scene_reference_bundle.get("reference_image_url", "") or "").strip() or _longform_documentary_reference_image_url(
                 template=template,
                 format_preset=format_preset,
                 channel_context=channel_context,
@@ -21296,7 +21511,10 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 narration=str(scene.get("narration", "") or ""),
                 visual_description=locked_visual,
             )
-            reference_lock_mode = session_reference_lock_mode
+            reference_lock_mode = _normalize_reference_lock_mode(
+                scene_reference_bundle.get("reference_lock_mode"),
+                default=_normalize_reference_lock_mode(live_session.get("reference_lock_mode"), default="strict"),
+            )
             if not reference_image_url:
                 reference_image_url = _normalize_reference_with_default(template, "")
             full_prompt = _build_longform_scene_execution_prompt(
@@ -21311,7 +21529,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 total_scenes=len(scenes),
                 skeleton_anchor=skeleton_anchor,
                 art_style=longform_art_style,
-                has_subject_reference=bool(session_reference_image_url),
+                has_subject_reference=bool(scene_reference_bundle.get("has_subject_reference", False)),
+                subject_reference_name=str(scene_reference_bundle.get("reference_name", "") or ""),
             )
             scene_prompts.append(locked_visual)
 
@@ -21936,6 +22155,7 @@ async def _create_longform_session_internal(
         "reference_dna": {},
         "reference_quality": {},
         "rolling_reference_image_url": "",
+        "character_references": [dict(item or {}) for item in list(existing_session.get("character_references") or []) if isinstance(item, dict)] if existing_session else [],
         "target_minutes": float(target_minutes),
         "language": language,
         "resolution": "720p_landscape",
@@ -22095,6 +22315,7 @@ def _create_longform_bootstrap_placeholder_session(
         "reference_dna": {},
         "reference_quality": {},
         "rolling_reference_image_url": "",
+        "character_references": [],
         "target_minutes": float(target_minutes),
         "language": _normalize_longform_language(language),
         "resolution": "720p_landscape",
@@ -22577,6 +22798,108 @@ async def longform_reference_image(
     return {
         "ok": True,
         "session": _longform_public_session(session),
+    }
+
+
+@app.post("/api/longform/session/{session_id}/character-reference")
+async def longform_character_reference(
+    session_id: str,
+    character_name: str = Form(""),
+    reference_image: UploadFile = File(...),
+    reference_lock_mode: str = Form("strict"),
+    request: Request = None,
+):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = dict(_longform_sessions.get(session_id) or {})
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "").strip() != str(user.get("id", "") or "").strip():
+            raise HTTPException(403, "Not your session")
+        if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
+            raise HTTPException(400, "Reference file must be an image")
+        raw = await reference_image.read()
+        if not raw:
+            raise HTTPException(400, "Reference image is empty")
+        mime = reference_image.content_type or "image/png"
+        data_url = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        session, created_reference = _persist_longform_character_reference(
+            session,
+            name=character_name,
+            reference_image_url=data_url,
+            reference_lock_mode=reference_lock_mode,
+        )
+        session["updated_at"] = time.time()
+        _longform_sessions[session_id] = session
+        _save_longform_sessions()
+    return {
+        "ok": True,
+        "session": _longform_public_session(session),
+        "character_reference": _longform_character_reference_public_view(created_reference),
+    }
+
+
+@app.post("/api/longform/session/{session_id}/scene-assignment")
+async def longform_scene_assignment(
+    session_id: str,
+    req: LongFormSceneAssignmentRequest,
+    request: Request = None,
+):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = dict(_longform_sessions.get(session_id) or {})
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "").strip() != str(user.get("id", "") or "").strip():
+            raise HTTPException(403, "Not your session")
+        chapters = list(session.get("chapters") or [])
+        chapter_index = int(req.chapter_index)
+        if chapter_index < 0 or chapter_index >= len(chapters):
+            raise HTTPException(400, "Invalid chapter index")
+        character_id = str(req.character_id or "").strip()
+        refs_by_id = {
+            str((item or {}).get("character_id", "") or "").strip(): dict(item or {})
+            for item in list(session.get("character_references") or [])
+            if isinstance(item, dict) and str((item or {}).get("character_id", "") or "").strip()
+        }
+        if character_id and character_id not in refs_by_id:
+            raise HTTPException(400, "Character reference not found")
+        chapter = dict(chapters[chapter_index] or {})
+        scenes = list(chapter.get("scenes") or [])
+        target_scene_index = -1
+        target_scene_num = int(req.scene_num or 0)
+        for idx, raw_scene in enumerate(scenes):
+            scene_num = int((dict(raw_scene or {})).get("scene_num", idx + 1) or (idx + 1))
+            if scene_num == target_scene_num:
+                target_scene_index = idx
+                break
+        if target_scene_index < 0:
+            raise HTTPException(400, "Scene not found")
+        scene = dict(scenes[target_scene_index] or {})
+        scene["assigned_character_id"] = character_id
+        scene["assigned_character_ids"] = [character_id] if character_id else []
+        scene["assigned_character_name"] = str((refs_by_id.get(character_id) or {}).get("name", "") or "").strip()
+        if character_id:
+            scene["image_status"] = "error"
+            scene["image_error"] = "Character assignment changed. Regenerate this chapter to refresh the preview."
+        scenes[target_scene_index] = scene
+        chapter["scenes"] = scenes
+        chapters[chapter_index] = chapter
+        session["chapters"] = chapters
+        session["updated_at"] = time.time()
+        _longform_sessions[session_id] = session
+        _save_longform_sessions()
+    return {
+        "ok": True,
+        "session": _longform_public_session(session),
+        "chapter": dict(chapter or {}),
+        "scene": dict(scene or {}),
     }
 
 

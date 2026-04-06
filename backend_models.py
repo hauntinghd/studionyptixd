@@ -146,6 +146,12 @@ class LongFormResolveErrorRequest(BaseModel):
     force_accept: bool = False
 
 
+class LongFormSceneAssignmentRequest(BaseModel):
+    chapter_index: int
+    scene_num: int
+    character_id: str = ""
+
+
 class YouTubeOAuthStartRequest(BaseModel):
     next_url: str = ""
 

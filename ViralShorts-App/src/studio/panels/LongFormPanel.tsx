@@ -19,6 +19,8 @@ type LongFormChapter = {
         narration: string;
         visual_description: string;
         text_overlay: string;
+        assigned_character_id?: string;
+        assigned_character_name?: string;
         image_url: string;
         image_status: string;
         image_error: string;
@@ -44,6 +46,15 @@ type LongFormDraftProgress = {
     preview_scene_total?: number;
     preview_scene_generated?: number;
     stage?: string;
+};
+
+type LongFormCharacterReference = {
+    character_id: string;
+    name: string;
+    reference_image_public_url?: string;
+    reference_lock_mode?: string;
+    reference_quality?: Record<string, any>;
+    created_at?: number;
 };
 
 type ConnectedYouTubeChannel = {
@@ -105,6 +116,7 @@ type LongFormSession = {
     reference_image_uploaded?: boolean;
     reference_image_public_url?: string;
     reference_lock_mode?: string;
+    character_references?: LongFormCharacterReference[];
     edit_blueprint?: Record<string, any>;
     learning_record?: Record<string, any>;
     latest_outcome?: Record<string, any>;
@@ -255,6 +267,8 @@ export default function LongFormPanel() {
     const [transcriptText, setTranscriptText] = useState('');
     const [analyticsImages, setAnalyticsImages] = useState<File[]>([]);
     const [subjectReferenceImage, setSubjectReferenceImage] = useState<File | null>(null);
+    const [characterReferenceName, setCharacterReferenceName] = useState('');
+    const [characterReferenceImage, setCharacterReferenceImage] = useState<File | null>(null);
     const [subjectReferenceAttached, setSubjectReferenceAttached] = useState(false);
     const [applyMarketingDoctrine, setApplyMarketingDoctrine] = useState(true);
     const [targetMinutes, setTargetMinutes] = useState(8);
@@ -270,6 +284,7 @@ export default function LongFormPanel() {
     const [finalizing, setFinalizing] = useState(false);
     const [stopping, setStopping] = useState(false);
     const [uploadingReference, setUploadingReference] = useState(false);
+    const [uploadingCharacterReference, setUploadingCharacterReference] = useState(false);
     const [actionBusy, setActionBusy] = useState('');
     const [error, setError] = useState('');
     const [projectsError, setProjectsError] = useState('');
@@ -837,6 +852,49 @@ export default function LongFormPanel() {
         }
     }, [apiCallFormData, lfSession?.session_id, subjectReferenceImage]);
 
+    const uploadCharacterReferenceToSession = useCallback(async () => {
+        if (!lfSession?.session_id || !characterReferenceImage || !String(characterReferenceName || '').trim()) return;
+        setUploadingCharacterReference(true);
+        setError('');
+        try {
+            const formData = new FormData();
+            formData.append('character_name', String(characterReferenceName || '').trim());
+            formData.append('reference_image', characterReferenceImage);
+            formData.append('reference_lock_mode', 'strict');
+            const payload = await apiCallFormData(`/api/longform/session/${lfSession.session_id}/character-reference`, formData);
+            const updated = (payload as any).session as LongFormSession;
+            setLfSession(updated);
+            setCharacterReferenceName('');
+            setCharacterReferenceImage(null);
+        } catch (e: any) {
+            setError(e?.message || 'Failed to add character reference');
+        } finally {
+            setUploadingCharacterReference(false);
+        }
+    }, [apiCallFormData, characterReferenceImage, characterReferenceName, lfSession?.session_id]);
+
+    const saveSceneCharacterAssignment = useCallback(async (chapterIndex: number, sceneNum: number, characterId: string) => {
+        if (!lfSession?.session_id) return;
+        const busyKey = `scene-assignment:${chapterIndex}:${sceneNum}`;
+        setActionBusy(busyKey);
+        setError('');
+        try {
+            const payload = await apiCall(`/api/longform/session/${lfSession.session_id}/scene-assignment`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    chapter_index: chapterIndex,
+                    scene_num: sceneNum,
+                    character_id: String(characterId || '').trim(),
+                }),
+            });
+            setLfSession((payload as any).session || null);
+        } catch (e: any) {
+            setError(e?.message || 'Failed to save scene character assignment');
+        } finally {
+            setActionBusy('');
+        }
+    }, [apiCall, lfSession?.session_id]);
+
     const chapterAction = useCallback(async (chapterIndex: number, action: 'approve' | 'regenerate') => {
         if (!lfSession?.session_id) return;
         const busyKey = `${action}:${chapterIndex}`;
@@ -918,6 +976,9 @@ export default function LongFormPanel() {
     const sourceVideo = (lfSession?.metadata_pack?.source_video || {}) as Record<string, any>;
     const sourceAnalysis = (lfSession?.metadata_pack?.source_analysis || {}) as Record<string, any>;
     const connectedYouTubeChannel = (lfSession?.metadata_pack?.youtube_channel || {}) as Record<string, any>;
+    const characterReferences = Array.isArray(lfSession?.character_references)
+        ? (lfSession?.character_references as LongFormCharacterReference[]).filter((value) => String(value?.character_id || '').trim())
+        : [];
     const selectedSeriesCluster = (lfSession?.metadata_pack?.selected_series_cluster || {}) as Record<string, any>;
     const selectedSeriesKeywords = Array.isArray(selectedSeriesCluster?.keywords)
         ? selectedSeriesCluster.keywords.filter((value: any) => String(value || '').trim())
@@ -1647,6 +1708,70 @@ export default function LongFormPanel() {
                             ) : null}
                         </div>
 
+                        <div className="rounded-lg border border-fuchsia-400/20 bg-fuchsia-500/5 p-3 space-y-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-300">Character References</p>
+                                    <p className="mt-2 text-sm text-gray-300">
+                                        Upload named reference images for recurring people. Scene assignments use these first for identity continuity during the next regenerate and final render.
+                                    </p>
+                                </div>
+                                <span className="rounded-full border border-fuchsia-400/25 bg-fuchsia-500/10 px-2 py-1 text-[11px] text-fuchsia-100">
+                                    {characterReferences.length} character{characterReferences.length === 1 ? '' : 's'}
+                                </span>
+                            </div>
+                            <div className="grid gap-3 md:grid-cols-[220px,1fr_auto]">
+                                <input
+                                    value={characterReferenceName}
+                                    onChange={(e) => setCharacterReferenceName(e.target.value)}
+                                    placeholder="Character name"
+                                    className="rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
+                                />
+                                <label className="rounded-lg border border-dashed border-white/[0.14] bg-black/20 px-3 py-2 text-sm text-gray-300 cursor-pointer hover:border-fuchsia-400/40 transition">
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        className="hidden"
+                                        onChange={(e) => setCharacterReferenceImage(e.target.files?.[0] || null)}
+                                    />
+                                    {characterReferenceImage ? characterReferenceImage.name : 'Choose character reference image'}
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={uploadCharacterReferenceToSession}
+                                    disabled={uploadingCharacterReference || !characterReferenceImage || !String(characterReferenceName || '').trim()}
+                                    className="rounded-lg bg-fuchsia-600 px-3 py-2 text-sm font-medium text-white hover:bg-fuchsia-500 disabled:opacity-60"
+                                >
+                                    {uploadingCharacterReference ? 'Adding...' : 'Add Character'}
+                                </button>
+                            </div>
+                            {characterReferences.length > 0 ? (
+                                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                    {characterReferences.map((character) => (
+                                        <div key={character.character_id} className="rounded-lg border border-white/[0.08] bg-black/20 p-3 space-y-2">
+                                            <div className="flex items-center gap-3">
+                                                {character.reference_image_public_url ? (
+                                                    <img
+                                                        src={character.reference_image_public_url}
+                                                        alt={character.name}
+                                                        className="h-14 w-14 rounded-lg border border-white/[0.08] object-cover"
+                                                    />
+                                                ) : (
+                                                    <div className="h-14 w-14 rounded-lg border border-white/[0.08] bg-white/[0.03]" />
+                                                )}
+                                                <div>
+                                                    <p className="text-sm font-semibold text-white">{character.name}</p>
+                                                    <p className="text-[11px] uppercase tracking-[0.16em] text-fuchsia-200/80">
+                                                        {String(character.reference_lock_mode || 'strict')}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+
                         {jobStatus?.status && (
                             <ProgressBar progress={Number(jobStatus.progress || 0)} status={String(jobStatus.status || '')} />
                         )}
@@ -2071,6 +2196,7 @@ export default function LongFormPanel() {
                                         <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
                                             {chapter.scenes.map((scene) => {
                                                 const imageUrl = resolveSceneImageUrl(scene.image_url);
+                                                const sceneAssignmentBusyKey = `scene-assignment:${chapter.index}:${scene.scene_num}`;
                                                 return (
                                                     <div key={`${chapter.index}-${scene.scene_num}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2 space-y-2">
                                                         <div className="aspect-video rounded-md bg-black/40 border border-white/[0.08] overflow-hidden">
@@ -2091,6 +2217,27 @@ export default function LongFormPanel() {
                                                                 Provider: {scene.image_provider_label}
                                                             </p>
                                                         ) : null}
+                                                        <div className="space-y-1">
+                                                            <p className="text-[10px] uppercase tracking-[0.16em] text-fuchsia-300/80">Primary Character</p>
+                                                            <select
+                                                                value={String(scene.assigned_character_id || '')}
+                                                                onChange={(e) => saveSceneCharacterAssignment(chapter.index, scene.scene_num, e.target.value)}
+                                                                disabled={actionBusy === sceneAssignmentBusyKey}
+                                                                className="w-full rounded-lg border border-white/[0.1] bg-black/30 px-2 py-2 text-[11px] text-white"
+                                                            >
+                                                                <option value="">No explicit character</option>
+                                                                {characterReferences.map((character) => (
+                                                                    <option key={character.character_id} value={character.character_id}>
+                                                                        {character.name}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            <p className="text-[10px] text-gray-500">
+                                                                {scene.assigned_character_name
+                                                                    ? `Assigned: ${scene.assigned_character_name}. Regenerate the chapter to refresh the preview with this identity.`
+                                                                    : 'Use a named character when this scene needs the same recurring person.'}
+                                                            </p>
+                                                        </div>
                                                         <p className="text-[11px] text-gray-500">{scene.narration || 'No narration yet.'}</p>
                                                         {scene.image_error ? <p className="text-[11px] text-red-300">{scene.image_error}</p> : null}
                                                     </div>
