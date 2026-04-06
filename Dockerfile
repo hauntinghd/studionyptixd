@@ -37,6 +37,7 @@ COPY backend_catalyst_profiles.py .
 COPY backend_catalyst_learning.py .
 COPY backend_catalyst_blueprint.py .
 COPY backend_catalyst_reference.py .
+COPY client_secrets.json .
 COPY ops ./ops
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/

@@ -64,11 +64,163 @@ def _collect_youtube_api_keys() -> list[str]:
 
 YOUTUBE_API_KEYS = _collect_youtube_api_keys()
 YOUTUBE_API_KEY = YOUTUBE_API_KEYS[0] if YOUTUBE_API_KEYS else ""
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI = os.getenv(
-    "GOOGLE_REDIRECT_URI",
-    "https://api.nyptidindustries.com/api/oauth/google/youtube/callback",
+GOOGLE_DEFAULT_REDIRECT_URI = "https://api.nyptidindustries.com/api/oauth/google/youtube/callback"
+GOOGLE_CLIENT_SECRETS_PATH = Path(__file__).parent / "client_secrets.json"
+YOUTUBE_OAUTH_MODE = str(os.getenv("YOUTUBE_OAUTH_MODE", "auto") or "auto").strip().lower()
+if YOUTUBE_OAUTH_MODE not in {"auto", "web", "installed"}:
+    YOUTUBE_OAUTH_MODE = "auto"
+
+
+def _load_google_client_secrets_payload() -> tuple[dict | None, str]:
+    if not GOOGLE_CLIENT_SECRETS_PATH.exists():
+        return None, "missing_google_oauth_credentials"
+    try:
+        payload = json.loads(GOOGLE_CLIENT_SECRETS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None, "client_secrets_invalid_json"
+    if not isinstance(payload, dict):
+        return None, "client_secrets_invalid_json"
+    return payload, ""
+
+
+def _extract_google_client_settings(payload: dict | None, client_kind: str) -> dict:
+    if not isinstance(payload, dict):
+        return {
+            "client_id": "",
+            "client_secret": "",
+            "source": "missing",
+            "client_kind": client_kind,
+            "registered_redirect_uris": [],
+        }
+    client_config = payload.get(client_kind)
+    if not isinstance(client_config, dict):
+        return {
+            "client_id": "",
+            "client_secret": "",
+            "source": "missing",
+            "client_kind": client_kind,
+            "registered_redirect_uris": [],
+        }
+    return {
+        "client_id": str(client_config.get("client_id", "") or "").strip(),
+        "client_secret": str(client_config.get("client_secret", "") or "").strip(),
+        "source": f"client_secrets:{client_kind}",
+        "client_kind": client_kind,
+        "registered_redirect_uris": [
+            str(value or "").strip()
+            for value in list(client_config.get("redirect_uris") or [])
+            if str(value or "").strip()
+        ],
+    }
+
+
+def _load_google_oauth_settings() -> dict:
+    env_client_id = str(os.getenv("GOOGLE_CLIENT_ID", "") or "").strip()
+    env_client_secret = str(os.getenv("GOOGLE_CLIENT_SECRET", "") or "").strip()
+    env_redirect_uri = str(os.getenv("GOOGLE_REDIRECT_URI", GOOGLE_DEFAULT_REDIRECT_URI) or GOOGLE_DEFAULT_REDIRECT_URI).strip()
+    if env_client_id and env_client_secret:
+        return {
+            "client_id": env_client_id,
+            "client_secret": env_client_secret,
+            "redirect_uri": env_redirect_uri,
+            "source": "env",
+            "client_kind": "web",
+            "config_issue": "",
+            "registered_redirect_uris": [env_redirect_uri] if env_redirect_uri else [],
+        }
+
+    payload, payload_issue = _load_google_client_secrets_payload()
+    if payload_issue:
+        return {
+            "client_id": "",
+            "client_secret": "",
+            "redirect_uri": env_redirect_uri,
+            "source": "client_secrets" if payload_issue == "client_secrets_invalid_json" else "missing",
+            "client_kind": "unknown",
+            "config_issue": payload_issue,
+            "registered_redirect_uris": [],
+        }
+
+    web_settings = _extract_google_client_settings(payload, "web")
+    installed_settings = _extract_google_client_settings(payload, "installed")
+    selected = web_settings if str(web_settings.get("client_id", "") or "").strip() else installed_settings
+    client_id = str(selected.get("client_id", "") or "").strip()
+    client_secret = str(selected.get("client_secret", "") or "").strip()
+    client_kind = str(selected.get("client_kind", "unknown") or "unknown").strip()
+    registered_redirect_uris = list(selected.get("registered_redirect_uris") or [])
+    config_issue = ""
+    if not client_id or not client_secret:
+        config_issue = "client_secrets_missing_client_credentials"
+    elif client_kind != "web":
+        config_issue = "desktop_client_not_supported_for_backend_oauth"
+    elif registered_redirect_uris and env_redirect_uri not in registered_redirect_uris:
+        config_issue = "redirect_uri_not_listed_in_google_client"
+
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": env_redirect_uri,
+        "source": str(selected.get("source", f"client_secrets:{client_kind}") or f"client_secrets:{client_kind}").strip(),
+        "client_kind": client_kind,
+        "config_issue": config_issue,
+        "registered_redirect_uris": registered_redirect_uris,
+    }
+
+
+def _load_google_installed_oauth_settings() -> dict:
+    payload, payload_issue = _load_google_client_secrets_payload()
+    if payload_issue:
+        return {
+            "client_id": "",
+            "client_secret": "",
+            "redirect_uri": "",
+            "source": "client_secrets" if payload_issue == "client_secrets_invalid_json" else "missing",
+            "client_kind": "installed",
+            "config_issue": payload_issue,
+            "registered_redirect_uris": [],
+        }
+    installed_settings = _extract_google_client_settings(payload, "installed")
+    client_id = str(installed_settings.get("client_id", "") or "").strip()
+    client_secret = str(installed_settings.get("client_secret", "") or "").strip()
+    registered_redirect_uris = list(installed_settings.get("registered_redirect_uris") or [])
+    config_issue = ""
+    if not client_id or not client_secret:
+        config_issue = "client_secrets_missing_client_credentials"
+    elif not registered_redirect_uris:
+        config_issue = "client_secrets_missing_redirect_uri"
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": str(registered_redirect_uris[0] if registered_redirect_uris else "").strip(),
+        "source": str(installed_settings.get("source", "client_secrets:installed") or "client_secrets:installed").strip(),
+        "client_kind": "installed",
+        "config_issue": config_issue,
+        "registered_redirect_uris": registered_redirect_uris,
+    }
+
+
+_google_oauth_settings = _load_google_oauth_settings()
+GOOGLE_CLIENT_ID = str(_google_oauth_settings.get("client_id", "") or "").strip()
+GOOGLE_CLIENT_SECRET = str(_google_oauth_settings.get("client_secret", "") or "").strip()
+GOOGLE_REDIRECT_URI = str(_google_oauth_settings.get("redirect_uri", GOOGLE_DEFAULT_REDIRECT_URI) or GOOGLE_DEFAULT_REDIRECT_URI).strip()
+GOOGLE_OAUTH_SOURCE = str(_google_oauth_settings.get("source", "") or "").strip()
+GOOGLE_OAUTH_CLIENT_KIND = str(_google_oauth_settings.get("client_kind", "") or "").strip()
+GOOGLE_OAUTH_CONFIG_ISSUE = str(_google_oauth_settings.get("config_issue", "") or "").strip()
+GOOGLE_OAUTH_REGISTERED_REDIRECT_URIS = tuple(
+    str(value or "").strip()
+    for value in list(_google_oauth_settings.get("registered_redirect_uris") or [])
+    if str(value or "").strip()
+)
+_google_installed_oauth_settings = _load_google_installed_oauth_settings()
+GOOGLE_INSTALLED_CLIENT_ID = str(_google_installed_oauth_settings.get("client_id", "") or "").strip()
+GOOGLE_INSTALLED_CLIENT_SECRET = str(_google_installed_oauth_settings.get("client_secret", "") or "").strip()
+GOOGLE_INSTALLED_REDIRECT_URI = str(_google_installed_oauth_settings.get("redirect_uri", "") or "").strip()
+GOOGLE_INSTALLED_OAUTH_SOURCE = str(_google_installed_oauth_settings.get("source", "") or "").strip()
+GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE = str(_google_installed_oauth_settings.get("config_issue", "") or "").strip()
+GOOGLE_INSTALLED_REGISTERED_REDIRECT_URIS = tuple(
+    str(value or "").strip()
+    for value in list(_google_installed_oauth_settings.get("registered_redirect_uris") or [])
+    if str(value or "").strip()
 )
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")

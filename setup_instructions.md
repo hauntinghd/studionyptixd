@@ -1,35 +1,46 @@
-# Google Cloud Setup Instructions
+# Google YouTube OAuth Setup
 
-To allow the AI to analyze your YouTube analytics, you need to set up a project in the Google Cloud Console.
+Studio now supports two YouTube OAuth paths:
 
-### 1. Create a Project
-- Go to the [Google Cloud Console](https://console.cloud.google.com/).
-- Create a new project named `YouTube Vibe Optimizer`.
+1. Preferred `web` mode
+   - Uses the backend callback at `https://api.nyptidindustries.com/api/oauth/google/youtube/callback`
+   - Best UX when you have an active Google Web application OAuth client
+2. Fallback `installed` mode
+   - Uses the repo's `client_secrets.json` desktop client
+   - Opens Google consent, then asks the user to paste the final `http://localhost/...` redirect URL back into Studio
+   - Useful when the web OAuth client is suspended, disabled, or not ready yet
 
-### 2. Enable APIs
-Enable the following APIs for your project:
-- **YouTube Data API v3** (for fetching video lists, metadata)
-- **YouTube Analytics API** (for fetching retention and performance data)
-- **YouTube Reporting API** (optional, but good for bulk data)
+## Preferred Google Cloud Setup
+1. Create or choose the Google Cloud project that should own the live YouTube integration.
+2. Enable these APIs:
+   - YouTube Data API v3
+   - YouTube Analytics API
+   - YouTube Reporting API
+3. Configure the OAuth consent screen and add these scopes:
+   - `https://www.googleapis.com/auth/youtube.readonly`
+   - `https://www.googleapis.com/auth/yt-analytics.readonly`
+   - `https://www.googleapis.com/auth/youtube.force-ssl`
+4. Create an OAuth client of type `Web application`.
+5. Add this authorized redirect URI for production:
+   - `https://api.nyptidindustries.com/api/oauth/google/youtube/callback`
 
-### 3. Configure OAuth Consent Screen
-- Go to "APIs & Services" > "OAuth consent screen".
-- Choose "External".
-- Add your email and fill in the required app information.
-- **Scopes**: Add the following scopes:
-    - `https://www.googleapis.com/auth/youtube.readonly`
-    - `https://www.googleapis.com/auth/yt-analytics.readonly`
-- **Test Users**: Add your own YouTube account email as a test user.
+## Backend Configuration
+Web mode:
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI=https://api.nyptidindustries.com/api/oauth/google/youtube/callback`
+- `YOUTUBE_API_KEY`
+- Optional: `YOUTUBE_OAUTH_MODE=web`
 
-### 4. Create Credentials
-- Go to "APIs & Services" > "Credentials".
-- Click "Create Credentials" > "OAuth client ID".
-- Choose "Desktop app".
-- Name it `Vibe Optimizer CLI`.
-- Click "Create" and then **Download the JSON file**.
-- Rename the downloaded file to `client_secrets.json` and place it in this project folder.
+Installed fallback mode:
+- Ship `client_secrets.json` with the backend image
+- Set `YOUTUBE_OAUTH_MODE=installed`
+- Keep `YOUTUBE_API_KEY` configured for public inventory fallback and channel discovery
 
----
+Automatic mode:
+- `YOUTUBE_OAUTH_MODE=auto`
+- Studio prefers the web client when it is configured cleanly and falls back to the installed client when only that path is available
 
-### Once you have `client_secrets.json` in the folder, let me know!
-I will then provide the script to generate your `token.json` which will allow me to start the analysis.
+## Important
+- If Google returns errors about a disabled OAuth client or a suspended consumer project, the deployed backend is still using the wrong Google web client. Switch to `YOUTUBE_OAUTH_MODE=installed` or replace the live `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+- Existing refresh tokens stay tied to the client they were minted under. After switching OAuth clients, reconnect each affected channel so fresh refresh tokens are stored.

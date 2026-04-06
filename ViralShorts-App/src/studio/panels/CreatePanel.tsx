@@ -173,7 +173,7 @@ const fallbackVideoModelCatalog: CreativeModelProfile[] = [
 ];
 
 export default function CreatePanel() {
-    const { session, role, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
+    const { session, role, ownerOverride, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
     const [selectedTemplate, setSelectedTemplate] = useState('story');
@@ -212,6 +212,7 @@ export default function CreatePanel() {
     const [storyVoices, setStoryVoices] = useState<any[]>([]);
     const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
     const [storyPreviewLoading, setStoryPreviewLoading] = useState(false);
+    const [storyPreviewError, setStoryPreviewError] = useState('');
     const [storyVoicesSource, setStoryVoicesSource] = useState<'unknown' | 'elevenlabs' | 'fallback'>('unknown');
     const [storyVoicesWarning, setStoryVoicesWarning] = useState('');
     const [sceneBuildLoading, setSceneBuildLoading] = useState(false);
@@ -243,6 +244,7 @@ export default function CreatePanel() {
     const [youtubeLoading, setYoutubeLoading] = useState(false);
     const [youtubeError, setYoutubeError] = useState('');
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
+    const [generateError, setGenerateError] = useState<string | null>(null);
     const [templateChooserOpen, setTemplateChooserOpen] = useState(false);
     const [subscriptionPromptOpen, setSubscriptionPromptOpen] = useState(false);
     const [subscriptionCheckoutPlan, setSubscriptionCheckoutPlan] = useState<string | null>(null);
@@ -337,7 +339,10 @@ export default function CreatePanel() {
     const animationCreditExhausted = !isAdmin && (requiresTopup || animationCreditsAvailable <= 0);
     const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
     const templateSupportsVoiceControls = selectedTemplate === 'story' || selectedTemplate === 'daytrading';
-    const autoModeComingSoon = selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton' || selectedTemplate === 'daytrading';
+    const autoModeComingSoon =
+        !ownerOverride
+        && !isAdmin
+        && (selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton' || selectedTemplate === 'daytrading');
     const cinematicBoostAlwaysOn = true;
     const effectiveCinematicBoostEnabled = cinematicBoostAlwaysOn || cinematicBoostEnabled;
     const defaultSkeletonStyleLockActive = selectedTemplate === 'skeleton' && !creativeReferenceImage && !creativeReferenceAttached;
@@ -709,6 +714,17 @@ export default function CreatePanel() {
         } catch {
             return { data: null, raw };
         }
+    };
+    const extractResponseErrorMessage = (data: any, raw: string, fallback: string) => {
+        const detail = typeof data?.detail === 'string' && data.detail.trim()
+            ? data.detail.trim()
+            : (typeof data?.error === 'string' && data.error.trim() ? data.error.trim() : '');
+        if (detail) return detail;
+        const text = String(raw || '').trim();
+        if (text && !text.startsWith('<!doctype') && !text.startsWith('<html')) {
+            return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+        }
+        return fallback;
     };
 
     useEffect(() => {
@@ -1190,6 +1206,7 @@ export default function CreatePanel() {
     const previewStoryVoice = async () => {
         if (!session || !storyVoiceId || storyPreviewLoading) return;
         setStoryPreviewLoading(true);
+        setStoryPreviewError('');
         try {
             const res = await fetch(`${API}/api/voices/preview`, {
                 method: 'POST',
@@ -1199,14 +1216,17 @@ export default function CreatePanel() {
                 },
                 body: JSON.stringify({ voice_id: storyVoiceId }),
             });
-            if (!res.ok) throw new Error("Preview failed");
+            if (!res.ok) {
+                const { data, raw } = await readJsonResponse<any>(res);
+                throw new Error(extractResponseErrorMessage(data, raw, "Voice preview failed"));
+            }
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);
             const audio = new Audio(url);
             audio.onended = () => URL.revokeObjectURL(url);
             void audio.play();
-        } catch {
-            alert("Voice preview failed");
+        } catch (e: any) {
+            setStoryPreviewError(String(e?.message || "Voice preview failed"));
         } finally {
             setStoryPreviewLoading(false);
         }
@@ -1227,6 +1247,7 @@ export default function CreatePanel() {
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
         const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         setLoading(true);
+        setGenerateError(null);
         setJobStatus(null);
         setJobId(null);
         try {
@@ -1262,13 +1283,22 @@ export default function CreatePanel() {
                     reference_lock_mode: creativeReferenceLockMode,
                 }),
             });
-            const { data } = await readJsonResponse<any>(res);
+            const { data, raw } = await readJsonResponse<any>(res);
+            if (!res.ok) {
+                throw new Error(extractResponseErrorMessage(data, raw, "Failed to start generation"));
+            }
             if (data?.job_id) {
                 setJobId(data.job_id);
                 trackShortProjectStarted(selectedTemplate, 'auto', true);
             }
-            else { setLoading(false); }
-        } catch { setLoading(false); }
+            else {
+                setLoading(false);
+                setGenerateError("Generation started without a job id. Retry once the generation lane is healthy.");
+            }
+        } catch (e: any) {
+            setLoading(false);
+            setGenerateError(String(e?.message || "Failed to start generation"));
+        }
     };
 
     const handleRegenerateAutoScene = async (sceneIndex: number) => {
@@ -2922,6 +2952,9 @@ export default function CreatePanel() {
                             ) : storyVoicesSource === 'fallback' ? (
                                 <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
                             ) : null}
+                            {storyPreviewError ? (
+                                <p className="text-[11px] text-red-300 mt-1">{storyPreviewError}</p>
+                            ) : null}
                             <input
                                 type="range"
                                 min={0.8}
@@ -3798,6 +3831,9 @@ export default function CreatePanel() {
                                 ) : storyVoicesSource === 'fallback' ? (
                                     <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
                                 ) : null}
+                                {storyPreviewError ? (
+                                    <p className="text-[11px] text-red-300 mt-1">{storyPreviewError}</p>
+                                ) : null}
                             </div>
                             <div>
                                 <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
@@ -3884,6 +3920,11 @@ export default function CreatePanel() {
                         </button>
                     )}
                 </div>
+                {workspaceStage !== 'finale' && generateError && (
+                    <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                        {generateError}
+                    </div>
+                )}
                 {quickStartCard}
                 {templateChooserModal}
                 {subscriptionPromptModal}

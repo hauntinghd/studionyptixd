@@ -1,6 +1,7 @@
 ﻿import os
 import re
 import base64
+import hashlib
 import shutil
 import random
 import secrets
@@ -40,6 +41,15 @@ from backend_settings import (
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REDIRECT_URI,
+    GOOGLE_OAUTH_SOURCE,
+    GOOGLE_OAUTH_CLIENT_KIND,
+    GOOGLE_OAUTH_CONFIG_ISSUE,
+    GOOGLE_INSTALLED_CLIENT_ID,
+    GOOGLE_INSTALLED_CLIENT_SECRET,
+    GOOGLE_INSTALLED_REDIRECT_URI,
+    GOOGLE_INSTALLED_OAUTH_SOURCE,
+    GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE,
+    YOUTUBE_OAUTH_MODE,
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
     STRIPE_TOPUP_PUBLIC_ENABLED,
@@ -1037,8 +1047,135 @@ def _save_youtube_oauth_states() -> None:
         pass
 
 
+def _youtube_web_auth_configured() -> bool:
+    return bool(
+        GOOGLE_CLIENT_ID
+        and GOOGLE_CLIENT_SECRET
+        and GOOGLE_REDIRECT_URI
+        and GOOGLE_OAUTH_CLIENT_KIND == "web"
+        and not GOOGLE_OAUTH_CONFIG_ISSUE
+    )
+
+
+def _youtube_installed_auth_configured() -> bool:
+    return bool(
+        GOOGLE_INSTALLED_CLIENT_ID
+        and GOOGLE_INSTALLED_CLIENT_SECRET
+        and GOOGLE_INSTALLED_REDIRECT_URI
+        and not GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE
+    )
+
+
+def _youtube_active_oauth_mode(preferred_mode: str | None = None) -> str:
+    normalized = str(preferred_mode or YOUTUBE_OAUTH_MODE or "auto").strip().lower()
+    if normalized not in {"auto", "web", "installed"}:
+        normalized = "auto"
+    if normalized == "web":
+        return "web" if _youtube_web_auth_configured() else ""
+    if normalized == "installed":
+        return "installed" if _youtube_installed_auth_configured() else ""
+    if _youtube_web_auth_configured():
+        return "web"
+    if _youtube_installed_auth_configured():
+        return "installed"
+    return ""
+
+
+def _youtube_auth_context(mode: str | None = None) -> dict:
+    resolved_mode = _youtube_active_oauth_mode(mode)
+    if resolved_mode == "installed":
+        return {
+            "mode": "installed",
+            "client_id": GOOGLE_INSTALLED_CLIENT_ID,
+            "client_secret": GOOGLE_INSTALLED_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_INSTALLED_REDIRECT_URI,
+            "source": GOOGLE_INSTALLED_OAUTH_SOURCE,
+            "client_kind": "installed",
+        }
+    if resolved_mode == "web":
+        return {
+            "mode": "web",
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "source": GOOGLE_OAUTH_SOURCE,
+            "client_kind": GOOGLE_OAUTH_CLIENT_KIND or "web",
+        }
+    return {
+        "mode": "",
+        "client_id": "",
+        "client_secret": "",
+        "redirect_uri": "",
+        "source": "",
+        "client_kind": "",
+    }
+
+
 def _youtube_auth_configured() -> bool:
-    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)
+    return bool(_youtube_active_oauth_mode())
+
+
+def _youtube_auth_issue_message() -> str:
+    preferred_mode = str(YOUTUBE_OAUTH_MODE or "auto").strip().lower()
+    if preferred_mode == "installed":
+        if GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE == "client_secrets_missing_redirect_uri":
+            return "Google YouTube OAuth fallback is missing an installed-app redirect URI in client_secrets.json."
+        if GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE == "client_secrets_missing_client_credentials":
+            return "Google YouTube OAuth fallback client_secrets.json is present but missing installed-app credentials."
+        if GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE == "client_secrets_invalid_json":
+            return "Google YouTube OAuth fallback client_secrets.json is unreadable JSON."
+        if GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE == "missing_google_oauth_credentials":
+            return "Google YouTube OAuth fallback is enabled, but client_secrets.json is missing from the backend image."
+        return "Google YouTube OAuth installed-client fallback is not configured on the backend yet."
+    issue = str(GOOGLE_OAUTH_CONFIG_ISSUE or "").strip().lower()
+    if issue == "desktop_client_not_supported_for_backend_oauth":
+        return (
+            "Google YouTube OAuth is loading a desktop/installed client file, but Studio is still configured for the backend web callback path. "
+            "Either set YOUTUBE_OAUTH_MODE=installed so Studio uses the installed-client fallback flow, or create a Google Web application OAuth client and register "
+            f"{GOOGLE_REDIRECT_URI} as an authorized redirect URI."
+        )
+    if issue == "redirect_uri_not_listed_in_google_client":
+        return (
+            "Google YouTube OAuth is loading a web client whose authorized redirect URIs do not include "
+            f"{GOOGLE_REDIRECT_URI}. Update the Google OAuth client or the backend redirect URI."
+        )
+    if issue == "client_secrets_missing_client_credentials":
+        return "Google YouTube OAuth client_secrets.json is present but missing client credentials."
+    if issue == "client_secrets_invalid_json":
+        return "Google YouTube OAuth client_secrets.json is unreadable JSON."
+    if issue == "missing_google_oauth_credentials":
+        return "Google YouTube OAuth credentials are missing on the backend."
+    return "Google YouTube OAuth is not configured on the backend yet"
+
+
+def _format_google_oauth_failure(action: str, status_code: int, body: str) -> str:
+    detail = _clip_text(body, 220)
+    lower = detail.lower()
+    if "consumer project" in lower or "project_number" in lower or "suspend" in lower:
+        if _youtube_installed_auth_configured():
+            return (
+                f"Google {action} failed ({status_code}): the configured backend web OAuth client belongs to a suspended Google Cloud project. "
+                "Switch YOUTUBE_OAUTH_MODE to installed or replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
+            )
+        return (
+            f"Google {action} failed ({status_code}): the configured backend OAuth client belongs to a suspended Google Cloud project. "
+            "Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
+        )
+    if "oauth client was deleted" in lower or "oauth client was disabled" in lower or "deleted_client" in lower or "disabled_client" in lower:
+        if _youtube_installed_auth_configured():
+            return (
+                f"Google {action} failed ({status_code}): the configured backend web OAuth client is disabled or deleted. "
+                "Switch YOUTUBE_OAUTH_MODE to installed or replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
+            )
+        return (
+            f"Google {action} failed ({status_code}): the configured backend OAuth client is disabled or deleted. "
+            "Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
+        )
+    if "redirect_uri_mismatch" in lower:
+        return (
+            f"Google {action} failed ({status_code}): GOOGLE_REDIRECT_URI does not match an authorized redirect URI in the configured Google OAuth client."
+        )
+    return f"Google {action} failed ({status_code}): {detail}"
 
 
 def _youtube_bucket_for_user(user_id: str) -> dict:
@@ -1072,6 +1209,7 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "last_outcome_sync_at": float(data.get("last_outcome_sync_at", 0.0) or 0.0),
         "last_outcome_sync_count": int(data.get("last_outcome_sync_count", 0) or 0),
         "last_outcome_sync_error": str(data.get("last_outcome_sync_error", "") or ""),
+        "last_sync_error": str(data.get("last_sync_error", "") or ""),
         "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
         "analytics_snapshot": {
             "channel_video_count": int(analytics_snapshot.get("channel_video_count", 0) or 0),
@@ -6792,57 +6930,218 @@ def _youtube_redirect_target(next_url: str, ok: bool, message: str = "") -> str:
     return out
 
 
-def _youtube_build_auth_url(state_token: str) -> str:
-    query = urlencode(
-        {
-            "client_id": GOOGLE_CLIENT_ID,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
-            "response_type": "code",
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent",
-            "scope": " ".join(YOUTUBE_SCOPES),
-            "state": state_token,
-        }
-    )
+def _youtube_pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    return verifier, _youtube_pkce_challenge(verifier)
+
+
+def _youtube_pkce_challenge(verifier: str) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(str(verifier or "").encode("utf-8")).digest()).decode("ascii").rstrip("=")
+
+
+def _youtube_build_auth_url(state_token: str, oauth_mode: str | None = None, code_challenge: str = "") -> str:
+    auth_context = _youtube_auth_context(oauth_mode)
+    query_payload = {
+        "client_id": str(auth_context.get("client_id", "") or "").strip(),
+        "redirect_uri": str(auth_context.get("redirect_uri", "") or "").strip(),
+        "response_type": "code",
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "scope": " ".join(YOUTUBE_SCOPES),
+        "state": state_token,
+    }
+    if str(auth_context.get("mode", "") or "").strip() == "installed" and code_challenge:
+        query_payload["code_challenge"] = code_challenge
+        query_payload["code_challenge_method"] = "S256"
+    query = urlencode(query_payload)
     return f"{YOUTUBE_AUTH_BASE_URL}?{query}"
 
 
-async def _google_exchange_code_for_tokens(code: str) -> dict:
+def _youtube_helper_page_url(state_token: str) -> str:
+    return f"/api/oauth/google/youtube/installed?state={quote(str(state_token or '').strip(), safe='')}"
+
+
+def _youtube_extract_code_or_error(raw_value: str) -> tuple[str, str]:
+    value = str(raw_value or "").strip()
+    if not value:
+        return "", ""
+    if value.startswith("http://") or value.startswith("https://"):
+        try:
+            parsed = urlparse(value)
+            params = parse_qs(parsed.query or "")
+            code = str((params.get("code") or [""])[0] or "").strip()
+            error = str((params.get("error") or [""])[0] or "").strip()
+            return code, error
+        except Exception:
+            return "", ""
+    if "code=" in value or "error=" in value:
+        try:
+            params = parse_qs(value.lstrip("?#"))
+            code = str((params.get("code") or [""])[0] or "").strip()
+            error = str((params.get("error") or [""])[0] or "").strip()
+            return code, error
+        except Exception:
+            return "", ""
+    return value, ""
+
+
+def _youtube_installed_helper_html(state_token: str, auth_url: str, error_message: str = "") -> str:
+    safe_auth_url = html_lib.escape(str(auth_url or "").strip(), quote=True)
+    safe_state = html_lib.escape(str(state_token or "").strip(), quote=True)
+    safe_error = html_lib.escape(str(error_message or "").strip())
+    error_block = f'<p class="error">{safe_error}</p>' if safe_error else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Connect YouTube</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #07131a;
+      --panel: rgba(8, 23, 31, 0.92);
+      --border: rgba(125, 211, 252, 0.18);
+      --text: #e5f4ff;
+      --muted: #9fb4c4;
+      --accent: #38bdf8;
+      --danger: #fca5a5;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, rgba(56, 189, 248, 0.2), transparent 38%), linear-gradient(180deg, #040b10, var(--bg));
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }}
+    .panel {{
+      width: min(760px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+    }}
+    h1 {{ margin: 0 0 12px; font-size: 28px; }}
+    p {{ color: var(--muted); line-height: 1.55; }}
+    ol {{ margin: 20px 0; padding-left: 20px; color: var(--muted); }}
+    li {{ margin-bottom: 10px; }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 18px; }}
+    .button {{
+      appearance: none;
+      border: 0;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #0ea5e9, #2563eb);
+      color: white;
+      padding: 14px 18px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }}
+    .button.secondary {{
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+    textarea {{
+      width: 100%;
+      min-height: 150px;
+      resize: vertical;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(0, 0, 0, 0.28);
+      color: var(--text);
+      padding: 14px;
+      font: inherit;
+    }}
+    .hint {{ font-size: 13px; }}
+    .error {{
+      margin: 0 0 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(127, 29, 29, 0.35);
+      border: 1px solid rgba(252, 165, 165, 0.25);
+      color: var(--danger);
+    }}
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Connect YouTube with the installed Google client</h1>
+    <p>Studio can still connect your YouTube channel even when the backend web OAuth client is unavailable. Google will return you to a localhost URL after consent. That page will not load. Copy the full URL from your browser bar and paste it below.</p>
+    {error_block}
+    <ol>
+      <li>Open the Google consent screen in a new tab.</li>
+      <li>Approve access to YouTube and YouTube Analytics.</li>
+      <li>When your browser lands on a <code>http://localhost...</code> URL, copy the full address.</li>
+      <li>Paste it here and submit to finish connecting the channel.</li>
+    </ol>
+    <div class="actions">
+      <a class="button" href="{safe_auth_url}" target="_blank" rel="noopener noreferrer">Open Google Consent</a>
+      <a class="button secondary" href="{html_lib.escape(_youtube_redirect_target('', False, 'YouTube connection canceled'), quote=True)}">Cancel</a>
+    </div>
+    <form method="post" action="/api/oauth/google/youtube/complete">
+      <input type="hidden" name="state" value="{safe_state}" />
+      <textarea name="redirect_url" placeholder="Paste the full localhost URL or just the code value" required></textarea>
+      <p class="hint">Example: <code>http://localhost/?state=...&amp;code=4/0...</code></p>
+      <div class="actions">
+        <button type="submit" class="button">Finish Connection</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>"""
+
+
+async def _google_exchange_code_for_tokens(code: str, oauth_mode: str | None = None, code_verifier: str = "") -> dict:
+    auth_context = _youtube_auth_context(oauth_mode)
+    form_payload = {
+        "code": code,
+        "client_id": str(auth_context.get("client_id", "") or "").strip(),
+        "redirect_uri": str(auth_context.get("redirect_uri", "") or "").strip(),
+        "grant_type": "authorization_code",
+    }
+    client_secret = str(auth_context.get("client_secret", "") or "").strip()
+    if client_secret:
+        form_payload["client_secret"] = client_secret
+    if str(auth_context.get("mode", "") or "").strip() == "installed" and code_verifier:
+        form_payload["code_verifier"] = code_verifier
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             GOOGLE_TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
+            data=form_payload,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(f"Google token exchange failed ({resp.status_code}): {_clip_text(resp.text, 220)}")
+        raise RuntimeError(_format_google_oauth_failure("token exchange", resp.status_code, resp.text))
     payload = resp.json()
     if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
         raise RuntimeError("Google token exchange returned no access token")
     return payload
 
 
-async def _google_refresh_access_token(refresh_token: str) -> dict:
+async def _google_refresh_access_token(refresh_token: str, oauth_mode: str | None = None) -> dict:
+    auth_context = _youtube_auth_context(oauth_mode)
+    form_payload = {
+        "refresh_token": refresh_token,
+        "client_id": str(auth_context.get("client_id", "") or "").strip(),
+        "grant_type": "refresh_token",
+    }
+    client_secret = str(auth_context.get("client_secret", "") or "").strip()
+    if client_secret:
+        form_payload["client_secret"] = client_secret
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             GOOGLE_TOKEN_URL,
-            data={
-                "refresh_token": refresh_token,
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "grant_type": "refresh_token",
-            },
+            data=form_payload,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(f"Google token refresh failed ({resp.status_code}): {_clip_text(resp.text, 220)}")
+        raise RuntimeError(_format_google_oauth_failure("token refresh", resp.status_code, resp.text))
     payload = resp.json()
     if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
         raise RuntimeError("Google token refresh returned no access token")
@@ -7204,6 +7503,48 @@ def _youtube_extract_video_ids_from_channel_page(html: str) -> list[str]:
     return ids
 
 
+def _youtube_renderer_text(node: object) -> str:
+    if isinstance(node, dict):
+        simple_text = str(node.get("simpleText", "") or "").strip()
+        if simple_text:
+            return simple_text
+        runs = list(node.get("runs") or [])
+        return "".join(str((run or {}).get("text", "") or "") for run in runs if isinstance(run, dict)).strip()
+    if isinstance(node, list):
+        return "".join(_youtube_renderer_text(value) for value in node).strip()
+    return str(node or "").strip()
+
+
+def _youtube_parse_compact_count(raw_value: str) -> int:
+    text = str(raw_value or "").strip().replace(",", "")
+    if not text:
+        return 0
+    if text.lower().startswith("no "):
+        return 0
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([kmb])?\b", text, flags=re.IGNORECASE)
+    if not match:
+        return 0
+    value = float(match.group(1) or 0.0)
+    suffix = str(match.group(2) or "").strip().lower()
+    multiplier = {
+        "k": 1_000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+    }.get(suffix, 1)
+    return int(round(value * multiplier))
+
+
+def _youtube_video_renderer_duration_sec(video_renderer: dict) -> int:
+    duration_text = _youtube_renderer_text((video_renderer or {}).get("lengthText") or {})
+    if not duration_text:
+        for overlay in list((video_renderer or {}).get("thumbnailOverlays") or []):
+            overlay_payload = dict((overlay or {}).get("thumbnailOverlayTimeStatusRenderer") or {})
+            duration_text = _youtube_renderer_text(overlay_payload.get("text") or {})
+            if duration_text:
+                break
+    return _duration_text_to_seconds(duration_text)
+
+
 def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
     text = str(html or "")
     initial_data_match = (
@@ -7227,15 +7568,16 @@ def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
                 video_id = str(video_renderer.get("videoId", "") or "").strip()
                 if video_id and video_id not in seen_ids:
                     seen_ids.add(video_id)
-                    title_runs = list((video_renderer.get("title") or {}).get("runs") or [])
-                    title = "".join(str(run.get("text", "") or "") for run in title_runs).strip()
-                    if not title:
-                        title = str((video_renderer.get("title") or {}).get("simpleText", "") or "").strip()
+                    title = _youtube_renderer_text(video_renderer.get("title") or {})
                     thumbnail_url = ""
                     thumb_candidates = list((video_renderer.get("thumbnail") or {}).get("thumbnails") or [])
                     if thumb_candidates:
                         thumbnail_url = str((thumb_candidates[-1] or {}).get("url", "") or "").strip()
-                    published_label = str((video_renderer.get("publishedTimeText") or {}).get("simpleText", "") or "").strip()
+                    published_label = _youtube_renderer_text(video_renderer.get("publishedTimeText") or {})
+                    view_label = _youtube_renderer_text(
+                        (video_renderer.get("viewCountText") or {})
+                        or (video_renderer.get("shortViewCountText") or {})
+                    )
                     rows.append(
                         {
                             "video_id": video_id,
@@ -7243,6 +7585,8 @@ def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
                             "published_at": "",
                             "published_label": published_label,
                             "thumbnail_url": thumbnail_url,
+                            "views": _youtube_parse_compact_count(view_label),
+                            "duration_sec": _youtube_video_renderer_duration_sec(video_renderer),
                             "privacy_status": "public",
                         }
                     )
@@ -7281,10 +7625,44 @@ def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id
                 "published_at": published_at,
                 "published_label": "",
                 "thumbnail_url": str(entry.get("thumbnail", "") or "").strip(),
+                "views": int(float(entry.get("view_count", 0) or 0) or 0),
+                "likes": int(float(entry.get("like_count", 0) or 0) or 0),
+                "comments": int(float(entry.get("comment_count", 0) or 0) or 0),
+                "duration_sec": int(float(entry.get("duration", 0) or 0) or 0),
                 "privacy_status": "public",
             }
         )
     return rows
+
+
+def _youtube_merge_public_video_rows(primary_rows: list[dict] | None, supplemental_rows: list[dict] | None) -> list[dict]:
+    primary = [dict(row or {}) for row in list(primary_rows or []) if isinstance(row, dict)]
+    supplemental = [dict(row or {}) for row in list(supplemental_rows or []) if isinstance(row, dict)]
+    if not primary:
+        return supplemental
+    supplemental_by_id = {
+        str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
+        for row in supplemental
+        if str((row or {}).get("video_id", "") or "").strip()
+    }
+    merged_rows: list[dict] = []
+    seen_ids: set[str] = set()
+    for row in primary:
+        clean_video_id = str((row or {}).get("video_id", "") or "").strip()
+        merged = dict(row or {})
+        if clean_video_id and clean_video_id in supplemental_by_id:
+            for key, value in dict(supplemental_by_id.get(clean_video_id) or {}).items():
+                if value not in (None, "", [], {}):
+                    merged[key] = value
+        if clean_video_id:
+            seen_ids.add(clean_video_id)
+        merged_rows.append(merged)
+    for row in supplemental:
+        clean_video_id = str((row or {}).get("video_id", "") or "").strip()
+        if clean_video_id and clean_video_id in seen_ids:
+            continue
+        merged_rows.append(dict(row or {}))
+    return merged_rows
 
 
 async def _youtube_fetch_public_channel_page_videos(
@@ -7329,6 +7707,14 @@ async def _youtube_fetch_public_channel_page_videos(
         if not page_rows:
             return []
         page_rows = page_rows[: max(1, min(int(max_results or 100), 100))]
+        if not any(int(float((row or {}).get("views", 0) or 0) or 0) > 0 for row in page_rows):
+            ytdlp_rows = _youtube_extract_public_channel_rows_with_ytdlp(
+                channel_url=channel_url,
+                channel_id=channel_id,
+                max_results=max_results,
+            )
+            if ytdlp_rows:
+                page_rows = _youtube_merge_public_video_rows(page_rows, ytdlp_rows)
         page_ids = [str((row or {}).get("video_id", "") or "").strip() for row in list(page_rows or []) if str((row or {}).get("video_id", "") or "").strip()]
         hydrated_rows: list[dict] = []
         if page_ids:
@@ -8448,6 +8834,68 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     return snapshot
 
 
+async def _youtube_refresh_public_channel_record_without_oauth(record: dict, sync_error: str = "") -> dict:
+    updated = dict(record or {})
+    channel_id = str(updated.get("channel_id", "") or "").strip()
+    existing_snapshot = dict(updated.get("analytics_snapshot") or {})
+    upload_inventory_target = max(int(float(updated.get("video_count", 0) or 0) or 0), 25)
+    upload_inventory_target = min(upload_inventory_target, 100)
+    public_rows: list[dict] = []
+    if channel_id:
+        try:
+            public_rows = await _youtube_fetch_public_channel_page_videos(
+                "",
+                channel_url=str(updated.get("channel_url", "") or "").strip(),
+                channel_id=channel_id,
+                max_results=upload_inventory_target,
+            )
+        except Exception:
+            public_rows = []
+        if not public_rows:
+            try:
+                public_rows = await _youtube_fetch_public_channel_search_api_key(
+                    channel_id,
+                    order="date",
+                    max_results=max(3, min(upload_inventory_target, 50)),
+                )
+            except Exception:
+                public_rows = []
+    fallback_snapshot = dict(existing_snapshot)
+    if public_rows:
+        fallback_snapshot = _youtube_apply_public_inventory_to_snapshot(fallback_snapshot, public_rows)
+        historical_compare = dict(fallback_snapshot.get("historical_compare") or {})
+        historical_compare["limitations"] = _dedupe_clip_list(
+            [
+                *[str(v).strip() for v in list(historical_compare.get("limitations") or []) if str(v).strip()],
+                ("Private impressions and CTR are unavailable while the connected YouTube OAuth client is failing, so public views are the strongest available signal." if sync_error else ""),
+                sync_error,
+            ],
+            max_items=6,
+        )
+        fallback_snapshot["historical_compare"] = historical_compare
+        channel_audit = dict(fallback_snapshot.get("channel_audit") or _youtube_build_channel_audit(fallback_snapshot))
+        channel_audit["measured_facts"] = _dedupe_clip_list(
+            [
+                f"Recovered {len(public_rows)} public uploads from YouTube page/API fallback." if public_rows else "",
+                *[str(v).strip() for v in list(channel_audit.get("measured_facts") or []) if str(v).strip()],
+            ],
+            max_items=8,
+        )
+        channel_audit["limitations"] = _dedupe_clip_list(
+            [
+                *[str(v).strip() for v in list(channel_audit.get("limitations") or []) if str(v).strip()],
+                ("Private impressions, CTR, and retention metrics are unavailable until the connected YouTube OAuth client is healthy again." if sync_error else ""),
+                sync_error,
+            ],
+            max_items=6,
+        )
+        fallback_snapshot["channel_audit"] = channel_audit
+    updated["analytics_snapshot"] = fallback_snapshot
+    updated["last_sync_error"] = _clip_text(sync_error, 220)
+    updated["last_synced_at"] = time.time()
+    return updated
+
+
 async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
     updated = dict(record or {})
     access_token = str(updated.get("access_token", "") or "").strip()
@@ -8458,12 +8906,16 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
         return access_token, updated
     if not refresh_token:
         raise RuntimeError("Missing Google refresh token for connected YouTube channel")
-    refreshed = await _google_refresh_access_token(refresh_token)
+    oauth_mode = str(updated.get("oauth_mode", "") or "").strip().lower()
+    if oauth_mode not in {"web", "installed"}:
+        oauth_mode = "web"
+    refreshed = await _google_refresh_access_token(refresh_token, oauth_mode)
     updated["access_token"] = str(refreshed.get("access_token", "") or "").strip()
     updated["token_expires_at"] = now + max(300, int(refreshed.get("expires_in", 3600) or 3600))
     if str(refreshed.get("refresh_token", "") or "").strip():
         updated["refresh_token"] = str(refreshed.get("refresh_token", "") or "").strip()
     updated["token_scope"] = str(refreshed.get("scope", updated.get("token_scope", "")) or "").strip()
+    updated["oauth_mode"] = oauth_mode
     updated["last_synced_at"] = now
     return str(updated.get("access_token", "") or "").strip(), updated
 
@@ -8560,8 +9012,10 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
     try:
         refreshed = await _youtube_sync_channel_record(record)
     except Exception as e:
-        refreshed = dict(record)
-        refreshed["last_sync_error"] = _clip_text(str(e), 220)
+        refreshed = await _youtube_refresh_public_channel_record_without_oauth(
+            record,
+            sync_error=_clip_text(str(e), 220),
+        )
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_id)
         bucket["channels"][chosen_id] = refreshed
@@ -10201,7 +10655,13 @@ async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> d
         record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
     if not record:
         return {}
-    refreshed = await _youtube_sync_channel_record(record)
+    try:
+        refreshed = await _youtube_sync_channel_record(record)
+    except Exception as e:
+        refreshed = await _youtube_refresh_public_channel_record_without_oauth(
+            record,
+            sync_error=_clip_text(str(e), 220),
+        )
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_key)
         bucket["channels"][channel_key] = refreshed
@@ -11576,6 +12036,16 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
         "style": vs.get("style", 0.3),
         "speed": max(0.8, min(1.35, speed)),
     }
+    if not ELEVENLABS_API_KEY:
+        log.warning("ElevenLabs API key not configured; using Edge TTS fallback for template=%s", template)
+        return await _generate_voiceover_with_edge_tts(
+            text=text,
+            output_path=output_path,
+            language=language,
+            requested_voice_id=requested_voice_id,
+            preferred_gender=str(vs.get("gender", "")),
+            speed=speed,
+        )
     resolved_voice_id, voice_candidates, available_voice_ids = await _resolve_elevenlabs_voice_candidates(
         requested_voice_id
     )
@@ -21909,8 +22379,6 @@ async def _create_longform_session_internal(
 ) -> dict:
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     template = _normalize_longform_template(template)
     format_preset = str(format_preset or "explainer").strip().lower()
@@ -25598,6 +26066,13 @@ async def public_config():
             "api_key_configured": bool(YOUTUBE_API_KEY),
             "api_key_pool_size": len(_youtube_public_api_key_candidates()),
             "redirect_uri": GOOGLE_REDIRECT_URI,
+            "oauth_preferred_mode": YOUTUBE_OAUTH_MODE,
+            "oauth_active_mode": _youtube_active_oauth_mode(),
+            "oauth_source": GOOGLE_OAUTH_SOURCE,
+            "oauth_client_kind": GOOGLE_OAUTH_CLIENT_KIND,
+            "oauth_config_issue": GOOGLE_OAUTH_CONFIG_ISSUE,
+            "installed_oauth_source": GOOGLE_INSTALLED_OAUTH_SOURCE,
+            "installed_oauth_issue": GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE,
             "multiple_channels_supported": True,
         },
         "auth": {
@@ -25708,54 +26183,36 @@ async def get_me(user: dict = Depends(require_auth)):
         "demo_coming_soon": (not PRODUCT_DEMO_PUBLIC_ENABLED),
         "longform_owner_beta": bool(_longform_deep_analysis_enabled(user)),
         "youtube_oauth_configured": _youtube_auth_configured(),
+        "youtube_oauth_preferred_mode": YOUTUBE_OAUTH_MODE,
+        "youtube_oauth_active_mode": _youtube_active_oauth_mode(),
+        "youtube_oauth_source": GOOGLE_OAUTH_SOURCE,
+        "youtube_oauth_client_kind": GOOGLE_OAUTH_CLIENT_KIND,
+        "youtube_oauth_issue": GOOGLE_OAUTH_CONFIG_ISSUE,
+        "youtube_installed_oauth_source": GOOGLE_INSTALLED_OAUTH_SOURCE,
+        "youtube_installed_oauth_issue": GOOGLE_INSTALLED_OAUTH_CONFIG_ISSUE,
         "youtube_connected_channel_count": len(yt_channels),
         "youtube_default_channel_id": yt_default_channel_id,
     }
 
 
-@app.post("/api/oauth/google/youtube/start")
-async def start_google_youtube_oauth(
-    req: YouTubeOAuthStartRequest,
-    user: dict = Depends(require_auth),
-):
-    if not _youtube_auth_configured():
-        raise HTTPException(500, "Google YouTube OAuth is not configured on the backend yet")
-    state_token = secrets.token_urlsafe(32)
-    async with _youtube_oauth_states_lock:
-        _load_youtube_oauth_states()
-        _prune_youtube_oauth_states()
-        _youtube_oauth_states[state_token] = {
-            "user_id": str(user.get("id", "") or "").strip(),
-            "created_at": time.time(),
-            "next_url": str((req or {}).next_url or "").strip(),
-        }
-        _save_youtube_oauth_states()
-    return {"auth_url": _youtube_build_auth_url(state_token)}
-
-
-@app.get("/api/oauth/google/youtube/callback")
-async def google_youtube_oauth_callback(
-    code: str = "",
-    state: str = "",
-    error: str = "",
-):
-    async with _youtube_oauth_states_lock:
-        _load_youtube_oauth_states()
-        _prune_youtube_oauth_states()
-        state_payload = dict(_youtube_oauth_states.pop(str(state or "").strip(), {}) or {})
-        _save_youtube_oauth_states()
+async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = "", error: str = "") -> RedirectResponse:
     next_url = str(state_payload.get("next_url", "") or "").strip()
     user_id = str(state_payload.get("user_id", "") or "").strip()
+    oauth_mode = str(state_payload.get("oauth_mode", "") or "").strip().lower()
+    if oauth_mode not in {"web", "installed"}:
+        oauth_mode = "web"
+    code_verifier = str(state_payload.get("pkce_verifier", "") or "").strip()
     if error:
         return RedirectResponse(_youtube_redirect_target(next_url, False, f"Google OAuth error: {error}"), status_code=302)
     if not user_id or not code:
         return RedirectResponse(_youtube_redirect_target(next_url, False, "Google OAuth callback was missing state or code"), status_code=302)
     try:
-        token_payload = await _google_exchange_code_for_tokens(code)
+        token_payload = await _google_exchange_code_for_tokens(code, oauth_mode, code_verifier)
         access_token = str(token_payload.get("access_token", "") or "").strip()
         refresh_token = str(token_payload.get("refresh_token", "") or "").strip()
         expires_in = max(300, int(token_payload.get("expires_in", 3600) or 3600))
         scope = str(token_payload.get("scope", "") or "").strip()
+        auth_context = _youtube_auth_context(oauth_mode)
         channels = await _youtube_fetch_my_channels(access_token)
         if not channels:
             return RedirectResponse(_youtube_redirect_target(next_url, False, "Google account returned no YouTube channels"), status_code=302)
@@ -25778,6 +26235,8 @@ async def google_youtube_oauth_callback(
                     "refresh_token": refresh_token or str(previous.get("refresh_token", "") or "").strip(),
                     "token_expires_at": now + expires_in,
                     "token_scope": scope,
+                    "oauth_mode": oauth_mode,
+                    "oauth_source": str(auth_context.get("source", "") or "").strip(),
                     "linked_at": float(previous.get("linked_at", now) or now),
                     "last_synced_at": float(previous.get("last_synced_at", 0.0) or 0.0),
                     "last_sync_error": "",
@@ -25793,9 +26252,95 @@ async def google_youtube_oauth_callback(
                 await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
             except Exception:
                 pass
-        return RedirectResponse(_youtube_redirect_target(next_url, True, "YouTube channel connected"), status_code=302)
+        success_message = "YouTube channel connected"
+        if oauth_mode == "installed":
+            success_message = "YouTube channel connected through the installed Google client fallback"
+        return RedirectResponse(_youtube_redirect_target(next_url, True, success_message), status_code=302)
     except Exception as e:
         return RedirectResponse(_youtube_redirect_target(next_url, False, str(e)), status_code=302)
+
+
+@app.post("/api/oauth/google/youtube/start")
+async def start_google_youtube_oauth(
+    req: YouTubeOAuthStartRequest,
+    user: dict = Depends(require_auth),
+):
+    oauth_mode = _youtube_active_oauth_mode()
+    if not oauth_mode:
+        raise HTTPException(500, _youtube_auth_issue_message())
+    state_token = secrets.token_urlsafe(32)
+    pkce_verifier = ""
+    if oauth_mode == "installed":
+        pkce_verifier, _ = _youtube_pkce_pair()
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        _youtube_oauth_states[state_token] = {
+            "user_id": str(user.get("id", "") or "").strip(),
+            "created_at": time.time(),
+            "next_url": str((req or {}).next_url or "").strip(),
+            "oauth_mode": oauth_mode,
+            "pkce_verifier": pkce_verifier,
+        }
+        _save_youtube_oauth_states()
+    auth_url = _youtube_build_auth_url(state_token, oauth_mode)
+    if oauth_mode == "installed":
+        auth_url = _youtube_helper_page_url(state_token)
+    return {"auth_url": auth_url, "oauth_mode": oauth_mode}
+
+
+@app.get("/api/oauth/google/youtube/installed")
+async def google_youtube_oauth_installed_helper(state: str = ""):
+    state_token = str(state or "").strip()
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        state_payload = dict(_youtube_oauth_states.get(state_token, {}) or {})
+        _save_youtube_oauth_states()
+    if not state_payload:
+        return Response(
+            _youtube_installed_helper_html("", "", "That YouTube connection request expired. Start the connection again from Studio."),
+            media_type="text/html",
+        )
+    oauth_mode = str(state_payload.get("oauth_mode", "") or "").strip().lower()
+    if oauth_mode != "installed":
+        return RedirectResponse(_youtube_redirect_target(str(state_payload.get("next_url", "") or "").strip(), False, "This YouTube connection request is not using the installed-client fallback"), status_code=302)
+    pkce_verifier = str(state_payload.get("pkce_verifier", "") or "").strip()
+    if not pkce_verifier:
+        return Response(
+            _youtube_installed_helper_html(state_token, "", "Studio lost the PKCE verifier for this request. Start the YouTube connection again."),
+            media_type="text/html",
+        )
+    auth_url = _youtube_build_auth_url(state_token, "installed", _youtube_pkce_challenge(pkce_verifier))
+    return Response(_youtube_installed_helper_html(state_token, auth_url), media_type="text/html")
+
+
+@app.post("/api/oauth/google/youtube/complete")
+async def google_youtube_oauth_complete(state: str = Form(""), redirect_url: str = Form("")):
+    code, error = _youtube_extract_code_or_error(redirect_url)
+    state_token = str(state or "").strip()
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        state_payload = dict(_youtube_oauth_states.pop(state_token, {}) or {})
+        _save_youtube_oauth_states()
+    if not state_payload:
+        return RedirectResponse(_youtube_redirect_target("", False, "That YouTube connection request expired before it was completed"), status_code=302)
+    return await _youtube_finalize_oauth_connection(state_payload, code=code, error=error)
+
+
+@app.get("/api/oauth/google/youtube/callback")
+async def google_youtube_oauth_callback(
+    code: str = "",
+    state: str = "",
+    error: str = "",
+):
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        state_payload = dict(_youtube_oauth_states.pop(str(state or "").strip(), {}) or {})
+        _save_youtube_oauth_states()
+    return await _youtube_finalize_oauth_connection(state_payload, code=code, error=error)
 
 
 @app.get("/api/catalyst/hub")
@@ -26226,8 +26771,6 @@ def _user_has_paid_access(user: dict | None) -> bool:
 async def generate_short(req: GenerateRequest, background_tasks: BackgroundTasks, request: Request = None):
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ELEVENLABS_API_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
     if user and not _user_has_paid_access(user):
@@ -31258,41 +31801,42 @@ async def list_voices():
 @app.post("/api/voices/preview")
 async def preview_voice(request: Request):
     """Generate a short voice preview with a given voice_id."""
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ElevenLabs API key not configured")
     body = await request.json()
     voice_id = body.get("voice_id", "")
     if not voice_id:
         raise HTTPException(400, "voice_id required")
     preview_text = body.get("text", "Hey there! This is a quick preview of what I sound like. Pretty cool, right?")
-    _, voice_candidates, available_voice_ids = await _resolve_elevenlabs_voice_candidates(voice_id)
     preview_audio: bytes | None = None
     used_voice_id = voice_id
-    async with httpx.AsyncClient(timeout=30) as client:
-        for candidate_voice_id in voice_candidates:
-            if available_voice_ids and candidate_voice_id not in available_voice_ids:
-                continue
-            resp = await client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{candidate_voice_id}",
-                headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
-                json={
-                    "text": preview_text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3},
-                },
-            )
-            if resp.status_code == 200:
-                preview_audio = resp.content
-                used_voice_id = candidate_voice_id
-                break
-            if _is_retryable_elevenlabs_voice_error(resp.status_code):
-                log.warning(
-                    "ElevenLabs preview voice %s rejected with %s. Retrying next voice.",
-                    candidate_voice_id,
-                    resp.status_code,
+    if ELEVENLABS_API_KEY:
+        _, voice_candidates, available_voice_ids = await _resolve_elevenlabs_voice_candidates(voice_id)
+        async with httpx.AsyncClient(timeout=30) as client:
+            for candidate_voice_id in voice_candidates:
+                if available_voice_ids and candidate_voice_id not in available_voice_ids:
+                    continue
+                resp = await client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{candidate_voice_id}",
+                    headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+                    json={
+                        "text": preview_text,
+                        "model_id": "eleven_turbo_v2_5",
+                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3},
+                    },
                 )
-                continue
-            raise HTTPException(resp.status_code, f"ElevenLabs error: {resp.text[:200]}")
+                if resp.status_code == 200:
+                    preview_audio = resp.content
+                    used_voice_id = candidate_voice_id
+                    break
+                if _is_retryable_elevenlabs_voice_error(resp.status_code):
+                    log.warning(
+                        "ElevenLabs preview voice %s rejected with %s. Retrying next voice.",
+                        candidate_voice_id,
+                        resp.status_code,
+                    )
+                    continue
+                raise HTTPException(resp.status_code, f"ElevenLabs error: {resp.text[:200]}")
+    else:
+        log.warning("ElevenLabs API key not configured; using Edge TTS preview fallback.")
     if preview_audio is None:
         tmp_preview = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         tmp_preview.close()

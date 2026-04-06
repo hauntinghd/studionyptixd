@@ -1,0 +1,55 @@
+name: Publish API Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/render-studio-backend
+    paths:
+      - Dockerfile
+      - requirements.txt
+      - backend.py
+      - backend_settings.py
+      - backend_catalog.py
+      - backend_image_prompts.py
+      - backend_models.py
+      - backend_demo.py
+      - backend_state.py
+      - backend_queue.py
+      - backend_worker.py
+      - backend_catalyst_core.py
+      - backend_catalyst_profiles.py
+      - backend_catalyst_learning.py
+      - backend_catalyst_blueprint.py
+      - backend_catalyst_reference.py
+      - client_secrets.json
+      - ops/run_render_service.sh
+      - ViralShorts-App/**
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/hauntinghd/nyptid-studio-api:latest

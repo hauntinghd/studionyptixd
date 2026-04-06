@@ -543,7 +543,12 @@ export default function CatalystPanel() {
                 : []
         )
             .filter((row) => String(row?.video_id || '').trim())
-            .sort((a, b) => String(a?.published_at || '').localeCompare(String(b?.published_at || ''))),
+            .sort((a, b) =>
+                (Number(b?.views || 0) - Number(a?.views || 0))
+                || (Number(b?.average_view_percentage || 0) - Number(a?.average_view_percentage || 0))
+                || (Number(b?.impression_click_through_rate || 0) - Number(a?.impression_click_through_rate || 0))
+                || String(b?.published_at || '').localeCompare(String(a?.published_at || ''))
+            ),
         [selectedChannel]
     );
 
@@ -553,12 +558,16 @@ export default function CatalystPanel() {
             setSelectedReferenceVideoId(currentReferenceVideoId);
             return;
         }
-        if (uploadedVideoOptions.length > 0) {
-            setSelectedReferenceVideoId(String(uploadedVideoOptions[0]?.video_id || '').trim());
-            return;
-        }
-        setSelectedReferenceVideoId('');
+        setSelectedReferenceVideoId((prev) => {
+            const currentSelection = String(prev || '').trim();
+            if (currentSelection && uploadedVideoOptions.some((video) => String(video?.video_id || '').trim() === currentSelection)) {
+                return currentSelection;
+            }
+            return '';
+        });
     }, [referenceVideoAnalysis?.video?.video_id, uploadedVideoOptions]);
+
+    const canAnalyzeReferenceVideo = uploadedVideoOptions.length > 0 && !analyzingReference && !clearingReference;
 
     if (!session) return null;
 
@@ -871,6 +880,9 @@ export default function CatalystPanel() {
                                                 className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
                                                 style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
                                             >
+                                                <option value="" style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
+                                                    Let Catalyst choose the strongest measured upload
+                                                </option>
                                                 {uploadedVideoOptions.map((video) => {
                                                     const published = String(video.published_at || '').trim();
                                                     const title = String(video.title || '').trim() || String(video.video_id || '').trim();
@@ -888,15 +900,15 @@ export default function CatalystPanel() {
                                             <button
                                                 type="button"
                                                 onClick={() => void handleAnalyzeReferenceVideo()}
-                                                disabled={analyzingReference || clearingReference || !selectedReferenceVideoId}
+                                                disabled={!canAnalyzeReferenceVideo}
                                                 className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                                             >
                                                 {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                                                Analyze Selected
+                                                {selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
                                             </button>
                                         </div>
                                         <div className="mt-2 text-xs text-gray-500">
-                                            Pick the exact measured upload you want Catalyst to analyze. The first item is your oldest uploaded video.
+                                            Leave the first option selected to let Catalyst pick the strongest measured upload, or override it with a specific video.
                                         </div>
                                     </div>
                                 )}

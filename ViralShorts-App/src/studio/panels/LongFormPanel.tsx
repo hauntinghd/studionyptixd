@@ -716,16 +716,20 @@ export default function LongFormPanel() {
 
     const canUseDeepAnalysis = Boolean(ownerOverride || longformOwnerBeta);
     const missingManualBrief = !topic.trim() || !inputTitle.trim() || !inputDescription.trim();
-    const deepAnalysisRequested = Boolean(
+    const hasDeepAnalysisInputs = Boolean(
         sourceUrl.trim()
         || youtubeChannelId.trim()
         || analyticsNotes.trim()
         || transcriptText.trim()
         || analyticsImages.length > 0
+    );
+    const deepAnalysisRequested = Boolean(
+        hasDeepAnalysisInputs
         || (ownerOverride && autoPipeline)
     );
     const canCreateFromSourceOnly = canUseDeepAnalysis && Boolean(sourceUrl.trim());
-    const createDisabled = creating || (!canCreateFromSourceOnly && missingManualBrief);
+    const canCreateFromDeepAnalysisOnly = canUseDeepAnalysis && hasDeepAnalysisInputs;
+    const createDisabled = creating || (!canCreateFromDeepAnalysisOnly && missingManualBrief);
 
     const createSession = useCallback(async () => {
         if (!session) return;
@@ -1628,7 +1632,15 @@ export default function LongFormPanel() {
                         disabled={createDisabled}
                         className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium disabled:opacity-60 transition"
                     >
-                        {creating ? 'Creating...' : ownerOverride && autoPipeline ? 'Create + Auto Run' : canCreateFromSourceOnly && !topic.trim() && !inputTitle.trim() && !inputDescription.trim() ? 'Create From Source Video' : 'Create Session'}
+                        {creating
+                            ? 'Creating...'
+                            : ownerOverride && autoPipeline
+                                ? 'Create + Auto Run'
+                                : canCreateFromSourceOnly && missingManualBrief
+                                    ? 'Create From Source Video'
+                                    : canCreateFromDeepAnalysisOnly && missingManualBrief
+                                        ? 'Create From Analysis Inputs'
+                                        : 'Create Session'}
                     </button>
                     <div className="flex items-center gap-2">
                         <input

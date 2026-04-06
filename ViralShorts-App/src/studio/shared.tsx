@@ -36,10 +36,11 @@ const resolveSafeApiBase = (rawBase: string): string => {
 
 // API routing:
 // - local dev: use VITE_API_BASE_URL / VITE_GENERATION_API_BASE_URL
-// - hosted UI (Vercel): optionally point to a separate backend domain via VITE_PROD_API_BASE_URL
+// - hosted UI (Vercel): default to same-origin `/api` rewrites and only use a separate backend domain when env overrides are provided
 const rawLocalApi = resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "");
 const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
-export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || PROD_API_BASE_URL);
+const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
+export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || hostedOrigin);
 const rawGenerationApi = resolveSafeApiBase(
     (isLocalDevHost ? viteEnv.VITE_GENERATION_API_BASE_URL : viteEnv.VITE_PROD_GENERATION_API_BASE_URL) || ""
 );
@@ -60,7 +61,7 @@ export const isOwnerEmail = (email?: string | null): boolean => {
 };
 export const GENERATION_API = (() => {
     if (!rawGenerationApi) {
-        return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : PROD_API_BASE_URL);
+        return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : hostedOrigin || PROD_API_BASE_URL);
     }
     return rawGenerationApi;
 })();
