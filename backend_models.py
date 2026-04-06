@@ -240,7 +240,7 @@ class CatalystHubReferenceVideoAnalysisRequest(BaseModel):
     channel_id: str = ""
     workspace_id: str = ""
     video_id: str = ""
-    max_analysis_minutes: float = 3.0
+    max_analysis_minutes: float = 20.0
 
 
 class CatalystHubReferenceVideoClearRequest(BaseModel):

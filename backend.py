@@ -10381,6 +10381,7 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
         try:
             info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, normalized_url) if yt_dlp is not None else {}
             if isinstance(info, dict):
+                merged["_yt_dlp_info"] = info
                 subtitle_url, subtitle_ext = _pick_subtitle_candidate(info, language=language)
                 if subtitle_url and subtitle_ext == "vtt":
                     try:
@@ -10507,6 +10508,7 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
         "chapters": chapters,
         "transcript_excerpt": transcript_excerpt,
         "public_summary": " | ".join(part for part in public_summary_parts if part),
+        "_yt_dlp_info": info,
     }
 
 
@@ -27227,9 +27229,10 @@ async def _build_catalyst_reference_video_analysis(
     audio_summary = ""
     analysis_mode = "direct_media"
     heuristic_used = False
-    if not video_path and download_info:
+    stream_info = dict(download_info or source_bundle.get("_yt_dlp_info") or {})
+    if not video_path and stream_info:
         stream_clip = await _extract_reference_video_stream_clip(
-            download_info,
+            stream_info,
             work_dir / "video",
             max_seconds=analysis_seconds,
         )
@@ -27244,6 +27247,8 @@ async def _build_catalyst_reference_video_analysis(
                         "Direct media download was blocked, but Catalyst recovered by clipping the reference video from extracted stream URLs.",
                     ] if part
                 )
+            elif not download_info and source_bundle.get("_yt_dlp_info"):
+                download_error = "Catalyst recovered moving-video analysis from earlier yt-dlp metadata after the direct download step failed."
         elif stream_error:
             download_error = " | ".join(part for part in [download_error, stream_error] if part)
     if video_path:
