@@ -7101,6 +7101,37 @@ def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
     return rows
 
 
+def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id: str, max_results: int = 100) -> list[dict]:
+    page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
+    if not page_url or yt_dlp is None:
+        return []
+    try:
+        info = _yt_dlp_extract_info_blocking(page_url)
+    except Exception:
+        return []
+    entries = [dict(v or {}) for v in list((info or {}).get("entries") or []) if isinstance(v, dict)]
+    rows: list[dict] = []
+    for entry in entries[: max(1, min(int(max_results or 100), 250))]:
+        video_id = str(entry.get("id", "") or "").strip()
+        if not video_id:
+            continue
+        upload_date = str(entry.get("upload_date", "") or "").strip()
+        published_at = ""
+        if len(upload_date) == 8 and upload_date.isdigit():
+            published_at = f"{upload_date[0:4]}-{upload_date[4:6]}-{upload_date[6:8]}T00:00:00Z"
+        rows.append(
+            {
+                "video_id": video_id,
+                "title": _clip_text(str(entry.get("title", "") or "").strip(), 180),
+                "published_at": published_at,
+                "published_label": "",
+                "thumbnail_url": str(entry.get("thumbnail", "") or "").strip(),
+                "privacy_status": "public",
+            }
+        )
+    return rows
+
+
 async def _youtube_fetch_public_channel_page_videos(
     access_token: str,
     *,
@@ -7135,6 +7166,12 @@ async def _youtube_fetch_public_channel_page_videos(
                 if str(video_id or "").strip()
             ]
         if not page_rows:
+            page_rows = _youtube_extract_public_channel_rows_with_ytdlp(
+                channel_url=channel_url,
+                channel_id=channel_id,
+                max_results=max_results,
+            )
+        if not page_rows:
             return []
         page_rows = page_rows[: max(1, min(int(max_results or 100), 100))]
         page_ids = [str((row or {}).get("video_id", "") or "").strip() for row in list(page_rows or []) if str((row or {}).get("video_id", "") or "").strip()]
@@ -7168,7 +7205,11 @@ async def _youtube_fetch_public_channel_page_videos(
             merged_rows.append(merged)
         return merged_rows
     except Exception:
-        return []
+        return _youtube_extract_public_channel_rows_with_ytdlp(
+            channel_url=channel_url,
+            channel_id=channel_id,
+            max_results=max_results,
+        )
 
 
 def _youtube_caption_language_candidates(language: str = "en") -> list[str]:
