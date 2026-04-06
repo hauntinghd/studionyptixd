@@ -9383,6 +9383,36 @@ async def _build_catalyst_hub_payload(
             channel_context,
         )
         memory_bucket["reference_video_analysis"] = reconciled_reference_video_analysis
+        reference_video_public = _catalyst_reference_video_analysis_public_view(reconciled_reference_video_analysis)
+        reference_analysis_mode = str(
+            (dict(reference_video_public.get("evidence") or {}).get("analysis_mode", ""))
+            or (dict(reconciled_reference_video_analysis.get("evidence") or {}).get("analysis_mode", ""))
+            or ""
+        ).strip().lower()
+        reference_video_id = str(
+            (dict(reference_video_public.get("video") or {}).get("video_id", ""))
+            or (dict(reconciled_reference_video_analysis.get("video") or {}).get("video_id", ""))
+            or ""
+        ).strip()
+        if (
+            workspace_id == "documentary"
+            and selected_channel_id
+            and reference_video_id
+            and reference_analysis_mode == "preview_frames"
+        ):
+            try:
+                rebuilt_reference_video_analysis = await _build_catalyst_reference_video_analysis(
+                    user=user,
+                    channel_id=selected_channel_id,
+                    workspace_id=workspace_id,
+                    video_id=reference_video_id,
+                    max_analysis_minutes=CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
+                )
+                memory_bucket["reference_video_analysis"] = dict(rebuilt_reference_video_analysis or {})
+                reconciled_reference_video_analysis = dict(rebuilt_reference_video_analysis or {})
+                reference_video_public = _catalyst_reference_video_analysis_public_view(reconciled_reference_video_analysis)
+            except Exception as e:
+                log.warning(f"Catalyst documentary reference auto-rebuild skipped: {e}")
         if not reconciled_reference_video_analysis:
             for stale_key in (
                 "reference_summary",
@@ -9410,7 +9440,7 @@ async def _build_catalyst_hub_payload(
             "selected_cluster": dict(series_context.get("selected_cluster") or {}),
             "cluster_context": _clip_text(str(series_context.get("cluster_context", "") or "").strip(), 320),
             "reference_summary": _clip_text(str((memory_public.get("reference_summary") if isinstance(memory_public, dict) else "") or ""), 320),
-            "reference_video_analysis": _catalyst_reference_video_analysis_public_view(memory_bucket.get("reference_video_analysis") or {}),
+            "reference_video_analysis": reference_video_public,
         }
     default_workspace_id = next(
         (
