@@ -173,7 +173,7 @@ const fallbackVideoModelCatalog: CreativeModelProfile[] = [
 ];
 
 export default function CreatePanel() {
-    const { session, role, ownerOverride, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
+    const { session, role, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
     const [selectedTemplate, setSelectedTemplate] = useState('story');
@@ -228,6 +228,7 @@ export default function CreatePanel() {
     const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
     const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
     const [projectsLoading, setProjectsLoading] = useState(false);
+    const [projectsError, setProjectsError] = useState<string | null>(null);
     const [finalizeError, setFinalizeError] = useState<string | null>(null);
     const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
     const [showQuickStart, setShowQuickStart] = useState(false);
@@ -339,10 +340,6 @@ export default function CreatePanel() {
     const animationCreditExhausted = !isAdmin && (requiresTopup || animationCreditsAvailable <= 0);
     const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
     const templateSupportsVoiceControls = selectedTemplate === 'story' || selectedTemplate === 'daytrading';
-    const autoModeComingSoon =
-        !ownerOverride
-        && !isAdmin
-        && (selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'skeleton' || selectedTemplate === 'daytrading');
     const cinematicBoostAlwaysOn = true;
     const effectiveCinematicBoostEnabled = cinematicBoostAlwaysOn || cinematicBoostEnabled;
     const defaultSkeletonStyleLockActive = selectedTemplate === 'skeleton' && !creativeReferenceImage && !creativeReferenceAttached;
@@ -428,11 +425,6 @@ export default function CreatePanel() {
             setBulkImageGenTotal(0);
         }
     }, [creativeMode]);
-    useEffect(() => {
-        if (autoModeComingSoon && creativeMode === 'auto') {
-            setCreativeMode('creative');
-        }
-    }, [autoModeComingSoon, creativeMode]);
     useEffect(() => {
         if (cinematicBoostAlwaysOn && !cinematicBoostEnabled) {
             setCinematicBoostEnabled(true);
@@ -1134,6 +1126,7 @@ export default function CreatePanel() {
     const loadProjects = useCallback(async () => {
         if (!session) return;
         setProjectsLoading(true);
+        setProjectsError(null);
         try {
             const res = await fetch(`${API}/api/projects`, {
                 headers: { Authorization: `Bearer ${session.access_token}` },
@@ -1143,9 +1136,10 @@ export default function CreatePanel() {
             const payload = data || {};
             setProjectDrafts((payload as any).drafts || []);
             setProjectRenders((payload as any).renders || []);
-        } catch {
+        } catch (e: any) {
             setProjectDrafts([]);
             setProjectRenders([]);
+            setProjectsError(e?.message || "Failed to load projects");
         } finally {
             setProjectsLoading(false);
         }
@@ -1234,6 +1228,7 @@ export default function CreatePanel() {
 
     const handleGenerate = async () => {
         if (!prompt) return;
+        setGenerateError(null);
         if (creativeMode === 'creative') {
             await handleCreativeStart();
             return;
@@ -1305,6 +1300,7 @@ export default function CreatePanel() {
         const targetJobId = jobId || jobStatus?.job_id;
         if (!targetJobId) return;
         const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        setGenerateError(null);
         setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
         try {
             const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
@@ -1331,7 +1327,7 @@ export default function CreatePanel() {
                 });
             }
         } catch (e: any) {
-            alert(e?.message || "Failed to regenerate scene image");
+            setGenerateError(e?.message || "Failed to regenerate scene image");
         } finally {
             setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: false }));
         }
@@ -1467,6 +1463,7 @@ export default function CreatePanel() {
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
         const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
         setScriptLoading(true);
+        setGenerateError(null);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/session`, {
@@ -1549,7 +1546,7 @@ export default function CreatePanel() {
             setCreativeStep('edit');
         } catch (e: any) {
             setCreativeReferenceStatus(creativeReferenceImage ? 'error' : 'idle');
-            alert(e.message || "Failed to start creative session");
+            setGenerateError(e?.message || "Failed to start creative session");
         } finally {
             setScriptLoading(false);
         }
@@ -2382,6 +2379,7 @@ export default function CreatePanel() {
 
     const openDraftProject = async (projectId: string) => {
         if (!session) return;
+        setProjectsError(null);
         try {
             const res = await fetch(`${API}/api/projects/${projectId}`, {
                 headers: { Authorization: `Bearer ${session.access_token}` },
@@ -2475,7 +2473,7 @@ export default function CreatePanel() {
                 setWorkspaceStage('finale');
             }
         } catch (e: any) {
-            alert(e?.message || "Failed to open project");
+            setProjectsError(e?.message || "Failed to open project");
         }
     };
 
@@ -3290,6 +3288,11 @@ export default function CreatePanel() {
                             <h2 className="text-lg font-bold text-white">Your Projects</h2>
                             <button onClick={loadProjects} className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300">Refresh</button>
                         </div>
+                        {projectsError && (
+                            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                                {projectsError}
+                            </div>
+                        )}
                         {projectsLoading && <p className="text-sm text-gray-500">Loading projects...</p>}
                         {!projectsLoading && (
                             <>
@@ -3341,7 +3344,7 @@ export default function CreatePanel() {
                                 <p className="mt-2 text-sm text-gray-400">
                                     {selectedTemplate === 'chatstory'
                                         ? 'Chat Story runs in a dedicated fullscreen-style editor on the same Catalyst render path as the rest of Studio.'
-                                        : 'Creative Control and Script to Short are the live build paths. Auto stays marked coming soon until the scene-first flow is tighter.'}
+                                        : 'Auto, Creative Control, and Script to Short are all live build paths for the sellable short-form templates.'}
                                 </p>
                             </div>
                             <div className="flex flex-wrap gap-2">
@@ -3377,20 +3380,14 @@ export default function CreatePanel() {
                 <div>
                     <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Creation Mode</h2>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                        <button onClick={() => !loading && !autoModeComingSoon && setCreativeMode('auto')}
-                            disabled={autoModeComingSoon}
+                        <button onClick={() => !loading && setCreativeMode('auto')}
                             className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
-                            } ${autoModeComingSoon ? 'opacity-55 cursor-not-allowed' : ''}`}>
+                            }`}>
                             <Wand2 className="w-4 h-4 mx-auto mb-1 text-violet-400" />
-                            <div className="text-xs font-bold flex items-center justify-center gap-1">
-                                Auto
-                                {autoModeComingSoon && (
-                                    <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-amber-200">Soon</span>
-                                )}
-                            </div>
+                            <div className="text-xs font-bold">Auto</div>
                             <div className="text-[11px] text-gray-500 mt-0.5">
-                                {autoModeComingSoon ? 'Reserved for a later public rollout.' : 'AI handles everything'}
+                                AI handles everything
                             </div>
                         </button>
                         <button onClick={() => !loading && setCreativeMode('creative')}
@@ -3920,7 +3917,7 @@ export default function CreatePanel() {
                         </button>
                     )}
                 </div>
-                {workspaceStage !== 'finale' && generateError && (
+                {generateError && (
                     <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
                         {generateError}
                     </div>

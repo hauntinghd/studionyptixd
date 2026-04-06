@@ -15356,13 +15356,8 @@ async def generate_scene_image(
             + "Glass-shell visibility must be obvious (not faint): medium-opacity translucent shell around the skeleton form."
         ).strip()
 
-    skeleton_scene_model_locked = template == "skeleton"
-    explicit_image_model_requested = bool(str(selected_model_id or "").strip()) or skeleton_scene_model_locked
-    explicit_image_model_id = (
-        "grok_imagine"
-        if skeleton_scene_model_locked
-        else _normalize_creative_image_model_id(selected_model_id, template=template)
-    )
+    explicit_image_model_requested = bool(str(selected_model_id or "").strip())
+    explicit_image_model_id = _normalize_creative_image_model_id(selected_model_id, template=template)
     if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
