@@ -7670,6 +7670,76 @@ def _youtube_build_historical_compare(videos: list[dict]) -> dict:
     }
 
 
+def _youtube_apply_public_inventory_to_snapshot(snapshot: dict | None, public_rows: list[dict] | None) -> dict:
+    base_snapshot = dict(snapshot or {})
+    public_inventory_rows = [
+        dict(row or {})
+        for row in list(public_rows or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    ]
+    if not public_inventory_rows:
+        return base_snapshot
+
+    existing_rows = [
+        dict(row or {})
+        for row in list(base_snapshot.get("uploaded_videos") or [])
+        if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
+    ]
+    existing_by_id = {
+        str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
+        for row in list(existing_rows or [])
+        if isinstance(row, dict)
+    }
+
+    merged_rows: list[dict] = []
+    for row in list(public_inventory_rows or []):
+        clean_video_id = str((row or {}).get("video_id", "") or "").strip()
+        if not clean_video_id:
+            continue
+        merged = dict(existing_by_id.get(clean_video_id) or {})
+        for key, value in dict(row or {}).items():
+            if value not in (None, "", [], {}):
+                merged[key] = value
+        merged["video_id"] = clean_video_id
+        merged["privacy_status"] = str(
+            (row or {}).get("privacy_status", "") or merged.get("privacy_status", "") or "public"
+        ).strip() or "public"
+        merged_rows.append(merged)
+
+    merged_rows.sort(
+        key=lambda row: (
+            str((row or {}).get("published_at", "") or ""),
+            str((row or {}).get("video_id", "") or ""),
+        ),
+        reverse=True,
+    )
+
+    updated_snapshot = dict(base_snapshot)
+    updated_snapshot["uploaded_videos"] = merged_rows[:250]
+    updated_snapshot["channel_video_count"] = len(merged_rows)
+    updated_snapshot["recent_upload_titles"] = [
+        str((row or {}).get("title", "") or "").strip()
+        for row in list(merged_rows[:12])
+        if str((row or {}).get("title", "") or "").strip()
+    ]
+    merged_top_rows = sorted(
+        [dict(row or {}) for row in list(merged_rows or []) if isinstance(row, dict)],
+        key=lambda row: (
+            -int(float((row or {}).get("views", 0) or 0) or 0),
+            str((row or {}).get("published_at", "") or ""),
+        ),
+    )
+    updated_snapshot["top_video_titles"] = [
+        str((row or {}).get("title", "") or "").strip()
+        for row in list(merged_top_rows[:12])
+        if str((row or {}).get("title", "") or "").strip()
+    ]
+    updated_snapshot["top_videos"] = merged_top_rows[:10]
+    updated_snapshot["historical_compare"] = _youtube_build_historical_compare(merged_rows[:20])
+    updated_snapshot["channel_audit"] = _youtube_build_channel_audit(updated_snapshot)
+    return updated_snapshot
+
+
 def _youtube_build_channel_audit(snapshot: dict | None) -> dict:
     payload = dict(snapshot or {})
     historical_compare = dict(payload.get("historical_compare") or {})
@@ -8258,25 +8328,31 @@ async def _youtube_sync_channel_record(record: dict) -> dict:
     if matching:
         updated.update(matching)
 
+    public_page_rows: list[dict] = []
     try:
-        analytics_snapshot = await _youtube_fetch_channel_analytics(access_token, channel_id)
-        updated["analytics_snapshot"] = analytics_snapshot
-        updated["last_sync_error"] = ""
-    except Exception as e:
-        fallback_rows = await _youtube_fetch_public_channel_page_videos(
+        public_page_rows = await _youtube_fetch_public_channel_page_videos(
             access_token,
             channel_url=str(updated.get("channel_url", "") or "").strip(),
             channel_id=channel_id,
             max_results=max(int(float(updated.get("video_count", 0) or 0) or 0), 25),
         )
+    except Exception:
+        public_page_rows = []
+
+    try:
+        analytics_snapshot = await _youtube_fetch_channel_analytics(access_token, channel_id)
+        analytics_snapshot = _youtube_apply_public_inventory_to_snapshot(analytics_snapshot, public_page_rows)
+        updated["analytics_snapshot"] = analytics_snapshot
+        updated["last_sync_error"] = ""
+    except Exception as e:
         merged_existing_by_id = {
             str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
             for row in list(existing_snapshot.get("uploaded_videos") or [])
             if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
         }
         merged_uploaded_rows: list[dict] = []
-        if fallback_rows:
-            for row in list(fallback_rows or []):
+        if public_page_rows:
+            for row in list(public_page_rows or []):
                 clean_video_id = str((row or {}).get("video_id", "") or "").strip()
                 merged = dict(merged_existing_by_id.get(clean_video_id) or {})
                 merged.update(dict(row or {}))
@@ -8293,27 +8369,7 @@ async def _youtube_sync_channel_record(record: dict) -> dict:
         )
         fallback_snapshot = dict(existing_snapshot)
         if merged_uploaded_rows:
-            fallback_snapshot["uploaded_videos"] = merged_uploaded_rows[:250]
-            fallback_snapshot["channel_video_count"] = len(merged_uploaded_rows)
-            fallback_snapshot["recent_upload_titles"] = [
-                str((row or {}).get("title", "") or "").strip()
-                for row in list(merged_uploaded_rows[:12])
-                if str((row or {}).get("title", "") or "").strip()
-            ]
-            top_rows = sorted(
-                [dict(row or {}) for row in list(merged_uploaded_rows or []) if isinstance(row, dict)],
-                key=lambda row: (
-                    -int(float((row or {}).get("views", 0) or 0) or 0),
-                    str((row or {}).get("published_at", "") or ""),
-                ),
-            )
-            fallback_snapshot["top_video_titles"] = [
-                str((row or {}).get("title", "") or "").strip()
-                for row in list(top_rows[:12])
-                if str((row or {}).get("title", "") or "").strip()
-            ]
-            fallback_snapshot["historical_compare"] = _youtube_build_historical_compare(merged_uploaded_rows[:20])
-            fallback_snapshot["channel_audit"] = _youtube_build_channel_audit(fallback_snapshot)
+            fallback_snapshot = _youtube_apply_public_inventory_to_snapshot(fallback_snapshot, merged_uploaded_rows)
         updated["analytics_snapshot"] = fallback_snapshot
         updated["last_sync_error"] = _clip_text(str(e), 220)
 
@@ -9220,44 +9276,23 @@ async def _build_catalyst_hub_payload(
             current_ids = [str((row or {}).get("video_id", "") or "").strip() for row in current_rows]
             public_ids = [str((row or {}).get("video_id", "") or "").strip() for row in public_page_rows]
             if public_ids and public_ids != current_ids:
-                current_by_id = {str((row or {}).get("video_id", "") or "").strip(): dict(row or {}) for row in current_rows}
-                merged_rows: list[dict] = []
-                for row in list(public_page_rows or []):
-                    clean_video_id = str((row or {}).get("video_id", "") or "").strip()
-                    merged = dict(current_by_id.get(clean_video_id) or {})
-                    merged.update(dict(row or {}))
-                    merged_rows.append(merged)
-                merged_recent_titles = [
-                    str((row or {}).get("title", "") or "").strip()
-                    for row in list(merged_rows[:12])
-                    if str((row or {}).get("title", "") or "").strip()
-                ]
-                merged_top_rows = sorted(
-                    [dict(row or {}) for row in list(merged_rows or []) if isinstance(row, dict)],
-                    key=lambda row: (
-                        -int(float((row or {}).get("views", 0) or 0) or 0),
-                        str((row or {}).get("published_at", "") or ""),
-                    ),
+                raw_snapshot = _youtube_apply_public_inventory_to_snapshot(
+                    {
+                        "channel_summary": str(channel_context.get("summary", "") or "").strip(),
+                        "channel_video_count": int(channel_context.get("channel_video_count", 0) or 0),
+                        "recent_upload_titles": list(channel_context.get("recent_upload_titles") or []),
+                        "uploaded_videos": list(channel_context.get("uploaded_videos") or []),
+                        "top_video_titles": list(channel_context.get("top_video_titles") or []),
+                        "top_videos": list(channel_context.get("top_videos") or []),
+                        "title_pattern_hints": list(channel_context.get("title_pattern_hints") or []),
+                        "packaging_learnings": list(channel_context.get("packaging_learnings") or []),
+                        "retention_learnings": list(channel_context.get("retention_learnings") or []),
+                        "series_clusters": list(channel_context.get("series_clusters") or []),
+                        "series_cluster_playbook": dict(channel_context.get("series_cluster_playbook") or {}),
+                        "historical_compare": dict(channel_context.get("historical_compare") or {}),
+                    },
+                    public_page_rows,
                 )
-                raw_snapshot = {
-                    "channel_summary": str(channel_context.get("summary", "") or "").strip(),
-                    "channel_video_count": len(merged_rows),
-                    "recent_upload_titles": merged_recent_titles,
-                    "uploaded_videos": merged_rows[:250],
-                    "top_video_titles": [
-                        str((row or {}).get("title", "") or "").strip()
-                        for row in list(merged_top_rows[:12])
-                        if str((row or {}).get("title", "") or "").strip()
-                    ],
-                    "top_videos": merged_top_rows[:10],
-                    "title_pattern_hints": list(channel_context.get("title_pattern_hints") or []),
-                    "packaging_learnings": list(channel_context.get("packaging_learnings") or []),
-                    "retention_learnings": list(channel_context.get("retention_learnings") or []),
-                    "series_clusters": list(channel_context.get("series_clusters") or []),
-                    "series_cluster_playbook": dict(channel_context.get("series_cluster_playbook") or {}),
-                    "historical_compare": _youtube_build_historical_compare(merged_rows[:20]),
-                }
-                raw_snapshot["channel_audit"] = _youtube_build_channel_audit(raw_snapshot)
                 channel_context = {
                     **dict(channel_context or {}),
                     "channel_video_count": raw_snapshot["channel_video_count"],
