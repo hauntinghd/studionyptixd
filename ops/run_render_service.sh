@@ -1,7 +1,25 @@
 #!/usr/bin/env sh
 set -eu
 
-cd /app
+APP_ROOT="${RENDER_APP_ROOT:-/app}"
+if [ ! -f "$APP_ROOT/backend.py" ]; then
+  APP_ROOT="/app"
+fi
+
+if [ -n "${RENDER_ENV_FILE_PATH:-}" ] && [ -f "${RENDER_ENV_FILE_PATH}" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${RENDER_ENV_FILE_PATH}"
+  set +a
+fi
+
+cd "$APP_ROOT"
+
+if [ -z "${FRONTEND_DIST_DIR:-}" ] && [ -d "$APP_ROOT/ViralShorts-App/dist" ]; then
+  export FRONTEND_DIST_DIR="$APP_ROOT/ViralShorts-App/dist"
+fi
+
+export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 API_CMD="uvicorn backend:app --host 0.0.0.0 --port ${PORT:-10000}"
 RUN_EMBEDDED_WORKER="${RUN_EMBEDDED_WORKER:-0}"
