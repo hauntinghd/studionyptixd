@@ -266,6 +266,22 @@ export default function CreatePanel() {
         () => videoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog[0],
         [videoModelCatalog, videoModelId]
     );
+    const skeletonSceneModelLocked = selectedTemplate === 'skeleton';
+    const sceneImageModelOptions = useMemo(() => {
+        const enabledModels = imageModelCatalog.filter((model) => model.enabled !== false);
+        if (!skeletonSceneModelLocked) return enabledModels;
+        const lockedModels = enabledModels.filter((model) => model.id === 'grok_imagine');
+        if (lockedModels.length > 0) return lockedModels;
+        const fallbackGrok = fallbackImageModelCatalog.find((model) => model.id === 'grok_imagine');
+        return fallbackGrok ? [fallbackGrok] : enabledModels;
+    }, [imageModelCatalog, skeletonSceneModelLocked]);
+
+    useEffect(() => {
+        if (!skeletonSceneModelLocked) return;
+        if (imageModelId !== 'grok_imagine') {
+            setImageModelId('grok_imagine');
+        }
+    }, [skeletonSceneModelLocked, imageModelId]);
 
     useEffect(() => {
         (async () => {
@@ -2115,7 +2131,9 @@ export default function CreatePanel() {
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Image Generation Model</p>
                         <h3 className="mt-2 text-2xl font-bold text-white">Choose the image lane for this workspace</h3>
                         <p className="mt-2 text-sm text-gray-400">
-                            Basic lanes stay in the normal Studio burn. Premium and elite lanes consume Catalyst credits first from included credits, then from the credit wallet.
+                            {skeletonSceneModelLocked
+                                ? 'Skeleton scene generation is locked to Grok Imagine via fal.ai. Seedream stays thumbnail-only.'
+                                : 'Basic lanes stay in the normal Studio burn. Premium and elite lanes consume Catalyst credits first from included credits, then from the credit wallet.'}
                         </p>
                     </div>
                     <button
@@ -2132,7 +2150,7 @@ export default function CreatePanel() {
                 </div>
                 <div onWheelCapture={handleModelPickerWheel} className="mt-6 max-h-[58vh] overflow-y-auto overscroll-contain pr-1">
                     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                        {imageModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                        {sceneImageModelOptions.map((model) => {
                             const active = selectedImageModel.id === model.id;
                             return (
                                 <button
@@ -2307,7 +2325,10 @@ export default function CreatePanel() {
                         type="button"
                         onClick={() => {
                             if (animationCreditPromptMode === 'image') {
-                                const basicImageLane = imageModelCatalog.find((model) => model.id === 'studio_default')
+                                const basicImageLane = (selectedTemplate === 'skeleton'
+                                    ? imageModelCatalog.find((model) => model.id === 'grok_imagine')
+                                    : undefined)
+                                    || imageModelCatalog.find((model) => model.id === 'studio_default')
                                     || imageModelCatalog.find((model) => model.tier === 'basic')
                                     || fallbackImageModelCatalog[0];
                                 setImageModelId(basicImageLane.id);
@@ -2641,7 +2662,11 @@ export default function CreatePanel() {
                                 <div>
                                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Generation Model</p>
                                     <h3 className="mt-2 text-lg font-semibold text-white">{selectedImageModel.label}</h3>
-                                    <p className="mt-2 text-sm text-gray-400">{selectedImageModel.summary}</p>
+                                    <p className="mt-2 text-sm text-gray-400">
+                                        {skeletonSceneModelLocked
+                                            ? 'Skeleton AI short scenes are locked to Grok Imagine via fal.ai. Seedream is reserved for thumbnail work.'
+                                            : selectedImageModel.summary}
+                                    </p>
                                 </div>
                                 <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
                                     selectedImageModel.tier === 'elite'
@@ -2657,12 +2682,18 @@ export default function CreatePanel() {
                                 <span>{formatModelSpendLabel(selectedImageModel, 'image')}</span>
                                 <span>{selectedImageModel.speed}</span>
                             </div>
-                            <p className="mt-4 text-xs text-gray-500">Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.</p>
+                            <p className="mt-4 text-xs text-gray-500">
+                                {skeletonSceneModelLocked
+                                    ? 'Skeleton scenes stay on Grok Imagine. Other image lanes are not used for Skeleton scene generation.'
+                                    : 'Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.'}
+                            </p>
                         </button>
                         <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
                             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Catalyst Spend Snapshot</p>
                             <p className="mt-2 text-lg font-semibold text-white">
-                                {selectedImageCreditCost > 0
+                                {skeletonSceneModelLocked
+                                    ? 'Skeleton scene lane is locked to Grok Imagine via fal.ai'
+                                    : selectedImageCreditCost > 0
                                     ? `${selectedImageCreditCost} credits per image on ${selectedImageModel.label}`
                                     : `${selectedImageModel.label} stays on the basic image lane`}
                             </p>

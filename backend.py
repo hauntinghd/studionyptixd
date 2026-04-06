@@ -1541,6 +1541,13 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
     return DEFAULT_CREATIVE_IMAGE_MODEL_ID
 
 
+def _normalize_scene_image_model_id(value: str | None, template: str = "") -> str:
+    normalized = _normalize_creative_image_model_id(value, template=template)
+    if str(template or "").strip().lower() == "skeleton":
+        return "grok_imagine"
+    return normalized
+
+
 def _normalize_creative_video_model_id(value: str | None) -> str:
     requested = str(value or "").strip().lower()
     if requested in CREATIVE_VIDEO_MODEL_MAP and bool(CREATIVE_VIDEO_MODEL_MAP[requested].get("enabled", False)):
@@ -14631,8 +14638,13 @@ async def generate_scene_image(
             + "Glass-shell visibility must be obvious (not faint): medium-opacity translucent shell around the skeleton form."
         ).strip()
 
-    explicit_image_model_requested = bool(str(selected_model_id or "").strip())
-    explicit_image_model_id = _normalize_creative_image_model_id(selected_model_id, template=template)
+    skeleton_scene_model_locked = template == "skeleton"
+    explicit_image_model_requested = bool(str(selected_model_id or "").strip()) or skeleton_scene_model_locked
+    explicit_image_model_id = (
+        "grok_imagine"
+        if skeleton_scene_model_locked
+        else _normalize_creative_image_model_id(selected_model_id, template=template)
+    )
     if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
@@ -14670,6 +14682,40 @@ async def generate_scene_image(
         result["qa_min_score"] = qa_gate_min
         result["qa_notes"] = list(qa.get("notes", []) or [])
         if template == "skeleton" and not qa_gate_ok:
+            try:
+                repair_prompt = _skeleton_repair_prompt(prompt)
+                repair_path = str(Path(output_path).with_name(Path(output_path).stem + "_grok_repair" + Path(output_path).suffix))
+                repair_result = await generate_image_grok(
+                    repair_prompt,
+                    repair_path,
+                    resolution=resolution,
+                    reference_image_url=reference_image_url,
+                    reference_lock_mode=lock_mode,
+                )
+                await _enforce_1080_image(repair_path)
+                _ensure_generated_image_valid(repair_path)
+                repair_qa = _score_generated_image_quality(repair_path, prompt=repair_prompt, template=template)
+                repair_gate_ok, repair_gate_min = _image_quality_gate(
+                    repair_qa,
+                    template=template,
+                    lock_mode=lock_mode,
+                    has_reference=has_reference,
+                    prompt=repair_prompt,
+                )
+                if repair_gate_ok or float(repair_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
+                    shutil.copyfile(repair_path, output_path)
+                    result = dict(repair_result)
+                    result["local_path"] = output_path
+                    result["provider"] = explicit_image_model_id
+                    result["provider_label"] = str(profile.get("label", explicit_image_model_id) or explicit_image_model_id)
+                    result["qa_score"] = repair_qa.get("score", 0.0)
+                    result["qa_ok"] = bool(repair_gate_ok)
+                    result["qa_min_score"] = repair_gate_min
+                    result["qa_notes"] = list(repair_qa.get("notes", []) or [])
+                Path(repair_path).unlink(missing_ok=True)
+            except Exception as repair_err:
+                log.warning(f"Skeleton Grok-only repair pass failed: {repair_err}")
+        if template == "skeleton" and not bool(result.get("qa_ok", False)):
             if interactive_fast:
                 notes = _interactive_soft_accept_notes(result["qa_notes"])
                 if not _skeleton_notes_are_severe(notes):
@@ -23109,7 +23155,7 @@ async def creative_generate_script(req: GenerateRequest, request: Request = None
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
     mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
     art_style = _normalize_art_style(req.art_style, template=req.template)
-    image_model_id = _normalize_creative_image_model_id(getattr(req, "image_model_id", ""), template=req.template)
+    image_model_id = _normalize_scene_image_model_id(getattr(req, "image_model_id", ""), template=req.template)
     video_model_id = _normalize_creative_video_model_id(getattr(req, "video_model_id", ""))
     user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = user.get("email", "") in ADMIN_EMAILS
@@ -23357,7 +23403,7 @@ async def creative_create_session(body: dict, request: Request = None):
     quality_mode = _normalize_skeleton_quality_mode(body.get("quality_mode"), template=template)
     mint_mode = _normalize_mint_mode(body.get("mint_mode"), template=template)
     art_style = _normalize_art_style(body.get("art_style"), template=template)
-    image_model_id = _normalize_creative_image_model_id(body.get("image_model_id"), template=template)
+    image_model_id = _normalize_scene_image_model_id(body.get("image_model_id"), template=template)
     video_model_id = _normalize_creative_video_model_id(body.get("video_model_id"))
     transition_style = _normalize_transition_style(body.get("transition_style", "smooth"))
     micro_escalation_mode = _normalize_micro_escalation_mode(body.get("micro_escalation_mode"), template=template)
@@ -23600,7 +23646,7 @@ async def creative_session_status(session_id: str, request: Request = None):
         "quality_mode": _normalize_skeleton_quality_mode(session.get("quality_mode"), template=session.get("template", "")),
         "mint_mode": _normalize_mint_mode(session.get("mint_mode"), template=session.get("template", "")),
         "art_style": _normalize_art_style(session.get("art_style", "auto"), template=session.get("template", "")),
-        "image_model_id": _normalize_creative_image_model_id(session.get("image_model_id"), template=session.get("template", "")),
+        "image_model_id": _normalize_scene_image_model_id(session.get("image_model_id"), template=session.get("template", "")),
         "video_model_id": _normalize_creative_video_model_id(session.get("video_model_id")),
         "cinematic_boost": _normalize_cinematic_boost(session.get("cinematic_boost", False)),
         "transition_style": _normalize_transition_style(session.get("transition_style", "smooth")),
@@ -23700,7 +23746,7 @@ async def creative_scene_image(req: SceneImageRequest, request: Request = None):
     raw_prompt = str(req.prompt or "").strip()
     if not raw_prompt:
         raise HTTPException(400, "Scene prompt is required")
-    image_model_id = _normalize_creative_image_model_id(
+    image_model_id = _normalize_scene_image_model_id(
         getattr(req, "image_model_id", "") or session.get("image_model_id"),
         template=template,
     )
@@ -24069,7 +24115,7 @@ async def creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTa
         pacing_mode = "standard"
     youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or session.get("youtube_channel_id", "") or "").strip()
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode or session.get("reference_lock_mode"), "strict")
-    image_model_id = _normalize_creative_image_model_id(req.image_model_id or session.get("image_model_id"), template=session.get("template", req.template))
+    image_model_id = _normalize_scene_image_model_id(req.image_model_id or session.get("image_model_id"), template=session.get("template", req.template))
     video_model_id = _normalize_creative_video_model_id(req.video_model_id or session.get("video_model_id"))
     video_model_profile = _creative_video_model_profile(video_model_id)
     animation_enabled = _bool_from_any(
@@ -24233,7 +24279,7 @@ async def _run_creative_pipeline(
         voice_speed = _normalize_voice_speed(session.get("voice_speed", 1.0), default=1.0)
         pacing_mode = _normalize_pacing_mode(session.get("pacing_mode", "standard"))
         subtitles_enabled = _bool_from_any(session.get("subtitles_enabled"), True)
-        image_model_id = _normalize_creative_image_model_id(session.get("image_model_id"), template=template)
+        image_model_id = _normalize_scene_image_model_id(session.get("image_model_id"), template=template)
         video_model_id = _normalize_creative_video_model_id(session.get("video_model_id"))
         script_data = dict(session.get("script_data", {}) or {})
         scenes = _normalize_scenes_for_render(session["scenes"])
