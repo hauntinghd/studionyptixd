@@ -168,6 +168,7 @@ type LongFormSessionSummary = {
     updated_at: number;
 };
 
+type LongFormTemplate = 'story' | 'skeleton';
 type LongFormPreset = 'recap' | 'explainer' | 'documentary' | 'story_channel';
 
 const PRESET_LABELS: Record<LongFormPreset, string> = {
@@ -230,7 +231,7 @@ function splitOutcomeLines(value: string): string[] {
 export default function LongFormPanel() {
     const { session, ownerOverride, longformOwnerBeta } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
-    const template = 'story' as const;
+    const [template, setTemplate] = useState<LongFormTemplate>('story');
     const [formatPreset, setFormatPreset] = useState<LongFormPreset>('documentary');
     const [topic, setTopic] = useState('');
     const [inputTitle, setInputTitle] = useState('');
@@ -296,6 +297,8 @@ export default function LongFormPanel() {
     const [renderMonitorDismissed, setRenderMonitorDismissed] = useState(false);
     const restoredSessionUserRef = useRef('');
     const outcomeSeedRef = useRef('');
+    const prefillAppliedRef = useRef(false);
+    const pendingPrefillChannelHintRef = useRef('');
 
     const lastSessionStorageKey = useMemo(() => {
         const uid = String(session?.user?.id || 'guest').trim() || 'guest';
@@ -567,6 +570,72 @@ export default function LongFormPanel() {
         if (!session) return;
         void loadYouTubeChannels(true);
     }, [session, loadYouTubeChannels]);
+
+    useEffect(() => {
+        if (prefillAppliedRef.current || typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        const hasPrefill = Array.from(params.keys()).some((key) => key.startsWith('lf_'));
+        if (!hasPrefill) return;
+
+        const templateParam = String(params.get('lf_template') || '').trim().toLowerCase();
+        const formatParam = String(params.get('lf_format') || '').trim().toLowerCase();
+        const topicParam = String(params.get('lf_topic') || '').trim();
+        const titleParam = String(params.get('lf_title') || '').trim();
+        const descriptionParam = String(params.get('lf_description') || '').trim();
+        const sourceParam = String(params.get('lf_source') || '').trim();
+        const channelHint = String(params.get('lf_channel') || '').trim();
+        const autoParam = String(params.get('lf_auto') || '').trim().toLowerCase();
+        const minutesRaw = Number(params.get('lf_minutes') || '');
+
+        if (templateParam === 'story' || templateParam === 'skeleton') {
+            setTemplate(templateParam);
+        }
+        if (formatParam === 'recap' || formatParam === 'explainer' || formatParam === 'documentary' || formatParam === 'story_channel') {
+            setFormatPreset(formatParam);
+        }
+        if (topicParam) setTopic(topicParam);
+        if (titleParam) setInputTitle(titleParam);
+        if (descriptionParam) setInputDescription(descriptionParam);
+        if (sourceParam) setSourceUrl(sourceParam);
+        if (Number.isFinite(minutesRaw) && minutesRaw > 0) {
+            setTargetMinutes(Math.max(2, Math.min(30, minutesRaw)));
+        }
+        if (autoParam) {
+            setAutoPipeline(['1', 'true', 'yes', 'on'].includes(autoParam));
+        }
+        if (channelHint) {
+            pendingPrefillChannelHintRef.current = channelHint;
+        }
+        setActiveTab('create');
+        prefillAppliedRef.current = true;
+
+        const cleanup = new URL(window.location.href);
+        ['lf_template', 'lf_format', 'lf_topic', 'lf_title', 'lf_description', 'lf_source', 'lf_channel', 'lf_minutes', 'lf_auto'].forEach((key) => {
+            cleanup.searchParams.delete(key);
+        });
+        window.history.replaceState({}, '', cleanup.toString());
+    }, []);
+
+    useEffect(() => {
+        const hintRaw = String(pendingPrefillChannelHintRef.current || '').trim();
+        if (!hintRaw || youtubeChannels.length === 0) return;
+        const normalizedHint = hintRaw.toLowerCase();
+        const match = youtubeChannels.find((row) => {
+            const channelId = String(row.channel_id || '').trim().toLowerCase();
+            const title = String(row.title || '').trim().toLowerCase();
+            const handle = String(row.channel_handle || '').trim().toLowerCase();
+            const url = String(row.channel_url || '').trim().toLowerCase();
+            return channelId === normalizedHint
+                || title === normalizedHint
+                || handle === normalizedHint
+                || title.includes(normalizedHint)
+                || handle.includes(normalizedHint)
+                || url.includes(normalizedHint);
+        });
+        if (!match) return;
+        setYoutubeChannelId(String(match.channel_id || '').trim());
+        pendingPrefillChannelHintRef.current = '';
+    }, [youtubeChannels]);
 
     useEffect(() => {
         const uid = String(session?.user?.id || '').trim();
@@ -1204,6 +1273,14 @@ export default function LongFormPanel() {
                         ) : null}
                     </div>
                     <label className="text-sm text-gray-300">
+                        Template Style
+                        <select value={template} onChange={(e) => setTemplate(e.target.value as LongFormTemplate)}
+                            className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
+                            <option value="story">Story</option>
+                            <option value="skeleton">Skeleton</option>
+                        </select>
+                    </label>
+                    <label className="text-sm text-gray-300">
                         Content Format
                         <select value={formatPreset} onChange={(e) => setFormatPreset(e.target.value as LongFormPreset)}
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white">
@@ -1216,10 +1293,12 @@ export default function LongFormPanel() {
                     <div className="text-sm text-gray-300">
                         Visual Engine
                         <div className="mt-1 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-sm text-cyan-100">
-                            Catalyst Documentary 3D
+                            {template === 'skeleton' ? 'Catalyst Skeleton 3D' : 'Catalyst Documentary 3D'}
                         </div>
                         <p className="mt-2 text-xs text-cyan-300/80">
-                            Long Form now uses the documentary 3D engine directly. Content Format is the real creative driver.
+                            {template === 'skeleton'
+                                ? 'Long Form now uses the Skeleton identity engine directly. Content Format controls the documentary or story grammar around it.'
+                                : 'Long Form now uses the documentary 3D engine directly. Content Format is the real creative driver.'}
                         </p>
                     </div>
                     <label className="text-sm text-gray-300">
@@ -1227,10 +1306,10 @@ export default function LongFormPanel() {
                         <input
                             type="number"
                             min={2}
-                            max={10}
+                            max={30}
                             step={0.5}
                             value={targetMinutes}
-                            onChange={(e) => setTargetMinutes(Math.max(2, Math.min(10, Number(e.target.value || 8))))}
+                            onChange={(e) => setTargetMinutes(Math.max(2, Math.min(30, Number(e.target.value || 8))))}
                             className="mt-1 w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white"
                         />
                     </label>
