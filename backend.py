@@ -10335,23 +10335,38 @@ async def _fetch_public_video_bundle_fallback(source_url: str) -> dict:
 def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed")
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "extract_flat": False,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/135.0.0.0 Safari/537.36"
-            )
-        },
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(source_url, download=False) or {}
+    client_sets = [
+        ["android", "web"],
+        ["tv_embedded", "android", "web"],
+        ["ios", "android", "web"],
+        ["mweb", "android", "web"],
+    ]
+    last_error = ""
+    for player_clients in client_sets:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": False,
+            "extractor_args": {"youtube": {"player_client": player_clients}},
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/135.0.0.0 Safari/537.36"
+                )
+            },
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(source_url, download=False) or {}
+            if isinstance(info, dict) and info:
+                return info
+        except Exception as e:
+            last_error = str(e)
+            continue
+    raise RuntimeError(last_error or "yt-dlp metadata extraction failed")
 
 
 async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> dict:
@@ -10360,11 +10375,12 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
         return {}
     official_api_bundle = await _youtube_fetch_public_video_bundle_api_key(normalized_url)
     if official_api_bundle:
+        video_id = _source_url_video_id(normalized_url)
+        merged = dict(official_api_bundle)
+        transcript_excerpt = ""
         try:
             info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, normalized_url) if yt_dlp is not None else {}
             if isinstance(info, dict):
-                merged = dict(official_api_bundle)
-                transcript_excerpt = ""
                 subtitle_url, subtitle_ext = _pick_subtitle_candidate(info, language=language)
                 if subtitle_url and subtitle_ext == "vtt":
                     try:
@@ -10382,9 +10398,22 @@ async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> d
                             f"Transcript excerpt: {transcript_excerpt}",
                         ] if part
                     )
-                return merged
         except Exception:
-            return official_api_bundle
+            transcript_excerpt = ""
+        if not transcript_excerpt and video_id:
+            try:
+                transcript_excerpt = await _youtube_download_public_timedtext_transcript(video_id, language=language)
+            except Exception:
+                transcript_excerpt = ""
+        if transcript_excerpt:
+            merged["transcript_excerpt"] = transcript_excerpt
+            merged["public_summary"] = " | ".join(
+                part for part in [
+                    str(merged.get("public_summary", "") or "").strip(),
+                    f"Transcript excerpt: {transcript_excerpt}",
+                ] if part
+            )
+        return merged
     if yt_dlp is None:
         fallback_bundle = await _fetch_public_video_bundle_fallback(normalized_url)
         if fallback_bundle:
@@ -26371,38 +26400,50 @@ async def _download_youtube_video_for_reference_analysis(source_url: str, output
     def _download() -> dict:
         info = {}
         extract_error = ""
+        video_file = None
+        download_error = ""
         try:
             info = _yt_dlp_extract_info_blocking(normalized_url)
         except Exception as e:
             extract_error = str(e)
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "merge_output_format": "mp4",
-            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/135.0.0.0 Safari/537.36"
-                )
-            },
-        }
-        video_file = None
-        download_error = extract_error
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                download_info = ydl.extract_info(normalized_url, download=True) or {}
-            if isinstance(download_info, dict) and download_info:
-                info = download_info
-            video_id = str(info.get("id", "") or "").strip()
-            files = sorted(output_dir.glob(f"{video_id}*"), key=lambda p: p.stat().st_mtime, reverse=True)
-            video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
-        except Exception as e:
-            download_error = str(e or download_error)
+            download_error = extract_error
+        client_sets = [
+            ["android", "web"],
+            ["tv_embedded", "android", "web"],
+            ["ios", "android", "web"],
+            ["mweb", "android", "web"],
+        ]
+        for player_clients in client_sets:
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "merge_output_format": "mp4",
+                "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
+                "extractor_args": {"youtube": {"player_client": player_clients}},
+                "http_headers": {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/135.0.0.0 Safari/537.36"
+                    )
+                },
+            }
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    download_info = ydl.extract_info(normalized_url, download=True) or {}
+                if isinstance(download_info, dict) and download_info:
+                    info = download_info
+                video_id = str(info.get("id", "") or "").strip()
+                files = sorted(output_dir.glob(f"{video_id}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                video_file = next((p for p in files if p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}), None)
+                if video_file:
+                    download_error = ""
+                    break
+            except Exception as e:
+                download_error = str(e or download_error or extract_error)
+                continue
         return {
             "info": info,
             "video_path": str(video_file) if video_file else "",
@@ -26715,6 +26756,7 @@ def _build_catalyst_reference_analysis_evidence(
             (f"Measured cut density from sampled media is about {float(metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute." if float(metrics.get("cuts_per_minute", 0.0) or 0.0) > 0 else ""),
             (f"Connected-channel metrics for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
             ("Catalyst extracted real audio/transcript context from the sampled media." if str(audio_summary or "").strip() else ""),
+            ("Catalyst recovered transcript context from public or owned captions." if not str(audio_summary or "").strip() and str(transcript_excerpt or "").strip() else ""),
         ],
         max_items=6,
     )
