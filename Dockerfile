@@ -43,7 +43,8 @@ COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
 
-RUN chmod +x ./ops/run_render_service.sh
+RUN sed -i 's/\r$//' ./ops/run_render_service.sh \
+    && chmod +x ./ops/run_render_service.sh
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
