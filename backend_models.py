@@ -130,6 +130,8 @@ class LongFormSessionCreateRequest(BaseModel):
     animation_enabled: bool = True
     sfx_enabled: bool = True
     whisper_mode: str = "subtle"
+    reference_image_url: str = ""
+    reference_lock_mode: str = "strict"
 
 
 class LongFormChapterActionRequest(BaseModel):

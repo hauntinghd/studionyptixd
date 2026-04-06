@@ -3483,6 +3483,62 @@ def _decode_data_image_url(data_url: str) -> tuple[bytes, str]:
         return b"", ""
 
 
+def _longform_reference_file_public_url(filename: str) -> str:
+    safe = os.path.basename(str(filename or "").strip())
+    return f"{SITE_URL.rstrip('/')}/api/longform/reference-file/{safe}"
+
+
+def _persist_longform_reference_image(
+    session: dict,
+    *,
+    reference_image_url: str,
+    reference_lock_mode: str = "strict",
+) -> dict:
+    session = dict(session or {})
+    data_url = str(reference_image_url or "").strip()
+    if not data_url:
+        return session
+    raw, mime = _decode_data_image_url(data_url)
+    if not raw:
+        raise HTTPException(400, "Reference image is empty or invalid")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(400, "Reference image must be <= 8MB")
+    lock_mode = _normalize_reference_lock_mode(
+        reference_lock_mode,
+        default=_normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict"),
+    )
+    quality = _analyze_reference_quality(raw, lock_mode=lock_mode)
+    if not quality.get("accepted", True) and lock_mode == "strict":
+        raise HTTPException(
+            400,
+            "Reference image quality too low for Strict Reference Lock. Upload a higher-resolution image or switch to Style Inspired mode.",
+        )
+    ext = ".png"
+    if "jpeg" in mime or "jpg" in mime:
+        ext = ".jpg"
+    elif "webp" in mime:
+        ext = ".webp"
+    ref_dir = TEMP_DIR / "longform_references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    session_id = str(session.get("session_id", "") or "").strip() or f"lf_ref_{int(time.time())}_{random.randint(1000, 9999)}"
+    ref_name = f"{session_id}_reference{ext}"
+    ref_path = ref_dir / ref_name
+    ref_path.write_bytes(raw)
+    public_url = _longform_reference_file_public_url(ref_name)
+    template = str(session.get("template", "story") or "story").strip().lower() or "story"
+    session["reference_image_url"] = data_url
+    session["reference_image_path"] = str(ref_path)
+    session["reference_image_public_url"] = public_url
+    session["reference_lock_mode"] = lock_mode
+    session["reference_quality"] = quality
+    session["reference_dna"] = _extract_reference_dna(raw, template=template)
+    session["reference_image_uploaded"] = True
+    session["rolling_reference_image_url"] = public_url
+    if template == "skeleton":
+        session["skeleton_reference_image"] = public_url
+    return session
+
+
 def _extract_reference_dna(raw: bytes, template: str = "skeleton") -> dict:
     dna = {
         "template": str(template or ""),
@@ -11020,6 +11076,7 @@ def _build_longform_scene_execution_prompt(
     total_scenes: int = 0,
     skeleton_anchor: str = "",
     art_style: str = "auto",
+    has_subject_reference: bool = False,
 ) -> str:
     scene = dict(scene or {})
     visual_description_raw = str(scene.get("visual_description", "") or "").strip()
@@ -11088,7 +11145,11 @@ def _build_longform_scene_execution_prompt(
             f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
-            "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference.",
+            (
+                "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+                if has_subject_reference
+                else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
+            ),
             documentary_environment_guidance,
             "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
         ], max_items=8, max_chars=240)
@@ -11098,6 +11159,7 @@ def _build_longform_scene_execution_prompt(
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
         f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
+        "Preserve the exact same subject identity from the attached reference image whenever that person appears." if has_subject_reference else "",
         f"Visual motif: {visual_motif}." if visual_motif else "",
         f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
         "Pattern interrupt required in composition, scale, or contrast." if execution.get("is_interrupt") else "",
@@ -19472,6 +19534,13 @@ def _longform_public_session(session: dict) -> dict:
         "status": str(s.get("status", "draft_review") or "draft_review"),
         "job_id": str(s.get("job_id", "") or ""),
         "paused_error": s.get("paused_error", None),
+        "has_reference_image": bool(
+            str(s.get("reference_image_public_url", "") or "").strip()
+            or str(s.get("reference_image_url", "") or "").strip()
+        ),
+        "reference_image_uploaded": bool(s.get("reference_image_uploaded", False)),
+        "reference_image_public_url": str(s.get("reference_image_public_url", "") or ""),
+        "reference_lock_mode": str(s.get("reference_lock_mode", "strict") or "strict"),
         "metadata_pack": dict(s.get("metadata_pack") or {}),
         "edit_blueprint": dict(s.get("edit_blueprint") or {}),
         "learning_record": dict(s.get("learning_record") or {}),
@@ -20265,6 +20334,14 @@ def _longform_documentary_reference_image_url(
     return encoded
 
 
+def _longform_session_subject_reference_image_url(session: dict | None, template: str = "") -> str:
+    s = dict(session or {})
+    current = str(s.get("reference_image_public_url", "") or s.get("reference_image_url", "") or "").strip()
+    if current and _bool_from_any(s.get("reference_image_uploaded"), False):
+        return current
+    return ""
+
+
 def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
     channel_context = dict(channel_context or {})
     haystack = " ".join(
@@ -20552,12 +20629,19 @@ async def _longform_attach_scene_previews(
     session_topic = ""
     session_input_title = ""
     channel_context: dict = {}
+    session_reference_image_url = ""
+    session_reference_lock_mode = "strict"
     try:
         async with _longform_sessions_lock:
             live_session = dict(_longform_sessions.get(session_id) or {})
         session_topic = str(live_session.get("topic", "") or "").strip()
         session_input_title = str(live_session.get("input_title", "") or "").strip()
         channel_context = dict((dict(live_session.get("metadata_pack") or {})).get("youtube_channel") or {})
+        session_reference_image_url = _longform_session_subject_reference_image_url(live_session, template)
+        session_reference_lock_mode = _normalize_reference_lock_mode(
+            live_session.get("reference_lock_mode"),
+            default="strict",
+        )
     except Exception:
         pass
 
@@ -20656,7 +20740,7 @@ async def _longform_attach_scene_previews(
             format_preset=format_preset,
         )
         scene["visual_description"] = visual_desc
-        reference_image_url = _longform_documentary_reference_image_url(
+        reference_image_url = session_reference_image_url or _longform_documentary_reference_image_url(
             template=template,
             format_preset=format_preset,
             channel_context=channel_context,
@@ -20680,6 +20764,7 @@ async def _longform_attach_scene_previews(
             total_scenes=len(scripted_scenes),
             skeleton_anchor=skeleton_anchor,
             art_style=_longform_default_art_style(template, format_preset),
+            has_subject_reference=bool(session_reference_image_url),
         )
         filename = _longform_preview_filename(session_id, chapter_index, scene_idx)
         output_path = str(LONGFORM_PREVIEW_DIR / filename)
@@ -20692,7 +20777,7 @@ async def _longform_attach_scene_previews(
                 template=template,
                 format_preset=format_preset,
                 reference_image_url=reference_image_url,
-                reference_lock_mode="strict",
+                reference_lock_mode=session_reference_lock_mode,
                 best_of_enabled=False,
                 salvage_enabled=False,
             )
@@ -21163,6 +21248,11 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             if _bool_from_any(live_session.get("stop_requested"), False) or str(live_session.get("status", "") or "").strip().lower() in {"stopped", "cancelled", "canceled"}:
                 await _mark_longform_job_cancelled(job_id, "Stopped by owner.")
                 return
+            session_reference_image_url = _longform_session_subject_reference_image_url(live_session, template)
+            session_reference_lock_mode = _normalize_reference_lock_mode(
+                live_session.get("reference_lock_mode"),
+                default="strict",
+            )
             chapter_index = int(scene.get("_chapter_index", 0) or 0)
             scene_num = int(scene.get("scene_num", i + 1) or (i + 1))
             _job_update_scene_pointer(
@@ -21195,7 +21285,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             scene["_payoff_hold_sec"] = float(execution_profile.get("payoff_hold_sec", 1.1) or 1.1)
             scene["_caption_rhythm"] = str(execution_profile.get("caption_rhythm", "") or "")
             scene["_sound_density"] = str(execution_profile.get("sound_density", "") or "")
-            reference_image_url = _longform_documentary_reference_image_url(
+            reference_image_url = session_reference_image_url or _longform_documentary_reference_image_url(
                 template=template,
                 format_preset=format_preset,
                 channel_context=channel_context,
@@ -21206,7 +21296,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 narration=str(scene.get("narration", "") or ""),
                 visual_description=locked_visual,
             )
-            reference_lock_mode = "strict"
+            reference_lock_mode = session_reference_lock_mode
             if not reference_image_url:
                 reference_image_url = _normalize_reference_with_default(template, "")
             full_prompt = _build_longform_scene_execution_prompt(
@@ -21221,6 +21311,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 total_scenes=len(scenes),
                 skeleton_anchor=skeleton_anchor,
                 art_style=longform_art_style,
+                has_subject_reference=bool(session_reference_image_url),
             )
             scene_prompts.append(locked_visual)
 
@@ -21586,6 +21677,8 @@ async def _create_longform_session_internal(
     analytics_notes: str = "",
     strategy_notes: str = "",
     transcript_text: str = "",
+    reference_image_data_url: str = "",
+    reference_lock_mode: str = "strict",
     analytics_image_paths: list[str] | None = None,
     target_minutes: float = LONGFORM_DEFAULT_TARGET_MINUTES,
     language: str = "en",
@@ -21615,6 +21708,8 @@ async def _create_longform_session_internal(
     analytics_notes = str(analytics_notes or "").strip()
     strategy_notes = str(strategy_notes or "").strip()
     transcript_text = str(transcript_text or "").strip()
+    reference_image_data_url = str(reference_image_data_url or "").strip()
+    reference_lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
     target_minutes = _normalize_longform_target_minutes(target_minutes)
     language = _normalize_longform_language(language)
     whisper_mode = _normalize_longform_whisper_mode(whisper_mode)
@@ -21833,6 +21928,14 @@ async def _create_longform_session_internal(
         "analytics_notes": analytics_notes,
         "strategy_notes": strategy_notes,
         "transcript_text": _clip_text(transcript_text, 12000),
+        "reference_image_url": "",
+        "reference_image_public_url": "",
+        "reference_image_path": "",
+        "reference_image_uploaded": False,
+        "reference_lock_mode": reference_lock_mode,
+        "reference_dna": {},
+        "reference_quality": {},
+        "rolling_reference_image_url": "",
         "target_minutes": float(target_minutes),
         "language": language,
         "resolution": "720p_landscape",
@@ -21860,6 +21963,12 @@ async def _create_longform_session_internal(
         "created_at": created_at,
         "updated_at": now,
     }
+    if reference_image_data_url:
+        session_data = _persist_longform_reference_image(
+            session_data,
+            reference_image_url=reference_image_data_url,
+            reference_lock_mode=reference_lock_mode,
+        )
     async with _longform_sessions_lock:
         _longform_sessions[session_id] = session_data
         _save_longform_sessions()
@@ -21908,6 +22017,8 @@ async def create_longform_session(req: LongFormSessionCreateRequest, request: Re
             analytics_notes=req.analytics_notes,
             strategy_notes=req.strategy_notes,
             transcript_text=getattr(req, "transcript_text", ""),
+            reference_image_data_url=str(getattr(req, "reference_image_url", "") or ""),
+            reference_lock_mode=str(getattr(req, "reference_lock_mode", "strict") or "strict"),
             target_minutes=req.target_minutes,
             language=req.language,
             animation_enabled=req.animation_enabled,
@@ -21938,6 +22049,7 @@ def _create_longform_bootstrap_placeholder_session(
     whisper_mode: str,
     auto_pipeline: bool,
     analytics_asset_count: int,
+    reference_lock_mode: str = "strict",
 ) -> dict:
     chapter_count, chapter_target_sec = _longform_chapter_scene_targets(target_minutes)
     session_id = f"lf_{int(time.time())}_{random.randint(1000, 9999)}"
@@ -21975,6 +22087,14 @@ def _create_longform_bootstrap_placeholder_session(
         "analytics_notes": str(analytics_notes or "").strip(),
         "strategy_notes": str(strategy_notes or "").strip(),
         "transcript_text": _clip_text(str(transcript_text or "").strip(), 12000),
+        "reference_image_url": "",
+        "reference_image_public_url": "",
+        "reference_image_path": "",
+        "reference_image_uploaded": False,
+        "reference_lock_mode": _normalize_reference_lock_mode(reference_lock_mode, default="strict"),
+        "reference_dna": {},
+        "reference_quality": {},
+        "rolling_reference_image_url": "",
         "target_minutes": float(target_minutes),
         "language": _normalize_longform_language(language),
         "resolution": "720p_landscape",
@@ -22225,6 +22345,8 @@ async def _bootstrap_longform_session_background(
     analytics_notes: str,
     strategy_notes: str,
     transcript_text: str,
+    reference_image_data_url: str,
+    reference_lock_mode: str,
     analytics_image_paths: list[str],
     target_minutes: float,
     language: str,
@@ -22247,6 +22369,8 @@ async def _bootstrap_longform_session_background(
                 analytics_notes=analytics_notes,
                 strategy_notes=strategy_notes,
                 transcript_text=transcript_text,
+                reference_image_data_url=reference_image_data_url,
+                reference_lock_mode=reference_lock_mode,
                 analytics_image_paths=analytics_image_paths,
                 target_minutes=target_minutes,
                 language=language,
@@ -22291,12 +22415,14 @@ async def create_longform_session_bootstrap(
     analytics_notes: str = Form(""),
     strategy_notes: str = Form(""),
     transcript_text: str = Form(""),
+    reference_lock_mode: str = Form("strict"),
     auto_pipeline: bool = Form(False),
     target_minutes: float = Form(8.0),
     language: str = Form("en"),
     animation_enabled: bool = Form(True),
     sfx_enabled: bool = Form(True),
     whisper_mode: str = Form("subtle"),
+    subject_reference_image: UploadFile | None = File(None),
     analytics_images: list[UploadFile] = File([]),
     request: Request = None,
 ):
@@ -22321,6 +22447,7 @@ async def create_longform_session_bootstrap(
     normalized_language = _normalize_longform_language(language)
     normalized_target_minutes = _normalize_longform_target_minutes(target_minutes)
     normalized_whisper_mode = _normalize_longform_whisper_mode(whisper_mode)
+    normalized_reference_lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
     normalized_source_url = _normalize_external_source_url(str(source_url or "").strip())
     if str(source_url or "").strip() and not normalized_source_url:
         raise HTTPException(400, "Source URL is invalid")
@@ -22328,6 +22455,20 @@ async def create_longform_session_bootstrap(
     upload_dir = TEMP_DIR / "longform_bootstrap"
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved_image_paths: list[str] = []
+    reference_image_data_url = ""
+    if subject_reference_image is not None and getattr(subject_reference_image, "filename", ""):
+        if not subject_reference_image.content_type or not subject_reference_image.content_type.startswith("image/"):
+            raise HTTPException(400, "Reference file must be an image")
+        raw_reference = await subject_reference_image.read()
+        if not raw_reference:
+            raise HTTPException(400, "Reference image is empty")
+        if len(raw_reference) > 8 * 1024 * 1024:
+            raise HTTPException(400, "Reference image must be <= 8MB")
+        quality = _analyze_reference_quality(raw_reference, lock_mode=normalized_reference_lock_mode)
+        if not quality.get("accepted", True) and normalized_reference_lock_mode == "strict":
+            raise HTTPException(400, "Reference image quality too low for Strict Reference Lock. Upload a higher-resolution image or switch to Style Inspired mode.")
+        mime = subject_reference_image.content_type or "image/png"
+        reference_image_data_url = f"data:{mime};base64,{base64.b64encode(raw_reference).decode()}"
     for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
         filename = str(getattr(analytics_image, "filename", "") or "").strip()
         if not filename:
@@ -22361,7 +22502,14 @@ async def create_longform_session_bootstrap(
         whisper_mode=normalized_whisper_mode,
         auto_pipeline=bool(auto_pipeline_requested and _is_admin_user(user)),
         analytics_asset_count=len(saved_image_paths),
+        reference_lock_mode=normalized_reference_lock_mode,
     )
+    if reference_image_data_url:
+        placeholder_session = _persist_longform_reference_image(
+            placeholder_session,
+            reference_image_url=reference_image_data_url,
+            reference_lock_mode=normalized_reference_lock_mode,
+        )
     async with _longform_sessions_lock:
         _longform_sessions[placeholder_session["session_id"]] = placeholder_session
         _save_longform_sessions()
@@ -22380,6 +22528,8 @@ async def create_longform_session_bootstrap(
             analytics_notes=analytics_notes,
             strategy_notes=strategy_notes,
             transcript_text=transcript_text,
+            reference_image_data_url=reference_image_data_url,
+            reference_lock_mode=normalized_reference_lock_mode,
             analytics_image_paths=list(saved_image_paths),
             target_minutes=normalized_target_minutes,
             language=normalized_language,
@@ -22390,6 +22540,60 @@ async def create_longform_session_bootstrap(
         )
     )
     return {"session": _longform_public_session(placeholder_session)}
+
+
+@app.post("/api/longform/session/{session_id}/reference-image")
+async def longform_reference_image(
+    session_id: str,
+    reference_image: UploadFile = File(...),
+    reference_lock_mode: str = Form("strict"),
+    request: Request = None,
+):
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        session = dict(_longform_sessions.get(session_id) or {})
+        if not session:
+            raise HTTPException(404, "Long-form session not found")
+        if str(session.get("user_id", "") or "").strip() != str(user.get("id", "") or "").strip():
+            raise HTTPException(403, "Not your session")
+        if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
+            raise HTTPException(400, "Reference file must be an image")
+        raw = await reference_image.read()
+        if not raw:
+            raise HTTPException(400, "Reference image is empty")
+        mime = reference_image.content_type or "image/png"
+        data_url = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        session = _persist_longform_reference_image(
+            session,
+            reference_image_url=data_url,
+            reference_lock_mode=reference_lock_mode,
+        )
+        session["updated_at"] = time.time()
+        _longform_sessions[session_id] = session
+        _save_longform_sessions()
+    return {
+        "ok": True,
+        "session": _longform_public_session(session),
+    }
+
+
+@app.get("/api/longform/reference-file/{filename}")
+async def longform_reference_file(filename: str):
+    safe = os.path.basename(filename)
+    if not safe or safe != filename:
+        raise HTTPException(400, "Invalid filename")
+    path = TEMP_DIR / "longform_references" / safe
+    if not path.exists():
+        raise HTTPException(404, "Reference image not found")
+    media_type = "image/png"
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        media_type = "image/jpeg"
+    elif path.suffix.lower() == ".webp":
+        media_type = "image/webp"
+    return FileResponse(str(path), media_type=media_type, filename=safe)
 
 
 @app.get("/api/longform/session/{session_id}/status")

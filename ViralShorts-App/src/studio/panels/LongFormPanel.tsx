@@ -101,6 +101,10 @@ type LongFormSession = {
     status: string;
     job_id: string;
     paused_error: any;
+    has_reference_image?: boolean;
+    reference_image_uploaded?: boolean;
+    reference_image_public_url?: string;
+    reference_lock_mode?: string;
     edit_blueprint?: Record<string, any>;
     learning_record?: Record<string, any>;
     latest_outcome?: Record<string, any>;
@@ -228,6 +232,15 @@ function splitOutcomeLines(value: string): string[] {
         .filter(Boolean);
 }
 
+function fileToDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read reference image'));
+        reader.readAsDataURL(file);
+    });
+}
+
 export default function LongFormPanel() {
     const { session, ownerOverride, longformOwnerBeta } = useContext(AuthContext);
     const [activeTab, setActiveTab] = useState<'create' | 'projects'>('create');
@@ -241,6 +254,8 @@ export default function LongFormPanel() {
     const [analyticsNotes, setAnalyticsNotes] = useState('');
     const [transcriptText, setTranscriptText] = useState('');
     const [analyticsImages, setAnalyticsImages] = useState<File[]>([]);
+    const [subjectReferenceImage, setSubjectReferenceImage] = useState<File | null>(null);
+    const [subjectReferenceAttached, setSubjectReferenceAttached] = useState(false);
     const [applyMarketingDoctrine, setApplyMarketingDoctrine] = useState(true);
     const [targetMinutes, setTargetMinutes] = useState(8);
     const [language, setLanguage] = useState('en');
@@ -254,6 +269,7 @@ export default function LongFormPanel() {
     const [refreshing, setRefreshing] = useState(false);
     const [finalizing, setFinalizing] = useState(false);
     const [stopping, setStopping] = useState(false);
+    const [uploadingReference, setUploadingReference] = useState(false);
     const [actionBusy, setActionBusy] = useState('');
     const [error, setError] = useState('');
     const [projectsError, setProjectsError] = useState('');
@@ -344,6 +360,10 @@ export default function LongFormPanel() {
         if (!suggested) return;
         setFixNote((current) => (String(current || '').trim() ? current : suggested));
     }, [lfSession?.paused_error, lfSession?.session_id]);
+
+    useEffect(() => {
+        setSubjectReferenceAttached(Boolean(lfSession?.has_reference_image || lfSession?.reference_image_uploaded));
+    }, [lfSession?.has_reference_image, lfSession?.reference_image_uploaded, lfSession?.session_id]);
 
     const apiCall = useCallback(async (path: string, init: RequestInit = {}) => {
         const merged: RequestInit = {
@@ -708,6 +728,7 @@ export default function LongFormPanel() {
             const formattedDescription = inputDescription.trim()
                 ? `Format preset: ${PRESET_LABELS[formatPreset]}. ${inputDescription.trim()}`.trim()
                 : '';
+            const referenceImageDataUrl = subjectReferenceImage ? await fileToDataUrl(subjectReferenceImage) : '';
             const useBootstrapRoute = Boolean(canUseDeepAnalysis && deepAnalysisRequested);
             const payload = useBootstrapRoute
                 ? await (() => {
@@ -728,6 +749,10 @@ export default function LongFormPanel() {
                     formData.append('animation_enabled', animationEnabled ? 'true' : 'false');
                     formData.append('sfx_enabled', sfxEnabled ? 'true' : 'false');
                     formData.append('whisper_mode', whisperMode);
+                    formData.append('reference_lock_mode', 'strict');
+                    if (subjectReferenceImage) {
+                        formData.append('subject_reference_image', subjectReferenceImage);
+                    }
                     analyticsImages.forEach((file) => formData.append('analytics_images', file));
                     return apiCallFormData('/api/longform/session/bootstrap', formData);
                 })()
@@ -750,6 +775,8 @@ export default function LongFormPanel() {
                         animation_enabled: animationEnabled,
                         sfx_enabled: sfxEnabled,
                         whisper_mode: whisperMode,
+                        reference_image_url: referenceImageDataUrl,
+                        reference_lock_mode: 'strict',
                     }),
                 });
             const created = (payload as any).session as LongFormSession;
@@ -758,6 +785,7 @@ export default function LongFormPanel() {
             setSessionIdInput(created?.session_id || '');
             persistSessionId(created?.session_id || '');
             setChapterReasons({});
+            setSubjectReferenceAttached(Boolean(created?.has_reference_image || created?.reference_image_uploaded || subjectReferenceImage));
         } catch (e: any) {
             setError(e?.message || 'Failed to create long-form session');
         } finally {
@@ -781,6 +809,7 @@ export default function LongFormPanel() {
         session,
         sourceUrl,
         sfxEnabled,
+        subjectReferenceImage,
         targetMinutes,
         template,
         topic,
@@ -788,6 +817,25 @@ export default function LongFormPanel() {
         formatPreset,
         whisperMode,
     ]);
+
+    const attachSubjectReferenceToSession = useCallback(async () => {
+        if (!lfSession?.session_id || !subjectReferenceImage) return;
+        setUploadingReference(true);
+        setError('');
+        try {
+            const formData = new FormData();
+            formData.append('reference_image', subjectReferenceImage);
+            formData.append('reference_lock_mode', 'strict');
+            const payload = await apiCallFormData(`/api/longform/session/${lfSession.session_id}/reference-image`, formData);
+            const updated = (payload as any).session as LongFormSession;
+            setLfSession(updated);
+            setSubjectReferenceAttached(Boolean(updated?.has_reference_image || updated?.reference_image_uploaded));
+        } catch (e: any) {
+            setError(e?.message || 'Failed to attach subject reference image');
+        } finally {
+            setUploadingReference(false);
+        }
+    }, [apiCallFormData, lfSession?.session_id, subjectReferenceImage]);
 
     const chapterAction = useCallback(async (chapterIndex: number, action: 'approve' | 'regenerate') => {
         if (!lfSession?.session_id) return;
@@ -1422,6 +1470,45 @@ export default function LongFormPanel() {
                             </div>
                         ) : null}
                     </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                        Subject Reference Image
+                        <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => {
+                                const next = e.target.files?.[0] || null;
+                                setSubjectReferenceImage(next);
+                                e.currentTarget.value = '';
+                            }}
+                            className="mt-1 block w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-sm text-white file:mr-3 file:rounded-md file:border-0 file:bg-cyan-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white"
+                        />
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                            <span>
+                                {subjectReferenceImage
+                                    ? `Selected: ${subjectReferenceImage.name}`
+                                    : subjectReferenceAttached
+                                        ? 'Reference image already attached to this session'
+                                        : 'Optional but recommended for celebrities, rappers, athletes, or any recurring real person'}
+                            </span>
+                            {(subjectReferenceImage || subjectReferenceAttached) ? (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSubjectReferenceImage(null);
+                                        if (!lfSession?.session_id) {
+                                            setSubjectReferenceAttached(false);
+                                        }
+                                    }}
+                                    className="rounded-md border border-white/[0.12] px-2 py-1 text-[11px] text-white hover:bg-white/[0.06]"
+                                >
+                                    Clear
+                                </button>
+                            ) : null}
+                        </div>
+                        <p className="mt-2 text-xs text-cyan-300/80">
+                            Upload one clear face/body reference for the main recurring person so long-form can keep identity consistent across scenes instead of drifting into lookalikes.
+                        </p>
+                    </label>
                     <label className="text-sm text-gray-300">
                         Language
                         <select value={language} onChange={(e) => setLanguage(e.target.value)}
@@ -1517,6 +1604,47 @@ export default function LongFormPanel() {
                             <div className="text-xs text-gray-400">
                                 {review ? `${review.approved_chapters}/${review.total_chapters} chapters approved` : 'No review stats'}
                             </div>
+                        </div>
+
+                        <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/5 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Subject Reference</p>
+                                    <p className="mt-2 text-sm text-gray-300">
+                                        {lfSession.has_reference_image || lfSession.reference_image_uploaded
+                                            ? 'A subject reference is attached for this session. Long-form will use it first for identity continuity when that person appears.'
+                                            : 'No subject reference is attached yet. Upload one if this video needs a recurring celebrity or real person to stay visually consistent.'}
+                                    </p>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className={`rounded-full border px-2 py-1 text-[11px] ${
+                                        lfSession.has_reference_image || lfSession.reference_image_uploaded
+                                            ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+                                            : 'border-white/[0.12] bg-white/[0.03] text-gray-300'
+                                    }`}>
+                                        {lfSession.has_reference_image || lfSession.reference_image_uploaded ? 'Attached' : 'Missing'}
+                                    </span>
+                                    {subjectReferenceImage ? (
+                                        <button
+                                            type="button"
+                                            onClick={attachSubjectReferenceToSession}
+                                            disabled={uploadingReference}
+                                            className="rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+                                        >
+                                            {uploadingReference ? 'Attaching...' : 'Attach Selected Reference'}
+                                        </button>
+                                    ) : null}
+                                </div>
+                            </div>
+                            {lfSession.reference_image_public_url ? (
+                                <div className="mt-3">
+                                    <img
+                                        src={lfSession.reference_image_public_url}
+                                        alt="Long-form subject reference"
+                                        className="h-24 w-24 rounded-lg border border-white/[0.08] object-cover"
+                                    />
+                                </div>
+                            ) : null}
                         </div>
 
                         {jobStatus?.status && (
