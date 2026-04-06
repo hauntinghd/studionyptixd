@@ -9,5 +9,5 @@ paramiko
 redis
 pillow
 pydub
-yt-dlp
+yt-dlp==2026.03.17
 faster-whisper

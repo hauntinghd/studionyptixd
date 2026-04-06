@@ -26541,6 +26541,201 @@ async def _extract_reference_video_stream_clip(
     return {"video_path": str(clip_path), "mode": "stream_clip", "error": ""}
 
 
+async def _extract_reference_video_full_audit(
+    video_path: str,
+    output_dir: Path,
+    *,
+    max_keyframes: int = 14,
+    max_seconds: float = 1200.0,
+) -> dict:
+    if cv2 is None or np is None:
+        return await _extract_reference_video_sample_frames(
+            video_path,
+            output_dir,
+            max_frames=max_keyframes,
+            max_seconds=max_seconds,
+        )
+    source_path = str(video_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return {"frame_paths": [], "metrics": {"error": "missing_video"}}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _run() -> dict:
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            return {"frame_paths": [], "metrics": {"error": "cannot_open_video"}}
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_sec = (total_frames / fps) if fps > 0 and total_frames > 0 else 0.0
+        analysis_seconds = min(float(max_seconds or 1200.0), duration_sec or float(max_seconds or 1200.0))
+        if fps <= 0:
+            fps = 24.0
+        max_frame_index = min(total_frames - 1, max(0, int(round(analysis_seconds * fps)) - 1)) if total_frames > 0 else 0
+
+        prev_gray = None
+        frame_paths: list[str] = []
+        motion_rows: list[dict] = []
+        motion_values: list[float] = []
+        sharpness_values: list[float] = []
+        contrast_values: list[float] = []
+        saturation_values: list[float] = []
+        edge_density_values: list[float] = []
+        low_motion_streak_frames = 0
+        longest_low_motion_streak_frames = 0
+        idx = 0
+
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if idx > max_frame_index:
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            edges = cv2.Canny(gray, 80, 180)
+            motion = 0.0 if prev_gray is None else float(np.mean(cv2.absdiff(gray, prev_gray)))
+            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            contrast = float(np.std(gray))
+            saturation = float(np.mean(hsv[:, :, 1]))
+            edge_density = float(np.mean(edges > 0))
+            timestamp_sec = (idx / fps) if fps > 0 else 0.0
+            motion_rows.append(
+                {
+                    "frame_index": idx,
+                    "timestamp_sec": round(timestamp_sec, 3),
+                    "motion": round(motion, 3),
+                    "sharpness": round(sharpness, 3),
+                    "contrast": round(contrast, 3),
+                    "saturation": round(saturation, 3),
+                    "edge_density": round(edge_density, 5),
+                }
+            )
+            motion_values.append(motion)
+            sharpness_values.append(sharpness)
+            contrast_values.append(contrast)
+            saturation_values.append(saturation)
+            edge_density_values.append(edge_density)
+            if motion < 2.0:
+                low_motion_streak_frames += 1
+                if low_motion_streak_frames > longest_low_motion_streak_frames:
+                    longest_low_motion_streak_frames = low_motion_streak_frames
+            else:
+                low_motion_streak_frames = 0
+            prev_gray = gray
+            idx += 1
+
+        cap.release()
+
+        if not motion_rows:
+            return {
+                "frame_paths": [],
+                "metrics": {
+                    "duration_sec": round(duration_sec, 2),
+                    "analysis_seconds": round(analysis_seconds, 2),
+                    "timeline_frames_analyzed": 0,
+                    "error": "no_metrics",
+                },
+            }
+
+        motion_arr = np.array(motion_values, dtype=np.float32)
+        dynamic_cut_threshold = float(max(18.0, np.percentile(motion_arr, 97)))
+        cut_events = [row for row in motion_rows if float(row.get("motion", 0.0) or 0.0) >= dynamic_cut_threshold]
+        hook_rows = [row for row in motion_rows if float(row.get("timestamp_sec", 0.0) or 0.0) <= 30.0]
+        top_motion = sorted(
+            motion_rows,
+            key=lambda row: (-float(row.get("motion", 0.0) or 0.0), float(row.get("timestamp_sec", 0.0) or 0.0)),
+        )[:10]
+        low_motion = sorted(
+            motion_rows,
+            key=lambda row: (float(row.get("motion", 0.0) or 0.0), float(row.get("timestamp_sec", 0.0) or 0.0)),
+        )[:10]
+
+        keyframe_candidates: list[int] = []
+        even_count = max(4, min(int(max_keyframes or 14) // 2, 8))
+        if motion_rows:
+            for idx_even in range(even_count):
+                target_pos = int(round(((len(motion_rows) - 1) * idx_even) / max(even_count - 1, 1)))
+                keyframe_candidates.append(int(motion_rows[target_pos].get("frame_index", 0) or 0))
+        keyframe_candidates.extend(int(row.get("frame_index", 0) or 0) for row in top_motion[: max(3, int(max_keyframes or 14) // 2)])
+        keyframe_candidates.extend(int(row.get("frame_index", 0) or 0) for row in cut_events[:4])
+
+        selected_indices = sorted({idx_val for idx_val in keyframe_candidates if idx_val >= 0})[: max(6, min(int(max_keyframes or 14), 18))]
+        if selected_indices:
+            cap = cv2.VideoCapture(source_path)
+            wanted = set(selected_indices)
+            idx = 0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if idx > max_frame_index:
+                    break
+                if idx in wanted:
+                    frame_path = output_dir / f"frame_{idx:06d}.jpg"
+                    cv2.imwrite(str(frame_path), frame)
+                    frame_paths.append(str(frame_path))
+                idx += 1
+            cap.release()
+
+        report_path = output_dir / "full_timeline_report.json"
+        try:
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "video_path": source_path,
+                        "duration_sec": round(duration_sec, 3),
+                        "analysis_seconds": round(analysis_seconds, 3),
+                        "fps": round(fps, 3),
+                        "total_frames": total_frames,
+                        "timeline_frames_analyzed": len(motion_rows),
+                        "cut_threshold": round(dynamic_cut_threshold, 3),
+                        "top_motion_moments": top_motion,
+                        "lowest_motion_moments": low_motion,
+                        "timeline": motion_rows,
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            report_path = Path("")
+
+        metrics = {
+            "duration_sec": round(duration_sec, 2),
+            "analysis_seconds": round(analysis_seconds, 2),
+            "fps": round(fps, 2),
+            "sampled_frames": len(frame_paths),
+            "timeline_frames_analyzed": len(motion_rows),
+            "full_runtime_covered": bool(duration_sec <= 0 or analysis_seconds + 1.0 >= duration_sec),
+            "avg_motion": round(float(np.mean(motion_arr)), 3),
+            "avg_sharpness": round(float(np.mean(np.array(sharpness_values, dtype=np.float32))), 3),
+            "avg_contrast": round(float(np.mean(np.array(contrast_values, dtype=np.float32))), 3),
+            "avg_saturation": round(float(np.mean(np.array(saturation_values, dtype=np.float32))), 3),
+            "avg_edge_density": round(float(np.mean(np.array(edge_density_values, dtype=np.float32))), 5),
+            "cut_events": len(cut_events),
+            "cut_threshold": round(dynamic_cut_threshold, 3),
+            "cuts_per_minute": round((len(cut_events) / max(analysis_seconds, 1.0)) * 60.0, 2),
+            "hook_motion_avg_first_30_sec": round(
+                sum(float(row.get("motion", 0.0) or 0.0) for row in hook_rows) / max(len(hook_rows), 1),
+                3,
+            ) if hook_rows else 0.0,
+            "hook_sharpness_avg_first_30_sec": round(
+                sum(float(row.get("sharpness", 0.0) or 0.0) for row in hook_rows) / max(len(hook_rows), 1),
+                3,
+            ) if hook_rows else 0.0,
+            "longest_low_motion_gap_sec": round(longest_low_motion_streak_frames / max(fps, 1.0), 3),
+            "top_motion_moments": top_motion,
+            "lowest_motion_moments": low_motion,
+            "timeline_report_path": str(report_path) if report_path else "",
+        }
+        return {"frame_paths": frame_paths[:18], "metrics": metrics}
+
+    return await asyncio.to_thread(_run)
+
+
 async def _extract_reference_video_sample_frames(
     video_path: str,
     output_dir: Path,
@@ -26714,7 +26909,13 @@ def _catalyst_reference_analysis_confidence_label(
 ) -> str:
     mode = str(analysis_mode or "").strip().lower()
     sampled_frames = int(float((frame_metrics or {}).get("sampled_frames", 0) or 0))
+    timeline_frames_analyzed = int(float((frame_metrics or {}).get("timeline_frames_analyzed", 0) or 0))
+    full_runtime_covered = bool((frame_metrics or {}).get("full_runtime_covered", False))
     has_text = bool(str(transcript_excerpt or "").strip() or str(audio_summary or "").strip())
+    if mode == "direct_media" and full_runtime_covered and timeline_frames_analyzed >= 1000 and has_text and not heuristic_used:
+        return "High"
+    if mode == "stream_clip" and full_runtime_covered and timeline_frames_analyzed >= 1000 and has_text and not heuristic_used:
+        return "Medium-High"
     if mode == "direct_media" and sampled_frames >= 8 and has_text and not heuristic_used:
         return "High"
     if mode == "stream_clip" and sampled_frames >= 6 and not heuristic_used:
@@ -26736,11 +26937,17 @@ def _build_catalyst_reference_analysis_evidence(
     metrics = dict(frame_metrics or {})
     selected = dict(selected_video or {})
     mode = str(analysis_mode or "unknown").strip().lower()
+    full_runtime_covered = bool(metrics.get("full_runtime_covered", False))
+    timeline_frames_analyzed = int(float(metrics.get("timeline_frames_analyzed", 0) or 0))
     mode_label = {
         "direct_media": "Direct Video Sample",
         "stream_clip": "Stream Clip Sample",
         "preview_frames": "Preview Frames Only",
     }.get(mode, "Unknown")
+    if mode == "direct_media" and full_runtime_covered:
+        mode_label = "Direct Full Video Analysis"
+    elif mode == "stream_clip" and full_runtime_covered:
+        mode_label = "Full Stream Clip Analysis"
     sampled_frames = int(float(metrics.get("sampled_frames", 0) or 0))
     analysis_seconds = float(metrics.get("analysis_seconds", 0.0) or 0.0)
     video_duration_sec = float(selected.get("duration_sec", 0.0) or 0.0)
@@ -26754,10 +26961,20 @@ def _build_catalyst_reference_analysis_evidence(
     measured_facts = _dedupe_clip_list(
         [
             f"Catalyst analyzed this reference in {mode_label.lower()} mode.",
-            (f"Sampled about {analysis_seconds:.1f} seconds and {sampled_frames} frames." if analysis_seconds > 0 or sampled_frames > 0 else ""),
-            (f"Measured cut density from sampled media is about {float(metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute." if float(metrics.get("cuts_per_minute", 0.0) or 0.0) > 0 else ""),
+            (
+                f"Catalyst inspected the full runtime across about {timeline_frames_analyzed} frames and exported {sampled_frames} keyframes for visual reasoning."
+                if full_runtime_covered and timeline_frames_analyzed > 0
+                else f"Sampled about {analysis_seconds:.1f} seconds, inspected {timeline_frames_analyzed or sampled_frames} frames, and exported {sampled_frames} keyframes."
+                if analysis_seconds > 0 or sampled_frames > 0 or timeline_frames_analyzed > 0
+                else ""
+            ),
+            (
+                f"Measured cut density from the moving-video audit is about {float(metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute."
+                if float(metrics.get("cuts_per_minute", 0.0) or 0.0) > 0
+                else ""
+            ),
             (f"Connected-channel metrics for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
-            ("Catalyst extracted real audio/transcript context from the sampled media." if str(audio_summary or "").strip() else ""),
+            ("Catalyst extracted real audio/transcript context from the moving-video audit." if str(audio_summary or "").strip() else ""),
             ("Catalyst recovered transcript context from public or owned captions." if not str(audio_summary or "").strip() and str(transcript_excerpt or "").strip() else ""),
         ],
         max_items=6,
@@ -26771,11 +26988,11 @@ def _build_catalyst_reference_analysis_evidence(
     )
     limitations = _dedupe_clip_list(
         [
-            ("YouTube blocked full media download, so Catalyst had to analyze a shorter stream clip instead of the entire file." if mode == "stream_clip" else ""),
+            ("YouTube blocked full media download, so Catalyst had to analyze a shorter stream clip instead of the entire file." if mode == "stream_clip" and not full_runtime_covered else ""),
             ("YouTube blocked direct media sampling, so Catalyst had to rely on preview frames instead of full moving video." if mode == "preview_frames" else ""),
             ("No transcript or audio summary was available, so spoken pacing and narration conclusions are weaker." if not str(transcript_excerpt or "").strip() and not str(audio_summary or "").strip() else ""),
             ("CTR is missing or zero for this video, so packaging conclusions are less certain." if float(selected.get("impression_click_through_rate", 0.0) or 0.0) <= 0 else ""),
-            ("This analysis uses a sampled window, not the full runtime." if analysis_seconds > 0 and (video_duration_sec <= 0 or analysis_seconds + 5.0 < video_duration_sec) else ""),
+            ("This analysis uses a sampled window, not the full runtime." if not full_runtime_covered and analysis_seconds > 0 and (video_duration_sec <= 0 or analysis_seconds + 5.0 < video_duration_sec) else ""),
         ],
         max_items=6,
     )
@@ -27254,10 +27471,10 @@ async def _build_catalyst_reference_video_analysis(
     if video_path:
         audio_path = await extract_audio_from_video(video_path) or ""
         audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
-        frame_pack = await _extract_reference_video_sample_frames(
+        frame_pack = await _extract_reference_video_full_audit(
             video_path,
             work_dir / "frames",
-            max_frames=14,
+            max_keyframes=14,
             max_seconds=analysis_seconds,
         )
     else:
@@ -27306,9 +27523,9 @@ async def _build_catalyst_reference_video_analysis(
             (
                 "Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked."
                 if analysis_mode == "preview_frames"
-                else "Reference analysis mode: stream-clipped media + audio extraction from yt-dlp stream URLs because direct download was blocked."
+                else "Reference analysis mode: stream-clipped moving video + full audio extraction from yt-dlp stream URLs because direct download was blocked."
                 if analysis_mode == "stream_clip"
-                else "Reference analysis mode: direct media frames + audio extraction."
+                else "Reference analysis mode: direct full-video audit + full audio extraction."
             ),
             ("Audio summary: " + audio_summary) if audio_summary else "",
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
