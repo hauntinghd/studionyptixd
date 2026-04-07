@@ -53,32 +53,16 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                     <h1 className="text-3xl font-bold mt-4">{mode === 'signin' ? 'Welcome Back' : 'Create Account'}</h1>
                     <p className="text-gray-500 text-sm mt-2">
                         {mode === 'signin'
-                            ? 'Google is the primary sign-in. Email stays available as a fallback.'
+                            ? 'Email + password login is fully supported. Google stays optional when its OAuth path is healthy.'
                             : (
                                 <>
-                                    Google is the fastest way in, but you can also create an email account below.
+                                    Create an email account below, then verify it to unlock Studio even if Google sign-in is down.
                                     <br />1) Create an account below.
                                     <br />2) Verify your email.
                                     <br />3) Open your dashboard and start creating.
                                 </>
                             )}
                     </p>
-                </div>
-
-                <button
-                    type="button"
-                    onClick={() => void handleGoogleSignIn()}
-                    disabled={googleLoading || loading}
-                    className="mb-4 flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition hover:border-white/[0.14] hover:bg-white/[0.08] disabled:opacity-60"
-                >
-                    <GoogleMark />
-                    {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
-                </button>
-
-                <div className="mb-4 flex items-center gap-3 text-xs uppercase tracking-[0.18em] text-gray-500">
-                    <div className="h-px flex-1 bg-white/[0.08]" />
-                    <span>Email fallback</span>
-                    <div className="h-px flex-1 bg-white/[0.08]" />
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
@@ -117,6 +101,22 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                         {loading ? 'Please wait...' : (mode === 'signin' ? 'Sign In' : 'Create Account')}
                     </button>
                 </form>
+
+                <div className="mb-4 mt-6 flex items-center gap-3 text-xs uppercase tracking-[0.18em] text-gray-500">
+                    <div className="h-px flex-1 bg-white/[0.08]" />
+                    <span>Optional Google</span>
+                    <div className="h-px flex-1 bg-white/[0.08]" />
+                </div>
+
+                <button
+                    type="button"
+                    onClick={() => void handleGoogleSignIn()}
+                    disabled={googleLoading || loading}
+                    className="flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition hover:border-white/[0.14] hover:bg-white/[0.08] disabled:opacity-60"
+                >
+                    <GoogleMark />
+                    {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
+                </button>
 
                 <p className="text-center text-sm text-gray-500 mt-6">
                     {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}

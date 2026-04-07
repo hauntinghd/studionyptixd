@@ -17,6 +17,14 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
             onNavigate('dashboard');
             return;
         }
+        onNavigate('auth');
+    };
+
+    const openGoogle = () => {
+        if (session) {
+            onNavigate('dashboard');
+            return;
+        }
         void (async () => {
             setGoogleLoading(true);
             const error = await signInWithGoogle();
@@ -127,30 +135,40 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 Build faceless YouTube content with one Studio.
                             </h1>
                             <p className="mt-6 max-w-3xl text-lg leading-relaxed text-gray-400">
-                                NYPTID Studio now sells one short-form product. Catalyst powers the Create workflow and Chat Story now, while the heavier lanes stay behind the curtain until they are genuinely ready.
+                                NYPTID Studio now sells one short-form product. Catalyst powers the Create workflow and Chat Story now, while the heavier lanes stay behind the curtain until they are genuinely ready. Studio sign-in works with email + password even when Google or YouTube OAuth is temporarily unhealthy.
                             </p>
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
                                     type="button"
                                     onClick={openDashboard}
-                                    disabled={!session && googleLoading}
                                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                                 >
-                                    {session ? 'Open Studio' : (googleLoading ? 'Opening Google...' : 'Continue with Google')}
+                                    {session ? 'Open Studio' : 'Open Sign In'}
                                     <ArrowRight className="h-5 w-5" />
                                 </button>
-                                <button
-                                    type="button"
-                                    onClick={openBilling}
-                                    className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
-                                >
-                                    View Pricing
-                                </button>
+                                {session ? (
+                                    <button
+                                        type="button"
+                                        onClick={openBilling}
+                                        className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
+                                    >
+                                        View Pricing
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={openGoogle}
+                                        disabled={googleLoading}
+                                        className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07] disabled:opacity-60"
+                                    >
+                                        {googleLoading ? 'Opening Google...' : 'Continue with Google'}
+                                    </button>
+                                )}
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
                                 <StatCard label="Live Templates" value="5" />
                                 <StatCard label="Free Renders" value="2" />
-                                <StatCard label="Primary Auth" value="Google" />
+                                <StatCard label="Auth" value="Email + Google" />
                             </div>
                         </div>
 
@@ -277,25 +295,35 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Start Here</p>
                     <h2 className="mt-3 text-4xl font-bold text-white">Open Studio and build from one workspace.</h2>
                     <p className="mx-auto mt-4 max-w-2xl text-gray-400">
-                        If you already know your niche, open Studio now. If you want to test pricing first, go straight to the monthly plans and top-up packs.
+                        If you already know your niche, open Studio now. Email + password works even when Google or YouTube OAuth is having a bad day.
                     </p>
                     <div className="mt-8 flex flex-col justify-center gap-4 sm:flex-row">
                         <button
                             type="button"
                             onClick={openDashboard}
-                            disabled={!session && googleLoading}
                             className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                         >
-                            {session ? 'Open Studio' : (googleLoading ? 'Opening Google...' : 'Continue with Google')}
+                            {session ? 'Open Studio' : 'Open Sign In'}
                             <ArrowRight className="h-5 w-5" />
                         </button>
-                        <button
-                            type="button"
-                            onClick={openBilling}
-                            className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
-                        >
-                            Pricing
-                        </button>
+                        {session ? (
+                            <button
+                                type="button"
+                                onClick={openBilling}
+                                className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07]"
+                            >
+                                Pricing
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={openGoogle}
+                                disabled={googleLoading}
+                                className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-8 py-4 text-lg font-medium text-white transition hover:border-white/[0.14] hover:bg-white/[0.07] disabled:opacity-60"
+                            >
+                                {googleLoading ? 'Opening Google...' : 'Continue with Google'}
+                            </button>
+                        )}
                     </div>
                     {!billingHost && (
                         <p className="mt-6 text-xs text-gray-500">

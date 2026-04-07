@@ -67,6 +67,10 @@ services:
         value: eleven_multilingual_v2
       - key: XAI_API_KEY
         sync: false
+      - key: ALGROW_API_KEY
+        sync: false
+      - key: ALGROW_API_BASE_URL
+        value: https://api.algrow.online
       - key: YOUTUBE_API_KEY
         sync: false
       - key: GOOGLE_CLIENT_ID

@@ -136,6 +136,13 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                             Join Discord
                         </a>
                         <button
+                            type="button"
+                            onClick={() => onNavigate('auth')}
+                            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                        >
+                            Email Sign In
+                        </button>
+                        <button
                             onClick={() => void handleGoogleAuth()}
                             disabled={googleLoading}
                             className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500"

@@ -16,6 +16,8 @@ if env_path.exists():
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 PIKZELS_API_KEY = os.getenv("PIKZELS_API_KEY", "")
+ALGROW_API_KEY = os.getenv("ALGROW_API_KEY", "")
+ALGROW_API_BASE_URL = str(os.getenv("ALGROW_API_BASE_URL", "https://api.algrow.online") or "https://api.algrow.online").strip().rstrip("/")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "https://came-drop-energy-ryan.trycloudflare.com")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")

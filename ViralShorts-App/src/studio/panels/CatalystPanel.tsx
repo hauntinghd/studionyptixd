@@ -686,9 +686,16 @@ export default function CatalystPanel() {
         });
     }, [referenceVideoAnalysis?.video?.video_id, uploadedVideoOptions]);
 
+    const isReferenceWorkspace = ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId);
     const hasManualReferenceSource = Boolean(referenceSourceUrl.trim() || referenceSourceTitle.trim() || referenceSourceChannel.trim() || referenceVideoFile);
-    const canAnalyzeReferenceVideo = Boolean((uploadedVideoOptions.length > 0 || hasManualReferenceSource) && !analyzingReference && !clearingReference);
     const hasManualReferenceEvidence = Boolean(referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0);
+    const canAnalyzeReferenceVideo = Boolean(
+        selectedChannelId
+        && isReferenceWorkspace
+        && (uploadedVideoOptions.length > 0 || hasManualReferenceSource || hasManualReferenceEvidence)
+        && !analyzingReference
+        && !clearingReference
+    );
     const referenceManualEvidenceSummary = useMemo(
         () => normalizeCatalystText(String(referenceAnalysis?.manual_evidence_summary || referenceEvidence?.manual_evidence_summary || '').trim()),
         [referenceAnalysis?.manual_evidence_summary, referenceEvidence?.manual_evidence_summary]
@@ -751,7 +758,7 @@ export default function CatalystPanel() {
                         <button
                             type="button"
                             onClick={() => void handleAnalyzeReferenceVideo()}
-                            disabled={analyzingReference || clearingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
+                            disabled={!canAnalyzeReferenceVideo}
                             className="inline-flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
@@ -1062,7 +1069,7 @@ export default function CatalystPanel() {
                                         >
                                             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/70">Manual Studio Evidence</div>
                                             <p className="mt-2 text-sm text-cyan-50/90">
-                                                Build a full case file here while Google OAuth is down: upload the actual reference video, paste or upload every YouTube Studio screenshot you can grab, and add transcript or operator notes. Catalyst will OCR visible metrics like impressions, CTR, AVD, traffic sources, device split, and early rank.
+                                                Build a full case file here while Google OAuth is down: upload the actual reference video, paste or upload every YouTube Studio screenshot you can grab, and add transcript or operator notes. Catalyst will OCR visible metrics like impressions, CTR, AVD, traffic sources, device split, and early rank. If you also include the public source URL, Catalyst can enrich the case with Algrow scrape, thumbnail-match, and viral-analog data.
                                             </p>
                                             <div className="mt-3 grid gap-3 lg:grid-cols-3">
                                                 <input

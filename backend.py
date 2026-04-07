@@ -32,6 +32,8 @@ from backend_settings import (
     XAI_API_KEY,
     ELEVENLABS_API_KEY,
     PIKZELS_API_KEY,
+    ALGROW_API_KEY,
+    ALGROW_API_BASE_URL,
     COMFYUI_URL,
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
@@ -11470,6 +11472,384 @@ def _yt_dlp_extract_info_blocking(source_url: str) -> dict:
                 last_error = str(e)
                 continue
     raise RuntimeError(last_error or "yt-dlp metadata extraction failed")
+
+
+def _algrow_enabled() -> bool:
+    return bool(str(ALGROW_API_KEY or "").strip())
+
+
+def _algrow_headers() -> dict[str, str]:
+    token = str(ALGROW_API_KEY or "").strip()
+    if not token:
+        return {}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+async def _algrow_json_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    payload: dict | None = None,
+    timeout_sec: float = 45.0,
+) -> dict:
+    if not _algrow_enabled():
+        return {}
+    base_url = str(ALGROW_API_BASE_URL or "https://api.algrow.online").strip().rstrip("/")
+    target = f"{base_url}{path if str(path or '').startswith('/') else '/' + str(path or '')}"
+    async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
+        resp = await client.request(
+            str(method or "GET").upper(),
+            target,
+            headers=_algrow_headers(),
+            params=params or None,
+            json=payload if payload is not None else None,
+        )
+    raw_text = str(resp.text or "")
+    data = {}
+    try:
+        parsed = json.loads(raw_text or "{}")
+        if isinstance(parsed, dict):
+            data = parsed
+    except Exception:
+        data = {}
+    if resp.status_code >= 400 or data.get("success") is False:
+        message = (
+            str(data.get("error", "") or "").strip()
+            or str(data.get("message", "") or "").strip()
+            or _clip_text(raw_text, 220)
+            or f"Algrow request failed ({resp.status_code})"
+        )
+        raise RuntimeError(message)
+    return data
+
+
+async def _algrow_download_transcript_excerpt(transcript_url: str, max_chars: int = 4000) -> str:
+    target = str(transcript_url or "").strip()
+    if not target:
+        return ""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(target)
+    if resp.status_code != 200 or not str(resp.text or "").strip():
+        return ""
+    text = re.sub(r"\s+", " ", str(resp.text or "").strip())
+    return _clip_text(text, max_chars)
+
+
+async def _algrow_poll_youtube_scraper(job_id: str, timeout_sec: float = 90.0) -> dict:
+    target_job_id = str(job_id or "").strip()
+    if not target_job_id:
+        return {}
+    deadline = time.monotonic() + max(float(timeout_sec or 90.0), 10.0)
+    last_status = ""
+    last_message = ""
+    while time.monotonic() < deadline:
+        data = await _algrow_json_request("GET", f"/api/youtube-scraper/{target_job_id}", timeout_sec=45.0)
+        status = str(data.get("status", "") or "").strip().lower()
+        if status == "completed":
+            return data
+        if status == "failed":
+            raise RuntimeError(
+                _clip_text(
+                    str(data.get("error", "") or data.get("message", "") or "Algrow YouTube scraper failed").strip(),
+                    220,
+                )
+            )
+        last_status = status or last_status
+        last_message = str(data.get("message", "") or data.get("status_detail_message", "") or last_message).strip()
+        await asyncio.sleep(2.5)
+    detail = f"Algrow YouTube scraper timed out while waiting for job {target_job_id}"
+    if last_status:
+        detail += f" (last status: {last_status})"
+    if last_message:
+        detail += f": {_clip_text(last_message, 120)}"
+    raise RuntimeError(_clip_text(detail, 220))
+
+
+def _algrow_simplify_comment_rows(rows: list[dict] | None, max_items: int = 5) -> list[dict]:
+    comments: list[dict] = []
+    for row in list(rows or [])[: max(1, int(max_items or 5))]:
+        if not isinstance(row, dict):
+            continue
+        text = _clip_text(str(row.get("text", "") or "").strip(), 220)
+        if not text:
+            continue
+        comments.append(
+            {
+                "author": _clip_text(str(row.get("author", "") or "").strip(), 80),
+                "text": text,
+                "likes": int(float(row.get("likes", 0) or 0) or 0),
+                "published_time": _clip_text(str(row.get("published_time", "") or "").strip(), 80),
+            }
+        )
+    return comments
+
+
+async def _algrow_scrape_youtube_reference(source_url: str) -> dict:
+    normalized_url = _normalize_external_source_url(source_url)
+    if not normalized_url or not _algrow_enabled():
+        return {}
+    queued = await _algrow_json_request(
+        "POST",
+        "/api/youtube-scraper",
+        payload={
+            "url": normalized_url,
+            "video_type": "videos",
+            "sort": "recent",
+            "max_videos": 1,
+            "include_transcripts": True,
+            "include_comments": True,
+        },
+        timeout_sec=45.0,
+    )
+    job_id = str(queued.get("job_id", "") or "").strip()
+    if not job_id:
+        return {}
+    completed = await _algrow_poll_youtube_scraper(job_id, timeout_sec=90.0)
+    result = dict(completed.get("result") or {})
+    videos = [dict(v or {}) for v in list(result.get("videos") or []) if isinstance(v, dict)]
+    if not videos:
+        return {"job_id": job_id, "status": "completed", "summary": "Algrow scrape completed but returned no video rows."}
+    row = videos[0]
+    transcript_excerpt = await _algrow_download_transcript_excerpt(str(row.get("transcript_url", "") or "").strip(), max_chars=4000)
+    comments = _algrow_simplify_comment_rows(list(row.get("comments") or []), max_items=5)
+    summary_bits = [
+        (
+            f"Algrow scrape measured {int(float(row.get('view_count', 0) or 0) or 0)} views, "
+            f"{int(float(row.get('like_count', 0) or 0) or 0)} likes, and "
+            f"{int(float(row.get('comment_count', 0) or 0) or 0)} comments."
+        ),
+        (
+            "Algrow transcript excerpt: "
+            + _clip_text(transcript_excerpt, 220)
+            if transcript_excerpt
+            else ""
+        ),
+        (
+            "Algrow top comments: "
+            + "; ".join(
+                _clip_text(
+                    f"{str(comment.get('author', '') or '').strip()}: {str(comment.get('text', '') or '').strip()}",
+                    140,
+                )
+                for comment in comments[:3]
+            )
+            if comments
+            else ""
+        ),
+    ]
+    return {
+        "job_id": job_id,
+        "video_id": str(row.get("video_id", "") or "").strip(),
+        "title": _clip_text(str(row.get("title", "") or "").strip(), 220),
+        "url": str(row.get("url", "") or normalized_url).strip(),
+        "thumbnail_url": str(row.get("thumbnail", "") or "").strip(),
+        "view_count": int(float(row.get("view_count", 0) or 0) or 0),
+        "like_count": int(float(row.get("like_count", 0) or 0) or 0),
+        "comment_count": int(float(row.get("comment_count", 0) or 0) or 0),
+        "duration_sec": int(float(row.get("duration_seconds", 0) or 0) or 0),
+        "duration_human": _clip_text(str(row.get("duration_human", "") or "").strip(), 80),
+        "upload_date": str(row.get("publish_date", "") or "").strip(),
+        "channel": _clip_text(str(row.get("channel", "") or "").strip(), 180),
+        "channel_id": str(row.get("channel_id", "") or "").strip(),
+        "transcript_url": str(row.get("transcript_url", "") or "").strip(),
+        "transcript_excerpt": transcript_excerpt,
+        "comments": comments,
+        "summary": " | ".join(part for part in summary_bits if part),
+    }
+
+
+async def _algrow_thumbnail_reference_matches(
+    *,
+    video_url: str = "",
+    image_url: str = "",
+    limit: int = 5,
+) -> list[dict]:
+    if not _algrow_enabled():
+        return []
+    payload: dict[str, object] = {
+        "limit": max(1, min(int(limit or 5), 10)),
+        "min_similarity": 0.35,
+        "min_views": 1000,
+    }
+    if str(video_url or "").strip():
+        payload["video_url"] = str(video_url or "").strip()
+    elif str(image_url or "").strip():
+        payload["image_url"] = str(image_url or "").strip()
+    else:
+        return []
+    data = await _algrow_json_request("POST", "/api/thumbnail-search", payload=payload, timeout_sec=45.0)
+    videos = [dict(v or {}) for v in list(data.get("videos") or []) if isinstance(v, dict)]
+    matches: list[dict] = []
+    for row in videos[: max(1, min(int(limit or 5), 10))]:
+        title = _clip_text(str(row.get("title", "") or "").strip(), 180)
+        if not title:
+            continue
+        matches.append(
+            {
+                "video_id": str(row.get("video_id", "") or "").strip(),
+                "title": title,
+                "channel_name": _clip_text(str(row.get("channel_name", "") or "").strip(), 120),
+                "view_count": int(float(row.get("view_count", 0) or 0) or 0),
+                "similarity_score": int(float(row.get("similarity_score", 0) or 0) or 0),
+                "thumbnail_url": str(row.get("thumbnail_url", "") or "").strip(),
+                "url": str(row.get("url", "") or "").strip(),
+                "upload_date": str(row.get("upload_date", "") or "").strip(),
+                "duration": int(float(row.get("duration", 0) or 0) or 0),
+            }
+        )
+    return matches
+
+
+def _algrow_search_query_from_title(title: str) -> str:
+    tokens = [
+        str(token or "").strip()
+        for token in re.split(r"[^A-Za-z0-9]+", str(title or ""))
+        if str(token or "").strip()
+    ]
+    if not tokens:
+        return ""
+    filtered = [
+        token
+        for token in tokens
+        if len(token) >= 3 and token.lower() not in {
+            "the", "and", "with", "that", "this", "from", "into", "your", "what", "when", "then",
+            "after", "before", "best", "worst", "video", "manhwa", "manga", "recap",
+        }
+    ]
+    if not filtered:
+        filtered = tokens[:6]
+    return " ".join(filtered[:6])
+
+
+async def _algrow_viral_reference_matches(
+    *,
+    source_url: str = "",
+    title: str = "",
+    content_type: str = "longform",
+    limit: int = 5,
+) -> list[dict]:
+    if not _algrow_enabled():
+        return []
+    params: dict[str, object] = {
+        "content_type": "shorts" if str(content_type or "").strip().lower() == "shorts" else "longform",
+        "per_page": max(1, min(int(limit or 5), 10)),
+        "languages": "English",
+        "sort_by": "similarity",
+    }
+    video_id = str(_source_url_video_id(source_url) or "").strip()
+    if video_id:
+        params["video_id"] = video_id
+    else:
+        query = _algrow_search_query_from_title(title)
+        if not query:
+            return []
+        params["q"] = query
+    data = await _algrow_json_request("GET", "/api/viral-videos/search", params=params, timeout_sec=45.0)
+    videos = [dict(v or {}) for v in list(data.get("videos") or []) if isinstance(v, dict)]
+    matches: list[dict] = []
+    for row in videos[: max(1, min(int(limit or 5), 10))]:
+        row_title = _clip_text(str(row.get("title", "") or "").strip(), 180)
+        if not row_title:
+            continue
+        matches.append(
+            {
+                "video_id": str(row.get("video_id", "") or "").strip(),
+                "title": row_title,
+                "channel_name": _clip_text(str(row.get("channel_name", "") or "").strip(), 120),
+                "view_count": int(float(row.get("view_count", 0) or 0) or 0),
+                "subscriber_count": int(float(row.get("subscriber_count", 0) or 0) or 0),
+                "similarity_score": int(float(row.get("similarity_score", 0) or 0) or 0),
+                "thumbnail_url": str(row.get("thumbnail_url", "") or "").strip(),
+                "url": str(row.get("url", "") or "").strip(),
+                "upload_date": str(row.get("upload_date", "") or "").strip(),
+                "duration": int(float(row.get("duration", 0) or 0) or 0),
+            }
+        )
+    return matches
+
+
+async def _fetch_algrow_reference_enrichment(
+    *,
+    source_url: str = "",
+    source_bundle: dict | None = None,
+    workspace_id: str = "documentary",
+) -> dict:
+    normalized_url = _normalize_external_source_url(source_url)
+    if not _algrow_enabled() or not normalized_url:
+        return {}
+    current_bundle = dict(source_bundle or {})
+    enrichment: dict[str, object] = {
+        "enabled": True,
+        "source_url": normalized_url,
+        "source_video": {},
+        "thumbnail_matches": [],
+        "viral_matches": [],
+        "summary": "",
+        "errors": [],
+    }
+    errors: list[str] = []
+    source_video: dict = {}
+    try:
+        source_video = await _algrow_scrape_youtube_reference(normalized_url)
+    except Exception as e:
+        errors.append(_clip_text(f"Algrow source scrape failed: {e}", 220))
+    thumbnail_matches: list[dict] = []
+    try:
+        thumbnail_matches = await _algrow_thumbnail_reference_matches(
+            video_url=normalized_url,
+            image_url=str((source_video or {}).get("thumbnail_url", "") or current_bundle.get("thumbnail_url", "") or "").strip(),
+            limit=5,
+        )
+    except Exception as e:
+        errors.append(_clip_text(f"Algrow thumbnail search failed: {e}", 220))
+    viral_matches: list[dict] = []
+    try:
+        viral_matches = await _algrow_viral_reference_matches(
+            source_url=normalized_url,
+            title=str((source_video or {}).get("title", "") or current_bundle.get("title", "") or "").strip(),
+            content_type="longform" if str(workspace_id or "").strip().lower() in set(CATALYST_HUB_LONGFORM_WORKSPACES) else "shorts",
+            limit=5,
+        )
+    except Exception as e:
+        errors.append(_clip_text(f"Algrow viral search failed: {e}", 220))
+    summary_parts = [
+        _clip_text(str((source_video or {}).get("summary", "") or "").strip(), 320) if source_video else "",
+        (
+            "Algrow similar thumbnails: "
+            + "; ".join(
+                _clip_text(
+                    f"{str(row.get('title', '') or '').strip()} ({int(float(row.get('view_count', 0) or 0) or 0)} views, similarity {int(float(row.get('similarity_score', 0) or 0) or 0)})",
+                    140,
+                )
+                for row in thumbnail_matches[:3]
+            )
+            if thumbnail_matches
+            else ""
+        ),
+        (
+            "Algrow viral analogs: "
+            + "; ".join(
+                _clip_text(
+                    f"{str(row.get('title', '') or '').strip()} by {str(row.get('channel_name', '') or '').strip()} ({int(float(row.get('view_count', 0) or 0) or 0)} views)",
+                    160,
+                )
+                for row in viral_matches[:3]
+            )
+            if viral_matches
+            else ""
+        ),
+    ]
+    enrichment["source_video"] = source_video
+    enrichment["thumbnail_matches"] = thumbnail_matches
+    enrichment["viral_matches"] = viral_matches
+    enrichment["summary"] = " | ".join(part for part in summary_parts if part)
+    enrichment["errors"] = errors
+    return enrichment
 
 
 async def _fetch_source_video_bundle(source_url: str, language: str = "en") -> dict:
@@ -29063,6 +29443,7 @@ def _build_catalyst_reference_analysis_evidence(
     transcript_excerpt: str = "",
     audio_summary: str = "",
     heuristic_used: bool = False,
+    algrow_summary: str = "",
 ) -> dict:
     metrics = dict(frame_metrics or {})
     selected = dict(selected_video or {})
@@ -29130,6 +29511,7 @@ def _build_catalyst_reference_analysis_evidence(
             ),
             ("Catalyst extracted real audio/transcript context from the moving-video audit." if str(audio_summary or "").strip() else ""),
             ("Catalyst recovered transcript context from public or owned captions." if not str(audio_summary or "").strip() and str(transcript_excerpt or "").strip() else ""),
+            ("Algrow enriched the public reference metadata with extra scrape, thumbnail, and viral analog data." if str(algrow_summary or "").strip() else ""),
         ],
         max_items=6,
     )
@@ -29857,6 +30239,50 @@ async def _build_catalyst_reference_video_analysis(
             source_bundle = {"source_url": source_url}
         source_bundle["source_url"] = source_url
         source_bundle["source_url_video_id"] = selected_video_id
+    algrow_enrichment = {}
+    if source_url:
+        try:
+            algrow_enrichment = await _fetch_algrow_reference_enrichment(
+                source_url=source_url,
+                source_bundle=source_bundle,
+                workspace_id=workspace_id,
+            )
+        except Exception as e:
+            algrow_enrichment = {"errors": [_clip_text(str(e), 220)]}
+    algrow_source_video = dict((algrow_enrichment or {}).get("source_video") or {})
+    if algrow_source_video:
+        if not str(source_bundle.get("title", "") or "").strip() and str(algrow_source_video.get("title", "") or "").strip():
+            source_bundle["title"] = _clip_text(str(algrow_source_video.get("title", "") or "").strip(), 220)
+        if not str(source_bundle.get("channel", "") or "").strip() and str(algrow_source_video.get("channel", "") or "").strip():
+            source_bundle["channel"] = _clip_text(str(algrow_source_video.get("channel", "") or "").strip(), 180)
+        if not str(source_bundle.get("thumbnail_url", "") or "").strip() and str(algrow_source_video.get("thumbnail_url", "") or "").strip():
+            source_bundle["thumbnail_url"] = str(algrow_source_video.get("thumbnail_url", "") or "").strip()
+        if int(float(source_bundle.get("duration_sec", 0) or 0) or 0) <= 0 and int(float(algrow_source_video.get("duration_sec", 0) or 0) or 0) > 0:
+            source_bundle["duration_sec"] = int(float(algrow_source_video.get("duration_sec", 0) or 0) or 0)
+        if not str(source_bundle.get("upload_date", "") or "").strip() and str(algrow_source_video.get("upload_date", "") or "").strip():
+            source_bundle["upload_date"] = str(algrow_source_video.get("upload_date", "") or "").strip()
+        if not str(source_bundle.get("transcript_excerpt", "") or "").strip() and str(algrow_source_video.get("transcript_excerpt", "") or "").strip():
+            source_bundle["transcript_excerpt"] = _clip_text(str(algrow_source_video.get("transcript_excerpt", "") or "").strip(), 4000)
+        selected_video["views"] = max(
+            int(float(selected_video.get("views", 0) or 0) or 0),
+            int(float(algrow_source_video.get("view_count", 0) or 0) or 0),
+        )
+        selected_video["duration_sec"] = max(
+            int(float(selected_video.get("duration_sec", 0) or 0) or 0),
+            int(float(algrow_source_video.get("duration_sec", 0) or 0) or 0),
+        )
+    if algrow_enrichment:
+        source_bundle["algrow_enrichment"] = dict(algrow_enrichment)
+        algrow_summary = _clip_text(str(algrow_enrichment.get("summary", "") or "").strip(), 700)
+        if algrow_summary:
+            source_bundle["public_summary"] = " | ".join(
+                part
+                for part in [
+                    str(source_bundle.get("public_summary", "") or "").strip(),
+                    algrow_summary,
+                ]
+                if part
+            )
     if transcript_text:
         source_bundle["manual_transcript_excerpt"] = _clip_text(transcript_text, 12000)
         if not str(source_bundle.get("transcript_excerpt", "") or "").strip():
@@ -29996,6 +30422,10 @@ async def _build_catalyst_reference_video_analysis(
     previous_video = dict(historical_compare.get("previous_video") or {})
     worst_recent_video = dict(historical_compare.get("worst_recent_video") or {})
     channel_audit = dict(channel_context.get("channel_audit") or {})
+    algrow_thumbnail_matches = [dict(v or {}) for v in list((algrow_enrichment or {}).get("thumbnail_matches") or []) if isinstance(v, dict)]
+    algrow_viral_matches = [dict(v or {}) for v in list((algrow_enrichment or {}).get("viral_matches") or []) if isinstance(v, dict)]
+    algrow_errors = [str(v).strip() for v in list((algrow_enrichment or {}).get("errors") or []) if str(v).strip()]
+    algrow_summary = _clip_text(str((algrow_enrichment or {}).get("summary", "") or "").strip(), 900)
 
     analysis_prompt = "\n".join(
         part for part in [
@@ -30021,6 +30451,32 @@ async def _build_catalyst_reference_video_analysis(
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
             ("Manual operator evidence: " + _clip_text(operator_notes, 2200)) if operator_notes else "",
             (f"Reference source channel: {_clip_text(str(source_bundle.get('channel', '') or selected_video.get('source_channel', '') or '').strip(), 220)}" if str(source_bundle.get("channel", "") or selected_video.get("source_channel", "") or "").strip() else ""),
+            ("Algrow enrichment summary: " + algrow_summary) if algrow_summary else "",
+            (
+                "Algrow thumbnail analogs: "
+                + "; ".join(
+                    _clip_text(
+                        f"{str(row.get('title', '') or '').strip()} by {str(row.get('channel_name', '') or '').strip()} ({int(float(row.get('view_count', 0) or 0) or 0)} views, similarity {int(float(row.get('similarity_score', 0) or 0) or 0)})",
+                        180,
+                    )
+                    for row in algrow_thumbnail_matches[:4]
+                )
+                if algrow_thumbnail_matches
+                else ""
+            ),
+            (
+                "Algrow viral analogs: "
+                + "; ".join(
+                    _clip_text(
+                        f"{str(row.get('title', '') or '').strip()} by {str(row.get('channel_name', '') or '').strip()} ({int(float(row.get('view_count', 0) or 0) or 0)} views)",
+                        180,
+                    )
+                    for row in algrow_viral_matches[:4]
+                )
+                if algrow_viral_matches
+                else ""
+            ),
+            ("Algrow limitations: " + "; ".join(algrow_errors[:4])) if algrow_errors else "",
             ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
             ("Previous upload: " + _clip_text(str(previous_video.get("title", "") or "").strip(), 220)) if previous_video else "",
             ("Weakest recent package: " + _clip_text(str(worst_recent_video.get("title", "") or "").strip(), 220)) if worst_recent_video else "",
@@ -30056,6 +30512,7 @@ async def _build_catalyst_reference_video_analysis(
         transcript_excerpt=str(source_bundle.get("transcript_excerpt", "") or "").strip(),
         audio_summary=audio_summary,
         heuristic_used=heuristic_used,
+        algrow_summary=algrow_summary,
     )
     analysis, evidence = _merge_operator_evidence_into_reference_analysis(
         analysis=analysis,
