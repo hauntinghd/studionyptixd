@@ -424,6 +424,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const lastTrackedSessionUserRef = useRef('');
     const healthFailureCountRef = useRef(0);
     const lastHealthSuccessAtRef = useRef(0);
+    const supabaseRef = useRef<SupabaseClient | null>(null);
+    const authSubscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
+    const ensureSupabasePromiseRef = useRef<Promise<SupabaseClient | null> | null>(null);
     const ownerLaneAccess: LaneAccessMap = {
         create: true,
         thumbnails: true,
@@ -454,6 +457,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (normalized === 'starter' || normalized === 'creator' || normalized === 'pro') return normalized as Plan;
         return fallback;
     }, []);
+    useEffect(() => {
+        supabaseRef.current = supabase;
+    }, [supabase]);
+    const attachSupabaseClient = useCallback(async (sb: SupabaseClient): Promise<SupabaseClient> => {
+        supabaseRef.current = sb;
+        setSupabase((prev) => prev || sb);
+        const { data: { session: s } } = await sb.auth.getSession();
+        setSession(s);
+        if (!authSubscriptionRef.current) {
+            const { data } = sb.auth.onAuthStateChange((_e, nextSession) => setSession(nextSession));
+            authSubscriptionRef.current = data.subscription;
+        }
+        return sb;
+    }, []);
+    const ensureSupabaseClient = useCallback(async (): Promise<SupabaseClient | null> => {
+        if (supabaseRef.current) return supabaseRef.current;
+        if (ensureSupabasePromiseRef.current) return await ensureSupabasePromiseRef.current;
+        ensureSupabasePromiseRef.current = (async () => {
+            try {
+                const fallbackUrl = String(FALLBACK_SUPABASE_URL || '').trim();
+                const fallbackKey = String(FALLBACK_SUPABASE_ANON_KEY || '').trim();
+                if (!fallbackUrl || !fallbackKey) return null;
+                const sb = createClient(fallbackUrl, fallbackKey);
+                await attachSupabaseClient(sb);
+                return sb;
+            } catch {
+                return null;
+            } finally {
+                ensureSupabasePromiseRef.current = null;
+            }
+        })();
+        return await ensureSupabasePromiseRef.current;
+    }, [attachSupabaseClient]);
     const refreshViewerState = useCallback(async () => {
         if (!session) {
             setPlan('none');
@@ -596,12 +632,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+                    supabaseRef.current = sb;
                     setSupabase(sb);
                     sbCreated = true;
                     const { data: { session: s } } = await sb.auth.getSession();
-                    if (!cancelled) {
-                        setSession(s);
-                        sb.auth.onAuthStateChange((_e, s) => setSession(s));
+                    if (!cancelled) setSession(s);
+                    if (!authSubscriptionRef.current) {
+                        const { data } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+                        authSubscriptionRef.current = data.subscription;
                     }
                 }
             } catch {
@@ -612,11 +650,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (!cancelled && !sbCreated) {
                 try {
                     const sb = createClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY);
+                    supabaseRef.current = sb;
                     setSupabase(sb);
                     const { data: { session: s } } = await sb.auth.getSession();
                     if (!cancelled) {
                         setSession(s);
-                        sb.auth.onAuthStateChange((_e, s) => setSession(s));
+                        if (!authSubscriptionRef.current) {
+                            const { data } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+                            authSubscriptionRef.current = data.subscription;
+                        }
                         if (!configLoaded) setBackendOffline(true);
                     }
                 } catch {
@@ -627,6 +669,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (!cancelled) setLoading(false);
         })();
         return () => { cancelled = true; };
+    }, []);
+    useEffect(() => {
+        return () => {
+            try {
+                authSubscriptionRef.current?.unsubscribe();
+            } catch {
+                // ignore auth listener cleanup issues
+            }
+            authSubscriptionRef.current = null;
+        };
     }, []);
 
     useEffect(() => {
@@ -725,18 +777,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [session, refreshViewerState]);
 
     const signIn = useCallback(async (email: string, password: string): Promise<string | null> => {
-        if (!supabase) return "Auth not configured yet";
+        const sb = supabase || await ensureSupabaseClient();
+        if (!sb) return "Auth is still connecting. Try again in a second.";
         pendingAuthIntentRef.current = 'signin';
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { error } = await sb.auth.signInWithPassword({ email, password });
         if (error) pendingAuthIntentRef.current = '';
         return error ? error.message : null;
-    }, [supabase]);
+    }, [supabase, ensureSupabaseClient]);
 
     const signInWithGoogle = useCallback(async (): Promise<string | null> => {
-        if (!supabase) return "Auth not configured yet";
+        const sb = supabase || await ensureSupabaseClient();
+        if (!sb) return "Auth is still connecting. Try again in a second.";
         pendingAuthIntentRef.current = 'google';
         const redirectTo = isLocalDevHost ? `${window.location.origin}?page=dashboard` : `${STUDIO_SITE_URL}?page=dashboard`;
-        const { error } = await supabase.auth.signInWithOAuth({
+        const { error } = await sb.auth.signInWithOAuth({
             provider: 'google',
             options: {
                 redirectTo,
@@ -749,19 +803,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return 'Google sign-in is unavailable right now. Use email + password on the sign-in page until the Supabase Google provider is turned back on.';
         }
         return message || 'Google sign-in failed';
-    }, [supabase]);
+    }, [supabase, ensureSupabaseClient]);
 
     const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {
-        if (!supabase) return "Auth not configured yet";
+        const sb = supabase || await ensureSupabaseClient();
+        if (!sb) return "Auth is still connecting. Try again in a second.";
         pendingAuthIntentRef.current = 'signup';
-        const { error } = await supabase.auth.signUp({
+        const { error } = await sb.auth.signUp({
             email,
             password,
             options: { emailRedirectTo: window.location.origin },
         });
         if (error) pendingAuthIntentRef.current = '';
         return error ? error.message : null;
-    }, [supabase]);
+    }, [supabase, ensureSupabaseClient]);
 
     const signOut = useCallback(async () => {
         if (supabase) await supabase.auth.signOut();

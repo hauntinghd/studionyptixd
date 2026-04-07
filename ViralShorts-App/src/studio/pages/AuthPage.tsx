@@ -4,33 +4,39 @@ import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, Logo } from '../shared';
 
 export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
-    const { signIn, signInWithGoogle, signUp, session } = useContext(AuthContext);
+    const { signIn, signInWithGoogle, signUp, session, loading, supabase } = useContext(AuthContext);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [mode, setMode] = useState<'signin' | 'signup'>('signin');
     const [error, setError] = useState('');
     const [info, setInfo] = useState('');
-    const [loading, setLoading] = useState(false);
+    const [submitLoading, setSubmitLoading] = useState(false);
     const [googleLoading, setGoogleLoading] = useState(false);
 
     if (session) {
         onNavigate('landing');
         return null;
     }
+    const authBooting = loading || !supabase;
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (authBooting) {
+            setError('');
+            setInfo('Connecting auth. Try again in a second.');
+            return;
+        }
         setError('');
         setInfo('');
-        setLoading(true);
+        setSubmitLoading(true);
         if (mode === 'signup') {
             const err = await signUp(email, password);
-            setLoading(false);
+            setSubmitLoading(false);
             if (err) { setError(err); return; }
             setInfo('Check your email to confirm your account, then sign in.');
         } else {
             const err = await signIn(email, password);
-            setLoading(false);
+            setSubmitLoading(false);
             if (err) { setError(err); return; }
         }
     };
@@ -92,13 +98,14 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
 
                     {error && <p className="text-red-400 text-sm">{error}</p>}
                     {info && <p className="text-emerald-400 text-sm">{info}</p>}
+                    {authBooting && !error && !info && <p className="text-gray-400 text-sm">Connecting auth...</p>}
 
                     <button
                         type="submit"
-                        disabled={loading}
+                        disabled={submitLoading || authBooting}
                         className="w-full py-3 bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white font-bold rounded-xl transition-all shadow-lg shadow-violet-600/25"
                     >
-                        {loading ? 'Please wait...' : (mode === 'signin' ? 'Sign In' : 'Create Account')}
+                        {submitLoading ? 'Please wait...' : (authBooting ? 'Connecting...' : (mode === 'signin' ? 'Sign In' : 'Create Account'))}
                     </button>
                 </form>
 
@@ -111,11 +118,11 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                 <button
                     type="button"
                     onClick={() => void handleGoogleSignIn()}
-                    disabled={googleLoading || loading}
+                    disabled={googleLoading || submitLoading || authBooting}
                     className="flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition hover:border-white/[0.14] hover:bg-white/[0.08] disabled:opacity-60"
                 >
                     <GoogleMark />
-                    {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
+                    {googleLoading ? 'Redirecting to Google...' : (authBooting ? 'Connecting auth...' : 'Continue with Google')}
                 </button>
 
                 <p className="text-center text-sm text-gray-500 mt-6">
