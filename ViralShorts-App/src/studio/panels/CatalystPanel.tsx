@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Target, Youtube } from 'lucide-react';
-import { API, AuthContext } from '../shared';
+import { API, AuthContext, PROD_API_BASE_URL } from '../shared';
 
 type CatalystChannel = {
     channel_id: string;
@@ -269,6 +269,13 @@ export default function CatalystPanel() {
         () => ({ 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) }),
         [session]
     );
+    const directApiBase = useMemo(() => {
+        if (typeof window !== 'undefined') {
+            const host = String(window.location.hostname || '').toLowerCase();
+            if (host === 'localhost' || host === '127.0.0.1') return API;
+        }
+        return PROD_API_BASE_URL || API;
+    }, []);
 
     const loadHub = useCallback(async (channelId?: string, refresh = false) => {
         if (!session) return;
@@ -537,7 +544,7 @@ export default function CatalystPanel() {
                     if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
                     if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
                     referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
-                    return fetch(`${API}/api/catalyst/hub/reference-video-analysis/manual`, {
+                    return fetch(`${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`, {
                         method: 'POST',
                         headers: bearerHeaders,
                         body: formData,
@@ -554,7 +561,7 @@ export default function CatalystPanel() {
                     }),
                 });
             const data = await readJsonResponse<any>(res);
-            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to analyze the channel reference video'));
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to analyze the channel reference video (${res.status})`));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
             if (hasManualReferenceEvidence) setReferenceAnalyticsImages([]);
         } catch (e: any) {
