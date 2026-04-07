@@ -615,13 +615,23 @@ export default function CatalystPanel() {
     };
 
     const channelOptions = payload?.channels || [];
+    const selectedChannel = useMemo(() => {
+        const requestedId = String(selectedChannelId || payload?.selected_channel_id || payload?.default_channel_id || '').trim();
+        if (requestedId) {
+            const matched = channelOptions.find((row) => String(row.channel_id || '').trim() === requestedId);
+            if (matched) return matched;
+        }
+        return payload?.selected_channel || channelOptions[0] || null;
+    }, [channelOptions, payload?.default_channel_id, payload?.selected_channel, payload?.selected_channel_id, selectedChannelId]);
     const resolvedChannelId = useMemo(
-        () => String(selectedChannelId || payload?.selected_channel_id || payload?.default_channel_id || '').trim(),
-        [payload?.default_channel_id, payload?.selected_channel_id, selectedChannelId]
-    );
-    const selectedChannel = useMemo(
-        () => channelOptions.find((row) => String(row.channel_id || '').trim() === String(selectedChannelId || '').trim()) || payload?.selected_channel || null,
-        [channelOptions, payload?.selected_channel, selectedChannelId]
+        () => String(
+            selectedChannelId
+            || payload?.selected_channel_id
+            || payload?.default_channel_id
+            || selectedChannel?.channel_id
+            || ''
+        ).trim(),
+        [payload?.default_channel_id, payload?.selected_channel_id, selectedChannel?.channel_id, selectedChannelId]
     );
     const memory = selectedWorkspace?.memory_public || {};
     const referenceVideoAnalysis = selectedWorkspace?.reference_video_analysis || null;
@@ -630,7 +640,7 @@ export default function CatalystPanel() {
         () => [...APPLY_SCOPE_OPTIONS, { value: 'current', label: `Only this workspace (${WORKSPACE_LABELS[selectedWorkspaceId] || selectedWorkspaceId})` }],
         [selectedWorkspaceId]
     );
-    const canLaunchLongform = Boolean(selectedChannelId && ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId));
+    const canLaunchLongform = Boolean(resolvedChannelId && ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId));
     const channelAudit = selectedChannel?.analytics_snapshot?.channel_audit || null;
     const historicalCompare = selectedChannel?.analytics_snapshot?.historical_compare || null;
     const referenceEvidence = referenceVideoAnalysis?.evidence || null;
@@ -1254,6 +1264,11 @@ export default function CatalystPanel() {
                                                     {hasReadyManualCaseFile ? 'Analyze Now' : 'Analyze Case File'}
                                                 </button>
                                             </div>
+                                            {error && (
+                                                <div className="mt-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                                                    {error}
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}
