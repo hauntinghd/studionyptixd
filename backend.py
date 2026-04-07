@@ -326,6 +326,13 @@ log = logging.getLogger("nyptid-studio")
 CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES = 20.0
 CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS = 20.0 * 60.0
 CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS = 2400
+CATALYST_REFERENCE_AUDIO_MAX_SECONDS = 360.0
+CATALYST_REFERENCE_UPLOAD_PROXY_FPS = 6.0
+CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH = 960
+CATALYST_REFERENCE_FRAME_AUDIT_TARGET_FPS = 4.0
+CATALYST_REFERENCE_FRAME_AUDIT_MAX_TIMELINE_FRAMES = 4800
+CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS = 1200
+CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH = 640
 _reference_whisper_model = None
 _reference_whisper_lock = asyncio.Lock()
 
@@ -12408,21 +12415,44 @@ async def _audit_manual_comparison_video(
     if not source_path or not Path(source_path).exists():
         return {}
     output_dir.mkdir(parents=True, exist_ok=True)
+    proxy_info = await _build_catalyst_analysis_proxy_video(
+        source_path,
+        output_dir / "proxy",
+        max_seconds=max_seconds,
+    )
+    analysis_video_path = str(proxy_info.get("video_path", "") or "").strip() or source_path
     try:
         metadata = await extract_video_metadata(source_path)
     except Exception:
         metadata = {}
     frame_pack = await _extract_reference_video_full_audit(
-        source_path,
+        analysis_video_path,
         output_dir / "frames",
         max_keyframes=10,
         max_seconds=max_seconds,
     )
     frame_metrics = dict(frame_pack.get("metrics") or {})
+    original_duration_sec = float(metadata.get("duration_sec", 0) or 0.0)
+    if original_duration_sec > 0:
+        frame_metrics["original_duration_sec"] = round(original_duration_sec, 2)
+        if float(max_seconds or 0.0) > 0 and original_duration_sec > float(max_seconds) + 1.0:
+            frame_metrics["full_runtime_covered"] = False
+    if proxy_info:
+        frame_metrics["proxy_used"] = bool(proxy_info.get("proxy_used"))
+        if int(float(proxy_info.get("source_size_bytes", 0) or 0) or 0) > 0:
+            frame_metrics["source_size_bytes"] = int(float(proxy_info.get("source_size_bytes", 0) or 0) or 0)
+        if int(float(proxy_info.get("proxy_size_bytes", 0) or 0) or 0) > 0:
+            frame_metrics["proxy_size_bytes"] = int(float(proxy_info.get("proxy_size_bytes", 0) or 0) or 0)
+        proxy_error = str(proxy_info.get("error", "") or "").strip()
+        if proxy_error:
+            frame_metrics["proxy_error"] = _clip_text(proxy_error, 220)
     transcript_excerpt = ""
     audio_path = ""
     try:
-        audio_path = await extract_audio_from_video(source_path) or ""
+        audio_path = await extract_audio_from_video(
+            analysis_video_path,
+            max_seconds=min(float(max_seconds or CATALYST_REFERENCE_AUDIO_MAX_SECONDS), CATALYST_REFERENCE_AUDIO_MAX_SECONDS),
+        ) or ""
         transcript_excerpt = await transcribe_audio_with_grok(audio_path) if audio_path else ""
     except Exception:
         transcript_excerpt = ""
@@ -12445,6 +12475,11 @@ async def _audit_manual_comparison_video(
         (
             f"Estimated cut density: {float(frame_metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute."
             if float(frame_metrics.get("cuts_per_minute", 0.0) or 0.0) > 0
+            else ""
+        ),
+        (
+            "Catalyst downsampled the uploaded comparison video into a lighter analysis proxy before auditing it."
+            if bool(frame_metrics.get("proxy_used"))
             else ""
         ),
         ("Transcript excerpt: " + _clip_text(transcript_excerpt, 260)) if transcript_excerpt else "",
@@ -28536,12 +28571,24 @@ Output MUST be valid JSON:
 }"""
 
 
-async def extract_audio_from_video(video_path: str) -> str | None:
-    """Extract audio track from a video file for transcription."""
+async def extract_audio_from_video(video_path: str, *, max_seconds: float | None = None) -> str | None:
+    """Extract a lighter audio sample from a video file for transcription."""
     audio_path = video_path.rsplit(".", 1)[0] + "_audio.mp3"
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+    ]
+    if max_seconds and float(max_seconds or 0.0) > 0:
+        cmd += ["-t", f"{float(max_seconds):.2f}"]
+    cmd += [
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "libmp3lame",
+        "-q:a",
+        "6",
         audio_path,
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -29136,6 +29183,88 @@ async def _extract_reference_video_stream_clip(
     return {"video_path": str(clip_path), "mode": "stream_clip", "error": ""}
 
 
+async def _build_catalyst_analysis_proxy_video(
+    video_path: str,
+    output_dir: Path,
+    *,
+    max_seconds: float = 1200.0,
+) -> dict:
+    source_path = str(video_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return {"video_path": "", "proxy_used": False, "error": "missing_video"}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_file = Path(source_path)
+    proxy_path = output_dir / f"{source_file.stem}_analysis_proxy.mp4"
+    clip_seconds = max(60.0, min(float(max_seconds or 1200.0), CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS))
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        source_path,
+        "-t",
+        f"{clip_seconds:.2f}",
+        "-vf",
+        f"fps={CATALYST_REFERENCE_UPLOAD_PROXY_FPS},scale='min({CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH},iw)':-2:flags=lanczos",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "32",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "48k",
+        str(proxy_path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+    except Exception as e:
+        return {
+            "video_path": source_path,
+            "proxy_used": False,
+            "error": _clip_text(f"ffmpeg_proxy_failed: {e}", 220),
+        }
+
+    if proc.returncode != 0 or not proxy_path.exists() or proxy_path.stat().st_size <= 0:
+        try:
+            proxy_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {
+            "video_path": source_path,
+            "proxy_used": False,
+            "error": _clip_text(stderr.decode(errors="ignore"), 220) or "ffmpeg_proxy_failed",
+        }
+
+    source_bytes = int(source_file.stat().st_size or 0)
+    proxy_bytes = int(proxy_path.stat().st_size or 0)
+    return {
+        "video_path": str(proxy_path),
+        "proxy_used": True,
+        "source_size_bytes": source_bytes,
+        "proxy_size_bytes": proxy_bytes,
+        "proxy_fps": CATALYST_REFERENCE_UPLOAD_PROXY_FPS,
+        "proxy_max_width": CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH,
+        "proxy_duration_sec": clip_seconds,
+        "error": "",
+    }
+
+
 async def _extract_reference_video_full_audit(
     video_path: str,
     output_dir: Path,
@@ -29168,6 +29297,18 @@ async def _extract_reference_video_full_audit(
         if fps <= 0:
             fps = 24.0
         max_frame_index = min(total_frames - 1, max(0, int(round(analysis_seconds * fps)) - 1)) if total_frames > 0 else 0
+        analysis_frame_span = max_frame_index + 1 if max_frame_index >= 0 else 0
+        target_timeline_frames = max(
+            900,
+            min(
+                CATALYST_REFERENCE_FRAME_AUDIT_MAX_TIMELINE_FRAMES,
+                int(round(max(analysis_seconds, 1.0) * CATALYST_REFERENCE_FRAME_AUDIT_TARGET_FPS)),
+            ),
+        )
+        analysis_stride = max(
+            1,
+            int((analysis_frame_span + max(target_timeline_frames, 1) - 1) / max(target_timeline_frames, 1)),
+        )
 
         prev_gray = None
         frame_paths: list[str] = []
@@ -29187,6 +29328,26 @@ async def _extract_reference_video_full_audit(
                 break
             if idx > max_frame_index:
                 break
+            if analysis_stride > 1 and idx % analysis_stride != 0:
+                idx += 1
+                continue
+
+            if frame is None:
+                idx += 1
+                continue
+            try:
+                frame_h, frame_w = frame.shape[:2]
+            except Exception:
+                frame_h, frame_w = (0, 0)
+            if frame_w > CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH and frame_w > 0 and frame_h > 0:
+                scaled_h = max(2, int(round(frame_h * (CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH / float(frame_w)))))
+                if scaled_h % 2 != 0:
+                    scaled_h += 1
+                frame = cv2.resize(
+                    frame,
+                    (CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH, scaled_h),
+                    interpolation=cv2.INTER_AREA,
+                )
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -29260,23 +29421,45 @@ async def _extract_reference_video_full_audit(
         selected_indices = sorted({idx_val for idx_val in keyframe_candidates if idx_val >= 0})[: max(6, min(int(max_keyframes or 14), 18))]
         if selected_indices:
             cap = cv2.VideoCapture(source_path)
-            wanted = set(selected_indices)
-            idx = 0
-            while True:
+            for selected_index in selected_indices:
+                if selected_index > max_frame_index:
+                    continue
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, float(selected_index))
+                except Exception:
+                    pass
                 ok, frame = cap.read()
-                if not ok:
-                    break
-                if idx > max_frame_index:
-                    break
-                if idx in wanted:
-                    frame_path = output_dir / f"frame_{idx:06d}.jpg"
-                    cv2.imwrite(str(frame_path), frame)
-                    frame_paths.append(str(frame_path))
-                idx += 1
+                if not ok or frame is None:
+                    continue
+                try:
+                    frame_h, frame_w = frame.shape[:2]
+                except Exception:
+                    frame_h, frame_w = (0, 0)
+                if frame_w > CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH and frame_w > 0 and frame_h > 0:
+                    scaled_h = max(2, int(round(frame_h * (CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH / float(frame_w)))))
+                    if scaled_h % 2 != 0:
+                        scaled_h += 1
+                    frame = cv2.resize(
+                        frame,
+                        (CATALYST_REFERENCE_UPLOAD_PROXY_MAX_WIDTH, scaled_h),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                frame_path = output_dir / f"frame_{selected_index:06d}.jpg"
+                cv2.imwrite(str(frame_path), frame)
+                frame_paths.append(str(frame_path))
             cap.release()
 
         report_path = output_dir / "full_timeline_report.json"
         try:
+            report_rows = list(motion_rows)
+            if len(report_rows) > CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS:
+                report_stride = max(
+                    1,
+                    int((len(report_rows) + CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS - 1) / CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS),
+                )
+                report_rows = report_rows[::report_stride][:CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS]
+            else:
+                report_stride = 1
             report_path.write_text(
                 json.dumps(
                     {
@@ -29285,11 +29468,14 @@ async def _extract_reference_video_full_audit(
                         "analysis_seconds": round(analysis_seconds, 3),
                         "fps": round(fps, 3),
                         "total_frames": total_frames,
+                        "analysis_stride_frames": analysis_stride,
                         "timeline_frames_analyzed": len(motion_rows),
+                        "timeline_report_rows": len(report_rows),
+                        "timeline_report_stride": report_stride,
                         "cut_threshold": round(dynamic_cut_threshold, 3),
                         "top_motion_moments": top_motion,
                         "lowest_motion_moments": low_motion,
-                        "timeline": motion_rows,
+                        "timeline": report_rows,
                     },
                     ensure_ascii=True,
                 ),
@@ -29304,6 +29490,7 @@ async def _extract_reference_video_full_audit(
             "fps": round(fps, 2),
             "sampled_frames": len(frame_paths),
             "timeline_frames_analyzed": len(motion_rows),
+            "analysis_stride_frames": analysis_stride,
             "full_runtime_covered": bool(duration_sec <= 0 or analysis_seconds + 1.0 >= duration_sec),
             "avg_motion": round(float(np.mean(motion_arr)), 3),
             "avg_sharpness": round(float(np.mean(np.array(sharpness_values, dtype=np.float32))), 3),
@@ -29596,6 +29783,7 @@ def _build_catalyst_reference_analysis_evidence(
             ),
             ("Catalyst extracted real audio/transcript context from the moving-video audit." if str(audio_summary or "").strip() else ""),
             ("Catalyst recovered transcript context from public or owned captions." if not str(audio_summary or "").strip() and str(transcript_excerpt or "").strip() else ""),
+            ("Catalyst built a lighter analysis proxy of the uploaded reference video before auditing it end-to-end." if bool(metrics.get("proxy_used")) else ""),
             ("Algrow enriched the public reference metadata with extra scrape, thumbnail, and viral analog data." if str(algrow_summary or "").strip() else ""),
         ],
         max_items=6,
@@ -29614,6 +29802,7 @@ def _build_catalyst_reference_analysis_evidence(
             ("No transcript or audio summary was available, so spoken pacing and narration conclusions are weaker." if not str(transcript_excerpt or "").strip() and not str(audio_summary or "").strip() else ""),
             ("CTR is missing or zero for this video, so packaging conclusions are less certain." if float(selected.get("impression_click_through_rate", 0.0) or 0.0) <= 0 else ""),
             ("This analysis uses a sampled window, not the full runtime." if not full_runtime_covered and analysis_seconds > 0 and (video_duration_sec <= 0 or analysis_seconds + 5.0 < video_duration_sec) else ""),
+            ("Catalyst downsampled the uploaded reference video before auditing it so large manual uploads stay stable on hosted infrastructure." if bool(metrics.get("proxy_used")) else ""),
         ],
         max_items=6,
     )
@@ -30465,6 +30654,7 @@ async def _build_catalyst_reference_video_analysis(
     audio_summary = ""
     analysis_mode = "uploaded_file" if video_path and manual_video_path else "direct_media"
     heuristic_used = False
+    upload_proxy_info = {}
     stream_info = dict(download_info or source_bundle.get("_yt_dlp_info") or {})
     if not video_path and stream_info:
         stream_clip = await _extract_reference_video_stream_clip(
@@ -30487,11 +30677,30 @@ async def _build_catalyst_reference_video_analysis(
                 download_error = "Catalyst recovered moving-video analysis from earlier yt-dlp metadata after the direct download step failed."
         elif stream_error:
             download_error = " | ".join(part for part in [download_error, stream_error] if part)
+    audio_path = ""
     if video_path:
-        audio_path = await extract_audio_from_video(video_path) or ""
-        audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+        analysis_video_path = video_path
+        if manual_video_path and Path(manual_video_path).exists():
+            upload_proxy_info = await _build_catalyst_analysis_proxy_video(
+                video_path,
+                work_dir / "video_proxy",
+                max_seconds=analysis_seconds,
+            )
+            analysis_video_path = str(upload_proxy_info.get("video_path", "") or "").strip() or video_path
+        try:
+            audio_path = await extract_audio_from_video(
+                analysis_video_path,
+                max_seconds=min(analysis_seconds, CATALYST_REFERENCE_AUDIO_MAX_SECONDS),
+            ) or ""
+            audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+        finally:
+            if audio_path:
+                try:
+                    Path(audio_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
         frame_pack = await _extract_reference_video_full_audit(
-            video_path,
+            analysis_video_path,
             work_dir / "frames",
             max_keyframes=14,
             max_seconds=analysis_seconds,
@@ -30520,6 +30729,19 @@ async def _build_catalyst_reference_video_analysis(
     frame_paths = [str(v).strip() for v in list(frame_pack.get("frame_paths") or []) if str(v).strip()]
     frame_metrics = dict(frame_pack.get("metrics") or {})
     frame_metrics["analysis_mode"] = analysis_mode
+    if selected_duration_sec > 0:
+        frame_metrics["original_duration_sec"] = round(selected_duration_sec, 2)
+        if analysis_seconds + 1.0 < selected_duration_sec:
+            frame_metrics["full_runtime_covered"] = False
+    if upload_proxy_info:
+        frame_metrics["proxy_used"] = bool(upload_proxy_info.get("proxy_used"))
+        if int(float(upload_proxy_info.get("source_size_bytes", 0) or 0) or 0) > 0:
+            frame_metrics["source_size_bytes"] = int(float(upload_proxy_info.get("source_size_bytes", 0) or 0) or 0)
+        if int(float(upload_proxy_info.get("proxy_size_bytes", 0) or 0) or 0) > 0:
+            frame_metrics["proxy_size_bytes"] = int(float(upload_proxy_info.get("proxy_size_bytes", 0) or 0) or 0)
+        proxy_error = str(upload_proxy_info.get("error", "") or "").strip()
+        if proxy_error:
+            frame_metrics["proxy_error"] = _clip_text(proxy_error, 220)
     if download_error:
         frame_metrics["download_error"] = download_error
     historical_compare = dict(channel_context.get("historical_compare") or {})
