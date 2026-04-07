@@ -251,6 +251,7 @@ export default function CatalystPanel() {
     const [referenceSourceTitle, setReferenceSourceTitle] = useState('');
     const [referenceSourceChannel, setReferenceSourceChannel] = useState('');
     const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
+    const [comparisonVideoFile, setComparisonVideoFile] = useState<File | null>(null);
     const [referenceAnalyticsNotes, setReferenceAnalyticsNotes] = useState('');
     const [referenceTranscriptText, setReferenceTranscriptText] = useState('');
     const [referenceAnalyticsImages, setReferenceAnalyticsImages] = useState<File[]>([]);
@@ -522,6 +523,7 @@ export default function CatalystPanel() {
                     if (referenceSourceTitle.trim()) formData.append('reference_title', referenceSourceTitle.trim());
                     if (referenceSourceChannel.trim()) formData.append('reference_channel', referenceSourceChannel.trim());
                     if (referenceVideoFile) formData.append('reference_video', referenceVideoFile);
+                    if (comparisonVideoFile) formData.append('comparison_video', comparisonVideoFile);
                     if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
                     if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
                     referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
@@ -572,6 +574,7 @@ export default function CatalystPanel() {
             setReferenceSourceTitle('');
             setReferenceSourceChannel('');
             setReferenceVideoFile(null);
+            setComparisonVideoFile(null);
             setReferenceAnalyticsImages([]);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to clear the channel reference video'));
@@ -1107,31 +1110,71 @@ export default function CatalystPanel() {
                                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
                                                 />
                                             </div>
-                                            <div className="mt-3 flex flex-wrap items-center gap-3">
-                                                <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
-                                                    <input
-                                                        type="file"
-                                                        accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi"
-                                                        className="hidden"
-                                                        onChange={(e) => {
-                                                            setReferenceVideoFile(e.target.files?.[0] || null);
-                                                            e.currentTarget.value = '';
-                                                        }}
-                                                    />
-                                                    Upload Reference Video
-                                                </label>
-                                                <span className="text-xs text-gray-400">
-                                                    {referenceVideoFile ? referenceVideoFile.name : 'No reference video selected'}
-                                                </span>
-                                                {referenceVideoFile && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setReferenceVideoFile(null)}
-                                                        className="text-xs font-semibold text-gray-400 transition hover:text-white"
-                                                    >
-                                                        Clear video
-                                                    </button>
-                                                )}
+                                            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                                                <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+                                                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Reference / Competitor Video</div>
+                                                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                                                        <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
+                                                            <input
+                                                                type="file"
+                                                                accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi"
+                                                                className="hidden"
+                                                                onChange={(e) => {
+                                                                    setReferenceVideoFile(e.target.files?.[0] || null);
+                                                                    e.currentTarget.value = '';
+                                                                }}
+                                                            />
+                                                            Upload Reference Video
+                                                        </label>
+                                                        <span className="text-xs text-gray-400">
+                                                            {referenceVideoFile ? referenceVideoFile.name : 'No reference video selected'}
+                                                        </span>
+                                                        {referenceVideoFile && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setReferenceVideoFile(null)}
+                                                                className="text-xs font-semibold text-gray-400 transition hover:text-white"
+                                                            >
+                                                                Clear video
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <p className="mt-2 text-xs text-gray-500">
+                                                        Use this for the winner you want Catalyst to learn from.
+                                                    </p>
+                                                </div>
+                                                <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+                                                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Your / Current Video</div>
+                                                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                                                        <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
+                                                            <input
+                                                                type="file"
+                                                                accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi"
+                                                                className="hidden"
+                                                                onChange={(e) => {
+                                                                    setComparisonVideoFile(e.target.files?.[0] || null);
+                                                                    e.currentTarget.value = '';
+                                                                }}
+                                                            />
+                                                            Upload Current Video
+                                                        </label>
+                                                        <span className="text-xs text-gray-400">
+                                                            {comparisonVideoFile ? comparisonVideoFile.name : 'No current video selected'}
+                                                        </span>
+                                                        {comparisonVideoFile && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setComparisonVideoFile(null)}
+                                                                className="text-xs font-semibold text-gray-400 transition hover:text-white"
+                                                            >
+                                                                Clear video
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <p className="mt-2 text-xs text-gray-500">
+                                                        Use this when you want Catalyst to compare your actual upload against the reference instead of relying only on screenshots.
+                                                    </p>
+                                                </div>
                                             </div>
                                             <div className="mt-3 flex flex-wrap items-center gap-3">
                                                 <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">

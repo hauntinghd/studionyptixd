@@ -12397,6 +12397,67 @@ def _build_longform_operator_notes(
     return "\n".join(note for note in notes if note)
 
 
+async def _audit_manual_comparison_video(
+    video_path: str,
+    *,
+    filename: str = "",
+    output_dir: Path,
+    max_seconds: float = 1200.0,
+) -> dict:
+    source_path = str(video_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return {}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        metadata = await extract_video_metadata(source_path)
+    except Exception:
+        metadata = {}
+    frame_pack = await _extract_reference_video_full_audit(
+        source_path,
+        output_dir / "frames",
+        max_keyframes=10,
+        max_seconds=max_seconds,
+    )
+    frame_metrics = dict(frame_pack.get("metrics") or {})
+    transcript_excerpt = ""
+    audio_path = ""
+    try:
+        audio_path = await extract_audio_from_video(source_path) or ""
+        transcript_excerpt = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+    except Exception:
+        transcript_excerpt = ""
+    finally:
+        if audio_path:
+            try:
+                Path(audio_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+    title = Path(filename or source_path).stem.replace("_", " ").strip() or "Uploaded comparison video"
+    duration_sec = int(float(metadata.get("duration_sec", 0) or frame_metrics.get("duration_sec", 0) or 0) or 0)
+    summary_bits = [
+        f"Uploaded comparison video: {_clip_text(title, 180)}.",
+        f"Duration: {duration_sec}s." if duration_sec > 0 else "",
+        (
+            f"Moving-video audit covered about {int(float(frame_metrics.get('timeline_frames_analyzed', 0) or 0) or 0)} frames and exported {int(float(frame_metrics.get('sampled_frames', 0) or 0) or 0)} keyframes."
+            if frame_metrics
+            else ""
+        ),
+        (
+            f"Estimated cut density: {float(frame_metrics.get('cuts_per_minute', 0.0) or 0.0):.1f} cuts per minute."
+            if float(frame_metrics.get("cuts_per_minute", 0.0) or 0.0) > 0
+            else ""
+        ),
+        ("Transcript excerpt: " + _clip_text(transcript_excerpt, 260)) if transcript_excerpt else "",
+    ]
+    return {
+        "title": _clip_text(title, 180),
+        "duration_sec": duration_sec,
+        "frame_metrics": frame_metrics,
+        "transcript_excerpt": _clip_text(transcript_excerpt, 2800),
+        "summary": " ".join(part for part in summary_bits if part),
+    }
+
+
 def _normalize_longform_scenes_for_render(scenes: list) -> list:
     normalized = []
     for idx, raw_scene in enumerate(scenes or []):
@@ -27559,6 +27620,7 @@ async def catalyst_hub_reference_video_analysis_manual(
     analytics_notes: str = Form(""),
     transcript_text: str = Form(""),
     reference_video: UploadFile | None = File(None),
+    comparison_video: UploadFile | None = File(None),
     analytics_images: list[UploadFile] = File([]),
     user: dict = Depends(require_auth),
 ):
@@ -27575,6 +27637,8 @@ async def catalyst_hub_reference_video_analysis_manual(
     saved_image_paths: list[str] = []
     saved_video_path = ""
     saved_video_filename = ""
+    saved_comparison_video_path = ""
+    saved_comparison_video_filename = ""
     try:
         if reference_video and str(getattr(reference_video, "filename", "") or "").strip():
             saved_video_filename = str(getattr(reference_video, "filename", "") or "").strip()
@@ -27587,6 +27651,17 @@ async def catalyst_hub_reference_video_analysis_manual(
                     fh.write(chunk)
             if video_path.exists() and video_path.stat().st_size > 0:
                 saved_video_path = str(video_path)
+        if comparison_video and str(getattr(comparison_video, "filename", "") or "").strip():
+            saved_comparison_video_filename = str(getattr(comparison_video, "filename", "") or "").strip()
+            comparison_ext = Path(saved_comparison_video_filename).suffix.lower()
+            if comparison_ext not in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}:
+                comparison_ext = ".mp4"
+            comparison_path = upload_dir / f"catalyst_cmp_video_{int(time.time())}_{random.randint(1000, 9999)}{comparison_ext}"
+            with open(comparison_path, "wb") as fh:
+                while chunk := await comparison_video.read(1024 * 1024):
+                    fh.write(chunk)
+            if comparison_path.exists() and comparison_path.stat().st_size > 0:
+                saved_comparison_video_path = str(comparison_path)
         for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
             filename = str(getattr(analytics_image, "filename", "") or "").strip()
             if not filename:
@@ -27621,6 +27696,8 @@ async def catalyst_hub_reference_video_analysis_manual(
             analytics_image_paths=saved_image_paths,
             manual_video_path=saved_video_path,
             manual_video_filename=saved_video_filename,
+            comparison_video_path=saved_comparison_video_path,
+            comparison_video_filename=saved_comparison_video_filename,
         )
         payload = await _build_catalyst_hub_payload(
             user=user,
@@ -27647,6 +27724,11 @@ async def catalyst_hub_reference_video_analysis_manual(
         if saved_video_path:
             try:
                 Path(saved_video_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if saved_comparison_video_path:
+            try:
+                Path(saved_comparison_video_path).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -30140,6 +30222,8 @@ async def _build_catalyst_reference_video_analysis(
     analytics_image_paths: list[str] | None = None,
     manual_video_path: str = "",
     manual_video_filename: str = "",
+    comparison_video_path: str = "",
+    comparison_video_filename: str = "",
 ) -> dict:
     await _clear_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
@@ -30156,6 +30240,8 @@ async def _build_catalyst_reference_video_analysis(
     manual_reference_channel = _clip_text(str(manual_reference_channel or "").strip(), 180)
     manual_video_path = str(manual_video_path or "").strip()
     manual_video_filename = str(manual_video_filename or "").strip()
+    comparison_video_path = str(comparison_video_path or "").strip()
+    comparison_video_filename = str(comparison_video_filename or "").strip()
     manual_reference_mode = bool(manual_source_url or manual_reference_title or manual_reference_channel or manual_video_path)
     if manual_reference_mode:
         selected_video_id = _manual_catalyst_reference_video_id(
@@ -30357,6 +30443,19 @@ async def _build_catalyst_reference_video_analysis(
     )
     if selected_duration_sec > 0:
         analysis_seconds = min(analysis_seconds, selected_duration_sec)
+    comparison_video_audit = {}
+    if comparison_video_path and Path(comparison_video_path).exists():
+        try:
+            comparison_video_audit = await _audit_manual_comparison_video(
+                comparison_video_path,
+                filename=comparison_video_filename,
+                output_dir=work_dir / "comparison_video",
+                max_seconds=analysis_seconds,
+            )
+        except Exception as e:
+            comparison_video_audit = {
+                "summary": _clip_text(f"Uploaded comparison video audit failed: {e}", 220),
+            }
     audio_summary = ""
     analysis_mode = "uploaded_file" if video_path and manual_video_path else "direct_media"
     heuristic_used = False
@@ -30451,6 +30550,9 @@ async def _build_catalyst_reference_video_analysis(
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
             ("Manual operator evidence: " + _clip_text(operator_notes, 2200)) if operator_notes else "",
             (f"Reference source channel: {_clip_text(str(source_bundle.get('channel', '') or selected_video.get('source_channel', '') or '').strip(), 220)}" if str(source_bundle.get("channel", "") or selected_video.get("source_channel", "") or "").strip() else ""),
+            ("Uploaded comparison/current video: " + _clip_text(str(comparison_video_audit.get("summary", "") or "").strip(), 1200)) if comparison_video_audit else "",
+            ("Uploaded comparison transcript excerpt: " + _clip_text(str(comparison_video_audit.get("transcript_excerpt", "") or "").strip(), 2600)) if str(comparison_video_audit.get("transcript_excerpt", "") or "").strip() else "",
+            ("Uploaded comparison frame metrics: " + json.dumps(dict(comparison_video_audit.get("frame_metrics") or {}), ensure_ascii=True)) if dict(comparison_video_audit.get("frame_metrics") or {}) else "",
             ("Algrow enrichment summary: " + algrow_summary) if algrow_summary else "",
             (
                 "Algrow thumbnail analogs: "
