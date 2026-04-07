@@ -41,6 +41,7 @@ const rawLocalApi = resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "");
 const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
 const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
 export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || hostedOrigin);
+export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi || PROD_API_BASE_URL || API);
 const rawGenerationApi = resolveSafeApiBase(
     (isLocalDevHost ? viteEnv.VITE_GENERATION_API_BASE_URL : viteEnv.VITE_PROD_GENERATION_API_BASE_URL) || ""
 );
@@ -69,6 +70,34 @@ if (typeof window !== "undefined" && /firefox/i.test(window.navigator.userAgent)
     (window as any).__NYPTID_FIREFOX_HOTFIX__ = FIREFOX_HOTFIX_TAG;
 }
 export const CREATE_WORKFLOW_PERSISTENCE_ENABLED = true;
+export const startYouTubeBrowserConnect = (accessToken: string, nextUrl?: string): void => {
+    const token = String(accessToken || "").trim();
+    if (!token || typeof document === "undefined") return;
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = `${DIRECT_API || API}/api/oauth/google/youtube/browser-start`;
+    form.style.display = "none";
+
+    const appendField = (name: string, value: string) => {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value;
+        form.appendChild(input);
+    };
+
+    appendField("access_token", token);
+    appendField("next_url", String(nextUrl || window.location.href || "").trim());
+    document.body.appendChild(form);
+    form.submit();
+    window.setTimeout(() => {
+        try {
+            form.remove();
+        } catch {
+            // no-op
+        }
+    }, 0);
+};
 export const PUBLIC_TEMPLATE_IDS = new Set([
     'story',
     'motivation',

@@ -7386,6 +7386,31 @@ def _youtube_helper_page_url(state_token: str) -> str:
     return f"/api/oauth/google/youtube/installed?state={quote(str(state_token or '').strip(), safe='')}"
 
 
+async def _youtube_start_oauth_for_user(user: dict, next_url: str = "") -> dict:
+    oauth_mode = _youtube_active_oauth_mode()
+    if not oauth_mode:
+        raise HTTPException(500, _youtube_auth_issue_message())
+    state_token = secrets.token_urlsafe(32)
+    pkce_verifier = ""
+    if oauth_mode == "installed":
+        pkce_verifier, _ = _youtube_pkce_pair()
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        _youtube_oauth_states[state_token] = {
+            "user_id": str(user.get("id", "") or "").strip(),
+            "created_at": time.time(),
+            "next_url": str(next_url or "").strip(),
+            "oauth_mode": oauth_mode,
+            "pkce_verifier": pkce_verifier,
+        }
+        _save_youtube_oauth_states()
+    auth_url = _youtube_build_auth_url(state_token, oauth_mode)
+    if oauth_mode == "installed":
+        auth_url = _youtube_helper_page_url(state_token)
+    return {"auth_url": auth_url, "oauth_mode": oauth_mode}
+
+
 def _youtube_extract_code_or_error(raw_value: str) -> tuple[str, str]:
     value = str(raw_value or "").strip()
     if not value:
@@ -27811,28 +27836,44 @@ async def start_google_youtube_oauth(
     req: YouTubeOAuthStartRequest,
     user: dict = Depends(require_auth),
 ):
-    oauth_mode = _youtube_active_oauth_mode()
-    if not oauth_mode:
-        raise HTTPException(500, _youtube_auth_issue_message())
-    state_token = secrets.token_urlsafe(32)
-    pkce_verifier = ""
-    if oauth_mode == "installed":
-        pkce_verifier, _ = _youtube_pkce_pair()
-    async with _youtube_oauth_states_lock:
-        _load_youtube_oauth_states()
-        _prune_youtube_oauth_states()
-        _youtube_oauth_states[state_token] = {
-            "user_id": str(user.get("id", "") or "").strip(),
-            "created_at": time.time(),
-            "next_url": str((req or {}).next_url or "").strip(),
-            "oauth_mode": oauth_mode,
-            "pkce_verifier": pkce_verifier,
-        }
-        _save_youtube_oauth_states()
-    auth_url = _youtube_build_auth_url(state_token, oauth_mode)
-    if oauth_mode == "installed":
-        auth_url = _youtube_helper_page_url(state_token)
-    return {"auth_url": auth_url, "oauth_mode": oauth_mode}
+    return await _youtube_start_oauth_for_user(user, str((req or {}).next_url or "").strip())
+
+
+@app.post("/api/oauth/google/youtube/browser-start")
+async def start_google_youtube_oauth_browser(
+    next_url: str = Form(""),
+    access_token: str = Form(""),
+):
+    token = str(access_token or "").strip()
+    target = str(next_url or "").strip()
+    if not token:
+        return RedirectResponse(
+            _youtube_redirect_target(target, False, "Authentication required. Please sign in."),
+            status_code=302,
+        )
+
+    class _FakeCred:
+        credentials = ""
+
+    fake = _FakeCred()
+    fake.credentials = token
+    user = await get_current_user(fake)
+    if not user:
+        return RedirectResponse(
+            _youtube_redirect_target(target, False, "Authentication required. Please sign in."),
+            status_code=302,
+        )
+    try:
+        payload = await _youtube_start_oauth_for_user(user, target)
+        auth_url = str(payload.get("auth_url", "") or "").strip()
+        if not auth_url:
+            raise HTTPException(500, "Google auth URL missing")
+        return RedirectResponse(auth_url, status_code=302)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Failed to start Google YouTube connection"
+        return RedirectResponse(_youtube_redirect_target(target, False, detail), status_code=302)
+    except Exception as exc:
+        return RedirectResponse(_youtube_redirect_target(target, False, str(exc)), status_code=302)
 
 
 @app.get("/api/oauth/google/youtube/installed")

@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { API, AuthContext, BILLING_SITE_URL } from '../shared';
+import { API, AuthContext, BILLING_SITE_URL, startYouTubeBrowserConnect } from '../shared';
 
 type ConnectedYouTubeChannel = {
     channel_id: string;
@@ -50,19 +50,7 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
         setYoutubeConnecting(true);
         setYoutubeError('');
         try {
-            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${session.access_token}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ next_url: window.location.href }),
-            });
-            const payload = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
-            const authUrl = String((payload as any).auth_url || '').trim();
-            if (!authUrl) throw new Error('Google auth URL missing');
-            window.location.href = authUrl;
+            startYouTubeBrowserConnect(session.access_token, window.location.href);
         } catch (e: any) {
             setYoutubeError(e?.message || 'Failed to start Google YouTube connection');
             setYoutubeConnecting(false);

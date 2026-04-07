@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Target, Youtube } from 'lucide-react';
-import { API, AuthContext, PROD_API_BASE_URL } from '../shared';
+import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
 
 type CatalystChannel = {
     channel_id: string;
@@ -358,21 +358,12 @@ export default function CatalystPanel() {
         setYoutubeConnecting(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
-                method: 'POST',
-                headers: jsonHeaders,
-                body: JSON.stringify({ next_url: window.location.href }),
-            });
-            const data = await readJsonResponse<any>(res);
-            if (!res.ok) throw new Error(String(data?.detail || data?.error || `Request failed (${res.status})`));
-            const authUrl = String(data?.auth_url || '').trim();
-            if (!authUrl) throw new Error('Google auth URL missing');
-            window.location.href = authUrl;
+            startYouTubeBrowserConnect(session.access_token, window.location.href);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to start YouTube connection'));
             setYoutubeConnecting(false);
         }
-    }, [jsonHeaders, session, youtubeConnecting]);
+    }, [session, youtubeConnecting]);
 
     const persistSelectedChannel = useCallback(async (nextChannelId: string) => {
         const normalizedId = String(nextChannelId || '').trim();

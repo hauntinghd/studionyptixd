@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
-import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess } from '../shared';
+import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
@@ -471,19 +471,7 @@ export default function CreatePanel() {
         setYoutubeConnecting(true);
         setYoutubeError('');
         try {
-            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${session.access_token}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ next_url: window.location.href }),
-            });
-            const payload = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
-            const authUrl = String((payload as any).auth_url || '').trim();
-            if (!authUrl) throw new Error('Google connect response did not include an auth URL.');
-            window.location.href = authUrl;
+            startYouTubeBrowserConnect(session.access_token, window.location.href);
         } catch (e: any) {
             setYoutubeError(e?.message || 'Failed to start YouTube connection');
             setYoutubeConnecting(false);

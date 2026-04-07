@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Download, FolderKanban, Loader2, RefreshCw, RotateCcw, Sparkles, Wand2 } from 'lucide-react';
-import { API, AuthContext } from '../shared';
+import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 import { ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 
 type LongFormChapter = {
@@ -480,24 +480,12 @@ export default function LongFormPanel() {
         setYoutubeConnecting(true);
         setYoutubeError('');
         try {
-            const res = await fetch(`${API}/api/oauth/google/youtube/start`, {
-                method: 'POST',
-                headers: {
-                    ...authOnlyHeaders,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ next_url: window.location.href }),
-            });
-            const payload = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
-            const authUrl = String((payload as any).auth_url || '').trim();
-            if (!authUrl) throw new Error('Google auth URL missing');
-            window.location.href = authUrl;
+            startYouTubeBrowserConnect(session.access_token, window.location.href);
         } catch (e: any) {
             setYoutubeError(e?.message || 'Failed to start Google YouTube connection');
             setYoutubeConnecting(false);
         }
-    }, [authOnlyHeaders, session]);
+    }, [session]);
 
     const refreshStatus = useCallback(async (id?: string, silent = false) => {
         const targetId = String(id || lfSession?.session_id || '').trim();
