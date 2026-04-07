@@ -499,7 +499,16 @@ export default function CatalystPanel() {
     };
 
     const handleAnalyzeReferenceVideo = async () => {
-        if (!session || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) return;
+        if (!session) return;
+        if (!['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) {
+            setError('Reference analysis is only available for long-form workspaces right now.');
+            return;
+        }
+        const channelIdForAnalysis = String(resolvedChannelId || '').trim();
+        if (!channelIdForAnalysis) {
+            setError('Select a Catalyst channel first so the manual case file can be attached to the correct channel memory.');
+            return;
+        }
         setAnalyzingReference(true);
         setError('');
         try {
@@ -508,6 +517,7 @@ export default function CatalystPanel() {
                 || referenceSourceTitle.trim()
                 || referenceSourceChannel.trim()
                 || referenceVideoFile
+                || comparisonVideoFile
                 || referenceAnalyticsNotes.trim()
                 || referenceTranscriptText.trim()
                 || referenceAnalyticsImages.length > 0
@@ -515,7 +525,7 @@ export default function CatalystPanel() {
             const res = hasManualReferenceEvidence
                 ? await (async () => {
                     const formData = new FormData();
-                    formData.append('channel_id', selectedChannelId);
+                    formData.append('channel_id', channelIdForAnalysis);
                     formData.append('workspace_id', selectedWorkspaceId);
                     formData.append('video_id', selectedReferenceVideoId || '');
                     formData.append('max_analysis_minutes', '20');
@@ -537,7 +547,7 @@ export default function CatalystPanel() {
                     method: 'POST',
                     headers: jsonHeaders,
                     body: JSON.stringify({
-                        channel_id: selectedChannelId,
+                        channel_id: channelIdForAnalysis,
                         workspace_id: selectedWorkspaceId,
                         video_id: selectedReferenceVideoId || '',
                         max_analysis_minutes: 20.0,
@@ -555,7 +565,9 @@ export default function CatalystPanel() {
     };
 
     const handleClearReferenceVideo = async () => {
-        if (!session || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) return;
+        if (!session) return;
+        const channelIdForAnalysis = String(resolvedChannelId || '').trim();
+        if (!channelIdForAnalysis || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) return;
         setClearingReference(true);
         setError('');
         try {
@@ -563,7 +575,7 @@ export default function CatalystPanel() {
                 method: 'POST',
                 headers: jsonHeaders,
                 body: JSON.stringify({
-                    channel_id: selectedChannelId,
+                    channel_id: channelIdForAnalysis,
                     workspace_id: selectedWorkspaceId,
                 }),
             });
@@ -603,6 +615,10 @@ export default function CatalystPanel() {
     };
 
     const channelOptions = payload?.channels || [];
+    const resolvedChannelId = useMemo(
+        () => String(selectedChannelId || payload?.selected_channel_id || payload?.default_channel_id || '').trim(),
+        [payload?.default_channel_id, payload?.selected_channel_id, selectedChannelId]
+    );
     const selectedChannel = useMemo(
         () => channelOptions.find((row) => String(row.channel_id || '').trim() === String(selectedChannelId || '').trim()) || payload?.selected_channel || null,
         [channelOptions, payload?.selected_channel, selectedChannelId]
@@ -691,9 +707,10 @@ export default function CatalystPanel() {
 
     const isReferenceWorkspace = ['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId);
     const hasManualReferenceSource = Boolean(referenceSourceUrl.trim() || referenceSourceTitle.trim() || referenceSourceChannel.trim() || referenceVideoFile);
-    const hasManualReferenceEvidence = Boolean(referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0);
+    const hasManualReferenceEvidence = Boolean(referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0 || comparisonVideoFile);
+    const hasReadyManualCaseFile = Boolean(referenceVideoFile && comparisonVideoFile && referenceAnalyticsImages.length > 0);
     const canAnalyzeReferenceVideo = Boolean(
-        selectedChannelId
+        resolvedChannelId
         && isReferenceWorkspace
         && (uploadedVideoOptions.length > 0 || hasManualReferenceSource || hasManualReferenceEvidence)
         && !analyzingReference
@@ -1041,7 +1058,7 @@ export default function CatalystPanel() {
                                                         className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                                                     >
                                                         {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                                                        {hasManualReferenceSource ? 'Analyze Manual Reference' : hasManualReferenceEvidence ? 'Analyze With Studio Evidence' : selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
+                                                        {hasReadyManualCaseFile ? 'Analyze Now' : hasManualReferenceSource ? 'Analyze Manual Reference' : hasManualReferenceEvidence ? 'Analyze With Studio Evidence' : selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
                                                     </button>
                                                 </div>
                                                 <div className="mt-2 text-xs text-gray-500">
@@ -1221,6 +1238,22 @@ export default function CatalystPanel() {
                                                     )}
                                                 </div>
                                             )}
+                                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3">
+                                                <div className="text-xs text-violet-100/80">
+                                                    {hasReadyManualCaseFile
+                                                        ? 'Full manual case file is ready. Run Catalyst now to compare the reference winner against your current upload.'
+                                                        : 'Once the reference video, current video, and screenshots are in place, run Analyze Now for the full manual Catalyst pass.'}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleAnalyzeReferenceVideo()}
+                                                    disabled={!canAnalyzeReferenceVideo}
+                                                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/15 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                                                >
+                                                    {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+                                                    {hasReadyManualCaseFile ? 'Analyze Now' : 'Analyze Case File'}
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 )}

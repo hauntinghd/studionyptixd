@@ -27628,10 +27628,13 @@ async def catalyst_hub_reference_video_analysis_manual(
         raise HTTPException(403, "Catalyst hub is owner-only")
     channel_id = str(channel_id or "").strip()
     workspace_id = str(workspace_id or "documentary").strip().lower() or "documentary"
-    if not channel_id:
-        raise HTTPException(400, "channel_id required")
     if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
         raise HTTPException(400, "Reference video analysis currently supports long-form workspaces only")
+    if not channel_id:
+        fallback_channel_context = await _youtube_selected_channel_context(user, preferred_channel_id="")
+        channel_id = str((fallback_channel_context or {}).get("channel_id", "") or "").strip()
+    if not channel_id:
+        raise HTTPException(400, "Select or connect a Catalyst channel before analyzing the manual case file")
     upload_dir = TEMP_DIR / "catalyst_reference_evidence"
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved_image_paths: list[str] = []
@@ -30225,14 +30228,17 @@ async def _build_catalyst_reference_video_analysis(
     comparison_video_path: str = "",
     comparison_video_filename: str = "",
 ) -> dict:
+    channel_id = str(channel_id or "").strip()
+    workspace_id = str(workspace_id or "documentary").strip().lower() or "documentary"
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
+    if not channel_context:
+        raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")
+    channel_id = str(channel_context.get("channel_id", "") or channel_id).strip()
     await _clear_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
         channel_id=channel_id,
         workspace_id=workspace_id,
     )
-    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
-    if not channel_context:
-        raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")
     oauth_access_token, _oauth_channel_record = await _youtube_connected_channel_access_token(user, channel_id)
     workspace_profile = _catalyst_reference_workspace_profile(workspace_id)
     manual_source_url = _normalize_external_source_url(manual_source_url)
