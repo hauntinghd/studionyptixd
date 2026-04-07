@@ -27173,8 +27173,12 @@ async def catalyst_hub_reference_video_analysis_manual(
     workspace_id: str = Form("documentary"),
     video_id: str = Form(""),
     max_analysis_minutes: float = Form(CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES),
+    reference_source_url: str = Form(""),
+    reference_title: str = Form(""),
+    reference_channel: str = Form(""),
     analytics_notes: str = Form(""),
     transcript_text: str = Form(""),
+    reference_video: UploadFile | None = File(None),
     analytics_images: list[UploadFile] = File([]),
     user: dict = Depends(require_auth),
 ):
@@ -27189,7 +27193,20 @@ async def catalyst_hub_reference_video_analysis_manual(
     upload_dir = TEMP_DIR / "catalyst_reference_evidence"
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved_image_paths: list[str] = []
+    saved_video_path = ""
+    saved_video_filename = ""
     try:
+        if reference_video and str(getattr(reference_video, "filename", "") or "").strip():
+            saved_video_filename = str(getattr(reference_video, "filename", "") or "").strip()
+            video_ext = Path(saved_video_filename).suffix.lower()
+            if video_ext not in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}:
+                video_ext = ".mp4"
+            video_path = upload_dir / f"catalyst_ref_video_{int(time.time())}_{random.randint(1000, 9999)}{video_ext}"
+            with open(video_path, "wb") as fh:
+                while chunk := await reference_video.read(1024 * 1024):
+                    fh.write(chunk)
+            if video_path.exists() and video_path.stat().st_size > 0:
+                saved_video_path = str(video_path)
         for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
             filename = str(getattr(analytics_image, "filename", "") or "").strip()
             if not filename:
@@ -27216,9 +27233,14 @@ async def catalyst_hub_reference_video_analysis_manual(
                 1.0,
                 min(float(max_analysis_minutes or CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES), CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES),
             ),
+            manual_source_url=str(reference_source_url or "").strip(),
+            manual_reference_title=str(reference_title or "").strip(),
+            manual_reference_channel=str(reference_channel or "").strip(),
             analytics_notes=str(analytics_notes or "").strip(),
             transcript_text=str(transcript_text or "").strip(),
             analytics_image_paths=saved_image_paths,
+            manual_video_path=saved_video_path,
+            manual_video_filename=saved_video_filename,
         )
         payload = await _build_catalyst_hub_payload(
             user=user,
@@ -27240,6 +27262,11 @@ async def catalyst_hub_reference_video_analysis_manual(
         for path in saved_image_paths:
             try:
                 Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if saved_video_path:
+            try:
+                Path(saved_video_path).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -28183,6 +28210,82 @@ def _pick_catalyst_reference_video(channel_context: dict | None, requested_video
     return dict(deduped[0] or {}) if deduped else {}
 
 
+def _manual_catalyst_reference_video_id(source_url: str = "", title: str = "", filename: str = "") -> str:
+    source_id = str(_source_url_video_id(source_url) or "").strip()
+    if source_id:
+        return source_id
+    label = _slugify_file_component(title or filename or "manual-reference", fallback="manual-reference", max_len=24)
+    seed = "|".join(
+        part
+        for part in [
+            str(source_url or "").strip(),
+            str(title or "").strip(),
+            str(filename or "").strip(),
+        ]
+        if part
+    ).strip()
+    if not seed:
+        return label
+    digest = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()[:12]
+    return f"{label}-{digest}"
+
+
+def _catalyst_reference_workspace_profile(workspace_id: str) -> dict:
+    normalized = str(workspace_id or "documentary").strip().lower() or "documentary"
+    if normalized == "recap":
+        return {
+            "lane": "recap",
+            "reference_label": "recap reference",
+            "objective": "break down the reference recap so Catalyst can rebuild it into a sharper original recap without copying story beats literally.",
+            "focus": "Focus on hook clarity, chapter escalation, betrayal and payoff timing, character readability, thumbnail-title promise, and how the recap avoids lore dump drag.",
+            "translation": "Translate the winner into a cleaner, more emotional, more mobile-readable recap with stronger chapter pivots, character continuity, and consequence-first framing.",
+            "system_role": (
+                "You are Catalyst's reference-video analyst for NYPTID Studio. "
+                "Analyze the provided winning YouTube recap frames plus metadata, transcript excerpt, and frame metrics. "
+                "Be specific about hook timing, chapter escalation, visual readability, transition rhythm, sound design, and how to rebuild this into a premium original recap."
+            ),
+        }
+    if normalized == "explainer":
+        return {
+            "lane": "explainer",
+            "reference_label": "explainer reference",
+            "objective": "break down the reference explainer so Catalyst can rebuild it into a sharper original explainer without copying it literally.",
+            "focus": "Focus on the opening question, concept clarity, proof cadence, visual simplification, packaging, and how the explainer keeps the viewer oriented through every payoff.",
+            "translation": "Translate the winner into a cleaner, more visual, more mobile-readable explainer with faster proof beats and tighter concept resets.",
+            "system_role": (
+                "You are Catalyst's reference-video analyst for NYPTID Studio. "
+                "Analyze the provided winning YouTube explainer frames plus metadata, transcript excerpt, and frame metrics. "
+                "Be specific about hook timing, proof cadence, visual clarity, transition rhythm, sound design, and how to rebuild this into a premium original explainer."
+            ),
+        }
+    if normalized == "story_channel":
+        return {
+            "lane": "story channel",
+            "reference_label": "story reference",
+            "objective": "break down the reference story video so Catalyst can rebuild it into a sharper original story-driven long-form video without copying it literally.",
+            "focus": "Focus on the emotional opening, conflict escalation, character readability, payoff timing, sound tension, and the packaging promise that keeps the audience watching.",
+            "translation": "Translate the winner into a cleaner, more cinematic, more emotionally readable story video with stronger scene turns and more deliberate payoff control.",
+            "system_role": (
+                "You are Catalyst's reference-video analyst for NYPTID Studio. "
+                "Analyze the provided winning YouTube story-video frames plus metadata, transcript excerpt, and frame metrics. "
+                "Be specific about hook timing, emotional escalation, visual framing, transition rhythm, sound design, and how to rebuild this into a premium original story channel video."
+            ),
+        }
+    return {
+        "lane": "documentary",
+        "reference_label": "documentary reference",
+        "objective": "break down the connected channel's strongest current video so Catalyst can rebuild it as a better fully 3D documentary without copying it literally.",
+        "focus": "Focus on what makes the best video work, what the weaker upload is missing, and how to translate the winner into a stronger Fern-grade fully 3D documentary.",
+        "translation": "Catalyst should translate that into sharper fully 3D pressure scenes, not static dossier tables or empty archive rooms.",
+        "system_role": (
+            "You are Catalyst's reference-video analyst for NYPTID Studio. "
+            "Analyze the provided winning YouTube documentary frames plus metadata, transcript excerpt, and frame metrics. "
+            "Be specific about hook timing, narrative escalation, visual framing, transition rhythm, sound design, and how to rebuild this into a premium fully 3D documentary. "
+            "Do not describe generic explainer advice. Output strict JSON only."
+        ),
+    }
+
+
 def _reference_video_analysis_dir(user_id: str, channel_id: str, workspace_id: str, video_id: str) -> Path:
     root = TEMP_DIR / "catalyst_reference_video"
     bucket = (
@@ -28963,6 +29066,17 @@ def _build_catalyst_reference_analysis_evidence(
 ) -> dict:
     metrics = dict(frame_metrics or {})
     selected = dict(selected_video or {})
+    source_kind = str(selected.get("source_kind", "") or "connected_channel").strip().lower() or "connected_channel"
+    metrics_label = {
+        "manual_upload": "Manual reference metrics",
+        "external_url": "Manual/external reference metrics",
+        "manual_reference": "Manual reference metrics",
+    }.get(source_kind, "Connected-channel metrics")
+    honesty_origin = {
+        "manual_upload": "Measured facts below come from manual reference files, manual Studio evidence, public metadata when available, plus Catalyst's sampled-frame/audio extraction.",
+        "external_url": "Measured facts below come from external/public reference metadata, manual Studio evidence when supplied, plus Catalyst's sampled-frame/audio extraction.",
+        "manual_reference": "Measured facts below come from manual reference evidence plus Catalyst's sampled-frame/audio extraction.",
+    }.get(source_kind, "Measured facts below come from connected YouTube metrics when available plus Catalyst's sampled-frame/audio extraction.")
     mode = str(analysis_mode or "unknown").strip().lower()
     full_runtime_covered = bool(metrics.get("full_runtime_covered", False))
     timeline_frames_analyzed = int(float(metrics.get("timeline_frames_analyzed", 0) or 0))
@@ -28970,11 +29084,14 @@ def _build_catalyst_reference_analysis_evidence(
         "direct_media": "Direct Video Sample",
         "stream_clip": "Stream Clip Sample",
         "preview_frames": "Preview Frames Only",
+        "uploaded_file": "Uploaded Reference File",
     }.get(mode, "Unknown")
     if mode == "direct_media" and full_runtime_covered:
         mode_label = "Direct Full Video Analysis"
     elif mode == "stream_clip" and full_runtime_covered:
         mode_label = "Full Stream Clip Analysis"
+    elif mode == "uploaded_file" and full_runtime_covered:
+        mode_label = "Uploaded Full Video Analysis"
     sampled_frames = int(float(metrics.get("sampled_frames", 0) or 0))
     analysis_seconds = float(metrics.get("analysis_seconds", 0.0) or 0.0)
     video_duration_sec = float(selected.get("duration_sec", 0.0) or 0.0)
@@ -29001,11 +29118,11 @@ def _build_catalyst_reference_analysis_evidence(
                 else ""
             ),
             (
-                f"Connected-channel metrics show about {int(float(selected.get('impressions', 0) or 0))} impressions and {float(selected.get('watch_time_hours', 0.0) or 0.0):.1f} watch hours."
+                f"{metrics_label} show about {int(float(selected.get('impressions', 0) or 0))} impressions and {float(selected.get('watch_time_hours', 0.0) or 0.0):.1f} watch hours."
                 if int(float(selected.get("impressions", 0) or 0)) > 0 or float(selected.get("watch_time_hours", 0.0) or 0.0) > 0
                 else ""
             ),
-            (f"Connected-channel metrics for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
+            (f"{metrics_label} for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
             (
                 f"Average view duration is about {int(float(selected.get('average_view_duration_sec', 0) or 0) or 0) // 60}:{int(float(selected.get('average_view_duration_sec', 0) or 0) or 0) % 60:02d}."
                 if int(float(selected.get("average_view_duration_sec", 0) or 0) or 0) > 0
@@ -29034,7 +29151,7 @@ def _build_catalyst_reference_analysis_evidence(
         max_items=6,
     )
     honesty_note = (
-        "Measured facts below come from connected YouTube metrics when available plus Catalyst's sampled-frame/audio extraction. "
+        f"{honesty_origin} "
         "The playbook and breakdown text are Catalyst inferences, not direct YouTube labels."
     )
     return {
@@ -29059,6 +29176,8 @@ def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
             "video_id": str(payload.get("video_id", "") or "").strip(),
             "title": _clip_text(str(payload.get("video_title", "") or "").strip(), 180),
             "url": str(payload.get("video_url", "") or "").strip(),
+            "source_kind": str(payload.get("source_kind", "") or "").strip(),
+            "source_channel": _clip_text(str(payload.get("source_channel", "") or "").strip(), 180),
             "views": int(float(payload.get("views", 0) or 0) or 0),
             "impressions": int(float(payload.get("impressions", 0) or 0) or 0),
             "average_view_duration_sec": int(float(payload.get("average_view_duration_sec", 0) or 0) or 0),
@@ -29107,7 +29226,7 @@ def _reconcile_reference_video_analysis_with_inventory(raw: dict | None, channel
         if isinstance(v, dict) and str((v or {}).get("video_id", "") or "").strip()
     ]
     if not uploaded_rows:
-        return {}
+        return payload
     inventory_by_id = {
         str(row.get("video_id", "") or "").strip(): dict(row)
         for row in uploaded_rows
@@ -29120,10 +29239,10 @@ def _reconcile_reference_video_analysis_with_inventory(raw: dict | None, channel
         or ""
     ).strip()
     if not reference_video_id:
-        return {}
+        return payload
     inventory_row = dict(inventory_by_id.get(reference_video_id) or {})
     if not inventory_row:
-        return {}
+        return payload
     current_video["video_id"] = reference_video_id
     current_video["title"] = _clip_text(str(inventory_row.get("title", "") or current_video.get("title", "") or "").strip(), 180)
     current_video["url"] = _youtube_watch_url(reference_video_id)
@@ -29151,21 +29270,30 @@ def _heuristic_catalyst_reference_video_analysis(
     selected_video: dict | None,
     channel_context: dict | None,
     frame_metrics: dict | None,
+    workspace_id: str = "documentary",
 ) -> dict:
     source_bundle = dict(source_bundle or {})
     selected_video = dict(selected_video or {})
     channel_context = dict(channel_context or {})
     frame_metrics = dict(frame_metrics or {})
+    workspace_profile = _catalyst_reference_workspace_profile(workspace_id)
+    format_preset = "recap" if str(workspace_id or "").strip().lower() == "recap" else "documentary"
+    source_kind = str(selected_video.get("source_kind", "") or "connected_channel").strip().lower() or "connected_channel"
+    metrics_origin = {
+        "manual_upload": "manual reference files plus any screenshot metrics you supplied",
+        "external_url": "public/external reference metadata plus any screenshot metrics you supplied",
+        "manual_reference": "manual reference evidence you supplied",
+    }.get(source_kind, "connected-channel metrics plus sampled video evidence")
     title = _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180)
     description = _clip_text(str(source_bundle.get("description", "") or "").strip(), 700)
     transcript_excerpt = _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 1800)
-    niche = _catalyst_infer_niche(title, description, transcript_excerpt, format_preset="documentary")
+    niche = _catalyst_infer_niche(title, description, transcript_excerpt, format_preset=format_preset)
     archetype = _catalyst_infer_archetype(
         title,
         description,
         transcript_excerpt,
         niche_key=str(niche.get("key", "") or "").strip().lower(),
-        format_preset="documentary",
+        format_preset=format_preset,
     )
     avg_motion = float(frame_metrics.get("avg_motion", 0.0) or 0.0)
     cuts_per_minute = float(frame_metrics.get("cuts_per_minute", 0.0) or 0.0)
@@ -29174,89 +29302,157 @@ def _heuristic_catalyst_reference_video_analysis(
     candidate_titles = _same_arena_title_variants(
         {"title": title_focus, "description": description},
         topic=title_focus,
-        format_preset="documentary",
+        format_preset=format_preset,
         max_items=5,
     )
     summary_bits = [
-        f"Catalyst currently estimates that '{title}' is the strongest current Empire reference in the {str(archetype.get('label', '') or 'documentary').strip()} lane.",
-        "This estimate is based on connected-channel metrics plus sampled video evidence, not on a frame-perfect manual editorial review.",
-        "Catalyst should translate that into sharper fully 3D pressure scenes, not static dossier tables or empty archive rooms.",
+        f"Catalyst currently estimates that '{title}' is a strong current {str(workspace_profile.get('reference_label', 'reference video') or 'reference video').strip()} in the {str(archetype.get('label', '') or str(workspace_profile.get('lane', '') or 'channel')).strip()} lane.",
+        f"This estimate is based on {metrics_origin}, not on a frame-perfect manual editorial review.",
+        str(workspace_profile.get("translation", "") or "").strip(),
     ]
     if cuts_per_minute > 0:
-        summary_bits.append(f"Current sampled cut density is about {cuts_per_minute:.1f} cuts per minute, so the next run should preserve consequence-first movement instead of drifting into static proof boards.")
+        summary_bits.append(f"Current sampled cut density is about {cuts_per_minute:.1f} cuts per minute, so the next run should preserve consequence-first movement instead of drifting into dead visual air.")
     if hook_motion > 0:
-        summary_bits.append(f"Hook motion in the first 30 seconds is about {hook_motion:.1f}, which means the opener needs visible human pressure and a quick payoff image, not a slow setup room.")
-    why_it_worked = [
-        "The title promise is immediate, invasive, and easy to understand at a glance.",
-        "The winning lane stays inside one clear arena: hidden psychology and personal manipulation.",
-        "Frames feel expensive when they center on people under pressure instead of empty objects or generic mechanism props.",
-        "The opening should deliver claim, proof, and personal consequence quickly instead of warming up slowly.",
-    ]
-    what_hurt_weaker_upload = [
-        "Static archive rooms, untouched tables, and generic dossier setups dilute the topic instead of explaining it.",
-        "Prop-first staging without a visible human consequence makes the image feel off-topic even when the prompt sounds correct.",
-        "Overusing the same room grammar lowers visual score and makes the documentary feel templated instead of engineered.",
-    ]
-    if avg_motion < 6.0:
-        what_hurt_weaker_upload.append("Low frame motion in sampled scenes suggests the video can easily slip into dead visual air if Catalyst leans too hard on static proof frames.")
-    hook_system = [
-        "Open on a person already under pressure, not an empty room explaining the idea.",
-        "Land the contradiction immediately: the viewer sees a wrong decision happening before the narration explains why.",
-        "Use one obvious human power imbalance in the first frame so the topic reads instantly on a phone screen.",
-    ]
-    pacing_system = [
-        "Deliver proof every 5 to 10 seconds: claim, visible trigger, leverage, consequence, reset.",
-        "Escalate from one personal manipulation moment into a broader system, not from one static room into another static room.",
-        "Avoid repeating the same boardroom or archive composition back-to-back.",
-    ]
-    visual_system = [
-        "Use Fern-grade human-scale psychological pressure scenes: executive meetings, interviews, mirrored conversations, surveillance reveals, and consequence rooms.",
-        "Keep people, posture, gaze, hierarchy, distance, and timing visible in frame; that is the topic.",
-        "Avoid empty dossier rooms, untouched desks, centered props, literal anatomy, and generic machine filler.",
-    ]
-    sound_system = [
-        "Use low-end tension pulses, restrained silence pockets, and precise reveal accents instead of horror-camp textures.",
-        "Sound should tighten around the moment status or social pressure flips the decision.",
-        "Keep the bed expensive and controlled; do not drown narration in constant noise.",
-    ]
-    transition_system = [
-        "Use Magnates-style consequence resets between beats, not soft dissolves between similar rooms.",
-        "Cut from pressure moment to proof frame, then from proof frame to consequence frame.",
-        "Every transition should clarify leverage, not just vary the angle.",
-    ]
-    structure_map = [
-        "Hook: invasive decision already happening.",
-        "Proof: reveal the hidden pressure or trigger.",
-        "Mechanism: explain the manipulation cleanly.",
-        "Consequence: show what it costs the victim.",
-        "Escalation: widen from one scene to the bigger system.",
-        "Payoff: return to the viewer with a sharper practical implication.",
-    ]
-    threed_translation_moves = [
-        "Translate the winner into premium CG with designed glass offices, surveillance reflections, evidence overlays, and human-scale staging.",
-        "Use architectural Fern-style lighting and disciplined composition, but keep Magnates-style consequence cuts between proof beats.",
-        "Build the 3D around power dynamics and emotional cost, not around props or anatomy substitutes.",
-    ]
-    title_thumbnail_rules = [
-        "Keep the title promise short, invasive, and personal.",
-        "Thumbnail direction should show a human under pressure, one dominant power cue, and one obvious consequence.",
-        "Avoid lore chains, textbook phrasing, and generic 'brain facts' packaging.",
-    ]
-    next_video_moves = [
-        "Use the strongest Empire video as the narrative benchmark, but make the next run more human, more expensive, and more 3D.",
-        "Anchor every chapter opener in a visible manipulation moment before explanation.",
-        "Replace archive filler with pressure scenes, consequence scenes, and controlled symbolic mind-worlds.",
-    ]
-    avoid_rules = [
-        "No empty dossier rooms as the main beat.",
-        "No repeated boardroom still lifes.",
-        "No centered prop pedestal shots.",
-        "No literal exposed-brain or anatomy fallback unless the narration explicitly demands it.",
-    ]
+        summary_bits.append(f"Hook motion in the first 30 seconds is about {hook_motion:.1f}, which means the opener needs a fast visual payoff instead of a slow warm-up.")
+    if str(workspace_id or "").strip().lower() == "recap":
+        why_it_worked = [
+            "The title promise likely lands one clean betrayal, revenge, or power-turn hook the viewer understands immediately.",
+            "The winning recap lane keeps the viewer oriented around the main character and consequence, not around lore bookkeeping.",
+            "Strong recap frames usually make the hierarchy, emotion, and threat readable even on a phone screen.",
+            "The opening likely reaches conflict or payoff quickly instead of explaining the whole world first.",
+        ]
+        what_hurt_weaker_upload = [
+            "Slow setup, unclear factions, or lore dumping can kill recap momentum before the audience feels the stakes.",
+            "If the thumbnail/title promise and first minute focus on different things, viewers bail before the main payoff arrives.",
+            "Reusing the same generic confrontation framing lowers urgency and makes the recap feel templated.",
+        ]
+        if avg_motion < 6.0:
+            what_hurt_weaker_upload.append("Low frame motion in sampled scenes suggests the recap can slip into static exposition instead of visible escalation.")
+        hook_system = [
+            "Open on the betrayal, power gap, or impossible comeback first, then explain how the story got there.",
+            "Name the protagonist, antagonist, and consequence fast so the viewer understands the emotional stakes immediately.",
+            "Use the first frame to show dominance, panic, revenge, or humiliation clearly on a phone screen.",
+        ]
+        pacing_system = [
+            "Reset the viewer every chapter: problem, reversal, consequence, new pressure.",
+            "Keep explanation attached to visible consequence instead of stacking lore without a payoff beat.",
+            "Escalate every few minutes with a stronger betrayal, reveal, rank jump, or revenge step.",
+        ]
+        visual_system = [
+            "Keep character identity, hierarchy, and emotional consequence readable in every key frame.",
+            "Use chapter images that show action, betrayal, fear, power, or revenge instead of generic standing poses.",
+            "Avoid muddy crowd shots, unreadable lore boards, and filler environments that do not change the stakes.",
+        ]
+        sound_system = [
+            "Use controlled tension beds, payoff hits, and short silence pockets around reveals instead of flat constant music.",
+            "Accent betrayals, rank jumps, humiliations, and revenge beats so the audio helps the recap feel decisive.",
+            "Keep the narration lane clean and let the music underline emotion, not bury it.",
+        ]
+        transition_system = [
+            "Cut on turning points: betrayal to reaction, reaction to consequence, consequence to comeback.",
+            "Use transitions to orient the viewer to the next chapter instead of just decorating the edit.",
+            "Avoid soft transitions between similar beats when the story needs a harder escalation.",
+        ]
+        structure_map = [
+            "Hook: show the betrayal, humiliation, or impossible problem immediately.",
+            "Context: explain only the minimum backstory needed to understand the pain.",
+            "Escalation: stack reversals and power shifts clearly.",
+            "Payoff: land the revenge, comeback, or reveal with visible consequence.",
+            "Reset: point to the next chapter threat so the recap keeps momentum.",
+        ]
+        threed_translation_moves = [
+            "Translate the winner into cleaner cinematic chapter beats with better character continuity and more readable emotional staging.",
+            "Use motion, overlays, and framing to clarify who is winning, who is losing, and why the moment matters.",
+            "Build recap visuals around consequence and character status, not around generic fantasy filler.",
+        ]
+        title_thumbnail_rules = [
+            "Keep the title promise focused on one brutal reversal, comeback, betrayal, or power reveal.",
+            "Thumbnail direction should show the power gap and emotional consequence instantly.",
+            "Avoid overloaded lore phrasing or titles that require prior context to feel urgent.",
+        ]
+        next_video_moves = [
+            "Use the strongest recap as the benchmark, but make the next run clearer, faster, and more emotionally readable.",
+            "Tighten the opener so the viewer gets conflict and consequence before lore explanation.",
+            "Design each chapter around a visible status change instead of summary filler.",
+        ]
+        avoid_rules = [
+            "No lore dump opener before the conflict is clear.",
+            "No generic standing-character frames as the main payoff image.",
+            "No confusing name/faction overload without a visible consequence.",
+            "No filler chapter transitions that do not raise the stakes.",
+        ]
+    else:
+        why_it_worked = [
+            "The title promise is immediate, invasive, and easy to understand at a glance.",
+            "The winning lane stays inside one clear arena: hidden psychology and personal manipulation.",
+            "Frames feel expensive when they center on people under pressure instead of empty objects or generic mechanism props.",
+            "The opening should deliver claim, proof, and personal consequence quickly instead of warming up slowly.",
+        ]
+        what_hurt_weaker_upload = [
+            "Static archive rooms, untouched tables, and generic dossier setups dilute the topic instead of explaining it.",
+            "Prop-first staging without a visible human consequence makes the image feel off-topic even when the prompt sounds correct.",
+            "Overusing the same room grammar lowers visual score and makes the documentary feel templated instead of engineered.",
+        ]
+        if avg_motion < 6.0:
+            what_hurt_weaker_upload.append("Low frame motion in sampled scenes suggests the video can easily slip into dead visual air if Catalyst leans too hard on static proof frames.")
+        hook_system = [
+            "Open on a person already under pressure, not an empty room explaining the idea.",
+            "Land the contradiction immediately: the viewer sees a wrong decision happening before the narration explains why.",
+            "Use one obvious human power imbalance in the first frame so the topic reads instantly on a phone screen.",
+        ]
+        pacing_system = [
+            "Deliver proof every 5 to 10 seconds: claim, visible trigger, leverage, consequence, reset.",
+            "Escalate from one personal manipulation moment into a broader system, not from one static room into another static room.",
+            "Avoid repeating the same boardroom or archive composition back-to-back.",
+        ]
+        visual_system = [
+            "Use Fern-grade human-scale psychological pressure scenes: executive meetings, interviews, mirrored conversations, surveillance reveals, and consequence rooms.",
+            "Keep people, posture, gaze, hierarchy, distance, and timing visible in frame; that is the topic.",
+            "Avoid empty dossier rooms, untouched desks, centered props, literal anatomy, and generic machine filler.",
+        ]
+        sound_system = [
+            "Use low-end tension pulses, restrained silence pockets, and precise reveal accents instead of horror-camp textures.",
+            "Sound should tighten around the moment status or social pressure flips the decision.",
+            "Keep the bed expensive and controlled; do not drown narration in constant noise.",
+        ]
+        transition_system = [
+            "Use consequence resets between beats, not soft dissolves between similar rooms.",
+            "Cut from pressure moment to proof frame, then from proof frame to consequence frame.",
+            "Every transition should clarify leverage, not just vary the angle.",
+        ]
+        structure_map = [
+            "Hook: invasive decision already happening.",
+            "Proof: reveal the hidden pressure or trigger.",
+            "Mechanism: explain the manipulation cleanly.",
+            "Consequence: show what it costs the victim.",
+            "Escalation: widen from one scene to the bigger system.",
+            "Payoff: return to the viewer with a sharper practical implication.",
+        ]
+        threed_translation_moves = [
+            "Translate the winner into premium CG with designed pressure scenes, reflections, overlays, and human-scale staging.",
+            "Use disciplined lighting and composition, but keep consequence-first cuts between proof beats.",
+            "Build the visuals around power dynamics and emotional cost, not around props or anatomy substitutes.",
+        ]
+        title_thumbnail_rules = [
+            "Keep the title promise short, invasive, and personal.",
+            "Thumbnail direction should show a human under pressure, one dominant power cue, and one obvious consequence.",
+            "Avoid lore chains, textbook phrasing, and generic packaging.",
+        ]
+        next_video_moves = [
+            "Use the strongest reference video as the narrative benchmark, but make the next run more human, more expensive, and more deliberate.",
+            "Anchor every chapter opener in a visible pressure moment before explanation.",
+            "Replace archive filler with pressure scenes, consequence scenes, and controlled symbolic worlds.",
+        ]
+        avoid_rules = [
+            "No empty archive rooms as the main beat.",
+            "No repeated still-life proof boards.",
+            "No centered prop pedestal shots.",
+            "No literal anatomy fallback unless the narration explicitly demands it.",
+        ]
     return _normalize_catalyst_reference_video_analysis(
         {
             "summary": " ".join(summary_bits),
-            "honesty_note": "This reference breakdown is Catalyst inference built from sampled video evidence and connected-channel metrics, not a direct YouTube label set.",
+            "honesty_note": f"This reference breakdown is Catalyst inference built from {metrics_origin}, not a direct YouTube label set.",
             "why_it_worked": why_it_worked,
             "what_hurt_weaker_upload": what_hurt_weaker_upload,
             "hook_system": hook_system,
@@ -29437,6 +29633,8 @@ async def _persist_catalyst_reference_video_analysis(
                 "video_id": str(selected_video.get("video_id", "") or source_bundle.get("source_url_video_id", "") or "").strip(),
                 "title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
                 "url": str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip(),
+                "source_kind": str(selected_video.get("source_kind", "") or "connected_channel").strip() or "connected_channel",
+                "source_channel": _clip_text(str(selected_video.get("source_channel", "") or source_bundle.get("channel", "") or "").strip(), 180),
                 "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
                 "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
                 "impressions": int(float(selected_video.get("impressions", 0) or 0) or 0),
@@ -29463,6 +29661,8 @@ async def _persist_catalyst_reference_video_analysis(
             "video_url": str(reference_video_payload["video"]["url"] or "").strip(),
             "duration_sec": int(reference_video_payload["video"]["duration_sec"] or 0),
             "views": int(reference_video_payload["video"]["views"] or 0),
+            "source_kind": str(reference_video_payload["video"].get("source_kind", "") or "connected_channel").strip() or "connected_channel",
+            "source_channel": str(reference_video_payload["video"].get("source_channel", "") or "").strip(),
             "impressions": int(reference_video_payload["video"].get("impressions", 0) or 0),
             "average_view_percentage": float(reference_video_payload["video"]["average_view_percentage"] or 0.0),
             "average_view_duration_sec": int(reference_video_payload["video"].get("average_view_duration_sec", 0) or 0),
@@ -29474,6 +29674,8 @@ async def _persist_catalyst_reference_video_analysis(
         updated["reference_video_title"] = _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180)
         updated["reference_video_url"] = str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip()
         updated["reference_video_id"] = str(selected_video.get("video_id", "") or "").strip()
+        updated["reference_video_source_kind"] = str(reference_video_payload["video"].get("source_kind", "") or "connected_channel").strip() or "connected_channel"
+        updated["reference_video_source_channel"] = str(reference_video_payload["video"].get("source_channel", "") or "").strip()
         updated["reference_hook_rules"] = list(analysis.get("hook_system") or [])
         updated["reference_pacing_rules"] = list(analysis.get("pacing_system") or [])
         updated["reference_visual_rules"] = list(analysis.get("visual_system") or [])
@@ -29523,6 +29725,8 @@ async def _clear_catalyst_reference_video_analysis(
             "reference_video_title",
             "reference_video_url",
             "reference_video_id",
+            "reference_video_source_kind",
+            "reference_video_source_channel",
             "reference_hook_rules",
             "reference_pacing_rules",
             "reference_visual_rules",
@@ -29546,9 +29750,14 @@ async def _build_catalyst_reference_video_analysis(
     workspace_id: str,
     video_id: str = "",
     max_analysis_minutes: float = CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
+    manual_source_url: str = "",
+    manual_reference_title: str = "",
+    manual_reference_channel: str = "",
     analytics_notes: str = "",
     transcript_text: str = "",
     analytics_image_paths: list[str] | None = None,
+    manual_video_path: str = "",
+    manual_video_filename: str = "",
 ) -> dict:
     await _clear_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
@@ -29559,13 +29768,39 @@ async def _build_catalyst_reference_video_analysis(
     if not channel_context:
         raise HTTPException(400, "Connect and sync the YouTube channel before analyzing a reference video")
     oauth_access_token, _oauth_channel_record = await _youtube_connected_channel_access_token(user, channel_id)
-    selected_video = _pick_catalyst_reference_video(channel_context, requested_video_id=video_id)
-    if not selected_video:
-        raise HTTPException(404, "No connected-channel top video was available to analyze")
-    selected_video_id = str(selected_video.get("video_id", "") or "").strip()
-    source_url = _youtube_watch_url(selected_video_id)
-    if not source_url:
-        raise HTTPException(404, "Reference video is missing a usable YouTube video id")
+    workspace_profile = _catalyst_reference_workspace_profile(workspace_id)
+    manual_source_url = _normalize_external_source_url(manual_source_url)
+    manual_reference_title = _clip_text(str(manual_reference_title or "").strip(), 220)
+    manual_reference_channel = _clip_text(str(manual_reference_channel or "").strip(), 180)
+    manual_video_path = str(manual_video_path or "").strip()
+    manual_video_filename = str(manual_video_filename or "").strip()
+    manual_reference_mode = bool(manual_source_url or manual_reference_title or manual_reference_channel or manual_video_path)
+    if manual_reference_mode:
+        selected_video_id = _manual_catalyst_reference_video_id(
+            manual_source_url,
+            manual_reference_title,
+            manual_video_filename,
+        )
+        fallback_title = manual_reference_title or Path(manual_video_filename or manual_video_path or "manual-reference").stem.replace("_", " ").strip()
+        selected_video = {
+            "video_id": selected_video_id,
+            "title": _clip_text(fallback_title, 180),
+            "url": manual_source_url,
+            "source_kind": "manual_upload" if manual_video_path else ("external_url" if manual_source_url else "manual_reference"),
+            "source_channel": manual_reference_channel,
+        }
+        source_url = manual_source_url
+    else:
+        selected_video = _pick_catalyst_reference_video(channel_context, requested_video_id=video_id)
+        if not selected_video:
+            raise HTTPException(404, "No connected-channel top video was available to analyze")
+        selected_video = dict(selected_video or {})
+        selected_video["source_kind"] = "connected_channel"
+        selected_video["source_channel"] = _clip_text(str(channel_context.get("title", "") or "").strip(), 180)
+        selected_video_id = str(selected_video.get("video_id", "") or "").strip()
+        source_url = _youtube_watch_url(selected_video_id)
+        if not source_url:
+            raise HTTPException(404, "Reference video is missing a usable YouTube video id")
 
     work_dir = _reference_video_analysis_dir(
         str(user.get("id", "") or "").strip(),
@@ -29574,35 +29809,63 @@ async def _build_catalyst_reference_video_analysis(
         selected_video_id,
     )
     source_bundle = {}
-    if oauth_access_token:
-        try:
-            source_bundle = await _youtube_fetch_owned_video_bundle_oauth(
-                oauth_access_token,
-                selected_video_id,
-                language="en",
-            )
-        except Exception:
-            source_bundle = {}
-    fallback_bundle = {}
-    if not source_bundle or not str(source_bundle.get("transcript_excerpt", "") or "").strip():
-        fallback_bundle = await _fetch_source_video_bundle(source_url, language="en")
-    if source_bundle and fallback_bundle:
-        merged_source_bundle = dict(fallback_bundle)
-        merged_source_bundle.update({k: v for k, v in dict(source_bundle).items() if v not in (None, "", [], {})})
-        if str(source_bundle.get("transcript_excerpt", "") or "").strip():
-            merged_source_bundle["transcript_excerpt"] = str(source_bundle.get("transcript_excerpt", "") or "").strip()
-        source_bundle = merged_source_bundle
-    elif fallback_bundle:
-        source_bundle = dict(fallback_bundle)
-    if not source_bundle:
-        source_bundle = {"source_url": source_url}
-    source_bundle["source_url"] = source_url
-    source_bundle["source_url_video_id"] = selected_video_id
+    if manual_reference_mode:
+        if manual_source_url:
+            try:
+                source_bundle = await _fetch_source_video_bundle(manual_source_url, language="en")
+            except Exception:
+                source_bundle = {}
+        if not source_bundle:
+            source_bundle = {"source_url": manual_source_url}
+        if manual_reference_title:
+            source_bundle["title"] = manual_reference_title
+        if manual_reference_channel:
+            source_bundle["channel"] = manual_reference_channel
+        if manual_video_path and Path(manual_video_path).exists():
+            try:
+                upload_meta = await extract_video_metadata(manual_video_path)
+            except Exception:
+                upload_meta = {}
+            if upload_meta:
+                if int(float(upload_meta.get("duration_sec", 0) or 0) or 0) > 0:
+                    source_bundle["duration_sec"] = int(float(upload_meta.get("duration_sec", 0) or 0) or 0)
+                source_bundle["uploaded_video_meta"] = dict(upload_meta)
+        source_bundle["source_url"] = manual_source_url
+        source_bundle["source_url_video_id"] = selected_video_id
+    else:
+        if oauth_access_token:
+            try:
+                source_bundle = await _youtube_fetch_owned_video_bundle_oauth(
+                    oauth_access_token,
+                    selected_video_id,
+                    language="en",
+                )
+            except Exception:
+                source_bundle = {}
+        fallback_bundle = {}
+        if source_url and (not source_bundle or not str(source_bundle.get("transcript_excerpt", "") or "").strip()):
+            fallback_bundle = await _fetch_source_video_bundle(source_url, language="en")
+        if source_bundle and fallback_bundle:
+            merged_source_bundle = dict(fallback_bundle)
+            merged_source_bundle.update({k: v for k, v in dict(source_bundle).items() if v not in (None, "", [], {})})
+            if str(source_bundle.get("transcript_excerpt", "") or "").strip():
+                merged_source_bundle["transcript_excerpt"] = str(source_bundle.get("transcript_excerpt", "") or "").strip()
+            source_bundle = merged_source_bundle
+        elif fallback_bundle:
+            source_bundle = dict(fallback_bundle)
+        if not source_bundle:
+            source_bundle = {"source_url": source_url}
+        source_bundle["source_url"] = source_url
+        source_bundle["source_url_video_id"] = selected_video_id
     if transcript_text:
         source_bundle["manual_transcript_excerpt"] = _clip_text(transcript_text, 12000)
         if not str(source_bundle.get("transcript_excerpt", "") or "").strip():
             source_bundle["transcript_excerpt"] = _clip_text(transcript_text, 12000)
-    if oauth_access_token and selected_video_id:
+    if not str(source_bundle.get("title", "") or "").strip() and str(selected_video.get("title", "") or "").strip():
+        source_bundle["title"] = _clip_text(str(selected_video.get("title", "") or "").strip(), 180)
+    if not str(source_bundle.get("channel", "") or "").strip() and str(selected_video.get("source_channel", "") or "").strip():
+        source_bundle["channel"] = _clip_text(str(selected_video.get("source_channel", "") or "").strip(), 180)
+    if oauth_access_token and selected_video_id and not manual_reference_mode:
         selected_video_meta = dict(selected_video or {})
         published_hint = str(
             selected_video_meta.get("published_at", "")
@@ -29649,10 +29912,16 @@ async def _build_catalyst_reference_video_analysis(
         operator_evidence=operator_evidence,
     )
 
-    download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
-    download_info = dict(download.get("info") or {})
-    download_error = _clip_text(str(download.get("download_error", "") or "").strip(), 420)
-    video_path = str(download.get("video_path", "") or "").strip()
+    download_info = {}
+    download_error = ""
+    video_path = ""
+    if manual_video_path and Path(manual_video_path).exists():
+        video_path = manual_video_path
+    elif source_url:
+        download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
+        download_info = dict(download.get("info") or {})
+        download_error = _clip_text(str(download.get("download_error", "") or "").strip(), 420)
+        video_path = str(download.get("video_path", "") or "").strip()
     analysis_seconds = max(
         60.0,
         min(float(max_analysis_minutes or CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES) * 60.0, CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS),
@@ -29663,7 +29932,7 @@ async def _build_catalyst_reference_video_analysis(
     if selected_duration_sec > 0:
         analysis_seconds = min(analysis_seconds, selected_duration_sec)
     audio_summary = ""
-    analysis_mode = "direct_media"
+    analysis_mode = "uploaded_file" if video_path and manual_video_path else "direct_media"
     heuristic_used = False
     stream_info = dict(download_info or source_bundle.get("_yt_dlp_info") or {})
     if not video_path and stream_info:
@@ -29730,7 +29999,7 @@ async def _build_catalyst_reference_video_analysis(
 
     analysis_prompt = "\n".join(
         part for part in [
-            "Reference video objective: break down the connected channel's strongest current video so Catalyst can rebuild it as a better fully 3D documentary without copying it literally.",
+            f"Reference video objective: {str(workspace_profile.get('objective', '') or '').strip()}",
             f"Channel summary: {_clip_text(str(channel_context.get('summary', '') or '').strip(), 700)}",
             ("Channel audit: " + _clip_text(str(channel_audit.get("summary", "") or "").strip(), 520)) if channel_audit.get("summary") else "",
             ("Channel audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:4])) if channel_audit.get("strengths") else "",
@@ -29740,7 +30009,9 @@ async def _build_catalyst_reference_video_analysis(
             f"Top reference video public summary: {_clip_text(str(source_bundle.get('public_summary', '') or '').strip(), 700)}",
             f"Top reference video transcript excerpt: {_clip_text(str(source_bundle.get('transcript_excerpt', '') or '').strip(), 2800)}",
             (
-                "Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked."
+                "Reference analysis mode: uploaded reference file + full audio extraction."
+                if analysis_mode == "uploaded_file"
+                else "Reference analysis mode: preview frames + public metadata fallback because direct media download was blocked."
                 if analysis_mode == "preview_frames"
                 else "Reference analysis mode: stream-clipped moving video + full audio extraction from yt-dlp stream URLs because direct download was blocked."
                 if analysis_mode == "stream_clip"
@@ -29749,22 +30020,18 @@ async def _build_catalyst_reference_video_analysis(
             ("Audio summary: " + audio_summary) if audio_summary else "",
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
             ("Manual operator evidence: " + _clip_text(operator_notes, 2200)) if operator_notes else "",
+            (f"Reference source channel: {_clip_text(str(source_bundle.get('channel', '') or selected_video.get('source_channel', '') or '').strip(), 220)}" if str(source_bundle.get("channel", "") or selected_video.get("source_channel", "") or "").strip() else ""),
             ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
             ("Previous upload: " + _clip_text(str(previous_video.get("title", "") or "").strip(), 220)) if previous_video else "",
             ("Weakest recent package: " + _clip_text(str(worst_recent_video.get("title", "") or "").strip(), 220)) if worst_recent_video else "",
             "Return strict JSON with keys: summary, why_it_worked, what_hurt_weaker_upload, hook_system, pacing_system, visual_system, sound_system, transition_system, structure_map, threed_translation_moves, title_thumbnail_rules, next_video_moves, avoid_rules, candidate_titles.",
-            "Focus on what makes the best video work, what the weaker upload is missing, and how to translate the winner into a stronger Fern-grade fully 3D Empire Magnates video.",
+            str(workspace_profile.get("focus", "") or "").strip(),
         ]
         if part
     )
     try:
         raw_analysis = await _xai_json_completion_multimodal(
-            system_prompt=(
-                "You are Catalyst's reference-video analyst for NYPTID Studio. "
-                "Analyze the provided winning YouTube documentary frames plus metadata, transcript excerpt, and frame metrics. "
-                "Be specific about hook timing, narrative escalation, visual framing, transition rhythm, sound design, and how to rebuild this into a premium fully 3D documentary. "
-                "Do not describe generic explainer advice. Output strict JSON only."
-            ),
+            system_prompt=str(workspace_profile.get("system_role", "") or "").strip(),
             user_prompt=analysis_prompt,
             image_paths=frame_paths[:14],
             temperature=0.25,
@@ -29780,6 +30047,7 @@ async def _build_catalyst_reference_video_analysis(
             selected_video=selected_video,
             channel_context=channel_context,
             frame_metrics=frame_metrics,
+            workspace_id=workspace_id,
         )
     evidence = _build_catalyst_reference_analysis_evidence(
         analysis_mode=analysis_mode,
@@ -29816,6 +30084,8 @@ async def _build_catalyst_reference_video_analysis(
             "video_id": selected_video_id,
             "title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
             "url": source_url,
+            "source_kind": str(selected_video.get("source_kind", "") or "connected_channel").strip() or "connected_channel",
+            "source_channel": _clip_text(str(selected_video.get("source_channel", "") or source_bundle.get("channel", "") or "").strip(), 180),
             "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
             "impressions": int(float(selected_video.get("impressions", 0) or 0) or 0),
             "average_view_duration_sec": int(float(selected_video.get("average_view_duration_sec", 0) or 0) or 0),

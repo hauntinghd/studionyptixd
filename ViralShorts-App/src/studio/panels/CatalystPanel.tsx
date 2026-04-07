@@ -74,6 +74,8 @@ type CatalystWorkspaceSnapshot = {
             video_id?: string;
             title?: string;
             url?: string;
+            source_kind?: string;
+            source_channel?: string;
             views?: number;
             impressions?: number;
             average_view_duration_sec?: number;
@@ -169,6 +171,12 @@ const APPLY_SCOPE_OPTIONS = [
 ];
 
 const WORKSPACE_ORDER = ['skeleton', 'story', 'motivation', 'daytrading', 'chatstory', 'documentary', 'recap', 'explainer', 'story_channel'];
+const REFERENCE_SOURCE_LABELS: Record<string, string> = {
+    connected_channel: 'Connected Channel',
+    manual_upload: 'Uploaded Reference',
+    external_url: 'External Reference',
+    manual_reference: 'Manual Reference',
+};
 
 function splitLines(value: string): string[] {
     return String(value || '')
@@ -239,6 +247,10 @@ export default function CatalystPanel() {
     const [analyzingReference, setAnalyzingReference] = useState(false);
     const [clearingReference, setClearingReference] = useState(false);
     const [selectedReferenceVideoId, setSelectedReferenceVideoId] = useState('');
+    const [referenceSourceUrl, setReferenceSourceUrl] = useState('');
+    const [referenceSourceTitle, setReferenceSourceTitle] = useState('');
+    const [referenceSourceChannel, setReferenceSourceChannel] = useState('');
+    const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
     const [referenceAnalyticsNotes, setReferenceAnalyticsNotes] = useState('');
     const [referenceTranscriptText, setReferenceTranscriptText] = useState('');
     const [referenceAnalyticsImages, setReferenceAnalyticsImages] = useState<File[]>([]);
@@ -491,7 +503,13 @@ export default function CatalystPanel() {
         setError('');
         try {
             const hasManualReferenceEvidence = Boolean(
-                referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0
+                referenceSourceUrl.trim()
+                || referenceSourceTitle.trim()
+                || referenceSourceChannel.trim()
+                || referenceVideoFile
+                || referenceAnalyticsNotes.trim()
+                || referenceTranscriptText.trim()
+                || referenceAnalyticsImages.length > 0
             );
             const res = hasManualReferenceEvidence
                 ? await (async () => {
@@ -500,6 +518,10 @@ export default function CatalystPanel() {
                     formData.append('workspace_id', selectedWorkspaceId);
                     formData.append('video_id', selectedReferenceVideoId || '');
                     formData.append('max_analysis_minutes', '20');
+                    if (referenceSourceUrl.trim()) formData.append('reference_source_url', referenceSourceUrl.trim());
+                    if (referenceSourceTitle.trim()) formData.append('reference_title', referenceSourceTitle.trim());
+                    if (referenceSourceChannel.trim()) formData.append('reference_channel', referenceSourceChannel.trim());
+                    if (referenceVideoFile) formData.append('reference_video', referenceVideoFile);
                     if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
                     if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
                     referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
@@ -546,6 +568,10 @@ export default function CatalystPanel() {
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to clear the channel reference video'));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
+            setReferenceSourceUrl('');
+            setReferenceSourceTitle('');
+            setReferenceSourceChannel('');
+            setReferenceVideoFile(null);
             setReferenceAnalyticsImages([]);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to clear the channel reference video'));
@@ -634,6 +660,16 @@ export default function CatalystPanel() {
             ),
         [selectedChannel]
     );
+    const appendReferenceAnalyticsImages = useCallback((incomingFiles: File[]) => {
+        const normalized = incomingFiles
+            .filter((file) => file && (/^image\/(png|jpeg|webp)$/i.test(file.type) || /\.(png|jpe?g|webp)$/i.test(file.name || '')))
+            .map((file, idx) => {
+                if (file.name) return file;
+                const ext = /jpeg/i.test(file.type) ? 'jpg' : /webp/i.test(file.type) ? 'webp' : 'png';
+                return new File([file], `studio-shot-${Date.now()}-${idx}.${ext}`, { type: file.type || `image/${ext}` });
+            });
+        if (normalized.length) setReferenceAnalyticsImages((prev) => [...prev, ...normalized].slice(0, 24));
+    }, []);
 
     useEffect(() => {
         const currentReferenceVideoId = String(referenceVideoAnalysis?.video?.video_id || '').trim();
@@ -650,7 +686,8 @@ export default function CatalystPanel() {
         });
     }, [referenceVideoAnalysis?.video?.video_id, uploadedVideoOptions]);
 
-    const canAnalyzeReferenceVideo = uploadedVideoOptions.length > 0 && !analyzingReference && !clearingReference;
+    const hasManualReferenceSource = Boolean(referenceSourceUrl.trim() || referenceSourceTitle.trim() || referenceSourceChannel.trim() || referenceVideoFile);
+    const canAnalyzeReferenceVideo = Boolean((uploadedVideoOptions.length > 0 || hasManualReferenceSource) && !analyzingReference && !clearingReference);
     const hasManualReferenceEvidence = Boolean(referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0);
     const referenceManualEvidenceSummary = useMemo(
         () => normalizeCatalystText(String(referenceAnalysis?.manual_evidence_summary || referenceEvidence?.manual_evidence_summary || '').trim()),
@@ -718,7 +755,7 @@ export default function CatalystPanel() {
                             className="inline-flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                            Analyze Best Video
+                            Analyze Reference
                         </button>
                         <button
                             type="button"
@@ -958,51 +995,95 @@ export default function CatalystPanel() {
                                         {channelOutcomeSyncError}
                                     </div>
                                 )}
-                                {uploadedVideoOptions.length > 0 && (
+                                {selectedChannel && (
                                     <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
-                                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Measured Uploaded Videos</div>
-                                        <div className="mt-3 grid gap-3 md:grid-cols-[1fr,auto]">
-                                            <select
-                                                value={selectedReferenceVideoId}
-                                                onChange={(e) => setSelectedReferenceVideoId(e.target.value)}
-                                                className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
-                                                style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
-                                            >
-                                                <option value="" style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
-                                                    Let Catalyst choose the strongest measured upload
-                                                </option>
-                                                {uploadedVideoOptions.map((video) => {
-                                                    const published = String(video.published_at || '').trim();
-                                                    const title = String(video.title || '').trim() || String(video.video_id || '').trim();
-                                                    const meta = [
-                                                        published ? new Date(published).toLocaleDateString() : '',
-                                                        typeof video.views === 'number' ? `${video.views} views` : '',
-                                                    ].filter(Boolean).join(' | ');
-                                                    return (
-                                                        <option key={video.video_id} value={video.video_id} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
-                                                            {meta ? `${title} (${meta})` : title}
+                                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Reference Case File</div>
+                                        {uploadedVideoOptions.length > 0 ? (
+                                            <>
+                                                <div className="mt-3 grid gap-3 md:grid-cols-[1fr,auto]">
+                                                    <select
+                                                        value={selectedReferenceVideoId}
+                                                        onChange={(e) => setSelectedReferenceVideoId(e.target.value)}
+                                                        className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-violet-400/50"
+                                                        style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
+                                                    >
+                                                        <option value="" style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
+                                                            Let Catalyst choose the strongest measured upload
                                                         </option>
-                                                    );
-                                                })}
-                                            </select>
-                                            <button
-                                                type="button"
-                                                onClick={() => void handleAnalyzeReferenceVideo()}
-                                                disabled={!canAnalyzeReferenceVideo}
-                                                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
-                                            >
-                                                {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                                                {hasManualReferenceEvidence ? 'Analyze With Studio Evidence' : selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
-                                            </button>
-                                        </div>
-                                        <div className="mt-2 text-xs text-gray-500">
-                                            Leave the first option selected to let Catalyst pick the strongest measured upload, or override it with a specific video.
-                                        </div>
-                                        <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                                                        {uploadedVideoOptions.map((video) => {
+                                                            const published = String(video.published_at || '').trim();
+                                                            const title = String(video.title || '').trim() || String(video.video_id || '').trim();
+                                                            const meta = [
+                                                                published ? new Date(published).toLocaleDateString() : '',
+                                                                typeof video.views === 'number' ? `${video.views} views` : '',
+                                                            ].filter(Boolean).join(' | ');
+                                                            return (
+                                                                <option key={video.video_id} value={video.video_id} style={{ backgroundColor: '#0b0b0f', color: '#ffffff' }}>
+                                                                    {meta ? `${title} (${meta})` : title}
+                                                                </option>
+                                                            );
+                                                        })}
+                                                    </select>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void handleAnalyzeReferenceVideo()}
+                                                        disabled={!canAnalyzeReferenceVideo}
+                                                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                                                    >
+                                                        {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
+                                                        {hasManualReferenceSource ? 'Analyze Manual Reference' : hasManualReferenceEvidence ? 'Analyze With Studio Evidence' : selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
+                                                    </button>
+                                                </div>
+                                                <div className="mt-2 text-xs text-gray-500">
+                                                    Leave the first option selected to let Catalyst pick the strongest measured upload, or override it with a specific video.
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <div className="mt-3 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-xs text-gray-400">
+                                                No measured uploads are loaded yet. You can still benchmark a manual or competitor reference by uploading the video file below and pasting the Studio screenshots.
+                                            </div>
+                                        )}
+                                        <div
+                                            className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4 outline-none"
+                                            tabIndex={0}
+                                            onPaste={(e) => {
+                                                const files = Array.from(e.clipboardData?.files || []);
+                                                if (!files.length) return;
+                                                appendReferenceAnalyticsImages(files);
+                                                e.preventDefault();
+                                            }}
+                                            onDragOver={(e) => e.preventDefault()}
+                                            onDrop={(e) => {
+                                                const files = Array.from(e.dataTransfer?.files || []);
+                                                if (!files.length) return;
+                                                appendReferenceAnalyticsImages(files);
+                                                e.preventDefault();
+                                            }}
+                                        >
                                             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/70">Manual Studio Evidence</div>
                                             <p className="mt-2 text-sm text-cyan-50/90">
-                                                Use YouTube Studio screenshots and notes here while Google OAuth is down. Catalyst will OCR visible metrics like impressions, CTR, AVD, traffic sources, device split, and early rank.
+                                                Build a full case file here while Google OAuth is down: upload the actual reference video, paste or upload every YouTube Studio screenshot you can grab, and add transcript or operator notes. Catalyst will OCR visible metrics like impressions, CTR, AVD, traffic sources, device split, and early rank.
                                             </p>
+                                            <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                                                <input
+                                                    value={referenceSourceUrl}
+                                                    onChange={(e) => setReferenceSourceUrl(e.target.value)}
+                                                    placeholder="Optional: competitor/source video URL"
+                                                    className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
+                                                />
+                                                <input
+                                                    value={referenceSourceTitle}
+                                                    onChange={(e) => setReferenceSourceTitle(e.target.value)}
+                                                    placeholder="Optional: source title"
+                                                    className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
+                                                />
+                                                <input
+                                                    value={referenceSourceChannel}
+                                                    onChange={(e) => setReferenceSourceChannel(e.target.value)}
+                                                    placeholder="Optional: source channel"
+                                                    className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
+                                                />
+                                            </div>
                                             <div className="mt-3 grid gap-3 lg:grid-cols-2">
                                                 <textarea
                                                     value={referenceAnalyticsNotes}
@@ -1023,12 +1104,38 @@ export default function CatalystPanel() {
                                                 <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
                                                     <input
                                                         type="file"
+                                                        accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi"
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            setReferenceVideoFile(e.target.files?.[0] || null);
+                                                            e.currentTarget.value = '';
+                                                        }}
+                                                    />
+                                                    Upload Reference Video
+                                                </label>
+                                                <span className="text-xs text-gray-400">
+                                                    {referenceVideoFile ? referenceVideoFile.name : 'No reference video selected'}
+                                                </span>
+                                                {referenceVideoFile && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setReferenceVideoFile(null)}
+                                                        className="text-xs font-semibold text-gray-400 transition hover:text-white"
+                                                    >
+                                                        Clear video
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="mt-3 flex flex-wrap items-center gap-3">
+                                                <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
+                                                    <input
+                                                        type="file"
                                                         accept="image/png,image/jpeg,image/webp"
                                                         multiple
                                                         className="hidden"
                                                         onChange={(e) => {
                                                             const incoming = Array.from(e.target.files || []);
-                                                            if (incoming.length) setReferenceAnalyticsImages((prev) => [...prev, ...incoming].slice(0, 24));
+                                                            appendReferenceAnalyticsImages(incoming);
                                                             e.currentTarget.value = '';
                                                         }}
                                                     />
@@ -1036,6 +1143,9 @@ export default function CatalystPanel() {
                                                 </label>
                                                 <span className="text-xs text-gray-400">
                                                     {referenceAnalyticsImages.length} screenshot{referenceAnalyticsImages.length === 1 ? '' : 's'} selected
+                                                </span>
+                                                <span className="text-xs text-gray-500">
+                                                    Click this card and press Ctrl+V to paste screenshots directly.
                                                 </span>
                                                 {referenceAnalyticsImages.length > 0 && (
                                                     <button
@@ -1069,6 +1179,12 @@ export default function CatalystPanel() {
                                         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-200/70">Reference Video Breakdown</div>
                                         {referenceVideoAnalysis.video?.title && (
                                             <div className="mt-3 text-sm font-semibold text-white">{referenceVideoAnalysis.video.title}</div>
+                                        )}
+                                        {(referenceVideoAnalysis.video?.source_channel || referenceVideoAnalysis.video?.source_kind) && (
+                                            <div className="mt-2 text-xs text-gray-400">
+                                                Source: {referenceVideoAnalysis.video?.source_channel || 'Unknown'}
+                                                {referenceVideoAnalysis.video?.source_kind ? ` · ${REFERENCE_SOURCE_LABELS[String(referenceVideoAnalysis.video.source_kind)] || String(referenceVideoAnalysis.video.source_kind)}` : ''}
+                                            </div>
                                         )}
                                         {(referenceEvidence?.analysis_mode_label || referenceEvidence?.confidence_label) && (
                                             <div className="mt-3 flex flex-wrap gap-2">
