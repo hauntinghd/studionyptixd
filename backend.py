@@ -2012,15 +2012,18 @@ def _longform_title_variant(input_title: str, topic: str) -> str:
 
 def _longform_subject_lock(topic: str, input_title: str, input_description: str = "") -> str:
     subject = _longform_fallback_visual_focus(topic, input_title)
+    named_human_lock = _named_human_subject_likeness_lock(topic, input_title, input_description)
     if not subject or subject == "the central mechanism, object, or environment being explained":
-        return (
+        base = (
             "Primary subject lock: keep the exact named subject or system from the topic/title visible. "
             "Do not substitute a different object, organ, country, person, or symbol."
         )
-    return (
+        return f"{base} {named_human_lock}".strip()
+    base = (
         f"Primary subject lock: keep {subject} as the focal subject throughout this chapter whenever the beat refers to it. "
         f"Do not replace {subject} with a different organ, object, machine, person, or symbol."
     )
+    return f"{base} {named_human_lock}".strip()
 
 
 PACKAGING_STOP_WORDS = {
@@ -3964,6 +3967,184 @@ def _skeleton_outfit_coverage_lock(text: str) -> str:
     )
 
 
+_SKELETON_NAMED_SUBJECT_CONNECTORS = {
+    "the", "de", "da", "del", "la", "le", "van", "von", "bin", "ibn", "st", "st.",
+}
+_SKELETON_NAMED_SUBJECT_NONPERSON_SUFFIXES = {
+    "media", "science", "studio", "studios", "channel", "channels", "clips", "clip", "group",
+    "company", "companies", "agency", "department", "government", "state", "states", "university",
+    "college", "hospital", "network", "records", "podcast", "podcasts", "team", "teams", "court",
+    "courts", "project", "projects", "app", "apps", "api",
+}
+_SKELETON_NAMED_SUBJECT_NONPERSON_TOKENS = {
+    "a", "an", "the", "this", "that", "these", "those", "my", "your", "our",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+    "empire", "magnates", "cryptic", "science", "nyptid", "clips", "clip", "studio", "studios", "channel", "channels",
+    "youtube", "google", "cloud", "algrow", "api", "flow", "fal", "grok", "argument", "earth", "system", "systems",
+    "engine", "doctrine", "business", "psychology", "recap", "recaps", "manhwa", "manga", "anime", "video", "videos",
+    "chapter", "chapters", "scene", "scenes", "upload", "uploads", "project", "case", "latest", "recent", "active",
+    "request", "details", "federal", "consumer", "oauth", "consumer", "billing", "dashboard", "membership",
+}
+_SKELETON_NAMED_SUBJECT_NONPERSON_PHRASES = {
+    "empire magnates",
+    "cryptic science",
+    "nyptid clips",
+    "magnates media",
+    "flat earth",
+    "youtube studio",
+    "google cloud",
+    "algrow api",
+    "my first project",
+    "internet anarchist",
+}
+_SKELETON_HUMAN_FACE_NEGATIVE_TOKENS = {
+    "skin",
+    "flesh",
+    "muscles",
+    "human face",
+    "realistic person",
+}
+_SKELETON_EXTRA_PERSON_NEGATIVE_TOKENS = {
+    "extra person",
+}
+
+
+def _extract_likely_named_human_subjects(*texts: str, max_items: int = 3) -> list[str]:
+    pattern = re.compile(
+        r"\b[A-Z][A-Za-z0-9'’.-]*(?:\s+(?:[A-Z][A-Za-z0-9'’.-]*|the|The|de|De|da|Da|del|Del|la|La|le|Le|van|Van|von|Von|bin|Bin|ibn|Ibn|st\.?|St\.?)){1,3}\b"
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for text in texts:
+        raw = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not raw:
+            continue
+        for match in pattern.finditer(raw):
+            candidate = re.sub(r"\s+", " ", str(match.group(0) or "")).strip(" ,.;:!?()[]{}\"'")
+            if not _is_likely_named_human_subject(candidate):
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+            if len(out) >= max(1, int(max_items or 1)):
+                return out
+    return out
+
+
+def _is_likely_named_human_subject(candidate: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(candidate or "")).strip(" ,.;:!?()[]{}\"'")
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in _SKELETON_NAMED_SUBJECT_NONPERSON_PHRASES:
+        return False
+    words = [
+        re.sub(r"(^[^A-Za-z0-9]+|[^A-Za-z0-9.]+$)", "", part)
+        for part in cleaned.split()
+    ]
+    words = [part for part in words if part]
+    if len(words) < 2 or len(words) > 4:
+        return False
+    if words[0].lower().rstrip(".") in _SKELETON_NAMED_SUBJECT_NONPERSON_TOKENS:
+        return False
+    last = words[-1].lower().rstrip(".")
+    if last in _SKELETON_NAMED_SUBJECT_NONPERSON_SUFFIXES:
+        return False
+    meaningful = 0
+    titlelike = 0
+    for word in words:
+        lower = word.lower().rstrip(".")
+        if lower in _SKELETON_NAMED_SUBJECT_CONNECTORS:
+            continue
+        meaningful += 1
+        if lower in _SKELETON_NAMED_SUBJECT_NONPERSON_TOKENS:
+            return False
+        if re.match(r"^[A-Z][A-Za-z0-9'’.-]*$", word) or re.match(r"^[A-Z]{2,}$", word):
+            titlelike += 1
+            continue
+        return False
+    return meaningful >= 2 and titlelike >= 2
+
+
+def _human_subject_list(subjects: list[str]) -> str:
+    values = [str(subject or "").strip() for subject in subjects if str(subject or "").strip()]
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return ", ".join(values[:-1]) + f", and {values[-1]}"
+
+
+def _named_human_subject_likeness_lock(*texts: str, skeleton_mode: bool = False) -> str:
+    subjects = _extract_likely_named_human_subjects(*texts, max_items=3)
+    if not subjects:
+        return ""
+    subject_list = _human_subject_list(subjects)
+    lock = (
+        f"NAMED HUMAN SUBJECT LOCK: if the scene includes {subject_list}, render each named person as a recognizable photoreal human with accurate face structure, "
+        "skin tone, age cues, body build, hair or facial hair, tattoos, and signature styling. "
+        f"Do not replace {subject_list} with a generic lookalike, anonymous stock person, mannequin, or a different public figure."
+    )
+    if skeleton_mode:
+        lock += " Keep the canonical skeleton separate and unchanged; never humanize the skeleton itself."
+    return lock
+
+
+def _skeleton_scene_supporting_humans_requested(*texts: str) -> bool:
+    return bool(_extract_likely_named_human_subjects(*texts, max_items=1))
+
+
+def _filter_negative_prompt_entries(negative_text: str, blocked_entries: set[str]) -> str:
+    parts = [part.strip() for part in str(negative_text or "").split(",") if part and part.strip()]
+    if not parts:
+        return ""
+    blocked = {re.sub(r"\s+", " ", str(entry or "").strip().lower()) for entry in blocked_entries if str(entry or "").strip()}
+    out: list[str] = []
+    for part in parts:
+        key = re.sub(r"\s+", " ", part.strip().lower())
+        if key in blocked:
+            continue
+        out.append(part)
+    return ", ".join(out).strip(", ")
+
+
+def _skeleton_named_human_negative_adjustment(negative_text: str, prompt: str, allow_extra_people: bool = False) -> str:
+    neg = str(negative_text or "").strip()
+    if not neg or not _skeleton_scene_supporting_humans_requested(prompt):
+        return neg
+    blocked = set(_SKELETON_HUMAN_FACE_NEGATIVE_TOKENS)
+    if allow_extra_people:
+        blocked |= _SKELETON_EXTRA_PERSON_NEGATIVE_TOKENS
+    filtered = _filter_negative_prompt_entries(neg, blocked)
+    mismatch_tokens = [
+        "wrong named person identity",
+        "generic anonymous face",
+        "unrecognizable human face",
+        "mismatched hairstyle",
+        "mismatched facial hair",
+        "wrong tattoos",
+    ]
+    return ", ".join(part for part in [filtered, ", ".join(mismatch_tokens)] if part).strip(", ")
+
+
+def _skeleton_image_suffix_for_scene(scene_text: str) -> str:
+    suffix = str(SKELETON_IMAGE_SUFFIX or "").strip()
+    if not _skeleton_scene_supporting_humans_requested(scene_text):
+        return suffix
+    suffix = suffix.replace(
+        "A clearly visible translucent soft-tissue silhouette around torso/limbs is REQUIRED in every scene, but no full human skin face. ",
+        "A clearly visible translucent soft-tissue silhouette around torso/limbs is REQUIRED on the canonical skeleton in every scene. Explicitly named supporting humans may keep natural human faces. ",
+    )
+    return (
+        f"{suffix} Supporting human rule: any explicitly named real person must keep accurate facial structure, skin tone, age cues, "
+        "hair or facial hair, body build, tattoos, and signature styling."
+    ).strip()
+
+
 def _build_scene_prompt_with_reference(
     template: str,
     visual_description: str,
@@ -4020,6 +4201,7 @@ def _build_skeleton_identity_passthrough_prompt(
             + "."
         )
     outfit_lock = _skeleton_outfit_coverage_lock(delta)
+    named_human_lock = _named_human_subject_likeness_lock(delta, skeleton_mode=True)
     anchor = (
         "Always show the canonical Jerry-style NYPTID skeleton first and keep visible skeleton anatomy in frame: "
         "ivory-white anatomical skeleton, large realistic human-like eyeballs clearly visible in both eye sockets with readable iris and pupil, "
@@ -4039,6 +4221,7 @@ def _build_skeleton_identity_passthrough_prompt(
         _skeleton_scene_context_lock(delta),
         _skeleton_scene_framing_lock(delta),
         outfit_lock,
+        named_human_lock,
         f"USER SCENE REQUEST: {delta}",
         *ref_bits,
     ]).strip()
@@ -4118,7 +4301,8 @@ def _augment_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
     parts = [str(base_negative or "").strip()] if str(base_negative or "").strip() else []
     if extras:
         parts.append(", ".join(dict.fromkeys(extras)))
-    return ", ".join([p for p in parts if p]).strip(", ")
+    merged = ", ".join([p for p in parts if p]).strip(", ")
+    return _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
 
 
 def _relax_skeleton_negative_prompt_for_passthrough(base_negative: str, prompt: str) -> str:
@@ -4136,8 +4320,12 @@ def _relax_skeleton_negative_prompt_for_passthrough(base_negative: str, prompt: 
             continue
         if wants_tired and ("unnatural pose" in pl or "mannequin" in pl):
             continue
+        if _skeleton_scene_supporting_humans_requested(prompt):
+            if pl in _SKELETON_HUMAN_FACE_NEGATIVE_TOKENS or pl in _SKELETON_EXTRA_PERSON_NEGATIVE_TOKENS:
+                continue
         out.append(part)
-    return ", ".join(out).strip(", ")
+    merged = ", ".join(out).strip(", ")
+    return _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
 
 
 def _truncate_words(text: str, max_words: int = 120) -> str:
@@ -4316,6 +4504,7 @@ def _compact_skeleton_local_prompt(prompt: str) -> str:
     needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
     internal_focus = _skeleton_scene_prefers_internal_cutaway(scene)
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    named_human_lock = _named_human_subject_likeness_lock(scene, skeleton_mode=True)
     parts: list[str] = [
         "photoreal cinematic 3D render",
         "canonical ivory-white anatomical skeleton",
@@ -4361,6 +4550,8 @@ def _compact_skeleton_local_prompt(prompt: str) -> str:
         "Glass-shell lock: transparent glass-like skin hugs the skull, torso, arms, and legs tightly like a real outer body shell, "
         "not a halo, not a bubble, not a portal, and not a glowing arch behind the subject."
     )
+    if named_human_lock:
+        prompt_parts.append(named_human_lock)
     if delivery_hints:
         prompt_parts.append("Short-form lock: " + "; ".join(delivery_hints) + ".")
     return _truncate_words(" ".join(prompt_parts), 150)
@@ -4389,6 +4580,7 @@ def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
     props_text = " and ".join(props) if props else "scene props"
     placement = "on the table" if needs_table else "in front of the skeleton"
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    named_human_lock = _named_human_subject_likeness_lock(scene, skeleton_mode=True)
     base_parts = [
         "photoreal 3D cinematic render",
         "transparent-glass anatomical skeleton with both eyes visible",
@@ -4413,6 +4605,8 @@ def _compact_skeleton_prop_first_prompt(prompt: str) -> str:
         prompt_parts.append(_skeleton_outfit_coverage_lock(scene))
     prompt_parts.append(_skeleton_scene_context_lock(scene))
     prompt_parts.append(_skeleton_scene_framing_lock(scene))
+    if named_human_lock:
+        prompt_parts.append(named_human_lock)
     prompt_parts.append("Sharp focus, readable skull and prop detail, no text, no watermark.")
     return _truncate_words(" ".join(prompt_parts), 120)
 
@@ -4443,12 +4637,17 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
     needs_glow = bool(re.search(r"\b(glow|glowing|emissive|luminous|light[- ]?emitting)\b", scene_l))
     dark_room = bool(re.search(r"\b(dark|night|shadowy|moody|low[- ]?light)\b", scene_l))
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(scene)
+    named_human_lock = _named_human_subject_likeness_lock(scene, skeleton_mode=True)
     prompt_parts = [
         "Single skeleton subject only.",
         ("Dark moody environment with readable background detail." if dark_room else "Detailed topic-matched environment with layered background depth."),
         "Photoreal 3D render.",
         "Anatomical skeleton with large realistic eyes and transparent glass skin tightly wrapped around the skull, torso, arms, and legs.",
-        "No second skeleton and no extra person.",
+        (
+            "No second skeleton. Additional human subjects are allowed only when they are explicitly named in the scene, and those named people must stay recognizable."
+            if named_human_lock
+            else "No second skeleton and no extra person."
+        ),
     ]
     if needs_table:
         prompt_parts.append(
@@ -4471,6 +4670,8 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
         prompt_parts.append(f"One {glow}pile of paper cash banknotes is clearly visible.")
     else:
         prompt_parts.append(scene.rstrip(". ") + ".")
+    if named_human_lock:
+        prompt_parts.append(named_human_lock)
     prompt_parts.append(_skeleton_scene_framing_lock(scene))
     prompt_parts.append("Sharp focus, realistic lighting, readable environment depth.")
     return _truncate_words(" ".join(part for part in prompt_parts if part).strip(), 110)
@@ -4479,6 +4680,7 @@ def _build_skeleton_lora_fast_prompt(prompt: str) -> str:
 def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
     text = str(prompt or "").lower()
     explicit_outfit_request = _skeleton_has_explicit_outfit_request(text)
+    named_human_support = _skeleton_scene_supporting_humans_requested(prompt)
     tokens = [
         "blurry",
         "low quality",
@@ -4515,6 +4717,16 @@ def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
             "transparent outfit revealing full skeleton body",
             "naked skeleton body with only accessories",
         ])
+    if named_human_support:
+        tokens = [t for t in tokens if t not in {"human skin face"}]
+        tokens.extend([
+            "wrong named person identity",
+            "generic anonymous person",
+            "unrecognizable human face",
+            "mismatched hairstyle",
+            "mismatched facial hair",
+            "wrong tattoos",
+        ])
     if "brain" in text:
         tokens.extend([
             "smooth ball instead of brain",
@@ -4537,11 +4749,13 @@ def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
     merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
     if base:
         merged = f"{base}, {merged}"
+    merged = _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
     return _truncate_words(merged, 95)
 
 
 def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
     text = str(prompt or "").lower()
+    named_human_support = _skeleton_scene_supporting_humans_requested(prompt)
     tokens = [
         "blurry",
         "low quality",
@@ -4570,6 +4784,16 @@ def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
         "background made of money",
         "lying down pose",
     ]
+    if named_human_support:
+        tokens = [t for t in tokens if t not in {"extra person"}]
+        tokens.extend([
+            "wrong named person identity",
+            "generic anonymous person",
+            "unrecognizable human face",
+            "mismatched hairstyle",
+            "mismatched facial hair",
+            "wrong tattoos",
+        ])
     if "brain" in text:
         tokens.extend(["missing brain", "fruit instead of brain", "orb instead of brain"])
     if re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text):
@@ -4580,6 +4804,7 @@ def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
     merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
     if base:
         merged = f"{base}, {merged}"
+    merged = _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
     return _truncate_words(merged, 110)
 
 
@@ -11719,6 +11944,14 @@ def _build_longform_scene_execution_prompt(
     visual_description_raw = str(scene.get("visual_description", "") or "").strip()
     visual_description = _clip_text(_clean_longform_scene_text(visual_description_raw) or visual_description_raw, 420)
     motion_direction = str(scene.get("motion_direction", "") or "").strip()
+    named_human_lock = _named_human_subject_likeness_lock(
+        visual_description_raw,
+        visual_description,
+        str(scene.get("narration", "") or ""),
+        topic,
+        input_title,
+        subject_reference_name,
+    )
     execution = _catalyst_scene_execution_profile(
         edit_blueprint=edit_blueprint,
         chapter_blueprint=chapter_blueprint,
@@ -11790,6 +12023,7 @@ def _build_longform_scene_execution_prompt(
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
             subject_reference_phrase,
+            named_human_lock,
             documentary_environment_guidance,
             "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
         ], max_items=8, max_chars=240)
@@ -11806,6 +12040,7 @@ def _build_longform_scene_execution_prompt(
             if has_subject_reference
             else ""
         ),
+        named_human_lock,
         f"Visual motif: {visual_motif}." if visual_motif else "",
         f"Variation rule: {visual_variation_rule}." if visual_variation_rule else "",
         "Pattern interrupt required in composition, scale, or contrast." if execution.get("is_interrupt") else "",
@@ -15458,6 +15693,7 @@ async def generate_scene_image(
             provider="scene_image",
             adapter_route=template_adapter_route,
         )
+    named_human_support = template == "skeleton" and _skeleton_scene_supporting_humans_requested(prompt)
     if template == "skeleton":
         if prompt_passthrough:
             negative_prompt = _relax_skeleton_negative_prompt_for_passthrough(negative_prompt, prompt)
@@ -15584,7 +15820,7 @@ async def generate_scene_image(
                 f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
             )
         return result
-    if template == "skeleton" and interactive_fast and not has_reference:
+    if template == "skeleton" and interactive_fast and not has_reference and not named_human_support:
         try:
             lora_available = await check_skeleton_lora_available()
             if lora_available:
@@ -15634,7 +15870,7 @@ async def generate_scene_image(
                 )
         except Exception as e:
             log.warning(f"Skeleton interactive fast path failed, falling back to configured providers: {e}")
-    if template == "skeleton" and SKELETON_SDXL_LORA_ENABLED:
+    if template == "skeleton" and SKELETON_SDXL_LORA_ENABLED and not named_human_support:
         if reference_image_url and lock_mode == "strict":
             log.info("Skipping Skeleton LoRA for strict reference lock; using conditioned generator")
         else:
@@ -15649,9 +15885,20 @@ async def generate_scene_image(
                 log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
 
     provider_order = _configured_image_provider_order()
-    skeleton_wan_lock = template == "skeleton" and bool(SKELETON_REQUIRE_WAN22)
+    skeleton_wan_lock = template == "skeleton" and bool(SKELETON_REQUIRE_WAN22) and not named_human_support
     if interactive_fast and template == "skeleton":
-        if skeleton_wan_lock:
+        if named_human_support:
+            preferred_order: list[str] = []
+            if bool(FAL_AI_KEY or XAI_API_KEY):
+                preferred_order.append("fal")
+            configured = _configured_image_provider_order()
+            for provider_key in configured:
+                normalized = _normalize_image_provider_key(provider_key)
+                if normalized in {"fal", "xai", "grok"} and "fal" in preferred_order:
+                    continue
+                preferred_order.append(provider_key)
+            provider_order = preferred_order or _configured_image_provider_order()
+        elif skeleton_wan_lock:
             # Strict skeleton mode must stay WAN-only.
             provider_order = ["wan22"]
         else:
@@ -18941,6 +19188,8 @@ def _build_skeleton_image_prompt(
     immutable = (str(immutable_context or "").strip() + " ") if immutable_context else ""
     delta = _sanitize_skeleton_scene_delta(str(visual_description or "").strip())
     explicit_outfit_request = bool(re.search(r"\b(suit|tuxedo|armor|uniform|costume|hoodie|jacket|dress|shirt|pants|coat|robe|scrubs|jersey)\b", delta, re.IGNORECASE))
+    named_human_lock = _named_human_subject_likeness_lock(delta, skeleton_mode=True)
+    supports_named_humans = bool(named_human_lock)
     object_lock = _scene_object_lock(delta)
     glow_lock = ""
     context_lock = _skeleton_scene_context_lock(delta)
@@ -18966,14 +19215,23 @@ def _build_skeleton_image_prompt(
         + glow_lock
         + context_lock + " "
         + framing_lock + " "
+        + (named_human_lock + " " if named_human_lock else "")
         + SKELETON_MASTER_CONSISTENCY_PROMPT + " "
         + "NON-NEGOTIABLE CHARACTER RULE: use the exact same canonical anatomical skeleton in every scene: ivory-white skull and bones, large realistic eyeballs with visible iris and wet reflective highlights, clearly visible translucent soft-tissue silhouette around torso/limbs, identical skull proportions and eye spacing. "
         + "COLOR/RENDER RULE: realistic photographic rendering with natural ivory bone tones; never x-ray, radiograph, CT, fluoroscopy, or neon-blue scan aesthetics. "
         + "EYE RULE: eyes must be realistic and non-glowing; no emissive, neon, laser, or light-emitting eyes. Any glow in scene is only from props/environment, never from eye sockets. "
         + "CANONICAL LOOK LOCK: this is NEVER a bare-bones model. A clear glass-like translucent human shell must visibly wrap all shown body regions (head, torso, arms, hands, pelvis, legs when visible) with bones clearly seen through it. "
         + "VISIBILITY LOCK: the translucent shell must be clearly noticeable at phone-screen size, with medium-opacity glass edges and subtle interior translucency around the skeleton form. "
-        + "ANATOMY LOCK: skull-only face geometry, never human skin/flesh face features. "
-        + "HAIR LOCK: no human hair, scalp, beard, eyebrows, eyelashes, wig, or hairstyle elements. "
+        + (
+            "ANATOMY LOCK: skull-only face geometry and no human skin or flesh face features apply only to the canonical skeleton; any explicitly named supporting human subject must keep a natural human face. "
+            if supports_named_humans
+            else "ANATOMY LOCK: skull-only face geometry, never human skin/flesh face features. "
+        )
+        + (
+            "HAIR LOCK: no human hair, scalp, beard, eyebrows, eyelashes, wig, or hairstyle elements apply only to the canonical skeleton; explicitly named supporting humans keep their real hair or facial hair. "
+            if supports_named_humans
+            else "HAIR LOCK: no human hair, scalp, beard, eyebrows, eyelashes, wig, or hairstyle elements. "
+        )
         + (
             "NON-NEGOTIABLE STYLE RULE: if the scene explicitly requests clothing, keep that wardrobe visible while preserving the same skeleton identity, translucent shell, and anatomy. "
             if explicit_outfit_request
@@ -18981,7 +19239,7 @@ def _build_skeleton_image_prompt(
         )
         + "COMPOSITION RULE: keep the skeleton prominent and instantly readable in vertical 9:16, but allow off-center placement and visible environment depth whenever that makes the beat clearer. The frame should feel designed, not generic. "
         + addon + immutable + skeleton_anchor + delta + " "
-        + SKELETON_IMAGE_SUFFIX
+        + _skeleton_image_suffix_for_scene(delta)
     )
 
 
