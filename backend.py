@@ -7007,11 +7007,30 @@ def _extract_numeric_metric(source: str, patterns: tuple[str, ...]) -> float | N
         if not match:
             continue
         raw = str(match.group(1) or "").replace(",", "").strip()
-        try:
-            return float(raw)
-        except Exception:
-            continue
+        parsed = _parse_compact_metric_number(raw)
+        if parsed is not None:
+            return parsed
     return None
+
+
+def _parse_compact_metric_number(raw: str) -> float | None:
+    text = str(raw or "").strip().lower().replace(",", "")
+    if not text:
+        return None
+    match = re.match(r"^(-?\d+(?:\.\d+)?)([kmb])?$", text)
+    if not match:
+        try:
+            return float(text)
+        except Exception:
+            return None
+    value = float(match.group(1))
+    suffix = str(match.group(2) or "").strip().lower()
+    multiplier = {
+        "k": 1_000.0,
+        "m": 1_000_000.0,
+        "b": 1_000_000_000.0,
+    }.get(suffix, 1.0)
+    return value * multiplier
 
 
 def _extract_duration_metric(source: str, patterns: tuple[str, ...]) -> int:
@@ -7026,6 +7045,90 @@ def _extract_duration_metric(source: str, patterns: tuple[str, ...]) -> int:
     return 0
 
 
+def _extract_analytics_text_metrics(extracted_text: str, source_bundle: dict | None = None) -> dict:
+    compact = re.sub(r"\s+", " ", _strip_model_reasoning_artifacts(extracted_text)).strip()
+    source_bundle = dict(source_bundle or {})
+    metrics: dict[str, float | int] = {}
+    if not compact:
+        return metrics
+
+    def _set_float(key: str, value: float | None, digits: int = 2) -> None:
+        if value is None:
+            return
+        metrics[key] = round(float(value), digits)
+
+    def _set_int(key: str, value: float | int | None) -> None:
+        if value is None:
+            return
+        metrics[key] = int(round(float(value)))
+
+    _set_float("ctr", _extract_numeric_metric(compact, (
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:impressions\s+)?click[- ]through rate",
+        r"(?:impressions\s+)?click[- ]through rate[^0-9]*(\d+(?:\.\d+)?)\s*%",
+        r"\bctr[^0-9]*(\d+(?:\.\d+)?)\s*%",
+    )), digits=2)
+    _set_float("average_viewed_pct", _extract_numeric_metric(compact, (
+        r"(\d+(?:\.\d+)?)\s*%\s*viewed",
+        r"average percentage viewed[^0-9]*(\d+(?:\.\d+)?)\s*%",
+        r"average viewed[^0-9]*(\d+(?:\.\d+)?)\s*%",
+    )), digits=2)
+    _set_int("impressions", _extract_numeric_metric(compact, (
+        r"impressions[^0-9]*(\d+(?:\.\d+)?\s*[kmb]?)\b",
+        r"(?<!:)(\d+(?:\.\d+)?\s*[kmb]?)\s+impressions\b",
+    )))
+    _set_int("views", _extract_numeric_metric(compact, (
+        r"(?<!:)(\d+(?:\.\d+)?\s*[kmb]?)\s+views\b",
+        r"views[^0-9]*(\d+(?:\.\d+)?\s*[kmb]?)\b",
+    )))
+    _set_float("watch_time_hours", _extract_numeric_metric(compact, (
+        r"watch time\s*\(hours\)[^0-9]*(\d+(?:\.\d+)?)",
+        r"watch time[^0-9]*(\d+(?:\.\d+)?)\s*hours?\b",
+    )), digits=2)
+
+    avg_view_duration_sec = _extract_duration_metric(compact, (
+        r"average view duration[^0-9]*([0-9:]{3,8})",
+        r"\bavd[^0-9]*([0-9:]{3,8})",
+    ))
+    if avg_view_duration_sec > 0:
+        metrics["average_view_duration_sec"] = int(avg_view_duration_sec)
+    elif metrics.get("watch_time_hours") and metrics.get("views"):
+        hours = float(metrics.get("watch_time_hours", 0.0) or 0.0)
+        views = int(metrics.get("views", 0) or 0)
+        if hours > 0 and views > 0:
+            metrics["average_view_duration_sec"] = int(round((hours * 3600.0) / views))
+
+    duration_sec = int(float(source_bundle.get("duration_sec", 0) or 0) or 0)
+    if not metrics.get("average_viewed_pct") and metrics.get("average_view_duration_sec") and duration_sec > 0:
+        metrics["average_viewed_pct"] = round((float(metrics["average_view_duration_sec"]) / max(duration_sec, 1)) * 100.0, 2)
+
+    traffic_patterns = {
+        "suggested_videos_pct": (r"suggested videos[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "browse_features_pct": (r"browse features[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "notifications_pct": (r"notifications[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "search_pct": (r"youtube search[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "other_youtube_features_pct": (r"other youtube features[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "mobile_phone_pct": (r"mobile phone[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "tablet_pct": (r"tablet[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "computer_pct": (r"computer[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+        "tv_pct": (r"\btv[^0-9]*(\d+(?:\.\d+)?)\s*%",),
+    }
+    for key, patterns in traffic_patterns.items():
+        _set_float(key, _extract_numeric_metric(compact, patterns), digits=1)
+
+    rank_match = re.search(r"\b(\d+)\s+of\s+(\d+)\b", compact, flags=re.IGNORECASE)
+    if rank_match:
+        try:
+            rank = int(rank_match.group(1))
+            cohort = int(rank_match.group(2))
+            if rank > 0 and cohort > 0:
+                metrics["performance_rank"] = rank
+                metrics["performance_cohort"] = cohort
+        except Exception:
+            pass
+
+    return metrics
+
+
 def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict | None = None) -> dict:
     text = _strip_model_reasoning_artifacts(extracted_text)
     compact = re.sub(r"\s+", " ", text).strip()
@@ -7037,6 +7140,7 @@ def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict 
             "retention_findings": [],
             "packaging_findings": [],
             "improvement_moves": [],
+            "metrics": {},
         }
 
     strongest_signals: list[str] = []
@@ -7045,33 +7149,37 @@ def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict 
     packaging_findings: list[str] = []
     improvement_moves: list[str] = []
     summary_parts: list[str] = []
-
-    ctr = _extract_numeric_metric(compact, (
-        r"(\d+(?:\.\d+)?)\s*%\s*(?:impressions\s+)?click[- ]through rate",
-        r"(?:impressions\s+)?click[- ]through rate[^0-9]*(\d+(?:\.\d+)?)\s*%",
-        r"\bctr[^0-9]*(\d+(?:\.\d+)?)\s*%",
-    ))
-    avg_viewed_pct = _extract_numeric_metric(compact, (
-        r"(\d+(?:\.\d+)?)\s*%\s*viewed",
-        r"average percentage viewed[^0-9]*(\d+(?:\.\d+)?)\s*%",
-    ))
-    impressions = _extract_numeric_metric(compact, (
-        r"(\d[\d,\.]*)\s+impressions\b",
-    ))
-    views = _extract_numeric_metric(compact, (
-        r"(\d[\d,\.]*)\s+views\b",
-    ))
-    avg_view_duration_sec = _extract_duration_metric(compact, (
-        r"average view duration[^0-9]*([0-9:]{3,8})",
-        r"\bavd[^0-9]*([0-9:]{3,8})",
-    ))
+    metrics = _extract_analytics_text_metrics(compact, source_bundle=source_bundle)
+    ctr = metrics.get("ctr")
+    avg_viewed_pct = metrics.get("average_viewed_pct")
+    impressions = metrics.get("impressions")
+    views = metrics.get("views")
+    avg_view_duration_sec = int(metrics.get("average_view_duration_sec", 0) or 0)
+    watch_time_hours = float(metrics.get("watch_time_hours", 0.0) or 0.0)
+    suggested_pct = metrics.get("suggested_videos_pct")
+    browse_pct = metrics.get("browse_features_pct")
+    mobile_phone_pct = metrics.get("mobile_phone_pct")
+    performance_rank = int(metrics.get("performance_rank", 0) or 0)
+    performance_cohort = int(metrics.get("performance_cohort", 0) or 0)
     visible_early_drop = re.search(r"\b(first\s+\d{1,3}\s+seconds?|drop(?:s|off)?\s+off\s+in\s+the\s+first\s+\d{1,3}\s+seconds?|dropped\s+off\s+in\s+the\s+first\s+\d{1,3}\s+seconds?)\b", compact, flags=re.IGNORECASE)
-    browse_features = bool(re.search(r"\bbrowse features\b", compact, flags=re.IGNORECASE))
+    browse_features = (
+        float(browse_pct or 0.0) > 0.0
+        if browse_pct is not None
+        else bool(re.search(r"\bbrowse features\b", compact, flags=re.IGNORECASE))
+    )
 
     if views:
         summary_parts.append(f"Visible analytics mention roughly {int(views):,} views.")
     if impressions:
         summary_parts.append(f"Visible analytics mention roughly {int(impressions):,} impressions.")
+    if watch_time_hours > 0:
+        summary_parts.append(f"Visible watch time is about {watch_time_hours:.1f} hours.")
+    if performance_rank > 0 and performance_cohort > 0:
+        summary_parts.append(f"The upload appears to be ranking about {performance_rank} of {performance_cohort} by early views.")
+        if performance_rank <= max(2, int(round(performance_cohort * 0.25))):
+            strongest_signals.append(f"Early rank around {performance_rank} of {performance_cohort} suggests this upload is outperforming most recent uploads in its first YouTube test window.")
+        elif performance_rank >= max(4, int(round(performance_cohort * 0.75))):
+            weak_points.append(f"Early rank around {performance_rank} of {performance_cohort} suggests the package is lagging behind recent channel baselines.")
     if ctr is not None:
         packaging_findings.append(f"Visible CTR is about {ctr:.1f}%.")
         if ctr >= 4.0:
@@ -7089,9 +7197,19 @@ def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict 
         video_duration_sec = int(float((source_bundle or {}).get("duration_sec", 0) or 0))
         if video_duration_sec > 0 and avg_view_duration_sec < max(45, int(video_duration_sec * 0.35)):
             weak_points.append("View duration is noticeably below the video length, so the structure needs faster progression and more payoff density.")
+    if suggested_pct is not None and float(suggested_pct) > 0.0:
+        packaging_findings.append(f"Suggested Videos are driving about {float(suggested_pct):.1f}% of visible traffic.")
+        if float(suggested_pct) >= 60.0:
+            strongest_signals.append("Most visible traffic is coming from Suggested Videos, so the topic is already matching adjacent viewer demand and YouTube is testing it in recommendation surfaces.")
+            improvement_moves.append("Double down on adjacent-video packaging: title, thumbnail, and opening should feel native to the videos YouTube is placing this beside.")
     if browse_features:
         strongest_signals.append("Browse Features appears in the analytics, which means the package earned home-surface distribution.")
         packaging_findings.append("The source reached Browse Features, so topic selection and packaging were strong enough to win distribution.")
+    if browse_pct is not None and float(browse_pct) <= 0.0:
+        weak_points.append("Browse Features traffic is effectively zero in the visible sample, so the package is not yet winning home-surface distribution.")
+    if mobile_phone_pct is not None and float(mobile_phone_pct) >= 70.0:
+        packaging_findings.append(f"Mobile phone watch share is about {float(mobile_phone_pct):.1f}%, so packaging and on-screen readability need to stay phone-first.")
+        improvement_moves.append("Keep thumbnails, hooks, subtitles, and key visuals optimized for a phone screen because most of the visible audience is mobile.")
     if visible_early_drop:
         retention_findings.append("The screenshot explicitly mentions an early drop-off in the opening section.")
         improvement_moves.append("Rewrite the intro so the first line names the payoff immediately instead of warming up too slowly.")
@@ -7110,6 +7228,7 @@ def _summarize_longform_analytics_text(extracted_text: str, source_bundle: dict 
         "retention_findings": _dedupe_clip_list(retention_findings, max_items=6),
         "packaging_findings": _dedupe_clip_list(packaging_findings, max_items=6),
         "improvement_moves": _dedupe_clip_list(improvement_moves, max_items=8),
+        "metrics": metrics,
     }
 
 
@@ -27048,6 +27167,83 @@ async def catalyst_hub_reference_video_analysis(
         raise HTTPException(500, _clip_text(f"Catalyst reference analysis failed: {e}", 220))
 
 
+@app.post("/api/catalyst/hub/reference-video-analysis/manual")
+async def catalyst_hub_reference_video_analysis_manual(
+    channel_id: str = Form(""),
+    workspace_id: str = Form("documentary"),
+    video_id: str = Form(""),
+    max_analysis_minutes: float = Form(CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES),
+    analytics_notes: str = Form(""),
+    transcript_text: str = Form(""),
+    analytics_images: list[UploadFile] = File([]),
+    user: dict = Depends(require_auth),
+):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    channel_id = str(channel_id or "").strip()
+    workspace_id = str(workspace_id or "documentary").strip().lower() or "documentary"
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
+        raise HTTPException(400, "Reference video analysis currently supports long-form workspaces only")
+    upload_dir = TEMP_DIR / "catalyst_reference_evidence"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_image_paths: list[str] = []
+    try:
+        for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
+            filename = str(getattr(analytics_image, "filename", "") or "").strip()
+            if not filename:
+                continue
+            ext = Path(filename).suffix.lower()
+            if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                ext = ".png"
+            saved_path = upload_dir / f"catalyst_ref_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
+            with open(saved_path, "wb") as fh:
+                while chunk := await analytics_image.read(1024 * 1024):
+                    fh.write(chunk)
+            if saved_path.exists() and saved_path.stat().st_size > 0:
+                saved_image_paths.append(str(saved_path))
+        try:
+            await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id)
+        except Exception:
+            pass
+        analysis_result = await _build_catalyst_reference_video_analysis(
+            user=user,
+            channel_id=channel_id,
+            workspace_id=workspace_id,
+            video_id=str(video_id or "").strip(),
+            max_analysis_minutes=max(
+                1.0,
+                min(float(max_analysis_minutes or CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES), CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES),
+            ),
+            analytics_notes=str(analytics_notes or "").strip(),
+            transcript_text=str(transcript_text or "").strip(),
+            analytics_image_paths=saved_image_paths,
+        )
+        payload = await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=False,
+            refresh_outcomes=False,
+        )
+        return {
+            "ok": True,
+            "analysis": analysis_result,
+            "payload": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Catalyst manual reference video analysis failed")
+        raise HTTPException(500, _clip_text(f"Catalyst manual reference analysis failed: {e}", 220))
+    finally:
+        for path in saved_image_paths:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 @app.post("/api/catalyst/hub/reference-video-analysis/clear")
 async def catalyst_hub_clear_reference_video_analysis(
     req: CatalystHubReferenceVideoClearRequest,
@@ -28804,7 +29000,17 @@ def _build_catalyst_reference_analysis_evidence(
                 if float(metrics.get("cuts_per_minute", 0.0) or 0.0) > 0
                 else ""
             ),
+            (
+                f"Connected-channel metrics show about {int(float(selected.get('impressions', 0) or 0))} impressions and {float(selected.get('watch_time_hours', 0.0) or 0.0):.1f} watch hours."
+                if int(float(selected.get("impressions", 0) or 0)) > 0 or float(selected.get("watch_time_hours", 0.0) or 0.0) > 0
+                else ""
+            ),
             (f"Connected-channel metrics for this video are {int(float(selected.get('views', 0) or 0))} views, {float(selected.get('average_view_percentage', 0.0) or 0.0):.2f}% average viewed, and {float(selected.get('impression_click_through_rate', 0.0) or 0.0):.2f}% CTR." if int(float(selected.get("views", 0) or 0)) > 0 or float(selected.get("average_view_percentage", 0.0) or 0.0) > 0 or float(selected.get("impression_click_through_rate", 0.0) or 0.0) > 0 else ""),
+            (
+                f"Average view duration is about {int(float(selected.get('average_view_duration_sec', 0) or 0) or 0) // 60}:{int(float(selected.get('average_view_duration_sec', 0) or 0) or 0) % 60:02d}."
+                if int(float(selected.get("average_view_duration_sec", 0) or 0) or 0) > 0
+                else ""
+            ),
             ("Catalyst extracted real audio/transcript context from the moving-video audit." if str(audio_summary or "").strip() else ""),
             ("Catalyst recovered transcript context from public or owned captions." if not str(audio_summary or "").strip() and str(transcript_excerpt or "").strip() else ""),
         ],
@@ -28854,8 +29060,11 @@ def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
             "title": _clip_text(str(payload.get("video_title", "") or "").strip(), 180),
             "url": str(payload.get("video_url", "") or "").strip(),
             "views": int(float(payload.get("views", 0) or 0) or 0),
+            "impressions": int(float(payload.get("impressions", 0) or 0) or 0),
+            "average_view_duration_sec": int(float(payload.get("average_view_duration_sec", 0) or 0) or 0),
             "average_view_percentage": round(float(payload.get("average_view_percentage", 0.0) or 0.0), 2),
             "impression_click_through_rate": round(float(payload.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "watch_time_hours": round(float(payload.get("watch_time_hours", 0.0) or 0.0), 2),
             "duration_sec": int(float(payload.get("duration_sec", 0) or 0) or 0),
         }
     analysis = _normalize_catalyst_reference_video_analysis(payload.get("analysis") or {})
@@ -28880,6 +29089,7 @@ def _catalyst_reference_video_analysis_public_view(raw: dict | None) -> dict:
             "limitations": list(analysis.get("limitations") or []),
             "confidence_label": str(analysis.get("confidence_label", "") or "").strip(),
             "analysis_mode_label": str(analysis.get("analysis_mode_label", "") or "").strip(),
+            "manual_evidence_summary": _clip_text(str((payload.get("evidence") or {}).get("manual_evidence_summary", "") or "").strip(), 320),
         },
         "evidence": evidence,
         "analyzed_at": float(payload.get("analyzed_at", 0.0) or 0.0),
@@ -28927,8 +29137,11 @@ def _reconcile_reference_video_analysis_with_inventory(raw: dict | None, channel
     payload["video_url"] = str(current_video.get("url", "") or "").strip()
     payload["duration_sec"] = int(current_video.get("duration_sec", 0) or 0)
     payload["views"] = int(current_video.get("views", 0) or 0)
+    payload["impressions"] = int(current_video.get("impressions", payload.get("impressions", 0)) or 0)
     payload["average_view_percentage"] = float(current_video.get("average_view_percentage", 0.0) or 0.0)
+    payload["average_view_duration_sec"] = int(current_video.get("average_view_duration_sec", payload.get("average_view_duration_sec", 0)) or 0)
     payload["impression_click_through_rate"] = float(current_video.get("impression_click_through_rate", 0.0) or 0.0)
+    payload["watch_time_hours"] = float(current_video.get("watch_time_hours", payload.get("watch_time_hours", 0.0)) or 0.0)
     return payload
 
 
@@ -29061,6 +29274,143 @@ def _heuristic_catalyst_reference_video_analysis(
     )
 
 
+def _apply_manual_operator_evidence_to_reference_video(
+    selected_video: dict | None,
+    source_bundle: dict | None,
+    operator_evidence: dict | None = None,
+) -> dict:
+    updated = dict(selected_video or {})
+    metrics = dict((operator_evidence or {}).get("metrics") or {})
+    if not metrics:
+        return updated
+    duration_sec = int(float(updated.get("duration_sec", (source_bundle or {}).get("duration_sec", 0)) or 0) or 0)
+    if int(float(metrics.get("views", 0) or 0) or 0) > 0:
+        updated["views"] = int(float(metrics.get("views", 0) or 0) or 0)
+    if int(float(metrics.get("impressions", 0) or 0) or 0) > 0:
+        updated["impressions"] = int(float(metrics.get("impressions", 0) or 0) or 0)
+    if float(metrics.get("ctr", 0.0) or 0.0) > 0:
+        updated["impression_click_through_rate"] = round(float(metrics.get("ctr", 0.0) or 0.0), 2)
+    if int(float(metrics.get("average_view_duration_sec", 0) or 0) or 0) > 0:
+        updated["average_view_duration_sec"] = int(float(metrics.get("average_view_duration_sec", 0) or 0) or 0)
+    if float(metrics.get("average_viewed_pct", 0.0) or 0.0) > 0:
+        updated["average_view_percentage"] = round(float(metrics.get("average_viewed_pct", 0.0) or 0.0), 2)
+    elif int(float(updated.get("average_view_duration_sec", 0) or 0) or 0) > 0 and duration_sec > 0:
+        updated["average_view_percentage"] = round((float(updated.get("average_view_duration_sec", 0) or 0.0) / max(duration_sec, 1)) * 100.0, 2)
+    if float(metrics.get("watch_time_hours", 0.0) or 0.0) > 0:
+        updated["watch_time_hours"] = round(float(metrics.get("watch_time_hours", 0.0) or 0.0), 2)
+    return updated
+
+
+def _merge_operator_evidence_into_reference_analysis(
+    *,
+    analysis: dict | None,
+    evidence: dict | None,
+    operator_evidence: dict | None = None,
+    analytics_notes: str = "",
+    transcript_text: str = "",
+    analytics_asset_count: int = 0,
+) -> tuple[dict, dict]:
+    merged_analysis = _normalize_catalyst_reference_video_analysis(analysis or {})
+    merged_evidence = dict(evidence or {})
+    operator_evidence = dict(operator_evidence or {})
+    if not operator_evidence and not analytics_notes and not transcript_text and int(analytics_asset_count or 0) <= 0:
+        return merged_analysis, merged_evidence
+
+    analytics_summary = _clip_text(str(operator_evidence.get("analytics_summary", "") or "").strip(), 320)
+    strongest_signals = [str(v).strip() for v in list(operator_evidence.get("strongest_signals") or []) if str(v).strip()]
+    weak_points = [str(v).strip() for v in list(operator_evidence.get("weak_points") or []) if str(v).strip()]
+    retention_findings = [str(v).strip() for v in list(operator_evidence.get("retention_findings") or []) if str(v).strip()]
+    packaging_findings = [str(v).strip() for v in list(operator_evidence.get("packaging_findings") or []) if str(v).strip()]
+    improvement_moves = [str(v).strip() for v in list(operator_evidence.get("improvement_moves") or []) if str(v).strip()]
+
+    manual_measured = _dedupe_clip_list(
+        [
+            (
+                f"Manual YouTube Studio evidence was analyzed from {int(analytics_asset_count)} screenshot"
+                f"{'' if int(analytics_asset_count) == 1 else 's'}."
+                if int(analytics_asset_count or 0) > 0
+                else ""
+            ),
+            ("Manual analytics notes were supplied by the operator." if str(analytics_notes or "").strip() else ""),
+            ("Manual transcript/context was supplied by the operator." if str(transcript_text or "").strip() else ""),
+            (f"Studio analytics summary: {analytics_summary}" if analytics_summary else ""),
+            *strongest_signals[:3],
+            *retention_findings[:2],
+            *packaging_findings[:2],
+        ],
+        max_items=8,
+    )
+    manual_limitations = _dedupe_clip_list(
+        [
+            *[str(v).strip() for v in list(merged_evidence.get("limitations") or []) if str(v).strip()],
+            ("Manual screenshot OCR is approximate and should be treated as operator evidence, not a direct YouTube API export." if int(analytics_asset_count or 0) > 0 else ""),
+        ],
+        max_items=8,
+    )
+    merged_evidence["measured_facts"] = _dedupe_clip_list(
+        [
+            *[str(v).strip() for v in list(merged_evidence.get("measured_facts") or []) if str(v).strip()],
+            *manual_measured,
+        ],
+        max_items=8,
+    )
+    merged_evidence["limitations"] = manual_limitations
+    merged_evidence["manual_evidence_summary"] = analytics_summary
+    merged_evidence["manual_asset_count"] = int(analytics_asset_count or 0)
+    merged_evidence["manual_transcript_supplied"] = bool(str(transcript_text or "").strip())
+    merged_evidence["honesty_note"] = _clip_text(
+        "Measured facts below can include manual YouTube Studio screenshots and operator-supplied transcript context when direct Google analytics access is unavailable. "
+        + str(merged_evidence.get("honesty_note", "") or ""),
+        320,
+    )
+
+    merged_analysis["measured_facts"] = _dedupe_preserve_order(
+        [
+            *[str(v).strip() for v in list(merged_analysis.get("measured_facts") or []) if str(v).strip()],
+            *manual_measured,
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    merged_analysis["limitations"] = _dedupe_preserve_order(
+        [
+            *[str(v).strip() for v in list(merged_analysis.get("limitations") or []) if str(v).strip()],
+            *manual_limitations,
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    merged_analysis["inferred_notes"] = _dedupe_preserve_order(
+        [
+            *[str(v).strip() for v in list(merged_analysis.get("inferred_notes") or []) if str(v).strip()],
+            ("Catalyst merged manual Studio screenshot evidence into this reference breakdown." if manual_measured else ""),
+        ],
+        max_items=8,
+        max_chars=180,
+    )
+    for key, additions, max_items in [
+        ("why_it_worked", strongest_signals, 8),
+        ("what_hurt_weaker_upload", weak_points, 8),
+        ("pacing_system", retention_findings, 8),
+        ("title_thumbnail_rules", packaging_findings, 8),
+        ("next_video_moves", improvement_moves, 8),
+    ]:
+        merged_analysis[key] = _dedupe_preserve_order(
+            [
+                *[str(v).strip() for v in list(merged_analysis.get(key) or []) if str(v).strip()],
+                *[str(v).strip() for v in list(additions or []) if str(v).strip()],
+            ],
+            max_items=max_items,
+            max_chars=180,
+        )
+    merged_analysis["honesty_note"] = _clip_text(
+        "This reference breakdown blends connected-channel data, sampled video evidence, and manual Studio screenshot/operator evidence when available. "
+        + str(merged_analysis.get("honesty_note", "") or ""),
+        320,
+    )
+    return merged_analysis, merged_evidence
+
+
 async def _persist_catalyst_reference_video_analysis(
     *,
     user_id: str,
@@ -29071,6 +29421,10 @@ async def _persist_catalyst_reference_video_analysis(
     frame_metrics: dict,
     analysis: dict,
     evidence: dict | None = None,
+    operator_evidence: dict | None = None,
+    analytics_notes: str = "",
+    transcript_text: str = "",
+    analytics_asset_count: int = 0,
 ) -> dict:
     memory_key = _catalyst_channel_memory_key(user_id, channel_id, workspace_id)
     async with _catalyst_memory_lock:
@@ -29085,14 +29439,21 @@ async def _persist_catalyst_reference_video_analysis(
                 "url": str(source_bundle.get("source_url", "") or _youtube_watch_url(str(selected_video.get("video_id", "") or ""))).strip(),
                 "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
                 "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
+                "impressions": int(float(selected_video.get("impressions", 0) or 0) or 0),
+                "average_view_duration_sec": int(float(selected_video.get("average_view_duration_sec", 0) or 0) or 0),
                 "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
                 "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+                "watch_time_hours": round(float(selected_video.get("watch_time_hours", 0.0) or 0.0), 2),
             },
             "transcript_excerpt": _clip_text(str(source_bundle.get("transcript_excerpt", "") or "").strip(), 2400),
             "public_summary": _clip_text(str(source_bundle.get("public_summary", "") or "").strip(), 480),
             "frame_metrics": dict(frame_metrics or {}),
             "analysis": dict(analysis or {}),
             "evidence": dict(evidence or {}),
+            "operator_evidence": dict(operator_evidence or {}),
+            "analytics_notes": _clip_text(str(analytics_notes or "").strip(), 2400),
+            "manual_transcript_excerpt": _clip_text(str(transcript_text or "").strip(), 2400),
+            "analytics_asset_count": int(analytics_asset_count or 0),
             "analyzed_at": time.time(),
         }
         updated["reference_video_analysis"] = {
@@ -29102,8 +29463,11 @@ async def _persist_catalyst_reference_video_analysis(
             "video_url": str(reference_video_payload["video"]["url"] or "").strip(),
             "duration_sec": int(reference_video_payload["video"]["duration_sec"] or 0),
             "views": int(reference_video_payload["video"]["views"] or 0),
+            "impressions": int(reference_video_payload["video"].get("impressions", 0) or 0),
             "average_view_percentage": float(reference_video_payload["video"]["average_view_percentage"] or 0.0),
+            "average_view_duration_sec": int(reference_video_payload["video"].get("average_view_duration_sec", 0) or 0),
             "impression_click_through_rate": float(reference_video_payload["video"]["impression_click_through_rate"] or 0.0),
+            "watch_time_hours": float(reference_video_payload["video"].get("watch_time_hours", 0.0) or 0.0),
         }
         updated["reference_summary"] = summary
         updated["last_reference_summary"] = summary
@@ -29182,6 +29546,9 @@ async def _build_catalyst_reference_video_analysis(
     workspace_id: str,
     video_id: str = "",
     max_analysis_minutes: float = CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES,
+    analytics_notes: str = "",
+    transcript_text: str = "",
+    analytics_image_paths: list[str] | None = None,
 ) -> dict:
     await _clear_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
@@ -29231,6 +29598,10 @@ async def _build_catalyst_reference_video_analysis(
         source_bundle = {"source_url": source_url}
     source_bundle["source_url"] = source_url
     source_bundle["source_url_video_id"] = selected_video_id
+    if transcript_text:
+        source_bundle["manual_transcript_excerpt"] = _clip_text(transcript_text, 12000)
+        if not str(source_bundle.get("transcript_excerpt", "") or "").strip():
+            source_bundle["transcript_excerpt"] = _clip_text(transcript_text, 12000)
     if oauth_access_token and selected_video_id:
         selected_video_meta = dict(selected_video or {})
         published_hint = str(
@@ -29260,6 +29631,23 @@ async def _build_catalyst_reference_video_analysis(
                     "impression_click_through_rate": round(float(metric_row.get("impressionClickThroughRate", selected_video.get("impression_click_through_rate", 0.0) or 0.0) or 0.0), 2),
                 }
             )
+
+    analytics_image_paths = [str(path).strip() for path in list(analytics_image_paths or []) if str(path).strip()]
+    operator_evidence = await _summarize_longform_operator_evidence(
+        transcript_text=transcript_text,
+        image_paths=analytics_image_paths,
+        source_bundle=source_bundle,
+    ) if analytics_image_paths or transcript_text else {}
+    selected_video = _apply_manual_operator_evidence_to_reference_video(
+        selected_video,
+        source_bundle,
+        operator_evidence,
+    )
+    operator_notes = _build_longform_operator_notes(
+        analytics_notes=analytics_notes,
+        transcript_text=transcript_text,
+        operator_evidence=operator_evidence,
+    )
 
     download = await _download_youtube_video_for_reference_analysis(source_url, work_dir / "video")
     download_info = dict(download.get("info") or {})
@@ -29360,6 +29748,7 @@ async def _build_catalyst_reference_video_analysis(
             ),
             ("Audio summary: " + audio_summary) if audio_summary else "",
             ("Frame metrics: " + json.dumps(frame_metrics, ensure_ascii=True)) if frame_metrics else "",
+            ("Manual operator evidence: " + _clip_text(operator_notes, 2200)) if operator_notes else "",
             ("Latest weak/current upload: " + _clip_text(str(latest_video.get("title", "") or "").strip(), 220)) if latest_video else "",
             ("Previous upload: " + _clip_text(str(previous_video.get("title", "") or "").strip(), 220)) if previous_video else "",
             ("Weakest recent package: " + _clip_text(str(worst_recent_video.get("title", "") or "").strip(), 220)) if worst_recent_video else "",
@@ -29400,6 +29789,14 @@ async def _build_catalyst_reference_video_analysis(
         audio_summary=audio_summary,
         heuristic_used=heuristic_used,
     )
+    analysis, evidence = _merge_operator_evidence_into_reference_analysis(
+        analysis=analysis,
+        evidence=evidence,
+        operator_evidence=operator_evidence,
+        analytics_notes=analytics_notes,
+        transcript_text=transcript_text,
+        analytics_asset_count=len(analytics_image_paths),
+    )
     updated_memory = await _persist_catalyst_reference_video_analysis(
         user_id=str(user.get("id", "") or "").strip(),
         channel_id=channel_id,
@@ -29409,6 +29806,10 @@ async def _build_catalyst_reference_video_analysis(
         frame_metrics=frame_metrics,
         analysis=analysis,
         evidence=evidence,
+        operator_evidence=operator_evidence,
+        analytics_notes=analytics_notes,
+        transcript_text=transcript_text,
+        analytics_asset_count=len(analytics_image_paths),
     )
     return {
         "video": {
@@ -29416,8 +29817,11 @@ async def _build_catalyst_reference_video_analysis(
             "title": _clip_text(str(selected_video.get("title", "") or source_bundle.get("title", "") or "").strip(), 180),
             "url": source_url,
             "views": int(float(selected_video.get("views", source_bundle.get("view_count", 0)) or 0) or 0),
+            "impressions": int(float(selected_video.get("impressions", 0) or 0) or 0),
+            "average_view_duration_sec": int(float(selected_video.get("average_view_duration_sec", 0) or 0) or 0),
             "average_view_percentage": round(float(selected_video.get("average_view_percentage", 0.0) or 0.0), 2),
             "impression_click_through_rate": round(float(selected_video.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "watch_time_hours": round(float(selected_video.get("watch_time_hours", 0.0) or 0.0), 2),
             "duration_sec": int(float(source_bundle.get("duration_sec", selected_video.get("duration_sec", 0)) or 0) or 0),
         },
         "frame_metrics": frame_metrics,

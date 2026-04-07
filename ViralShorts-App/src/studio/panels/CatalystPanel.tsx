@@ -75,8 +75,11 @@ type CatalystWorkspaceSnapshot = {
             title?: string;
             url?: string;
             views?: number;
+            impressions?: number;
+            average_view_duration_sec?: number;
             average_view_percentage?: number;
             impression_click_through_rate?: number;
+            watch_time_hours?: number;
             duration_sec?: number;
         };
         frame_metrics?: Record<string, any>;
@@ -89,6 +92,9 @@ type CatalystWorkspaceSnapshot = {
             inferred_notes?: string[];
             limitations?: string[];
             heuristic_used?: boolean;
+            manual_evidence_summary?: string;
+            manual_asset_count?: number;
+            manual_transcript_supplied?: boolean;
         };
         analysis?: {
             summary?: string;
@@ -98,6 +104,7 @@ type CatalystWorkspaceSnapshot = {
             measured_facts?: string[];
             inferred_notes?: string[];
             limitations?: string[];
+            manual_evidence_summary?: string;
             why_it_worked?: string[];
             what_hurt_weaker_upload?: string[];
             hook_system?: string[];
@@ -232,6 +239,9 @@ export default function CatalystPanel() {
     const [analyzingReference, setAnalyzingReference] = useState(false);
     const [clearingReference, setClearingReference] = useState(false);
     const [selectedReferenceVideoId, setSelectedReferenceVideoId] = useState('');
+    const [referenceAnalyticsNotes, setReferenceAnalyticsNotes] = useState('');
+    const [referenceTranscriptText, setReferenceTranscriptText] = useState('');
+    const [referenceAnalyticsImages, setReferenceAnalyticsImages] = useState<File[]>([]);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
     const [stoppingSessionId, setStoppingSessionId] = useState('');
@@ -480,19 +490,39 @@ export default function CatalystPanel() {
         setAnalyzingReference(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/catalyst/hub/reference-video-analysis`, {
-                method: 'POST',
-                headers: jsonHeaders,
-                body: JSON.stringify({
-                    channel_id: selectedChannelId,
-                    workspace_id: selectedWorkspaceId,
-                    video_id: selectedReferenceVideoId || '',
-                    max_analysis_minutes: 20.0,
-                }),
-            });
+            const hasManualReferenceEvidence = Boolean(
+                referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0
+            );
+            const res = hasManualReferenceEvidence
+                ? await (async () => {
+                    const formData = new FormData();
+                    formData.append('channel_id', selectedChannelId);
+                    formData.append('workspace_id', selectedWorkspaceId);
+                    formData.append('video_id', selectedReferenceVideoId || '');
+                    formData.append('max_analysis_minutes', '20');
+                    if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
+                    if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
+                    referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
+                    return fetch(`${API}/api/catalyst/hub/reference-video-analysis/manual`, {
+                        method: 'POST',
+                        headers: bearerHeaders,
+                        body: formData,
+                    });
+                })()
+                : await fetch(`${API}/api/catalyst/hub/reference-video-analysis`, {
+                    method: 'POST',
+                    headers: jsonHeaders,
+                    body: JSON.stringify({
+                        channel_id: selectedChannelId,
+                        workspace_id: selectedWorkspaceId,
+                        video_id: selectedReferenceVideoId || '',
+                        max_analysis_minutes: 20.0,
+                    }),
+                });
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to analyze the channel reference video'));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
+            if (hasManualReferenceEvidence) setReferenceAnalyticsImages([]);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to analyze the channel reference video'));
         } finally {
@@ -516,6 +546,7 @@ export default function CatalystPanel() {
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to clear the channel reference video'));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
+            setReferenceAnalyticsImages([]);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to clear the channel reference video'));
         } finally {
@@ -620,6 +651,11 @@ export default function CatalystPanel() {
     }, [referenceVideoAnalysis?.video?.video_id, uploadedVideoOptions]);
 
     const canAnalyzeReferenceVideo = uploadedVideoOptions.length > 0 && !analyzingReference && !clearingReference;
+    const hasManualReferenceEvidence = Boolean(referenceAnalyticsNotes.trim() || referenceTranscriptText.trim() || referenceAnalyticsImages.length > 0);
+    const referenceManualEvidenceSummary = useMemo(
+        () => normalizeCatalystText(String(referenceAnalysis?.manual_evidence_summary || referenceEvidence?.manual_evidence_summary || '').trim()),
+        [referenceAnalysis?.manual_evidence_summary, referenceEvidence?.manual_evidence_summary]
+    );
 
     if (!session) return null;
 
@@ -956,11 +992,75 @@ export default function CatalystPanel() {
                                                 className="inline-flex items-center justify-center gap-2 rounded-2xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm font-semibold text-violet-100 transition hover:border-violet-400/50 hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                                             >
                                                 {analyzingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
-                                                {selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
+                                                {hasManualReferenceEvidence ? 'Analyze With Studio Evidence' : selectedReferenceVideoId ? 'Analyze Selected' : 'Analyze Strongest Upload'}
                                             </button>
                                         </div>
                                         <div className="mt-2 text-xs text-gray-500">
                                             Leave the first option selected to let Catalyst pick the strongest measured upload, or override it with a specific video.
+                                        </div>
+                                        <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                                            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/70">Manual Studio Evidence</div>
+                                            <p className="mt-2 text-sm text-cyan-50/90">
+                                                Use YouTube Studio screenshots and notes here while Google OAuth is down. Catalyst will OCR visible metrics like impressions, CTR, AVD, traffic sources, device split, and early rank.
+                                            </p>
+                                            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                                                <textarea
+                                                    value={referenceAnalyticsNotes}
+                                                    onChange={(e) => setReferenceAnalyticsNotes(e.target.value)}
+                                                    rows={5}
+                                                    placeholder="Optional: paste plain-English observations like '1 of 8, Suggested Videos 92.9%, CTR 1.9%, AVD 4:03, mobile 94.7%'."
+                                                    className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
+                                                />
+                                                <textarea
+                                                    value={referenceTranscriptText}
+                                                    onChange={(e) => setReferenceTranscriptText(e.target.value)}
+                                                    rows={5}
+                                                    placeholder="Optional: paste the intro transcript or key beats so Catalyst can connect packaging and retention to the actual story structure."
+                                                    className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-cyan-400/50"
+                                                />
+                                            </div>
+                                            <div className="mt-3 flex flex-wrap items-center gap-3">
+                                                <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm font-medium text-white transition hover:border-white/[0.18] hover:bg-white/[0.06]">
+                                                    <input
+                                                        type="file"
+                                                        accept="image/png,image/jpeg,image/webp"
+                                                        multiple
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            const incoming = Array.from(e.target.files || []);
+                                                            if (incoming.length) setReferenceAnalyticsImages((prev) => [...prev, ...incoming].slice(0, 24));
+                                                            e.currentTarget.value = '';
+                                                        }}
+                                                    />
+                                                    Upload Studio Screenshots
+                                                </label>
+                                                <span className="text-xs text-gray-400">
+                                                    {referenceAnalyticsImages.length} screenshot{referenceAnalyticsImages.length === 1 ? '' : 's'} selected
+                                                </span>
+                                                {referenceAnalyticsImages.length > 0 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setReferenceAnalyticsImages([])}
+                                                        className="text-xs font-semibold text-gray-400 transition hover:text-white"
+                                                    >
+                                                        Clear screenshots
+                                                    </button>
+                                                )}
+                                            </div>
+                                            {referenceAnalyticsImages.length > 0 && (
+                                                <div className="mt-3 flex flex-wrap gap-2">
+                                                    {referenceAnalyticsImages.slice(0, 8).map((file, idx) => (
+                                                        <span key={`${file.name}_${idx}`} className="rounded-full border border-white/[0.1] bg-black/20 px-3 py-1 text-xs text-gray-300">
+                                                            {file.name}
+                                                        </span>
+                                                    ))}
+                                                    {referenceAnalyticsImages.length > 8 && (
+                                                        <span className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1 text-xs text-gray-500">
+                                                            +{referenceAnalyticsImages.length - 8} more
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -989,11 +1089,19 @@ export default function CatalystPanel() {
                                                 {referenceEvidence?.honesty_note || referenceAnalysis?.honesty_note}
                                             </div>
                                         )}
-                                        {(referenceVideoAnalysis.video?.views || referenceVideoAnalysis.video?.average_view_percentage || referenceVideoAnalysis.video?.impression_click_through_rate) ? (
-                                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                        {referenceManualEvidenceSummary && (
+                                            <div className="mt-3 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+                                                {referenceManualEvidenceSummary}
+                                            </div>
+                                        )}
+                                        {(referenceVideoAnalysis.video?.views || referenceVideoAnalysis.video?.impressions || referenceVideoAnalysis.video?.average_view_duration_sec || referenceVideoAnalysis.video?.average_view_percentage || referenceVideoAnalysis.video?.impression_click_through_rate || referenceVideoAnalysis.video?.watch_time_hours) ? (
+                                            <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                                                 <StatCard label="Views" value={String(referenceVideoAnalysis.video?.views || 0)} />
+                                                <StatCard label="Impressions" value={referenceVideoAnalysis.video?.impressions ? String(referenceVideoAnalysis.video.impressions) : 'N/A'} />
+                                                <StatCard label="Avg View Duration" value={referenceVideoAnalysis.video?.average_view_duration_sec ? `${Math.floor(Number(referenceVideoAnalysis.video.average_view_duration_sec) / 60)}:${String(Math.floor(Number(referenceVideoAnalysis.video.average_view_duration_sec) % 60)).padStart(2, '0')}` : 'N/A'} />
                                                 <StatCard label="Avg Viewed" value={referenceVideoAnalysis.video?.average_view_percentage ? `${Number(referenceVideoAnalysis.video.average_view_percentage).toFixed(2)}%` : 'N/A'} />
                                                 <StatCard label="CTR" value={referenceVideoAnalysis.video?.impression_click_through_rate ? `${Number(referenceVideoAnalysis.video.impression_click_through_rate).toFixed(2)}%` : 'N/A'} />
+                                                <StatCard label="Watch Time" value={referenceVideoAnalysis.video?.watch_time_hours ? `${Number(referenceVideoAnalysis.video.watch_time_hours).toFixed(1)}h` : 'N/A'} />
                                             </div>
                                         ) : null}
                                         <DetailList title="Measured Reference Evidence" values={referenceMeasuredFacts} accent="emerald" />
