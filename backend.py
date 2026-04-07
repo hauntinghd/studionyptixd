@@ -12774,6 +12774,14 @@ def _extract_word_timings(original_text: str, alignment: dict) -> list:
     return words
 
 
+def _seconds_to_ass_timestamp(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int((seconds % 1) * 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
 def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str = "720p",
                            video_width: int = 0, video_height: int = 0, template: str = "") -> str:
     """Generate an ASS subtitle file with rapid single-word captions.
@@ -12898,6 +12906,142 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # â”€â”€â”€ ComfyUI Image Generation with Upscaling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+
+def generate_ass_scene_subtitles(
+    scenes: list,
+    output_path: str,
+    resolution: str = "720p",
+    video_width: int = 0,
+    video_height: int = 0,
+    template: str = "",
+) -> str:
+    if video_width and video_height:
+        res_w = int(video_width)
+        res_h = int(video_height)
+        is_landscape = res_w > res_h
+    else:
+        cfg = RESOLUTION_CONFIGS.get(resolution, RESOLUTION_CONFIGS.get("720p", {}))
+        res_w = int(cfg.get("output_width", 720) or 720)
+        res_h = int(cfg.get("output_height", 1280) or 1280)
+        is_landscape = res_w > res_h
+
+    skeleton_pro_style = (template == "skeleton" and not is_landscape)
+    is_1080 = str(resolution).startswith("1080p")
+
+    if skeleton_pro_style:
+        font_size = 84 if is_1080 else 60
+        outline = 3 if is_1080 else 2
+        shadow = 2
+        margin_v = int(res_h * 0.14)
+        spacing = 0
+        scale_xy = 100
+        primary = "&H00FFFFFF"
+        secondary = "&H00E7F4FF"
+        outline_color = "&H00303030"
+        back_color = "&H70000000"
+    elif is_landscape:
+        font_size = max(36, int(res_h * 0.045))
+        outline = 3
+        shadow = 1
+        margin_v = int(res_h * 0.08)
+        spacing = 2
+        scale_xy = 105
+        primary = "&H00FFFFFF"
+        secondary = "&H000000FF"
+        outline_color = "&H00000000"
+        back_color = "&H96000000"
+    else:
+        font_size = 72 if resolution == "1080p" else 52
+        outline = 5 if resolution == "1080p" else 4
+        shadow = 2
+        margin_v = int(res_h * 0.25)
+        spacing = 2
+        scale_xy = 105
+        primary = "&H00FFFFFF"
+        secondary = "&H000000FF"
+        outline_color = "&H00000000"
+        back_color = "&H96000000"
+
+    header = f"""[Script Info]
+Title: NYPTID Captions
+ScriptType: v4.00+
+PlayResX: {res_w}
+PlayResY: {res_h}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Word,Noto Sans,{font_size},{primary},{secondary},{outline_color},{back_color},-1,0,0,0,{scale_xy},{scale_xy},{spacing},0,1,{outline},{shadow},2,20,20,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def split_caption_chunks(text: str) -> list[str]:
+        clean = " ".join(str(text or "").split())
+        if not clean:
+            return []
+        words = clean.split(" ")
+        max_words = 6 if skeleton_pro_style else 5
+        max_chars = 34 if skeleton_pro_style else 28
+        chunks: list[str] = []
+        current: list[str] = []
+        for word in words:
+            candidate = current + [word]
+            candidate_text = " ".join(candidate)
+            if current and (len(candidate) > max_words or len(candidate_text) > max_chars):
+                chunks.append(" ".join(current))
+                current = [word]
+            else:
+                current = candidate
+        if current:
+            chunks.append(" ".join(current))
+        return chunks[:3]
+
+    events: list[str] = []
+    cursor = 0.0
+    for raw_scene in scenes or []:
+        scene = dict(raw_scene or {})
+        try:
+            duration = max(0.6, float(scene.get("duration_sec", 5.0) or 5.0))
+        except Exception:
+            duration = 5.0
+        caption_source = (
+            str(scene.get("text_overlay", "") or "").strip()
+            or str(scene.get("narration", "") or "").strip()
+        )
+        chunks = split_caption_chunks(caption_source)
+        if not chunks:
+            cursor += duration
+            continue
+        chunk_duration = max(0.35, duration / max(len(chunks), 1))
+        for idx, chunk in enumerate(chunks):
+            start = cursor + (idx * chunk_duration)
+            end = (cursor + duration - 0.04) if idx == len(chunks) - 1 else (cursor + ((idx + 1) * chunk_duration) - 0.04)
+            if end <= start:
+                end = start + 0.2
+            clean_chunk = chunk.replace("\\", "").replace("{", "").replace("}", "")
+            safe_chunk = clean_chunk if skeleton_pro_style else clean_chunk.upper()
+            if skeleton_pro_style:
+                pop_in = r"{\blur0.6\fad(40,60)\fscx100\fscy100\t(0,90,\fscx104\fscy104)\t(90,180,\fscx100\fscy100)}"
+            else:
+                pop_in = r"{\fscx118\fscy118\t(0,70,\fscx105\fscy105)}"
+            events.append(
+                f"Dialogue: 0,{_seconds_to_ass_timestamp(start)},{_seconds_to_ass_timestamp(end)},Word,,0,0,0,,{pop_in}{safe_chunk}"
+            )
+        cursor += duration
+
+    if not events:
+        return ""
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write("\n".join(events))
+        f.write("\n")
+
+    log.info(f"ASS scene subtitle file generated: {output_path} ({len(events)} timed caption beats)")
+    return output_path
 
 
 async def generate_sfx_for_scene(scene_desc: str, template: str, duration_sec: float, output_path: str) -> str:
@@ -17333,6 +17477,134 @@ async def kling_clip_to_scene(kling_clip: str, duration: float, output_clip: str
     return output_clip
 
 
+def _estimate_short_audio_duration_seconds(scenes: list, ending_buffer_sec: float = 0.8) -> float:
+    total = 0.0
+    for raw_scene in scenes or []:
+        try:
+            duration = float((raw_scene or {}).get("duration_sec", 5.0) or 5.0)
+        except Exception:
+            duration = 5.0
+        total += max(0.5, duration)
+    total += max(0.0, float(ending_buffer_sec or 0.0))
+    return max(0.8, round(total, 2))
+
+
+async def _generate_silent_audio_track(duration_sec: float, output_path: str) -> str:
+    duration = max(0.5, float(duration_sec or 0.5))
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=mono",
+        "-t",
+        str(duration),
+        "-c:a",
+        "libmp3lame",
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+        output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not _audio_track_exists(output_path):
+        err = (stderr.decode(errors="ignore") or "")[-200:]
+        raise RuntimeError(f"Silent audio track generation failed: {err}")
+    return output_path
+
+
+async def _prepare_short_audio_assets(
+    scenes: list,
+    *,
+    audio_path: str,
+    subtitle_path: str = "",
+    template: str,
+    language: str = "en",
+    override_voice_id: str = "",
+    override_speed: float | None = None,
+    subtitles_enabled: bool = True,
+    resolution: str = "720p",
+    job_id: str = "",
+    full_narration_override: str = "",
+) -> dict:
+    full_narration = str(full_narration_override or "").strip()
+    if not full_narration:
+        full_narration = " ".join(
+            str((scene or {}).get("narration", "") or "").strip()
+            for scene in scenes or []
+        ).strip()
+    word_timings: list[dict] = []
+    generated_subtitle_path = ""
+    audio_warning = ""
+    audio_mode = "voiceover"
+
+    if full_narration:
+        try:
+            vo_result = await generate_voiceover(
+                full_narration,
+                audio_path,
+                template=template,
+                language=language,
+                override_voice_id=override_voice_id,
+                override_speed=override_speed,
+            )
+            audio_path = str(vo_result.get("audio_path", audio_path) or audio_path)
+            word_timings = list(vo_result.get("word_timings", []) or [])
+            audio_mode = str(vo_result.get("provider", "") or "voiceover")
+        except Exception as exc:
+            audio_mode = "silent_fallback"
+            audio_warning = _clip_text(
+                f"Voice generation unavailable; rendered with caption/SFX fallback instead ({type(exc).__name__}: {exc})",
+                220,
+            )
+            log.warning("[%s] Voice generation failed; using silent track fallback: %s", job_id or "short", exc)
+            await _generate_silent_audio_track(
+                _estimate_short_audio_duration_seconds(scenes),
+                audio_path,
+            )
+    else:
+        audio_mode = "silent_no_narration"
+        await _generate_silent_audio_track(
+            _estimate_short_audio_duration_seconds(scenes),
+            audio_path,
+        )
+
+    if subtitles_enabled and subtitle_path:
+        try:
+            if word_timings:
+                generate_ass_subtitles(
+                    word_timings,
+                    subtitle_path,
+                    resolution=resolution,
+                    template=template,
+                )
+                generated_subtitle_path = subtitle_path if Path(subtitle_path).exists() else ""
+            else:
+                generated_subtitle_path = generate_ass_scene_subtitles(
+                    scenes,
+                    subtitle_path,
+                    resolution=resolution,
+                    template=template,
+                ) or ""
+        except Exception as subtitle_exc:
+            log.warning("[%s] Subtitle generation failed (non-fatal): %s", job_id or "short", subtitle_exc)
+            generated_subtitle_path = ""
+
+    return {
+        "audio_path": audio_path,
+        "word_timings": word_timings,
+        "subtitle_path": generated_subtitle_path,
+        "audio_mode": audio_mode,
+        "audio_warning": audio_warning,
+        "full_narration": full_narration,
+    }
+
+
 async def _merge_sfx_track(sfx_paths: list[str], scenes: list, output_path: str) -> str:
     """Concatenate per-scene SFX clips into one continuous audio track.
     Pads missing scenes with silence to keep timing aligned."""
@@ -19668,25 +19940,28 @@ async def run_generation_pipeline(
 
         _job_set_stage(job_id, "generating_voice", 70)
         log.info(f"[{job_id}] Generating voiceover...")
-
-        full_narration = " ".join(s.get("narration", "") for s in scenes)
-        audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(
-            full_narration,
-            audio_path,
+        audio_assets = await _prepare_short_audio_assets(
+            scenes,
+            audio_path=str(TEMP_DIR / (job_id + "_voice.mp3")),
+            subtitle_path=str(TEMP_DIR / (job_id + "_captions.ass")),
             template=template,
             language=language,
             override_voice_id=voice_id,
             override_speed=voice_speed,
+            subtitles_enabled=True,
+            resolution=resolution,
+            job_id=job_id,
+            full_narration_override="",
         )
-        audio_path = vo_result["audio_path"]
-        word_timings = vo_result.get("word_timings", [])
-
-        subtitle_path = None
+        audio_path = str(audio_assets.get("audio_path", "") or "")
+        word_timings = list(audio_assets.get("word_timings", []) or [])
+        subtitle_path = str(audio_assets.get("subtitle_path", "") or "") or None
+        jobs[job_id]["audio_mode"] = str(audio_assets.get("audio_mode", "") or "")
+        jobs[job_id]["audio_warning"] = str(audio_assets.get("audio_warning", "") or "")
         if word_timings:
-            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words ({lang_name})")
+        elif subtitle_path:
+            log.info(f"[{job_id}] Scene-timed captions generated without voice timestamps")
 
         sound_mix_profile = _creative_template_sound_mix_profile(template)
         sfx_paths = []
@@ -25511,23 +25786,24 @@ async def _run_creative_pipeline(
             scene_assets.append(asset)
 
         _job_set_stage(job_id, "generating_voice", 70)
-        full_narration = session.get("narration", "") or " ".join(s.get("narration", "") for s in scenes)
-        audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(
-            full_narration,
-            audio_path,
+        audio_assets = await _prepare_short_audio_assets(
+            scenes,
+            audio_path=str(TEMP_DIR / (job_id + "_voice.mp3")),
+            subtitle_path=str(TEMP_DIR / (job_id + "_captions.ass")),
             template=template,
             language=language,
             override_voice_id=voice_id,
             override_speed=voice_speed,
+            subtitles_enabled=subtitles_enabled,
+            resolution=resolution,
+            job_id=job_id,
+            full_narration_override=str(session.get("narration", "") or ""),
         )
-        audio_path = vo_result["audio_path"]
-        word_timings = vo_result.get("word_timings", [])
-
-        subtitle_path = None
-        if subtitles_enabled and word_timings:
-            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
-            generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
+        audio_path = str(audio_assets.get("audio_path", "") or "")
+        word_timings = list(audio_assets.get("word_timings", []) or [])
+        subtitle_path = str(audio_assets.get("subtitle_path", "") or "") or None
+        jobs[job_id]["audio_mode"] = str(audio_assets.get("audio_mode", "") or "")
+        jobs[job_id]["audio_warning"] = str(audio_assets.get("audio_warning", "") or "")
 
         sound_mix_profile = _creative_template_sound_mix_profile(template)
         sfx_paths = []
