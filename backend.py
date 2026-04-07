@@ -1082,7 +1082,9 @@ def _youtube_active_oauth_mode(preferred_mode: str | None = None) -> str:
     if normalized == "web":
         return "web" if _youtube_web_auth_configured() else ""
     if normalized == "installed":
-        return "installed" if _youtube_installed_auth_configured() else ""
+        if _youtube_installed_auth_configured():
+            return "installed"
+        return "web" if _youtube_web_auth_configured() else ""
     if _youtube_web_auth_configured():
         return "web"
     if _youtube_installed_auth_configured():
@@ -1913,6 +1915,14 @@ LONGFORM_3D_DOC_VISUAL_DIRECTIVE = (
     "This should feel like elite faceless YouTube documentary 3D: more designed, more intentional, more motion-graphics-aware, and more obviously CG. "
     "Avoid gritty street-photo realism, random warehouses, candid live-action film stills, cluttered lab repetition, medical-textbook rendering, floating machine hero objects, or generic moody humans unless the beat absolutely requires a person."
 )
+LONGFORM_3D_CRIME_DOC_VISUAL_DIRECTIVE = (
+    "3D crime-case documentary style lock: premium stylized 3D true-crime/case-breakdown render, not live-action photography. "
+    "Use designed evidence environments, source-capture framing, court and studio consequence scenes, case-board composition, phone and records logic, "
+    "timeline-map staging, surveillance monitors, photoreal named-human pressure scenes, and one dominant contradiction per frame. "
+    "This should feel like an expensive faceless YouTube case breakdown: editorial, evidence-led, human-scale, and obviously CG without looking like a random boardroom slideshow. "
+    "Bias toward real-life human faces, hands, posture, and evidence handling whenever the beat involves a public figure or named participant. "
+    "Avoid empty archive rooms, untouched dossier tables, generic corporate meetings, skeleton crowds, x-ray humans, sterile labs, floating machine props, and readable wall text or UI text."
+)
 LONGFORM_3D_PSYCHOLOGY_DOC_VISUAL_DIRECTIVE = (
     "3D psychology documentary style lock: premium stylized 3D faceless documentary render about hidden behavior, not live-action photography. "
     "Use designed psychological environments, clean focal hierarchy, controlled dark-stage contrast, elegant surveillance and dossier framing, mirror or split-self reversals, "
@@ -1927,9 +1937,15 @@ def _longform_is_horror_tone(tone: str) -> bool:
 
 
 def _longform_prefers_3d_documentary_visuals(template: str, format_preset: str = "") -> bool:
-    if str(template or "").strip().lower() != "story":
+    template_key = str(template or "").strip().lower()
+    preset_key = str(format_preset or "").strip().lower()
+    if preset_key not in {"explainer", "documentary", "recap"}:
         return False
-    return str(format_preset or "").strip().lower() in {"explainer", "documentary", "recap"}
+    if template_key == "story":
+        return True
+    if template_key == "skeleton":
+        return preset_key in {"explainer", "documentary"}
+    return False
 
 
 def _longform_default_art_style(template: str, format_preset: str = "") -> str:
@@ -1949,14 +1965,15 @@ def _longform_tone_locked_visual_description(
     base = str(visual_description or "").strip()
     lower = base.lower()
     if _longform_prefers_3d_documentary_visuals(template, format_preset) and "3d documentary style lock:" not in lower:
+        documentary_archetype = _longform_documentary_archetype(
+            format_preset=format_preset,
+            visual_description=base,
+        )
         doc_visual_directive = (
             LONGFORM_3D_PSYCHOLOGY_DOC_VISUAL_DIRECTIVE
-            if _longform_prefers_psychology_documentary_visuals(
-                visual_description=base,
-                tone=tone,
-                template=template,
-                format_preset=format_preset,
-            )
+            if documentary_archetype == "psychology_documentary"
+            else LONGFORM_3D_CRIME_DOC_VISUAL_DIRECTIVE
+            if documentary_archetype == "crime_documentary"
             else LONGFORM_3D_DOC_VISUAL_DIRECTIVE
         )
         base = (base + " " + doc_visual_directive).strip()
@@ -4103,6 +4120,43 @@ def _named_human_subject_likeness_lock(*texts: str, skeleton_mode: bool = False)
     return lock
 
 
+def _longform_named_human_priority_lock(
+    *texts: str,
+    template: str = "",
+    archetype_key: str = "",
+) -> str:
+    subjects = _extract_likely_named_human_subjects(*texts, max_items=3)
+    if not subjects:
+        return ""
+    subject_list = _human_subject_list(subjects)
+    archetype = str(archetype_key or "").strip().lower()
+    if archetype == "crime_documentary":
+        scene_rule = (
+            "Keep the named human as the dominant focal subject in a premium medium shot, close-up, or over-shoulder evidence interaction. "
+            "Evidence boards, maps, monitors, phones, and paperwork must support the person, not replace them."
+        )
+    elif archetype == "psychology_documentary":
+        scene_rule = (
+            "Keep the named human as the dominant focal subject in a premium close-up or human-pressure interaction. "
+            "Rooms, symbols, and props must stay secondary to readable face, posture, and consequence."
+        )
+    else:
+        scene_rule = (
+            "Keep the named human as the dominant focal subject instead of generic rooms, props, or abstract system diagrams."
+        )
+    skeleton_rule = ""
+    if str(template or "").strip().lower() == "skeleton":
+        skeleton_rule = (
+            " If the canonical skeleton host appears, keep it secondary, brief, and clearly separate; omit it entirely when the beat is about the real person."
+        )
+    return (
+        f"REAL HUMAN PRIORITY: if {subject_list} appears in this beat, render {subject_list} as the main subject with accurate face structure, skin tone, age cues, body build, "
+        "hair or facial hair, tattoos, and signature styling. "
+        f"{scene_rule}{skeleton_rule} "
+        "No mannequin faces, no anonymous stock-person substitutions, no waxy skin, and no deformed eyes or hands."
+    ).strip()
+
+
 def _skeleton_scene_supporting_humans_requested(*texts: str) -> bool:
     return bool(_extract_likely_named_human_subjects(*texts, max_items=1))
 
@@ -5148,6 +5202,7 @@ def _image_quality_gate(
     ok = score >= threshold
     t = str(template or "").strip().lower()
     if t == "skeleton":
+        prompt_lower = str(prompt or "").strip().lower()
         notes = set(str(n or "").strip().lower() for n in list((qa or {}).get("notes", []) or []))
         hard_fail = {
             "not_skeleton_structure",
@@ -5155,6 +5210,10 @@ def _image_quality_gate(
             "missing_translucent_shell",
             "shell_not_visible_enough",
         }
+        documentary_case_prompt = bool(re.search(r"\b(documentary|crime|case|court|evidence|timeline|surveillance|records|source-capture|true-crime)\b", prompt_lower))
+        if documentary_case_prompt and not notes.intersection(hard_fail):
+            threshold = min(threshold, 53.0 if has_reference else 51.0)
+            ok = score >= threshold
         if notes.intersection(hard_fail):
             ok = False
     return ok, threshold
@@ -12586,9 +12645,10 @@ def _build_longform_scene_execution_prompt(
                 topic=topic,
                 input_title=input_title,
                 archetype_key=documentary_archetype,
+                template=template,
             )
         documentary_visual_description = re.sub(
-            r"^Fern-grade premium 3D (psychology|systems) documentary scene,\s*obviously CG,[^.]+\.\s*",
+            r"^Fern-grade premium 3D (psychology|systems|crime-case) documentary scene,\s*obviously CG,[^.]+\.\s*",
             "",
             str(documentary_visual_description or "").strip(),
             flags=re.IGNORECASE,
@@ -12596,6 +12656,8 @@ def _build_longform_scene_execution_prompt(
         documentary_prefix = (
             "Fern-grade premium 3D psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
             if documentary_archetype == "psychology_documentary"
+            else "Fern-grade premium 3D crime-case documentary scene, obviously CG, evidence-first, human-scale, and built around real case material. No live-action photography, no generic boardroom filler, no untouched dossier table, and no multi-skeleton crowd."
+            if documentary_archetype == "crime_documentary"
             else "Fern-grade premium 3D systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
         )
         if str(documentary_visual_description or "").strip().lower().startswith("fern-grade premium 3d"):
@@ -12603,14 +12665,33 @@ def _build_longform_scene_execution_prompt(
         documentary_environment_guidance = (
             "Prefer active human pressure scenes, mirrored conversations, surveillance moments, executive meetings, interviews, and consequence frames over empty rooms, untouched desks, or static dossier tables."
             if documentary_archetype == "psychology_documentary"
+            else "Prefer named-human close-ups, studio interiors, court corridors, phone and records evidence, source-capture monitors, route and timeline boards, surveillance-led consequence frames, and one dominant contradiction over boardrooms, static dossier tables, or empty archive rooms."
+            if documentary_archetype == "crime_documentary"
             else "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects."
+        )
+        human_priority_lock = _longform_named_human_priority_lock(
+            visual_description_raw,
+            visual_description,
+            str(scene.get("narration", "") or ""),
+            topic,
+            input_title,
+            subject_reference_name,
+            template=template,
+            archetype_key=documentary_archetype,
         )
         subject_reference_phrase = (
             f"Use the attached subject reference image for {subject_reference_name} only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
             if has_subject_reference and str(subject_reference_name or "").strip()
             else "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
             if has_subject_reference
+            else "Use the attached Cryptic Science case reference sheet for framing, lighting, set design, source-capture composition, and evidence-board discipline only; never reproduce timestamps, site names, captions, or layout text from the reference."
+            if documentary_archetype == "crime_documentary"
             else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
+        )
+        documentary_output_guardrail = (
+            "No legible text overlays, no chapter cards, no branded logos, no watermarks, no readable article text, and no giant wall text or monitor text in the scene."
+            if documentary_archetype == "crime_documentary"
+            else "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene."
         )
         visual_parts = _dedupe_preserve_order([
             documentary_visual_description,
@@ -12619,8 +12700,10 @@ def _build_longform_scene_execution_prompt(
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
             subject_reference_phrase,
             named_human_lock,
+            human_priority_lock,
+            "Use the recurring skeleton as an editorial host only when useful; keep case participants human and never fill a room with multiple skeleton people." if documentary_archetype == "crime_documentary" and str(template or "").strip().lower() == "skeleton" else "",
             documentary_environment_guidance,
-            "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene.",
+            documentary_output_guardrail,
         ], max_items=8, max_chars=240)
         visual_delta = " ".join(part for part in visual_parts if part).strip()
         return f"{documentary_prefix} {visual_delta}".strip()
@@ -12714,12 +12797,16 @@ def _build_longform_scene_sfx_brief(
 
 
 def _scale_scene_durations_to_target(scenes: list, target_sec: float) -> list:
-    # Hard lock pacing to 5s per scene for deterministic sync.
+    target = float(target_sec or 0.0)
+    count = len(list(scenes or []))
+    per_scene = 5.0
+    if count > 0 and target > 0.0:
+        per_scene = max(5.0, min(12.0, round(target / count, 2)))
     scaled = []
     for idx, raw in enumerate(scenes or []):
         scene = dict(raw or {})
         scene["scene_num"] = int(scene.get("scene_num", idx + 1) or (idx + 1))
-        scene["duration_sec"] = 5.0
+        scene["duration_sec"] = per_scene
         scaled.append(scene)
     return scaled
 
@@ -12806,7 +12893,12 @@ async def _generate_longform_chapter(
 ) -> dict:
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
-    scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    documentary_mode = _longform_prefers_3d_documentary_visuals(template, format_preset)
+    scene_goal = (
+        max(4, min(10, int(round(float(chapter_target_sec) / 11.0))))
+        if documentary_mode
+        else max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    )
     subject_lock = _longform_subject_lock(topic, input_title, input_description)
     edit_blueprint = dict(edit_blueprint or {})
     chapter_blueprint = dict(chapter_blueprint or {})
@@ -12816,26 +12908,33 @@ async def _generate_longform_chapter(
         f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay, motion_direction, sfx_direction, engagement_purpose. "
         "narration must be concise and engaging; visual_description must be render-ready and specific. "
         "motion_direction must describe the camera or motion-graphics beat; sfx_direction must describe the sound-design accent; engagement_purpose must explain why the scene keeps attention. "
-        "Every scene duration_sec must be exactly 5. Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
+        + ("Most scenes should land between 8 and 12 seconds so the chapter can breathe without exploding render count. " if documentary_mode else "Every scene duration_sec must be exactly 5. ")
+        + "Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
         "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler. "
         "Never copy planning language or Catalyst instructions literally into narration or visual_description. "
         "Do not write meta phrases like 'open on', 'start directly on', 'subject focus', 'current Catalyst archetype', 'next run should', 'use premium', or 'avoid' inside scene fields."
     )
     system_prompt += " " + subject_lock
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
+        documentary_archetype = str(edit_blueprint.get("archetype_key", "") or "").strip().lower()
         system_prompt += (
-            " Visual default for this format: premium stylized 3D documentary/business-explainer imagery. "
+            " Visual default for this format: premium stylized 3D documentary imagery. "
             "Every visual_description should bias toward designed 3D sets, readable human-scale proof framing, clean motion-design composition, "
             "polished CGI materials, bold focal hierarchy, and premium YouTube documentary energy. "
             "Do not default to gritty live-action stills, random empty warehouses, street-photo realism, or moody candid humans unless the narration beat truly requires that. "
-            "Scene variation rule: rotate between surveillance or dossier proof frames, social manipulation scenes, boardroom or institutional consequence frames, archive evidence tables, influence or system maps, before-versus-after contrasts, and consequence-driven environments. "
+            "Scene variation rule: rotate between proof frames, consequence scenes, archive or source setups, map or timeline views, human pressure scenes, before-versus-after contrasts, and consequence-driven environments. "
             "Do not repeat the same isolated object, sterile room, or floating machine in the same chapter."
         )
-        documentary_archetype = str(edit_blueprint.get("archetype_key", "") or "").strip().lower()
         if documentary_archetype == "psychology_documentary":
             system_prompt += (
                 " Psychology-documentary lock: visualize hidden behavior through dossiers, surveillance, social manipulation tableaux, mirror/reversal frames, attention funnels, hidden triggers, observed choice moments, and human consequence scenes. "
                 "Favor Fern-style dark systems framing over generic explainer widgets. Do not default to literal exposed brains, textbook anatomy, sterile labs, floating machines, sci-fi device showcases, or abstract gear sculptures unless the narration explicitly requires them."
+            )
+        elif documentary_archetype == "crime_documentary":
+            system_prompt += (
+                " Crime-documentary lock: visualize the case through complaint-file fragments, phone and record trails, route maps, surveillance stills, studio or custody pressure scenes, source-capture layouts, and court or consequence frames. "
+                "Use the recurring skeleton only as an editorial host or connective witness when useful; keep named humans human whenever the beat is about evidence, pressure, or consequence. "
+                "Do not default to generic boardrooms, untouched dossier tables, empty archive rooms, multi-skeleton meetings, x-ray humans, anatomy filler, or floating machine stages."
             )
         elif documentary_archetype == "systems_documentary":
             system_prompt += (
@@ -21216,10 +21315,12 @@ def _catalyst_default_fix_note_for_session(session: dict, chapter_index: int, ma
     preflight = _catalyst_longform_preflight(session_snapshot)
     blockers = [str(v).strip() for v in list(preflight.get("blockers") or []) if str(v).strip()]
     next_fixes = [str(v).strip() for v in list(preflight.get("next_fixes") or []) if str(v).strip()]
-    memory_view = _coerce_empire_longform_channel_memory(
+    memory_view = _coerce_documentary_longform_channel_memory(
         channel_context,
         dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {}),
         format_preset=format_preset,
+        topic=str(session_snapshot.get("topic", "") or ""),
+        input_title=str(session_snapshot.get("input_title", "") or ""),
     )
     rewrite_pressure = dict(memory_view.get("rewrite_pressure") or edit_blueprint.get("rewrite_pressure") or {})
     rewrite_priorities = [str(v).strip() for v in list(rewrite_pressure.get("next_run_priorities") or []) if str(v).strip()]
@@ -21263,10 +21364,12 @@ async def _refresh_longform_edit_blueprint_for_session(session: dict) -> dict:
     metadata_pack = dict(session_snapshot.get("metadata_pack") or {})
     channel_context = dict(metadata_pack.get("youtube_channel") or {})
     format_preset = str(session_snapshot.get("format_preset", "") or "documentary").strip().lower()
-    channel_memory = _coerce_empire_longform_channel_memory(
+    channel_memory = _coerce_documentary_longform_channel_memory(
         channel_context,
         dict(metadata_pack.get("catalyst_channel_memory") or session_snapshot.get("channel_memory") or {}),
         format_preset=format_preset,
+        topic=str(session_snapshot.get("topic", "") or ""),
+        input_title=str(session_snapshot.get("input_title", "") or ""),
     )
     return await _build_catalyst_edit_blueprint(
         template=str(session_snapshot.get("template", "story") or "story"),
@@ -21295,10 +21398,12 @@ def _longform_public_session(session: dict) -> dict:
     s = dict(session or {})
     catalyst_preflight = _catalyst_longform_preflight(s)
     metadata_pack = dict(s.get("metadata_pack") or {})
-    public_channel_memory = _coerce_empire_longform_channel_memory(
+    public_channel_memory = _coerce_documentary_longform_channel_memory(
         dict(metadata_pack.get("youtube_channel") or {}),
         _catalyst_channel_memory_public_view(s.get("channel_memory") or {}),
         format_preset=str(s.get("format_preset", "") or "documentary"),
+        topic=str(s.get("topic", "") or ""),
+        input_title=str(s.get("input_title", "") or ""),
     )
     chapters = []
     public_character_references = [
@@ -21684,6 +21789,12 @@ def _longform_documentary_archetype(
         str(visual_description or "").strip().lower(),
     ])
     if re.search(
+        r"\b(true crime|crime|criminal|case|court|courtroom|sentenc|sentence|trial|charges?|charged|complaint|indict|kidnapp|robbery|victim|defendant|prosecutor|federal|evidence|surveillance|forensic|dna|detective|arrest|warrant|plea|home confinement|monitoring|cellphone|call log|license plate|records|timeline|case file|studio ambush)\b",
+        haystack,
+        flags=re.IGNORECASE,
+    ):
+        return "crime_documentary"
+    if re.search(
         r"\b(psychology|psychological|brain|mind|behavior|behaviour|manipulat|bias|blind spot|subconscious|attention|dopamine|emotion|thought|memory|control|choice|choices|decision|decisions|influence|hidden behavior)\b",
         haystack,
         flags=re.IGNORECASE,
@@ -21727,6 +21838,11 @@ def _longform_scene_looks_like_machine_filler(text: str, archetype_key: str = ""
             return True
         if literal_brain and not human_context:
             return True
+    if archetype_key == "crime_documentary":
+        if generic_machine or generic_stage:
+            return True
+        if literal_brain and not human_context:
+            return True
     if archetype_key == "systems_documentary" and generic_stage:
         return True
     return False
@@ -21749,6 +21865,23 @@ def _longform_psychology_scene_too_generic(text: str) -> bool:
     return False
 
 
+def _longform_crime_scene_too_generic(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    generic_room = bool(re.search(r"\b(boardroom|archive room|dossier room|meeting room|office|conference room|backroom|control room)\b", lowered))
+    human_action = bool(re.search(r"\b(person|people|face|faces|hands?|body|victim|defendant|witness|lawyer|agent|suspect|conversation|arguing|restrained|dragged|signing|pointing|interview|walking|running|surveillance)\b", lowered))
+    case_context = bool(re.search(r"\b(case|court|complaint|evidence|records|timeline|map|route|studio|phone|call log|license plate|monitor|surveillance|filing|docket|contract|ankle monitor|home confinement|cash|watch|jewelry|robbery|kidnapp)\b", lowered))
+    static_prop_bias = bool(re.search(r"\b(table|desk|room|archive|boardroom|dossier|office)\b", lowered)) and not human_action and not case_context
+    generic_systems = bool(re.search(r"\b(boardroom power-map|ownership|money-flow|institutional pressure|hidden system|infrastructure)\b", lowered))
+    skeleton_crowd = bool(re.search(r"\b(skeletons|multiple skeleton|committee of skeleton|skeleton meeting|x-ray humans?)\b", lowered))
+    if generic_room and not case_context:
+        return True
+    if static_prop_bias or generic_systems or skeleton_crowd:
+        return True
+    return False
+
+
 def _build_documentary_scene_repair(
     *,
     narration: str,
@@ -21758,6 +21891,7 @@ def _build_documentary_scene_repair(
     topic: str = "",
     input_title: str = "",
     archetype_key: str = "systems_documentary",
+    template: str = "",
 ) -> tuple[str, str]:
     scene_role = "opening" if scene_index == 0 else ("closer" if total_scenes > 0 and scene_index >= max(total_scenes - 2, 0) else "middle")
     focus_phrase = _longform_scene_focus_phrase(
@@ -21791,6 +21925,24 @@ def _build_documentary_scene_repair(
             if scene_role == "middle"
             else "Land on a premium consequence or reversal frame with a real person carrying the cost of the hidden behavior. No empty aftermath room unless the narration is explicitly about absence."
         )
+    elif archetype_key == "crime_documentary":
+        proof_modes = [
+            "a photoreal human close-up or medium shot where the named subject is under visible pressure and one decisive evidence cue is present in the same frame",
+            "a premium 3D case-board room where one dominant evidence thread ties together complaint pages, phones, photos, and a studio floor plan",
+            "a map-and-timeline evidence frame showing travel, arrival, and one decisive contradiction through routes, timestamps, and surveillance stills",
+            "a believable recording studio, hallway, SUV, or curbside pressure scene where the human stakes and one key evidence cue are visible together",
+            "a court hallway, interview room, or custody-adjacent consequence frame where one real human subject, one legal cue, and one emotional contradiction carry the image",
+            "a documentary control-room frame built from monitors, call logs, plate-reader hits, rental records, and redacted filing fragments",
+            "a court, custody, interview, or aftermath consequence frame where legal exposure and human cost are obvious at a glance",
+            "a public-image versus case-evidence split frame using phones, social posts, records, and one dominant contradiction",
+        ]
+        action_line = (
+            "Make the contradiction visible immediately. Use at least one readable human stake, one evidence object or screen, and one designed environment. Never stage a generic meeting room or untouched dossier table."
+            if scene_role == "opening"
+            else "Show the proof trail and the consequence in the same frame: phone, filing, route, monitor, contract, surveillance still, or witness pressure cue. Keep readable faces, hands, and posture so the human stakes lead the image."
+            if scene_role == "middle"
+            else "Land on the clearest consequence frame: court exposure, home-confinement irony, public-post contradiction, or the moment the evidence trail closes in."
+        )
     else:
         proof_modes = [
             "a premium dossier-table proof frame inside a real room with one decisive evidence trail",
@@ -21808,35 +21960,47 @@ def _build_documentary_scene_repair(
             else "Land on the payoff frame that proves who benefits, who loses, and why the system matters."
         )
     proof_mode = proof_modes[scene_index % len(proof_modes)]
-    narration_line = (
-        (
-            "The decision looks personal, but the pressure shaping it is already in the room."
-            if archetype_key == "psychology_documentary"
-            else f"What looks natural around {focus_phrase} is actually being steered by a hidden system."
-        )
-        if scene_role == "opening"
-        else (
-            f"The trigger behind {focus_phrase} only makes sense once the leverage and consequence are visible together."
-            if archetype_key == "psychology_documentary"
-            else f"The mechanism behind {focus_phrase} becomes obvious once the trigger and consequence are shown together."
-        )
-        if scene_role == "middle"
-        else (
-            "By the time the subject notices the pattern, the consequence is already locked in."
-            if archetype_key == "psychology_documentary"
-            else f"The consequence around {focus_phrase} is already visible by the time the system is noticed."
-        )
-    )
+    if scene_role == "opening":
+        if archetype_key == "psychology_documentary":
+            narration_line = "The decision looks personal, but the pressure shaping it is already in the room."
+        elif archetype_key == "crime_documentary":
+            narration_line = f"The case around {focus_phrase} stops looking like a headline once the first human consequence and evidence cue appear together."
+        else:
+            narration_line = f"What looks natural around {focus_phrase} is actually being steered by a hidden system."
+    elif scene_role == "middle":
+        if archetype_key == "psychology_documentary":
+            narration_line = f"The trigger behind {focus_phrase} only makes sense once the leverage and consequence are visible together."
+        elif archetype_key == "crime_documentary":
+            narration_line = f"The contradiction around {focus_phrase} only lands once the proof trail and the human pressure are visible together."
+        else:
+            narration_line = f"The mechanism behind {focus_phrase} becomes obvious once the trigger and consequence are shown together."
+    else:
+        if archetype_key == "psychology_documentary":
+            narration_line = "By the time the subject notices the pattern, the consequence is already locked in."
+        elif archetype_key == "crime_documentary":
+            narration_line = f"The case around {focus_phrase} is already legible once the evidence trail is shown end-to-end."
+        else:
+            narration_line = f"The consequence around {focus_phrase} is already visible by the time the system is noticed."
     visual_line = (
         (
             f"Fern-grade premium 3D psychology documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
             f"{action_line} Use controlled cinematic CG, premium human-scale interiors, restrained symbolism, and real social pressure instead of abstract props. "
             f"No empty room, no untouched table, no static dossier still life, no isolated object pedestal, no literal anatomy, and no floating machine filler."
             if archetype_key == "psychology_documentary"
+            else f"Fern-grade premium 3D crime-case documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
+            f"{action_line} Use designed evidence layouts, source-capture logic, readable human consequence, and premium editorial CG. "
+            f"No generic boardroom filler, no untouched archive room, no committee of skeletons, no x-ray humans, no floating machine props, no anonymous stock-person face, and no legible article text."
+            if archetype_key == "crime_documentary"
             else f"Premium 3D systems documentary frame set in {proof_mode}, visualizing {focus_phrase}. "
             f"{action_line} Use a real environment, clean premium CG staging, and no isolated object pedestal, sterile lab filler, or floating machine props."
         )
     )
+    if str(template or "").strip().lower() == "skeleton" and archetype_key == "crime_documentary":
+        visual_line = _clip_text(
+            visual_line
+            + " Use the recurring Cryptic Science skeleton only as an editorial host, witness, or silhouette when useful. Keep case participants human whenever the beat is about evidence, pressure, or consequence. Never turn the whole room into skeleton characters.",
+            460,
+        )
     return (_clip_text(narration_line, 180), _clip_text(visual_line, 420))
 
 
@@ -21851,7 +22015,7 @@ def _repair_longform_generated_scenes(
     chapter_blueprint: dict | None = None,
     allow_narration_rewrite: bool = True,
 ) -> list[dict]:
-    if str(template or "").strip().lower() != "story" or str(format_preset or "").strip().lower() != "documentary":
+    if str(template or "").strip().lower() not in {"story", "skeleton"} or str(format_preset or "").strip().lower() != "documentary":
         return [dict(scene or {}) for scene in list(scenes or [])]
     repaired: list[dict] = []
     total_scenes = len(list(scenes or []))
@@ -21873,7 +22037,10 @@ def _repair_longform_generated_scenes(
         narration_contaminated = bool(narration) and (not cleaned_narration or cleaned_narration != narration)
         visual_contaminated = bool(visual_description) and (not cleaned_visual or cleaned_visual != visual_description)
         visual_filler = _longform_scene_looks_like_machine_filler(cleaned_visual or visual_description, archetype_key=archetype_key)
-        visual_generic = archetype_key == "psychology_documentary" and _longform_psychology_scene_too_generic(cleaned_visual or visual_description)
+        visual_generic = (
+            (archetype_key == "psychology_documentary" and _longform_psychology_scene_too_generic(cleaned_visual or visual_description))
+            or (archetype_key == "crime_documentary" and _longform_crime_scene_too_generic(cleaned_visual or visual_description))
+        )
         if allow_narration_rewrite and (not cleaned_narration or narration_contaminated):
             repaired_narration, repaired_visual = _build_documentary_scene_repair(
                 narration=cleaned_narration or narration or visual_description,
@@ -21883,6 +22050,7 @@ def _repair_longform_generated_scenes(
                 topic=topic,
                 input_title=input_title,
                 archetype_key=archetype_key,
+                template=template,
             )
             cleaned_narration = repaired_narration
             if visual_contaminated or visual_filler or visual_generic or not cleaned_visual:
@@ -21896,6 +22064,7 @@ def _repair_longform_generated_scenes(
                 topic=topic,
                 input_title=input_title,
                 archetype_key=archetype_key,
+                template=template,
             )
             cleaned_visual = repaired_visual
         scene["narration"] = cleaned_narration or narration or f"Chapter beat {scene_index + 1}."
@@ -21954,7 +22123,12 @@ def _longform_fallback_chapter(
     edit_blueprint: dict | None = None,
     chapter_blueprint: dict | None = None,
 ) -> dict:
-    scene_goal = max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    documentary_mode = _longform_prefers_3d_documentary_visuals(template, format_preset)
+    scene_goal = (
+        max(4, min(10, int(round(float(chapter_target_sec) / 11.0))))
+        if documentary_mode
+        else max(6, min(24, int(round(float(chapter_target_sec) / 5.0))))
+    )
     topic_focus = _longform_fallback_visual_focus(topic, input_title)
     edit_blueprint = dict(edit_blueprint or {})
     chapter_blueprint = dict(chapter_blueprint or {})
@@ -21992,6 +22166,23 @@ def _longform_fallback_chapter(
                 "Raise the stakes by showing how the behavior quietly reshapes a decision or relationship.",
                 "Introduce a reversal between what the person believes and what is actually controlling the outcome.",
                 "Land the beat on a consequence or proof image that makes the next reveal feel more personal.",
+            ]
+        elif documentary_archetype == "crime_documentary":
+            visual_modes = [
+                "premium case-board evidence frame with complaint pages, photos, phones, and one decisive contradiction in a designed room",
+                "timeline and route board showing travel, studio arrival, and the evidence path in one readable composition",
+                "recording-studio, hallway, parking-lot, or custody-pressure scene where one human stake and one proof cue collide",
+                "documentary control-room frame with surveillance monitors, call logs, rental records, and redacted filing fragments",
+                "court or consequence frame showing legal exposure, public contradiction, or home-confinement irony",
+                "source-capture split frame contrasting public image against the case evidence trail",
+            ]
+            narration_modes = [
+                "Open with the contradiction or allegation that becomes much worse once the evidence is visible.",
+                "Show the proof trail and the human consequence in the same beat.",
+                "Translate the legal or factual detail into a pressure scene the viewer can picture instantly.",
+                "Raise the stakes by connecting one more record, route, phone, witness, or surveillance clue.",
+                "Introduce a reversal between the public story and what the case file suggests.",
+                "Land the beat on the clearest consequence or unresolved question so the next reveal feels necessary.",
             ]
         else:
             visual_modes = [
@@ -22066,7 +22257,7 @@ def _longform_fallback_chapter(
         "title": f"Chapter {chapter_index + 1}",
         "summary": blueprint_focus or "Auto-built chapter draft ready for review.",
         "tone": str(tone or "neutral"),
-        "target_sec": round(float(len(normalized) * 5.0), 2),
+        "target_sec": round(sum(float((scene or {}).get("duration_sec", 5.0) or 5.0) for scene in normalized), 2),
         "scenes": normalized,
         "status": "pending_review",
         "retry_count": 0,
@@ -22094,6 +22285,7 @@ FERN_EXACT_PRESIDENT_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "fern_exa
 EMPIRE_FERN_CURATED_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_fern_magnates_curated_test.jpg"
 EMPIRE_PSYCHOLOGY_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_psychology_reference_sheet_v2.jpg"
 EMPIRE_SYSTEMS_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "empire_systems_reference_sheet_v2.jpg"
+CRYPTIC_SCIENCE_CASE_REFERENCE_SHEET = CATALYST_REFERENCE_FRAMES_DIR / "cryptic_science_case_sheet.jpg"
 _LONGFORM_REFERENCE_IMAGE_CACHE: dict[str, str] = {}
 
 
@@ -22111,7 +22303,9 @@ def _longform_documentary_reference_sheet_path(
 ) -> Path | None:
     if not _longform_prefers_3d_documentary_visuals(template, format_preset):
         return None
-    if not _is_empire_magnates_channel(channel_context):
+    empire_channel = _is_empire_magnates_channel(channel_context)
+    cryptic_science_channel = _is_cryptic_science_channel(channel_context)
+    if not empire_channel and not cryptic_science_channel:
         return None
     documentary_archetype = _longform_documentary_archetype(
         edit_blueprint=edit_blueprint,
@@ -22123,10 +22317,16 @@ def _longform_documentary_reference_sheet_path(
         visual_description=visual_description,
     )
     if documentary_archetype == "psychology_documentary":
-        if FERN_EXACT_PRESIDENT_REFERENCE_SHEET.exists():
+        if empire_channel and FERN_EXACT_PRESIDENT_REFERENCE_SHEET.exists():
             return FERN_EXACT_PRESIDENT_REFERENCE_SHEET
         if FERN_REFERENCE_SHEET.exists():
             return FERN_REFERENCE_SHEET
+    if cryptic_science_channel:
+        if documentary_archetype == "crime_documentary" and CRYPTIC_SCIENCE_CASE_REFERENCE_SHEET.exists():
+            return CRYPTIC_SCIENCE_CASE_REFERENCE_SHEET
+        if FERN_REFERENCE_SHEET.exists():
+            return FERN_REFERENCE_SHEET
+        return None
     if EMPIRE_FERN_CURATED_REFERENCE_SHEET.exists():
         return EMPIRE_FERN_CURATED_REFERENCE_SHEET
     candidate = (
@@ -22210,6 +22410,15 @@ def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
         for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
     ).lower()
     return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
+
+
+def _is_cryptic_science_channel(channel_context: dict | None) -> bool:
+    channel_context = dict(channel_context or {})
+    haystack = " ".join(
+        str(channel_context.get(key, "") or "").strip()
+        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
+    ).lower()
+    return any(token in haystack for token in ("cryptic science", "crypticscience", "@crypticscience"))
 
 
 def _coerce_empire_longform_channel_memory(
@@ -22313,6 +22522,114 @@ def _coerce_empire_longform_channel_memory(
     )
     updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
     return updated
+
+
+def _coerce_cryptic_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+    topic: str = "",
+    input_title: str = "",
+) -> dict:
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_cryptic_science_channel(channel_context):
+        return memory
+    haystack = " ".join([
+        str(topic or "").strip().lower(),
+        str(input_title or "").strip().lower(),
+        str((channel_context or {}).get("summary", "") or "").strip().lower(),
+        str((channel_context or {}).get("channel_summary", "") or "").strip().lower(),
+        str(memory.get("niche_key", "") or "").strip().lower(),
+        str(memory.get("niche_label", "") or "").strip().lower(),
+        str(memory.get("archetype_key", "") or "").strip().lower(),
+        str(memory.get("archetype_label", "") or "").strip().lower(),
+    ])
+    case_mode = bool(re.search(
+        r"\b(true crime|crime|criminal|case|court|sentenc|trial|charges?|charged|complaint|indict|kidnapp|robbery|victim|defendant|prosecutor|federal|evidence|surveillance|forensic|dna|detective|arrest|warrant|plea|home confinement|monitoring|records|timeline|case file|studio ambush)\b",
+        haystack,
+    ))
+    if not case_mode:
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "crime_documentary"
+    updated["niche_label"] = "Crime / Case Breakdown"
+    updated["archetype_key"] = "crime_documentary"
+    updated["archetype_label"] = "Crime Documentary"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on the contradiction, allegation, or evidence cue that instantly makes the case feel bigger than a headline.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Use proof-first case pacing: contradiction, allegation, proof trail, consequence, unresolved pressure. No setup drift.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Use premium 3D case-board, court, studio, route-map, phone, records, surveillance, and consequence frames. Prioritize photoreal named-human close-ups, over-shoulder evidence handling, and pressure scenes whenever real people are central to the beat. Keep the recurring skeleton as editorial connective tissue only; keep named humans human when the beat is about evidence or pressure. Avoid generic boardrooms, untouched dossier tables, skeleton crowds, mannequin faces, and anatomy filler.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Use expensive investigative tension, controlled low-end pulses, document-hit accents, and silence pockets before reveals instead of horror camp or generic trailer sludge.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Package around one contradiction, one evidence trail, and one consequence image instead of vague gossip or abstract systems language.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "Cryptic Science should run this topic as a premium 3D case-breakdown documentary: evidence-led, contradiction-first, and human-scale, not a generic science explainer or corporate boardroom scene.",
+        320,
+    )
+    existing_guardrails = [str(v).strip() for v in list(updated.get("operator_guardrails") or []) if str(v).strip()]
+    updated["operator_guardrails"] = _dedupe_preserve_order(
+        [
+            *existing_guardrails,
+            "No generic boardroom filler",
+            "No multi-skeleton meeting rooms or x-ray humans",
+            "No untouched dossier-table still life without case context",
+            "No science-mechanism drift, anatomy filler, or floating machine props",
+            "Keep visuals obviously premium CG and evidence-led",
+        ],
+        max_items=10,
+        max_chars=180,
+    )
+    existing_niches = [str(v).strip() for v in list(updated.get("operator_target_niches") or []) if str(v).strip()]
+    updated["operator_target_niches"] = _dedupe_preserve_order(
+        [
+            *existing_niches,
+            "true crime",
+            "court breakdowns",
+            "case evidence",
+            "public contradictions",
+            "documentary explainers",
+        ],
+        max_items=8,
+        max_chars=80,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
+def _coerce_documentary_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+    topic: str = "",
+    input_title: str = "",
+) -> dict:
+    updated = _coerce_empire_longform_channel_memory(
+        channel_context,
+        channel_memory,
+        format_preset=format_preset,
+    )
+    return _coerce_cryptic_longform_channel_memory(
+        channel_context,
+        updated,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+    )
 
 
 def _longform_hosted_image_model_candidates(
@@ -22507,12 +22824,17 @@ async def _longform_attach_scene_previews(
         neg_prompt = (
             neg_prompt
             + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
-            + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution"
+            + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution, readable wall text, giant title words, fake UI typography, pseudo text, lower-third captions, anonymous stock-person face, mannequin face, waxy skin, deformed hands, extra fingers, deformed eyes"
         )
         if _is_empire_magnates_channel(channel_context):
             neg_prompt = (
                 neg_prompt
                 + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+            )
+        elif _is_cryptic_science_channel(channel_context):
+            neg_prompt = (
+                neg_prompt
+                + ", generic corporate boardroom, empty archive room, untouched dossier table, skeleton committee, multiple skeleton people, x-ray humans, static meeting room filler, anatomy filler, floating machine props, pseudo text, title words in frame"
             )
     skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
     # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
@@ -22572,7 +22894,7 @@ async def _longform_attach_scene_previews(
     for scene_idx, raw_scene in enumerate(scenes):
         scene = dict(raw_scene or {})
         scene["scene_num"] = int(scene.get("scene_num", scene_idx + 1) or (scene_idx + 1))
-        scene["duration_sec"] = 5.0
+        scene["duration_sec"] = float(raw_scene.get("duration_sec", 5.0) or 5.0)
         scene["visual_description"] = _longform_tone_locked_visual_description(
             str(scene.get("visual_description", "") or ""),
             tone=chapter_tone,
@@ -22594,7 +22916,7 @@ async def _longform_attach_scene_previews(
         scripted_scenes.append(scene)
 
     out["scenes"] = scripted_scenes
-    out["target_sec"] = round(float(len(scripted_scenes) * 5.0), 2)
+    out["target_sec"] = round(sum(float((scene or {}).get("duration_sec", 5.0) or 5.0) for scene in scripted_scenes), 2)
 
     # Persist all scripted scenes first so owner can review story flow before images finish.
     try:
@@ -22721,7 +23043,7 @@ async def _longform_attach_scene_previews(
             pass
 
     out["scenes"] = scripted_scenes
-    out["target_sec"] = round(float(len(scripted_scenes) * 5.0), 2)
+    out["target_sec"] = round(sum(float((scene or {}).get("duration_sec", 5.0) or 5.0) for scene in scripted_scenes), 2)
     return out
 
 
@@ -23121,12 +23443,17 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             neg_prompt = (
                 neg_prompt
                 + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
-                + "photographic actor portrait, handheld live-action frame"
+                + "photographic actor portrait, handheld live-action frame, readable wall text, giant title words, fake UI typography, pseudo text, lower-third captions, anonymous stock-person face, mannequin face, waxy skin, deformed hands, extra fingers, deformed eyes"
             )
             if _is_empire_magnates_channel(channel_context):
                 neg_prompt = (
                     neg_prompt
                     + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+                )
+            elif _is_cryptic_science_channel(channel_context):
+                neg_prompt = (
+                    neg_prompt
+                    + ", generic corporate boardroom, empty archive room, untouched dossier table, skeleton committee, multiple skeleton people, x-ray humans, static meeting room filler, anatomy filler, floating machine props, pseudo text, timestamp label, website footer, title words in frame"
                 )
         if render_horror_audio:
             neg_prompt = (
@@ -23623,10 +23950,12 @@ async def _create_longform_session_internal(
     async with _catalyst_memory_lock:
         _load_catalyst_memory()
         channel_memory = dict(_catalyst_channel_memory.get(channel_memory_key) or {})
-    channel_memory = _coerce_empire_longform_channel_memory(
+    channel_memory = _coerce_documentary_longform_channel_memory(
         channel_context,
         channel_memory,
         format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
     )
 
     source_bundle = await _fetch_source_video_bundle(source_url, language=language) if source_url else {}
@@ -24877,16 +25206,20 @@ async def longform_chapter_action(session_id: str, req: LongFormChapterActionReq
         }
         session_live["updated_at"] = time.time()
         live_metadata_pack = dict(session_live.get("metadata_pack") or {})
-        live_metadata_pack["catalyst_channel_memory"] = _coerce_empire_longform_channel_memory(
+        live_metadata_pack["catalyst_channel_memory"] = _coerce_documentary_longform_channel_memory(
             dict(live_metadata_pack.get("youtube_channel") or {}),
             dict(live_metadata_pack.get("catalyst_channel_memory") or session_live.get("channel_memory") or {}),
             format_preset=str(session_live.get("format_preset", "") or "documentary"),
+            topic=str(session_live.get("topic", "") or ""),
+            input_title=str(session_live.get("input_title", "") or ""),
         )
         session_live["metadata_pack"] = live_metadata_pack
-        session_live["channel_memory"] = _coerce_empire_longform_channel_memory(
+        session_live["channel_memory"] = _coerce_documentary_longform_channel_memory(
             dict(live_metadata_pack.get("youtube_channel") or {}),
             dict(session_live.get("channel_memory") or {}),
             format_preset=str(session_live.get("format_preset", "") or "documentary"),
+            topic=str(session_live.get("topic", "") or ""),
+            input_title=str(session_live.get("input_title", "") or ""),
         )
         _save_longform_sessions()
     if auto_pipeline:
@@ -24977,16 +25310,20 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         }
         session_live["updated_at"] = time.time()
         live_metadata_pack = dict(session_live.get("metadata_pack") or {})
-        live_metadata_pack["catalyst_channel_memory"] = _coerce_empire_longform_channel_memory(
+        live_metadata_pack["catalyst_channel_memory"] = _coerce_documentary_longform_channel_memory(
             dict(live_metadata_pack.get("youtube_channel") or {}),
             dict(live_metadata_pack.get("catalyst_channel_memory") or session_live.get("channel_memory") or {}),
             format_preset=str(session_live.get("format_preset", "") or "documentary"),
+            topic=str(session_live.get("topic", "") or ""),
+            input_title=str(session_live.get("input_title", "") or ""),
         )
         session_live["metadata_pack"] = live_metadata_pack
-        session_live["channel_memory"] = _coerce_empire_longform_channel_memory(
+        session_live["channel_memory"] = _coerce_documentary_longform_channel_memory(
             dict(live_metadata_pack.get("youtube_channel") or {}),
             dict(session_live.get("channel_memory") or {}),
             format_preset=str(session_live.get("format_preset", "") or "documentary"),
+            topic=str(session_live.get("topic", "") or ""),
+            input_title=str(session_live.get("input_title", "") or ""),
         )
         _save_longform_sessions()
     if force_accept or auto_pipeline:
