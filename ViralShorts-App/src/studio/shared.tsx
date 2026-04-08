@@ -47,6 +47,7 @@ const rawGenerationApi = resolveSafeApiBase(
 );
 const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
 const BOOT_CONFIG_TIMEOUT_MS = 12000;
+const SUPABASE_SESSION_TIMEOUT_MS = 8000;
 const HEALTH_PROBE_TIMEOUT_MS = 8000;
 const HEALTH_PROBE_INTERVAL_MS = 6000;
 const HEALTH_FAILURE_THRESHOLD = 8;
@@ -261,6 +262,96 @@ const coerceWaitlistFallbackRow = (row: any): WaitingListEntry | null => {
         stripe_session_id: parsed.stripe_session_id ? String(parsed.stripe_session_id) : undefined,
         created_at: String(parsed.created_at || row?.updated_at || ""),
     };
+};
+
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<T>((_, reject) => {
+                timeoutId = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+};
+
+const decodeAuthParam = (value: string): string => {
+    const normalized = String(value || '').replace(/\+/g, ' ').trim();
+    if (!normalized) return '';
+    try {
+        return decodeURIComponent(normalized);
+    } catch {
+        return normalized;
+    }
+};
+
+const clearSupabaseAuthRedirectArtifacts = (): void => {
+    if (typeof window === 'undefined') return;
+    try {
+        const url = new URL(window.location.href);
+        let changed = false;
+        const hashBody = String(url.hash || '').replace(/^#/, '');
+        if (/(^|&)(access_token|refresh_token|expires_in|expires_at|token_type|type|provider_token|provider_refresh_token|error|error_description|error_code)=/i.test(hashBody)) {
+            url.hash = '';
+            changed = true;
+        }
+        for (const key of ['code', 'error', 'error_code', 'error_description']) {
+            if (url.searchParams.has(key)) {
+                url.searchParams.delete(key);
+                changed = true;
+            }
+        }
+        if (!changed) return;
+        window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+        window.dispatchEvent(new Event('nyptid:navigation'));
+    } catch {
+        // ignore URL cleanup failures
+    }
+};
+
+const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Session | null> => {
+    if (typeof window === 'undefined') return null;
+    const url = new URL(window.location.href);
+    const query = url.searchParams;
+    const hash = new URLSearchParams(String(url.hash || '').replace(/^#/, ''));
+    const authError =
+        decodeAuthParam(String(hash.get('error_description') || query.get('error_description') || hash.get('error') || query.get('error') || ''));
+    if (authError) {
+        clearSupabaseAuthRedirectArtifacts();
+        throw new Error(authError);
+    }
+
+    const authCode = String(query.get('code') || '').trim();
+    if (authCode && typeof (sb.auth as any).exchangeCodeForSession === 'function') {
+        const result = await withTimeout(
+            (sb.auth as any).exchangeCodeForSession(authCode),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            'Supabase code exchange'
+        );
+        clearSupabaseAuthRedirectArtifacts();
+        const error = (result as any)?.error;
+        if (error) throw error;
+        return ((result as any)?.data?.session || null) as Session | null;
+    }
+
+    const accessToken = String(hash.get('access_token') || '').trim();
+    const refreshToken = String(hash.get('refresh_token') || '').trim();
+    if (accessToken && refreshToken && typeof (sb.auth as any).setSession === 'function') {
+        const result = await withTimeout(
+            sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }),
+            SUPABASE_SESSION_TIMEOUT_MS,
+            'Supabase session recovery'
+        );
+        clearSupabaseAuthRedirectArtifacts();
+        if (result.error) throw result.error;
+        return (result.data.session || null) as Session | null;
+    }
+
+    if (accessToken || refreshToken) clearSupabaseAuthRedirectArtifacts();
+    return null;
 };
 
 export const readWaitlistFallbackRows = async (supabase: SupabaseClient): Promise<WaitingListEntry[]> => {
@@ -492,10 +583,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const attachSupabaseClient = useCallback(async (sb: SupabaseClient): Promise<SupabaseClient> => {
         supabaseRef.current = sb;
         setSupabase((prev) => prev || sb);
-        const { data: { session: s } } = await sb.auth.getSession();
-        setSession(s);
+        let recoveredSession: Session | null = null;
+        try {
+            recoveredSession = await recoverSupabaseSessionFromUrl(sb);
+        } catch (error) {
+            console.warn('Supabase redirect recovery failed', error);
+        }
+        const sessionResult = recoveredSession
+            ? { data: { session: recoveredSession } }
+            : await withTimeout(sb.auth.getSession(), SUPABASE_SESSION_TIMEOUT_MS, 'Supabase session bootstrap');
+        setSession(sessionResult.data.session || null);
         if (!authSubscriptionRef.current) {
-            const { data } = sb.auth.onAuthStateChange((_e, nextSession) => setSession(nextSession));
+            const { data } = sb.auth.onAuthStateChange((_e, nextSession) => {
+                clearSupabaseAuthRedirectArtifacts();
+                setSession(nextSession);
+            });
             authSubscriptionRef.current = data.subscription;
         }
         return sb;
@@ -661,15 +763,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
-                    supabaseRef.current = sb;
-                    setSupabase(sb);
+                    await attachSupabaseClient(sb);
                     sbCreated = true;
-                    const { data: { session: s } } = await sb.auth.getSession();
-                    if (!cancelled) setSession(s);
-                    if (!authSubscriptionRef.current) {
-                        const { data } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
-                        authSubscriptionRef.current = data.subscription;
-                    }
                 }
             } catch {
                 // Backend is offline
@@ -679,15 +774,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (!cancelled && !sbCreated) {
                 try {
                     const sb = createClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY);
-                    supabaseRef.current = sb;
-                    setSupabase(sb);
-                    const { data: { session: s } } = await sb.auth.getSession();
+                    await attachSupabaseClient(sb);
                     if (!cancelled) {
-                        setSession(s);
-                        if (!authSubscriptionRef.current) {
-                            const { data } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
-                            authSubscriptionRef.current = data.subscription;
-                        }
                         if (!configLoaded) setBackendOffline(true);
                     }
                 } catch {
@@ -698,7 +786,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (!cancelled) setLoading(false);
         })();
         return () => { cancelled = true; };
-    }, []);
+    }, [attachSupabaseClient]);
     useEffect(() => {
         return () => {
             try {

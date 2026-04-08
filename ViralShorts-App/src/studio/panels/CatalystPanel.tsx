@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Target, Youtube } from 'lucide-react';
 import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
 
@@ -177,6 +177,7 @@ const REFERENCE_SOURCE_LABELS: Record<string, string> = {
     external_url: 'External Reference',
     manual_reference: 'Manual Reference',
 };
+const CATALYST_FETCH_TIMEOUT_MS = 20000;
 
 function splitLines(value: string): string[] {
     return String(value || '')
@@ -210,6 +211,28 @@ function sanitizeUniqueTextList(values: string[] | undefined | null): string[] {
     return result;
 }
 
+function formatCatalystGoogleError(value: string): string {
+    const normalized = normalizeCatalystText(String(value || '').trim());
+    if (!normalized) return '';
+    const lower = normalized.toLowerCase();
+    if (
+        lower.includes('disabled_client')
+        || lower.includes('oauth client was disabled')
+        || lower.includes('oauth client is disabled or deleted')
+        || lower.includes('old backend web oauth client')
+    ) {
+        return 'This channel is still tied to an older Google OAuth client. Click Connect YouTube and reconnect this specific channel so private YouTube metrics can refresh again.';
+    }
+    if (
+        lower.includes('invalid_grant')
+        || lower.includes('token has been expired or revoked')
+        || lower.includes('token has been revoked')
+    ) {
+        return 'This channel needs to be reconnected to Google before private YouTube metrics can refresh again.';
+    }
+    return normalized;
+}
+
 function formatWhen(unix: number): string {
     if (!unix) return 'Never';
     try {
@@ -227,6 +250,42 @@ async function readJsonResponse<T = any>(res: Response): Promise<T | Record<stri
     } catch {
         return {};
     }
+}
+
+async function fetchJsonWithTimeout<T = any>(input: string, init: RequestInit = {}, timeoutMs = CATALYST_FETCH_TIMEOUT_MS): Promise<{ res: Response; data: T | Record<string, any> }> {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const merged: RequestInit = {
+            ...init,
+            signal: controller.signal,
+        };
+        const res = await fetch(input, merged);
+        const data = await readJsonResponse<T>(res);
+        return { res, data };
+    } catch (error: any) {
+        if (error?.name === 'AbortError') {
+            throw new Error('Request timed out. Try again.');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+function pickCatalystChannelId(
+    rows: CatalystChannel[],
+    ...candidates: Array<string | null | undefined>
+): string {
+    const normalizedRows = Array.isArray(rows) ? rows : [];
+    for (const rawCandidate of candidates) {
+        const candidate = String(rawCandidate || '').trim();
+        if (!candidate) continue;
+        if (normalizedRows.some((row) => String(row.channel_id || '').trim() === candidate)) {
+            return candidate;
+        }
+    }
+    return String(normalizedRows[0]?.channel_id || '').trim();
 }
 
 export default function CatalystPanel() {
@@ -259,6 +318,9 @@ export default function CatalystPanel() {
     const [launching, setLaunching] = useState(false);
     const [stoppingSessionId, setStoppingSessionId] = useState('');
     const [error, setError] = useState('');
+    const hubRetryTimeoutRef = useRef<number | null>(null);
+    const hubRetriedRef = useRef(false);
+    const selectedChannelIdRef = useRef('');
 
     const bearerHeaders = useMemo<Record<string, string>>(() => {
         const headers: Record<string, string> = {};
@@ -277,8 +339,16 @@ export default function CatalystPanel() {
         return PROD_API_BASE_URL || API;
     }, []);
 
+    useEffect(() => {
+        selectedChannelIdRef.current = String(selectedChannelId || '').trim();
+    }, [selectedChannelId]);
+
     const loadHub = useCallback(async (channelId?: string, refresh = false) => {
         if (!session) return;
+        if (hubRetryTimeoutRef.current) {
+            clearTimeout(hubRetryTimeoutRef.current);
+            hubRetryTimeoutRef.current = null;
+        }
         setError('');
         if (refresh) setRefreshing(true);
         else setLoading(true);
@@ -286,14 +356,40 @@ export default function CatalystPanel() {
             const url = new URL(`${API}/api/catalyst/hub`);
             if (channelId) url.searchParams.set('channel_id', channelId);
             if (refresh) url.searchParams.set('refresh', 'true');
-            const res = await fetch(url.toString(), { headers: bearerHeaders });
-            const data = await readJsonResponse<CatalystHubPayload>(res) as any;
-            if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to load Catalyst hub'));
-            setPayload(data as CatalystHubPayload);
-            const nextChannelId = String(data?.selected_channel_id || data?.default_channel_id || channelId || '').trim();
-            if (nextChannelId) setSelectedChannelId(nextChannelId);
+            const { res, data } = await fetchJsonWithTimeout<CatalystHubPayload>(
+                url.toString(),
+                { headers: bearerHeaders },
+            );
+            const errorPayload = data as Record<string, any>;
+            if (!res.ok) throw new Error(String(errorPayload?.detail || errorPayload?.error || `Failed to load Catalyst hub (${res.status})`));
+            const nextPayload = data as CatalystHubPayload;
+            const rows = Array.isArray(nextPayload?.channels) ? nextPayload.channels : [];
+            const requestedId = String(channelId || '').trim();
+            const currentId = String(selectedChannelIdRef.current || '').trim();
+            const nextChannelId = pickCatalystChannelId(
+                rows,
+                requestedId,
+                currentId,
+                nextPayload?.selected_channel_id,
+                nextPayload?.default_channel_id,
+            );
+            if (nextChannelId) {
+                nextPayload.selected_channel_id = nextChannelId;
+                nextPayload.selected_channel = rows.find((row) => String(row.channel_id || '').trim() === nextChannelId) || nextPayload.selected_channel;
+            }
+            setPayload(nextPayload);
+            hubRetriedRef.current = false;
+            setSelectedChannelId(nextChannelId);
         } catch (e: any) {
-            setError(String(e?.message || e || 'Failed to load Catalyst hub'));
+            const message = String(e?.message || e || 'Failed to load Catalyst hub');
+            if (!refresh && !hubRetriedRef.current) {
+                hubRetriedRef.current = true;
+                hubRetryTimeoutRef.current = window.setTimeout(() => {
+                    void loadHub(channelId, false);
+                }, 1200);
+            } else {
+                setError(message);
+            }
         } finally {
             setLoading(false);
             setRefreshing(false);
@@ -304,6 +400,15 @@ export default function CatalystPanel() {
         if (!session) return;
         void loadHub('', false);
     }, [loadHub, session]);
+
+    useEffect(() => {
+        return () => {
+            if (hubRetryTimeoutRef.current) {
+                clearTimeout(hubRetryTimeoutRef.current);
+                hubRetryTimeoutRef.current = null;
+            }
+        };
+    }, []);
 
     const workspaceSnapshots = useMemo<Record<string, CatalystWorkspaceSnapshot>>(
         () => Object.fromEntries(Object.entries(payload?.workspace_snapshots || {}).map(([key, value]) => [key, value as CatalystWorkspaceSnapshot])),
@@ -358,7 +463,10 @@ export default function CatalystPanel() {
         setYoutubeConnecting(true);
         setError('');
         try {
-            startYouTubeBrowserConnect(session.access_token, window.location.href);
+            const nextUrl = new URL(window.location.href);
+            const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+            if (activeChannelId) nextUrl.searchParams.set('youtube_channel_id', activeChannelId);
+            startYouTubeBrowserConnect(session.access_token, nextUrl.toString());
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to start YouTube connection'));
             setYoutubeConnecting(false);
@@ -391,21 +499,21 @@ export default function CatalystPanel() {
     }, [jsonHeaders, loadHub, session]);
 
     const handleRefresh = async (refreshOutcomes = false) => {
-        if (!session || !selectedChannelId) return;
+        const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+        if (!session || !activeChannelId) return;
         setError('');
         if (refreshOutcomes) setSyncingOutcomes(true);
         else setRefreshing(true);
         try {
-            const res = await fetch(`${API}/api/catalyst/hub/refresh`, {
+            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/refresh`, {
                 method: 'POST',
                 headers: jsonHeaders,
                 body: JSON.stringify({
-                    channel_id: selectedChannelId,
+                    channel_id: activeChannelId,
                     include_public_benchmarks: true,
                     refresh_outcomes: refreshOutcomes,
                 }),
             });
-            const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to refresh Catalyst hub'));
             setPayload(data as CatalystHubPayload);
         } catch (e: any) {
@@ -417,15 +525,16 @@ export default function CatalystPanel() {
     };
 
     const handleSave = async () => {
-        if (!session || !selectedChannelId) return;
+        const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+        if (!session || !activeChannelId) return;
         setSaving(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/catalyst/hub/instructions`, {
+            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/instructions`, {
                 method: 'POST',
                 headers: jsonHeaders,
                 body: JSON.stringify({
-                    channel_id: selectedChannelId,
+                    channel_id: activeChannelId,
                     directive,
                     mission,
                     guardrails: splitLines(guardrails),
@@ -433,7 +542,6 @@ export default function CatalystPanel() {
                     apply_scope: applyScope === 'current' ? selectedWorkspaceId : applyScope,
                 }),
             });
-            const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to save Catalyst instructions'));
             setPayload(data as CatalystHubPayload);
         } catch (e: any) {
@@ -444,7 +552,8 @@ export default function CatalystPanel() {
     };
 
     const handleLaunchLongform = async () => {
-        if (!session || !selectedChannelId) return;
+        const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+        if (!session || !activeChannelId) return;
         if (!['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)) {
             setError('Catalyst launch is only available for long-form workspaces right now.');
             return;
@@ -452,11 +561,11 @@ export default function CatalystPanel() {
         setLaunching(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/catalyst/hub/launch`, {
+            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/launch`, {
                 method: 'POST',
                 headers: jsonHeaders,
                 body: JSON.stringify({
-                    channel_id: selectedChannelId,
+                    channel_id: activeChannelId,
                     workspace_id: selectedWorkspaceId,
                     mission,
                     directive,
@@ -470,7 +579,6 @@ export default function CatalystPanel() {
                     refresh_outcomes: true,
                 }),
             });
-            const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to launch Catalyst long-form run'));
             const sessionId = String(data?.session?.session_id || '').trim();
             if (!sessionId) throw new Error('Catalyst launch returned no session id');
@@ -491,9 +599,40 @@ export default function CatalystPanel() {
     };
 
     const handleRefreshChannels = async () => {
+        if (!session) return;
+        const currentChannelId = String(selectedChannelIdRef.current || '').trim();
         setRefreshingChannels(true);
-        await loadHub(selectedChannelId || '', false);
-        setRefreshingChannels(false);
+        setError('');
+        try {
+            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/youtube/channels?sync=true`, {
+                headers: bearerHeaders,
+            });
+            if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to refresh channels (${res.status})`));
+            const rows = Array.isArray(data?.channels) ? data.channels as CatalystChannel[] : [];
+            const nextChannelId = pickCatalystChannelId(
+                rows,
+                currentChannelId,
+                data?.default_channel_id,
+            );
+            setSelectedChannelId(nextChannelId);
+            setPayload((prev) => {
+                if (!prev) return prev;
+                return {
+                    ...prev,
+                    channels: rows,
+                    default_channel_id: String(data?.default_channel_id || prev.default_channel_id || '').trim(),
+                    selected_channel_id: nextChannelId || prev.selected_channel_id,
+                    selected_channel: rows.find((row) => String(row.channel_id || '').trim() === nextChannelId) || prev.selected_channel,
+                };
+            });
+            if (nextChannelId) {
+                await loadHub(nextChannelId, false);
+            }
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to refresh channels'));
+        } finally {
+            setRefreshingChannels(false);
+        }
     };
 
     const handleAnalyzeReferenceVideo = async () => {
@@ -604,7 +743,7 @@ export default function CatalystPanel() {
             });
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to stop active long-form session'));
-            await loadHub(selectedChannelId || '', false);
+            await loadHub(String(selectedChannelIdRef.current || '').trim(), false);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to stop active long-form session'));
         } finally {
@@ -644,11 +783,11 @@ export default function CatalystPanel() {
     const referenceEvidence = referenceVideoAnalysis?.evidence || null;
     const referenceAnalysis = referenceVideoAnalysis?.analysis || null;
     const channelSyncError = useMemo(
-        () => normalizeCatalystText(String(selectedChannel?.last_sync_error || '').trim()),
+        () => formatCatalystGoogleError(String(selectedChannel?.last_sync_error || '').trim()),
         [selectedChannel?.last_sync_error]
     );
     const channelOutcomeSyncError = useMemo(
-        () => normalizeCatalystText(String(selectedChannel?.last_outcome_sync_error || '').trim()),
+        () => formatCatalystGoogleError(String(selectedChannel?.last_outcome_sync_error || '').trim()),
         [selectedChannel?.last_outcome_sync_error]
     );
     const channelMeasuredFacts = useMemo(
@@ -768,7 +907,7 @@ export default function CatalystPanel() {
                         <button
                             type="button"
                             onClick={() => void handleRefresh(false)}
-                            disabled={refreshing || syncingOutcomes || !selectedChannelId}
+                            disabled={refreshing || syncingOutcomes || !resolvedChannelId}
                             className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -777,7 +916,7 @@ export default function CatalystPanel() {
                         <button
                             type="button"
                             onClick={() => void handleRefresh(true)}
-                            disabled={refreshing || syncingOutcomes || !selectedChannelId}
+                            disabled={refreshing || syncingOutcomes || !resolvedChannelId}
                             className="inline-flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-400/50 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {syncingOutcomes ? <Loader2 className="h-4 w-4 animate-spin" /> : <Youtube className="h-4 w-4" />}
@@ -795,7 +934,7 @@ export default function CatalystPanel() {
                         <button
                             type="button"
                             onClick={() => void handleClearReferenceVideo()}
-                            disabled={clearingReference || analyzingReference || !selectedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
+                            disabled={clearingReference || analyzingReference || !resolvedChannelId || !['documentary', 'recap', 'explainer', 'story_channel'].includes(selectedWorkspaceId)}
                             className="inline-flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-100 transition hover:border-rose-400/50 hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {clearingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -830,7 +969,7 @@ export default function CatalystPanel() {
                             <label className="space-y-2">
                                 <span className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/70">Connected Channel</span>
                                 <select
-                                    value={selectedChannelId}
+                                    value={resolvedChannelId}
                                     onChange={(e) => { void persistSelectedChannel(e.target.value); }}
                                     className="w-full rounded-2xl border border-white/[0.1] bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
                                     style={{ colorScheme: 'dark', backgroundColor: '#0b0b0f', color: '#ffffff' }}
@@ -925,7 +1064,7 @@ export default function CatalystPanel() {
                             <button
                                 type="button"
                                 onClick={() => void handleSave()}
-                                disabled={saving || !selectedChannelId}
+                                disabled={saving || !resolvedChannelId}
                                 className="inline-flex items-center gap-2 rounded-2xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
                             >
                                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}

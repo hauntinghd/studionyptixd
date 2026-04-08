@@ -19,6 +19,9 @@ function AppShell() {
         if (typeof window === 'undefined') return null;
         const search = new URLSearchParams(window.location.search);
         const urlPage = String(search.get('page') || '').trim().toLowerCase();
+        if (urlPage === 'dashboard') return 'dashboard';
+        if (urlPage === 'auth') return 'auth';
+        if (urlPage === 'landing') return 'landing';
         if (urlPage === 'billing') return 'billing';
         if (urlPage === 'subscription') return 'subscription';
         if (urlPage === 'settings') return 'settings';
@@ -86,6 +89,7 @@ function AppShell() {
     }, [page]);
 
     useEffect(() => {
+        if (loading) return;
         if (billingHost) {
             if (!session && (page === 'dashboard' || page === 'account' || page === 'settings')) {
                 setPage('auth');
@@ -99,7 +103,6 @@ function AppShell() {
         }
         if (!session && page === 'dashboard') setPage('landing');
         if (!session && (page === 'account' || page === 'settings' || page === 'billing' || page === 'subscription')) setPage('auth');
-        if (loading) return;
 
         const isAdmin = role === 'admin';
 

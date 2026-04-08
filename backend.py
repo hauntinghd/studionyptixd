@@ -10320,7 +10320,11 @@ async def _build_catalyst_hub_payload(
         bucket = _youtube_bucket_for_user(user_id)
         default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
         channels_map = {str(k): dict(v or {}) for k, v in dict(bucket.get("channels") or {}).items()}
+    if (not default_channel_id or default_channel_id not in channels_map) and channels_map:
+        default_channel_id = str(next(iter(channels_map.keys())) or "").strip()
     if not selected_channel_id:
+        selected_channel_id = default_channel_id
+    if selected_channel_id and selected_channel_id not in channels_map:
         selected_channel_id = default_channel_id
     if selected_channel_id and selected_channel_id in channels_map:
         try:
@@ -27773,6 +27777,12 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
     if oauth_mode not in {"web", "installed"}:
         oauth_mode = "web"
     code_verifier = str(state_payload.get("pkce_verifier", "") or "").strip()
+    requested_channel_id = ""
+    if next_url:
+        try:
+            requested_channel_id = str((parse_qs(urlparse(next_url).query or "").get("youtube_channel_id") or [""])[0] or "").strip()
+        except Exception:
+            requested_channel_id = ""
     if error:
         return RedirectResponse(_youtube_redirect_target(next_url, False, f"Google OAuth error: {error}"), status_code=302)
     if not user_id or not code:
@@ -27814,7 +27824,9 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
                 }
             bucket["channels"] = existing_channels
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
-            if not default_channel_id or default_channel_id not in existing_channels:
+            if requested_channel_id and requested_channel_id in existing_channels:
+                bucket["default_channel_id"] = requested_channel_id
+            elif not default_channel_id or default_channel_id not in existing_channels:
                 bucket["default_channel_id"] = str(channels[0].get("channel_id", "") or "").strip()
             _save_youtube_connections()
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
@@ -28365,6 +28377,8 @@ async def list_connected_youtube_channels(
         bucket = _youtube_bucket_for_user(user_id)
         default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
         channels = {str(k): dict(v or {}) for k, v in dict(bucket.get("channels") or {}).items()}
+    if (not default_channel_id or default_channel_id not in channels) and channels:
+        default_channel_id = str(next(iter(channels.keys())) or "").strip()
     if sync and default_channel_id in channels:
         try:
             channels[default_channel_id] = await _youtube_sync_and_persist_for_user(user_id, default_channel_id)

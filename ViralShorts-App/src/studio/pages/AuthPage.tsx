@@ -1,4 +1,4 @@
-import { useContext, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { Lock, Mail } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, Logo } from '../shared';
@@ -13,10 +13,11 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
     const [submitLoading, setSubmitLoading] = useState(false);
     const [googleLoading, setGoogleLoading] = useState(false);
 
-    if (session) {
-        onNavigate('landing');
-        return null;
-    }
+    useEffect(() => {
+        if (session) onNavigate('dashboard');
+    }, [onNavigate, session]);
+
+    if (session) return null;
     const authBooting = loading || !supabase;
 
     const handleSubmit = async (e: React.FormEvent) => {
