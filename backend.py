@@ -1194,6 +1194,11 @@ def _format_google_oauth_failure(action: str, status_code: int, body: str, oauth
             f"Google {action} failed ({status_code}): the configured backend OAuth client is disabled or deleted. "
             "Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the deployed backend, then reconnect the YouTube channel."
         )
+    if "unauthorized_client" in lower or '"error": "unauthorized"' in lower or "error_description" in lower and '"unauthorized"' in lower:
+        return (
+            f"Google {action} failed ({status_code}): this connected YouTube channel's saved Google grant no longer matches the active backend OAuth client. "
+            "Reconnect this specific channel under the current Google OAuth flow so private YouTube metrics can refresh again."
+        )
     if "redirect_uri_mismatch" in lower:
         return (
             f"Google {action} failed ({status_code}): GOOGLE_REDIRECT_URI does not match an authorized redirect URI in the configured Google OAuth client."
