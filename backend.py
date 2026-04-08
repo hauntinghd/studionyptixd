@@ -21910,6 +21910,12 @@ def _longform_documentary_archetype(
         str(visual_description or "").strip().lower(),
     ])
     if re.search(
+        r"\b(power_history|geopolitics_history|history / geopolitics|ancient greece|ancient greek|greek world|athens|sparta|city[- ]state|peloponnesian|hellenic|classical world|classical greece|history rewind|paradox)\b",
+        haystack,
+        flags=re.IGNORECASE,
+    ):
+        return "systems_documentary"
+    if re.search(
         r"\b(true crime|crime|criminal|case|court|courtroom|sentenc|sentence|trial|charges?|charged|complaint|indict|kidnapp|robbery|victim|defendant|prosecutor|federal|evidence|surveillance|forensic|dna|detective|arrest|warrant|plea|home confinement|monitoring|cellphone|call log|license plate|records|timeline|case file|studio ambush)\b",
         haystack,
         flags=re.IGNORECASE,
