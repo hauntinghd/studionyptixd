@@ -11150,10 +11150,33 @@ async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> d
     try:
         refreshed = await _youtube_sync_channel_record(record)
     except Exception as e:
-        refreshed = await _youtube_refresh_public_channel_record_without_oauth(
-            record,
-            sync_error=_clip_text(str(e), 220),
-        )
+        repair_error = e
+        repaired_record: dict = {}
+        if _google_oauth_error_suggests_reconnect_required(str(e)):
+            try:
+                repaired_record = await _youtube_repair_channel_record_from_sibling(user_key, channel_key, record)
+            except Exception as repair_exc:
+                log.warning(
+                    "YouTube sibling token repair failed for user=%s channel=%s: %s",
+                    user_key,
+                    channel_key,
+                    repair_exc,
+                )
+                repaired_record = {}
+        if repaired_record:
+            try:
+                refreshed = await _youtube_sync_channel_record(repaired_record)
+            except Exception as repaired_sync_error:
+                repair_error = repaired_sync_error
+                refreshed = await _youtube_refresh_public_channel_record_without_oauth(
+                    repaired_record,
+                    sync_error=_clip_text(str(repair_error), 220),
+                )
+        else:
+            refreshed = await _youtube_refresh_public_channel_record_without_oauth(
+                record,
+                sync_error=_clip_text(str(repair_error), 220),
+            )
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_key)
         bucket["channels"][channel_key] = refreshed
@@ -11234,6 +11257,70 @@ def _google_oauth_error_suggests_reconnect_required(message: str) -> bool:
             "bad request",
         )
     )
+
+
+async def _youtube_repair_channel_record_from_sibling(
+    user_id: str,
+    channel_id: str,
+    failed_record: dict | None,
+) -> dict:
+    user_key = str(user_id or "").strip()
+    channel_key = str(channel_id or "").strip()
+    failed = dict(failed_record or {})
+    if not user_key or not channel_key:
+        return {}
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_key)
+        sibling_records = [
+            dict(record or {})
+            for sibling_id, record in dict(bucket.get("channels") or {}).items()
+            if str(sibling_id or "").strip() != channel_key and isinstance(record, dict)
+        ]
+    if not sibling_records:
+        return {}
+    sibling_records.sort(
+        key=lambda row: (
+            -float(row.get("last_synced_at", 0.0) or 0.0),
+            -float(row.get("linked_at", 0.0) or 0.0),
+            str(row.get("channel_id", "") or "").lower(),
+        )
+    )
+    seen_refresh_tokens: set[str] = set()
+    for sibling in sibling_records:
+        refresh_token = str(sibling.get("refresh_token", "") or "").strip()
+        if not refresh_token or refresh_token in seen_refresh_tokens:
+            continue
+        seen_refresh_tokens.add(refresh_token)
+        try:
+            access_token, sibling_updated = await _youtube_ensure_access_token(sibling)
+        except Exception:
+            continue
+        try:
+            candidate_channels = await _youtube_fetch_my_channels(access_token)
+        except Exception:
+            continue
+        matching = next(
+            (
+                dict(row or {})
+                for row in list(candidate_channels or [])
+                if str((row or {}).get("channel_id", "") or "").strip() == channel_key
+            ),
+            {},
+        )
+        if not matching:
+            continue
+        repaired = dict(failed or {})
+        repaired.update(matching)
+        repaired["access_token"] = str(sibling_updated.get("access_token", "") or "").strip()
+        repaired["refresh_token"] = str(sibling_updated.get("refresh_token", "") or refresh_token).strip()
+        repaired["token_expires_at"] = float(sibling_updated.get("token_expires_at", 0.0) or 0.0)
+        repaired["token_scope"] = str(sibling_updated.get("token_scope", "") or repaired.get("token_scope", "") or "").strip()
+        repaired["oauth_mode"] = str(sibling_updated.get("oauth_mode", "") or repaired.get("oauth_mode", "") or "").strip().lower()
+        repaired["last_sync_error"] = ""
+        repaired["last_synced_at"] = time.time()
+        return repaired
+    return {}
 
 
 def _normalize_external_source_url(raw_value: str) -> str:
