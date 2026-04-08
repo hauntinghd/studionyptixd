@@ -227,6 +227,8 @@ function formatCatalystGoogleError(value: string): string {
         lower.includes('invalid_grant')
         || lower.includes('token has been expired or revoked')
         || lower.includes('token has been revoked')
+        || lower.includes('unauthorized_client')
+        || lower.includes('"unauthorized"')
     ) {
         return 'This channel needs to be reconnected to Google before private YouTube metrics can refresh again.';
     }
