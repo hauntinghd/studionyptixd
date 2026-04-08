@@ -18,7 +18,8 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [onNavigate, session]);
 
     if (session) return null;
-    const authBooting = loading || !supabase;
+    const authBooting = !supabase;
+    const authSettling = loading && Boolean(supabase);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -100,6 +101,7 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
                     {error && <p className="text-red-400 text-sm">{error}</p>}
                     {info && <p className="text-emerald-400 text-sm">{info}</p>}
                     {authBooting && !error && !info && <p className="text-gray-400 text-sm">Connecting auth...</p>}
+                    {!authBooting && authSettling && !error && !info && <p className="text-gray-400 text-sm">Finalizing session...</p>}
 
                     <button
                         type="submit"

@@ -11,6 +11,20 @@ import { trackStudioPageView } from './studio/lib/googleAds';
 
 type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription';
 
+const hasPendingAuthRedirectArtifacts = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    try {
+        const url = new URL(window.location.href);
+        const hashBody = String(url.hash || '').replace(/^#/, '');
+        if (/(^|&)(access_token|refresh_token|expires_in|expires_at|token_type|type|provider_token|provider_refresh_token)=/i.test(hashBody)) {
+            return true;
+        }
+        return ['code', 'error', 'error_code', 'error_description'].some((key) => url.searchParams.has(key));
+    } catch {
+        return false;
+    }
+};
+
 function AppShell() {
     const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const billingHost = isBillingHost;
@@ -90,8 +104,9 @@ function AppShell() {
 
     useEffect(() => {
         if (loading) return;
+        const authRedirectPending = hasPendingAuthRedirectArtifacts();
         if (billingHost) {
-            if (!session && (page === 'dashboard' || page === 'account' || page === 'settings')) {
+            if (!session && !authRedirectPending && (page === 'dashboard' || page === 'account' || page === 'settings')) {
                 setPage('auth');
                 return;
             }
@@ -101,8 +116,8 @@ function AppShell() {
             }
             return;
         }
-        if (!session && page === 'dashboard') setPage('landing');
-        if (!session && (page === 'account' || page === 'settings' || page === 'billing' || page === 'subscription')) setPage('auth');
+        if (!session && !authRedirectPending && page === 'dashboard') setPage('landing');
+        if (!session && !authRedirectPending && (page === 'account' || page === 'settings' || page === 'billing' || page === 'subscription')) setPage('auth');
 
         const isAdmin = role === 'admin';
 
