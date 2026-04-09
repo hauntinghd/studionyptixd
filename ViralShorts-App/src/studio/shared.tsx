@@ -479,7 +479,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 const fallbackUrl = String(FALLBACK_SUPABASE_URL || '').trim();
                 const fallbackKey = String(FALLBACK_SUPABASE_ANON_KEY || '').trim();
                 if (!fallbackUrl || !fallbackKey) return null;
-                const sb = createClient(fallbackUrl, fallbackKey);
+                const sb = createClient(fallbackUrl, fallbackKey, {
+                    auth: { persistSession: true, storageKey: 'nyptid-studio-auth', autoRefreshToken: true, detectSessionInUrl: true },
+                });
                 await attachSupabaseClient(sb);
                 return sb;
             } catch {
@@ -631,7 +633,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     setTopupPacks(packs);
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
-                    const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+                    const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+                        auth: { persistSession: true, storageKey: 'nyptid-studio-auth', autoRefreshToken: true, detectSessionInUrl: true },
+                    });
                     supabaseRef.current = sb;
                     setSupabase(sb);
                     sbCreated = true;
@@ -649,7 +653,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             // Fallback: if backend was offline or didn't provide supabase creds, use hardcoded fallback
             if (!cancelled && !sbCreated) {
                 try {
-                    const sb = createClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY);
+                    const sb = createClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY, {
+                        auth: { persistSession: true, storageKey: 'nyptid-studio-auth', autoRefreshToken: true, detectSessionInUrl: true },
+                    });
                     supabaseRef.current = sb;
                     setSupabase(sb);
                     const { data: { session: s } } = await sb.auth.getSession();
