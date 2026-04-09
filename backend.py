@@ -12751,8 +12751,14 @@ def _build_longform_scene_execution_prompt(
             if documentary_archetype == "crime_documentary"
             else "No text overlays, no chapter cards, no labels, no UI panels, no watermarks, no pseudo-text in the scene."
         )
+        # Phase 2A: inject Catalyst learned visual wins into image prompt
+        _visual_strategy = dict((dict(edit_blueprint or {}).get("visual_strategy") or {}))
+        _learned_camera = [_clip_text(str(v or ""), 100) for v in list(_visual_strategy.get("camera_language") or [])[:2] if str(v or "").strip()]
+        _learned_visual_rules = [_clip_text(str(v or ""), 100) for v in list(_visual_strategy.get("visual_rules") or [])[:1] if str(v or "").strip() and "avoid" not in str(v or "").lower()]
         visual_parts = _dedupe_preserve_order([
             documentary_visual_description,
+            *_learned_camera,
+            *_learned_visual_rules,
             f"Series anchor: {execution.get('series_anchor', '')}." if execution.get("series_anchor") and str(format_preset or "").strip().lower() == "recap" else "",
             "Open on the payoff image immediately before adding explanation." if execution.get("is_opening") else "",
             "Close with a clean consequence frame or controlled reveal that tees up the next beat." if execution.get("is_closer") else "",
@@ -13406,6 +13412,25 @@ TRANSITION_STYLE_MAP = {
     "snap": "pixelize",
     "blur": "hblur",
 }
+
+
+DOCUMENTARY_TRANSITION_POOL = ["fade", "slideleft", "smoothup", "fadeblack", "hblur", "circlecrop", "fadegrays"]
+
+
+def _select_scene_transition(scene_index: int, total_scenes: int, base_xfade: str, cut_profile: str = "") -> str:
+    """Pick per-scene xfade type for documentary-grade transition variety."""
+    cut = str(cut_profile or "").strip().lower()
+    if base_xfade in {"none", "pixelize"}:
+        return base_xfade
+    if cut == "punch-cut":
+        return ["pixelize", "fade", "slideleft"][scene_index % 3]
+    if cut == "contrast-cut":
+        return ["fadeblack", "hblur", "smoothup", "fade"][scene_index % 4]
+    # Default documentary variety
+    if total_scenes > 3:
+        pool = DOCUMENTARY_TRANSITION_POOL
+        return pool[scene_index % len(pool)]
+    return base_xfade
 
 
 def _normalize_transition_style(value: str | None) -> str:
@@ -19354,9 +19379,11 @@ async def composite_video(
         for idx in range(1, len(working_clips)):
             left = "0:v" if idx == 1 else f"v{idx-1}"
             out = f"v{idx}"
-            offset = max(0.0, cumulative - transition_dur)
-            parts.append(f"[{left}][{idx}:v]xfade=transition={xfade_type}:duration={transition_dur:.3f}:offset={offset:.3f}[{out}]")
-            cumulative += durations[idx] - transition_dur
+            scene_xfade = _select_scene_transition(idx, len(working_clips), xfade_type)
+            scene_dur = _transition_duration_for_style(style) if scene_xfade == xfade_type else max(0.08, min(0.18, transition_dur))
+            offset = max(0.0, cumulative - scene_dur)
+            parts.append(f"[{left}][{idx}:v]xfade=transition={scene_xfade}:duration={scene_dur:.3f}:offset={offset:.3f}[{out}]")
+            cumulative += durations[idx] - scene_dur
         final_label = f"v{len(working_clips)-1}"
         cmd.extend([
             "-filter_complex", ";".join(parts),
@@ -20156,8 +20183,18 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
     return constrained
 
 
-def _force_template_scene_duration(scenes: list, template: str) -> list:
-    """Lock selected templates to fixed 5s scenes for stable Kling generation."""
+def _force_template_scene_duration(scenes: list, template: str, format_preset: str = "") -> list:
+    """Lock selected templates to fixed 5s scenes, allow variable for documentary."""
+    is_documentary = str(format_preset or "").strip().lower() in {"documentary", "explainer"}
+    if is_documentary and template not in {"skeleton"}:
+        # Documentary: allow variable 6-14 second durations from LLM
+        forced = []
+        for s in scenes or []:
+            scene = dict(s or {})
+            dur = float(scene.get("duration_sec", 8.0) or 8.0)
+            scene["duration_sec"] = max(6.0, min(14.0, dur))
+            forced.append(scene)
+        return forced
     if template not in {"skeleton", "story", "motivation"}:
         return scenes
     forced = []
@@ -23444,6 +23481,12 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 or ("cinematic" if format_preset in {"recap", "explainer", "documentary"} else "smooth")
             )
         )
+        # Phase 2B: map learned cut_profile to transition_style
+        _learned_cut_profile = str((dict(edit_blueprint.get("execution_strategy") or {})).get("cut_profile", "") or "").strip().lower()
+        if _learned_cut_profile == "punch-cut" and transition_style in {"smooth", "cinematic"}:
+            transition_style = "snap"
+        elif _learned_cut_profile == "contrast-cut" and transition_style == "smooth":
+            transition_style = "dramatic"
         micro_escalation_mode = _normalize_micro_escalation_mode(
             edit_blueprint.get("motion_strategy", {}).get(
                 "micro_escalation_mode",
