@@ -769,7 +769,7 @@ _paypal_subscriptions: dict[str, dict] = {}
 _paypal_subscriptions_lock = asyncio.Lock()
 _landing_notifications: list[dict] = []
 _landing_notifications_lock = asyncio.Lock()
-YOUTUBE_OAUTH_STATE_TTL_SEC = 20 * 60
+YOUTUBE_OAUTH_STATE_TTL_SEC = 60 * 60  # 1 hour -- installed flow copy-paste can take a while
 YOUTUBE_TOKEN_REFRESH_MARGIN_SEC = 120
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
@@ -9508,19 +9508,26 @@ async def _youtube_selected_channel_context(user: dict, preferred_channel_id: st
         record = dict(channels.get(chosen_id) or {})
     if not record:
         return {}
-    try:
-        refreshed = await _youtube_sync_channel_record(record)
-    except Exception as e:
-        refreshed = await _youtube_refresh_public_channel_record_without_oauth(
-            record,
-            sync_error=_clip_text(str(e), 220),
-        )
-    async with _youtube_connections_lock:
-        bucket = _youtube_bucket_for_user(user_id)
-        bucket["channels"][chosen_id] = refreshed
-        if not str(bucket.get("default_channel_id", "") or "").strip():
-            bucket["default_channel_id"] = chosen_id
-        _save_youtube_connections()
+    # Respect the same cooldown as _youtube_sync_and_persist_for_user to avoid
+    # redundant YouTube API calls (which slow down the request and waste quota).
+    last_sync = _youtube_last_sync_ts.get(chosen_id, 0.0)
+    if (time.time() - last_sync) < _YOUTUBE_SYNC_COOLDOWN_SEC:
+        refreshed = record
+    else:
+        try:
+            refreshed = await _youtube_sync_channel_record(record)
+        except Exception as e:
+            refreshed = await _youtube_refresh_public_channel_record_without_oauth(
+                record,
+                sync_error=_clip_text(str(e), 220),
+            )
+        _youtube_last_sync_ts[chosen_id] = time.time()
+        async with _youtube_connections_lock:
+            bucket = _youtube_bucket_for_user(user_id)
+            bucket["channels"][chosen_id] = refreshed
+            if not str(bucket.get("default_channel_id", "") or "").strip():
+                bucket["default_channel_id"] = chosen_id
+            _save_youtube_connections()
     analytics_snapshot = dict(refreshed.get("analytics_snapshot") or {})
     return {
         "channel_id": chosen_id,
@@ -9557,8 +9564,16 @@ async def _youtube_connected_channel_access_token(user: dict, channel_id: str) -
         return "", {}
     try:
         access_token, updated = await _youtube_ensure_access_token(record)
-    except Exception:
-        return "", record
+    except Exception as e:
+        # Persist the sync error so the frontend can surface a "reconnect" hint
+        # instead of silently returning stale data with no access token.
+        failed_record = dict(record)
+        failed_record["last_sync_error"] = _clip_text(str(e), 220)
+        async with _youtube_connections_lock:
+            bucket = _youtube_bucket_for_user(user_id)
+            bucket["channels"][chosen_id] = failed_record
+            _save_youtube_connections()
+        return "", failed_record
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_id)
         bucket["channels"][chosen_id] = updated
@@ -27850,7 +27865,7 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
         if default_channel_id:
             try:
-                await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
+                await _youtube_sync_and_persist_for_user(user_id, default_channel_id, force=True)
             except Exception:
                 pass
         success_message = "YouTube channel connected"

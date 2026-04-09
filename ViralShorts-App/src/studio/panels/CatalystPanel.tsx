@@ -550,7 +550,7 @@ export default function CatalystPanel() {
                         body: formData,
                     });
                 })()
-                : await fetch(`${API}/api/catalyst/hub/reference-video-analysis`, {
+                : await fetch(`${directApiBase}/api/catalyst/hub/reference-video-analysis`, {
                     method: 'POST',
                     headers: jsonHeaders,
                     body: JSON.stringify({
@@ -1031,7 +1031,18 @@ export default function CatalystPanel() {
                                 ) : null}
                                 {channelSyncError && (
                                     <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                                        {channelSyncError}
+                                        <div>{channelSyncError}</div>
+                                        {/invalid.grant|expired|revoked|reconnect/i.test(channelSyncError) && (
+                                            <button
+                                                type="button"
+                                                onClick={() => void startYouTubeConnect()}
+                                                disabled={youtubeConnecting}
+                                                className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-200 transition hover:border-emerald-400/50 hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                <Youtube className="h-3.5 w-3.5" />
+                                                Reconnect YouTube
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                                 {channelOutcomeSyncError && (
