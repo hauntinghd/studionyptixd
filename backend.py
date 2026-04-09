@@ -25390,6 +25390,20 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
         session_copy = dict(session)
 
     edit_blueprint = dict(session_copy.get("edit_blueprint") or {})
+    force_accept_early = _bool_from_any(req.force_accept, False)
+    if force_accept_early:
+        # Skip regeneration entirely — just clear the error and approve existing chapter
+        async with _longform_sessions_lock:
+            session_live = _longform_sessions.get(session_id)
+            if session_live:
+                session_live["paused_error"] = None
+                session_live["status"] = "draft_review"
+                chapters_live = list(session_live.get("chapters") or [])
+                if chapter_index < len(chapters_live):
+                    chapters_live[chapter_index]["status"] = "approved"
+                    session_live["chapters"] = chapters_live
+                _save_longform_sessions()
+        return {"ok": True, "session": _longform_public_session(session_live or session_copy)}
     try:
         refreshed_edit_blueprint = await _refresh_longform_edit_blueprint_for_session(session_copy)
         if refreshed_edit_blueprint:
