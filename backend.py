@@ -27940,6 +27940,37 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
         return RedirectResponse(_youtube_redirect_target(next_url, False, str(e)), status_code=302)
 
 
+@app.get("/api/oauth/google/youtube/browser-start")
+async def start_google_youtube_oauth_browser(request: Request):
+    """Browser-friendly GET endpoint that redirects directly to Google OAuth."""
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Auth required — log into Studio first, then use the Connect YouTube button.")
+    oauth_mode = _youtube_active_oauth_mode()
+    if not oauth_mode:
+        raise HTTPException(500, _youtube_auth_issue_message())
+    state_token = secrets.token_urlsafe(32)
+    pkce_verifier = ""
+    if oauth_mode == "installed":
+        pkce_verifier, _ = _youtube_pkce_pair()
+    async with _youtube_oauth_states_lock:
+        _load_youtube_oauth_states()
+        _prune_youtube_oauth_states()
+        _youtube_oauth_states[state_token] = {
+            "user_id": str(user.get("id", "") or "").strip(),
+            "created_at": time.time(),
+            "next_url": "",
+            "oauth_mode": oauth_mode,
+            "pkce_verifier": pkce_verifier,
+        }
+        _save_youtube_oauth_states()
+    auth_url = _youtube_build_auth_url(state_token, oauth_mode)
+    if oauth_mode == "installed":
+        auth_url = _youtube_helper_page_url(state_token)
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
 @app.post("/api/oauth/google/youtube/start")
 async def start_google_youtube_oauth(
     req: YouTubeOAuthStartRequest,
