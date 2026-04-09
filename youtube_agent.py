@@ -37,8 +37,13 @@ class YouTubeVibeAgent:
         """Loads credentials from token.json if available."""
         if os.path.exists(self.token_file):
             from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
             try:
                 credentials = Credentials.from_authorized_user_file(self.token_file, SCOPES)
+                if credentials.expired and credentials.refresh_token:
+                    credentials.refresh(Request())
+                    with open(self.token_file, 'w') as token:
+                        token.write(credentials.to_json())
                 self.youtube = googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
                 self.analytics = googleapiclient.discovery.build("youtubeAnalytics", "v2", credentials=credentials)
                 return True
@@ -52,7 +57,10 @@ class YouTubeVibeAgent:
         # Note: In a real scenario, we'd query analytics, but for the 'video list' we use Data API
         request = self.youtube.channels().list(mine=True, part="contentDetails")
         response = request.execute()
-        uploads_playlist_id = response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        items = response.get('items', [])
+        if not items:
+            return {"items": []}
+        uploads_playlist_id = items[0]['contentDetails']['relatedPlaylists']['uploads']
         
         request = self.youtube.playlistItems().list(
             playlistId=uploads_playlist_id,
@@ -73,8 +81,8 @@ class YouTubeVibeAgent:
             ids='channel==MINE',
             startDate=start_date,
             endDate=end_date,
-            metrics='audienceRetention',
-            dimensions='video',
+            metrics='audienceWatchRatio',
+            dimensions='elapsedVideoTimeRatio',
             filters=f'video=={video_id}'
         )
         return request.execute()

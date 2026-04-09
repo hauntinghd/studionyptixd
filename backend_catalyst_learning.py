@@ -1,5 +1,5 @@
 ﻿import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import re
 from pathlib import Path
 
@@ -17,8 +17,10 @@ from backend_catalyst_core import (
     _catalyst_pick_preferred_choice,
     _catalyst_series_memory_key,
     _catalyst_text_overlap_score,
+    _catalyst_title_novelty_score,
     _catalyst_update_weighted_signals,
     _extract_catalyst_keywords,
+    _title_is_too_close_to_source,
 )
 from backend_models import CatalystOutcomeIngestRequest
 
@@ -39,7 +41,7 @@ def _catalyst_classify_outcome_failure_mode(metrics: dict | None) -> dict:
     if impressions <= 40 and views <= 5 and not has_retention_signal:
         key = "no_distribution"
         summary = "This upload barely received distribution, so there is not enough viewer-behavior signal yet to blame pacing, sound, or scene execution."
-    elif has_distribution_signal and 0 < ctr < 3.0 and (not has_retention_signal or avp >= 35.0 or first30 >= 55.0):
+    elif has_distribution_signal and 0 < ctr < 3.0 and (not has_retention_signal or (avp >= 42.0 and first30 >= 58.0)):
         key = "packaging_fail"
         summary = "The video was shown to people, but the package underperformed. Catalyst should treat title, thumbnail, and first-impression promise as the main bottleneck."
     elif (views >= 20 or has_retention_signal) and ((0 < avp < 40.0) or (0 < first30 < 58.0) or (0 < first60 < 48.0)):
@@ -149,7 +151,7 @@ def _build_catalyst_short_angle_signal(
         score -= 0.25
     if timeline_qa.get("bgm_enabled") is True:
         score += 0.12
-    elif timeline_qa:
+    elif timeline_qa.get("bgm_enabled") is False:
         score -= 0.12
     if timeline_qa.get("captions_enabled") is True:
         score += 0.08
@@ -1562,6 +1564,7 @@ def _update_catalyst_channel_memory(
 
 
 async def _youtube_fetch_video_analytics(access_token: str, channel_id: str, video_id: str) -> dict:
+    from backend import _youtube_api_get  # deferred to avoid circular import
     vid = str(video_id or "").strip()
     cid = str(channel_id or "").strip()
     if not vid or not cid:

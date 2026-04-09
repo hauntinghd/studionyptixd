@@ -23,6 +23,15 @@ def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
     ).lower()
     return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
 
+
+def _is_cryptic_science_channel(channel_context: dict | None) -> bool:
+    channel_context = dict(channel_context or {})
+    haystack = " ".join(
+        str(channel_context.get(key, "") or "").strip()
+        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
+    ).lower()
+    return any(token in haystack for token in ("cryptic science", "crypticscience", "@crypticscience"))
+
 def _heuristic_catalyst_edit_blueprint(
     *,
     template: str,
@@ -66,6 +75,7 @@ def _heuristic_catalyst_edit_blueprint(
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
     is_empire_magnates = bool(format_preset == "documentary" and not is_recap_lane and _is_empire_magnates_channel(channel_context))
+    is_cryptic_science = bool(format_preset == "documentary" and not is_recap_lane and not is_empire_magnates and _is_cryptic_science_channel(channel_context))
     operator_summary = _clip_text(str(memory_view.get("operator_summary", "") or ""), 320)
     operator_directive = _clip_text(str(memory_view.get("operator_directive", "") or ""), 1200)
     operator_mission = _clip_text(str(memory_view.get("operator_mission", "") or ""), 220)
@@ -111,6 +121,40 @@ def _heuristic_catalyst_edit_blueprint(
             "Package the video around one sharp contradiction, one hidden system, and one premium proof image instead of generic psychology clickbait."
             if not empire_psychology_mode
             else "Package the video around one invasive contradiction, one hidden behavior mechanism, and one premium consequence image instead of generic clickbait or textbook psychology framing.",
+            220,
+        )
+    if is_cryptic_science:
+        crime_haystack = " ".join([
+            str(topic or "").strip().lower(),
+            str(input_title or "").strip().lower(),
+            str(input_description or "").strip().lower(),
+            str(niche_key or "").strip().lower(),
+        ])
+        is_crime_mode = bool(re.search(r"\b(crime|murder|case|trial|court|suspect|victim|killer|missing|disappear|forensic|prison|sentence|verdict|cold case|serial)\b", crime_haystack))
+        archetype_key = "crime_documentary" if is_crime_mode else "science_mechanism"
+        archetype_label = "Crime Documentary" if is_crime_mode else "Science Mechanism"
+        archetype_hook_rule = _clip_text(
+            "Open on the most chilling moment of the case — the discovery, the contradiction, or the detail that changes everything."
+            if is_crime_mode
+            else "Open on the hidden mechanism or counterintuitive behavior that makes the viewer question what they assumed.",
+            220,
+        )
+        archetype_visual_rule = _clip_text(
+            "Use high-contrast 3D-infographic documentary staging, evidence boards, timeline reconstructions, and location recreations with Skeleton AI identity."
+            if is_crime_mode
+            else "Use premium 3D cutaways, process diagrams, macro system views, and cause-effect staging with Skeleton AI identity.",
+            220,
+        )
+        archetype_sound_rule = _clip_text(
+            "Use cold tension drones, sparse percussion hits, and silence before evidence reveals."
+            if is_crime_mode
+            else "Use precision pulses, subtle mechanical-scientific accents, and payoff hits when the mechanism clicks into place.",
+            220,
+        )
+        archetype_packaging_rule = _clip_text(
+            "Package around one chilling detail, one suspect contradiction, or one visual that makes the viewer need the answer."
+            if is_crime_mode
+            else "Package around one striking mechanism or scientific contradiction with strong before-versus-after contrast.",
             220,
         )
     cluster_label = _clip_text(str(selected_cluster.get("label", "") or "").strip(), 120)

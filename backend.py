@@ -225,6 +225,7 @@ from backend_catalyst_learning import (
     _heuristic_catalyst_learning_record,
     _heuristic_catalyst_short_learning_record,
     _update_catalyst_channel_memory,
+    _youtube_fetch_video_analytics,
 )
 from backend_catalyst_reference import (
     _build_catalyst_reference_playbook,
@@ -7725,15 +7726,17 @@ def _youtube_parse_published_date(raw_value: str) -> date | None:
 
 def _parse_youtube_iso8601_duration(raw_duration: str) -> int:
     value = str(raw_duration or "").strip().upper()
-    if not value.startswith("PT"):
+    if not value.startswith("P"):
         return 0
+    days_match = re.search(r"(\d+)D", value)
     hours_match = re.search(r"(\d+)H", value)
     minutes_match = re.search(r"(\d+)M", value)
     seconds_match = re.search(r"(\d+)S", value)
+    days = int(days_match.group(1) or 0) if days_match else 0
     hours = int(hours_match.group(1) or 0) if hours_match else 0
     minutes = int(minutes_match.group(1) or 0) if minutes_match else 0
     seconds = int(seconds_match.group(1) or 0) if seconds_match else 0
-    return (hours * 3600) + (minutes * 60) + seconds
+    return (days * 86400) + (hours * 3600) + (minutes * 60) + seconds
 
 
 def _youtube_public_api_key_candidates() -> list[str]:
@@ -7743,14 +7746,55 @@ def _youtube_public_api_key_candidates() -> list[str]:
     return keys
 
 
+# ── YouTube API response cache (in-memory, 10-minute TTL) ──
+_youtube_api_cache: dict[str, tuple[float, dict]] = {}
+_YOUTUBE_API_CACHE_TTL_SEC = 600  # 10 minutes
+_youtube_api_key_index = 0  # round-robin counter
+
+
+def _youtube_api_cache_key(path: str, params: dict | None) -> str:
+    """Build a stable cache key from path + sorted params (excluding API key)."""
+    clean_params = {k: v for k, v in sorted((params or {}).items()) if k != "key"}
+    return f"{path}|{json.dumps(clean_params, sort_keys=True, default=str)}"
+
+
+def _youtube_api_cache_get(cache_key: str) -> dict | None:
+    entry = _youtube_api_cache.get(cache_key)
+    if entry and (time.time() - entry[0]) < _YOUTUBE_API_CACHE_TTL_SEC:
+        return entry[1]
+    if entry:
+        _youtube_api_cache.pop(cache_key, None)
+    return None
+
+
+def _youtube_api_cache_set(cache_key: str, payload: dict):
+    _youtube_api_cache[cache_key] = (time.time(), payload)
+    # evict stale entries if cache grows too large
+    if len(_youtube_api_cache) > 200:
+        now = time.time()
+        stale = [k for k, (ts, _) in _youtube_api_cache.items() if now - ts > _YOUTUBE_API_CACHE_TTL_SEC]
+        for k in stale:
+            _youtube_api_cache.pop(k, None)
+
+
 async def _youtube_public_api_get(path: str, *, params: dict | None = None, timeout_sec: int = 30) -> tuple[dict, str]:
+    global _youtube_api_key_index
     keys = _youtube_public_api_key_candidates()
     if not keys:
         raise RuntimeError("YouTube API key not configured")
+    # check cache first
+    cache_key = _youtube_api_cache_key(path, params)
+    cached = _youtube_api_cache_get(cache_key)
+    if cached is not None:
+        return cached, keys[0]
     url = path if str(path or "").startswith("http") else f"{YOUTUBE_DATA_API_BASE}{path}"
     last_error: str = ""
+    # round-robin: start from next key each time
+    start_idx = _youtube_api_key_index % len(keys)
+    rotated_keys = keys[start_idx:] + keys[:start_idx]
+    _youtube_api_key_index = (start_idx + 1) % len(keys)
     async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
-        for key in keys:
+        for key in rotated_keys:
             query = dict(params or {})
             query["key"] = key
             try:
@@ -7762,9 +7806,12 @@ async def _youtube_public_api_get(path: str, *, params: dict | None = None, time
                 payload = resp.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("YouTube public API returned an invalid payload")
+                _youtube_api_cache_set(cache_key, payload)
                 return payload, key
             last_error = f"{resp.status_code}: {_clip_text(resp.text, 220)}"
-            if resp.status_code in {400, 401, 403, 404, 429, 500, 502, 503, 504}:
+            if resp.status_code in {400, 404}:
+                break  # request is wrong, not the key — stop trying
+            if resp.status_code in {401, 403, 429, 500, 502, 503, 504}:
                 continue
     raise RuntimeError(_clip_text(last_error or "YouTube public API request failed", 220))
 
@@ -8024,12 +8071,12 @@ def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
     return rows
 
 
-def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id: str, max_results: int = 100) -> list[dict]:
+async def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id: str, max_results: int = 100) -> list[dict]:
     page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
     if not page_url or yt_dlp is None:
         return []
     try:
-        info = _yt_dlp_extract_info_blocking(page_url)
+        info = await asyncio.to_thread(_yt_dlp_extract_info_blocking, page_url)
     except Exception:
         return []
     entries = [dict(v or {}) for v in list((info or {}).get("entries") or []) if isinstance(v, dict)]
@@ -8076,8 +8123,10 @@ def _youtube_merge_public_video_rows(primary_rows: list[dict] | None, supplement
         merged = dict(row or {})
         if clean_video_id and clean_video_id in supplemental_by_id:
             for key, value in dict(supplemental_by_id.get(clean_video_id) or {}).items():
-                if value not in (None, "", [], {}):
-                    merged[key] = value
+                if value not in (None, "", [], {}, 0, 0.0):
+                    existing = merged.get(key)
+                    if existing in (None, "", [], {}, 0, 0.0):
+                        merged[key] = value
         if clean_video_id:
             seen_ids.add(clean_video_id)
         merged_rows.append(merged)
@@ -8123,7 +8172,7 @@ async def _youtube_fetch_public_channel_page_videos(
                 if str(video_id or "").strip()
             ]
         if not page_rows:
-            page_rows = _youtube_extract_public_channel_rows_with_ytdlp(
+            page_rows = await _youtube_extract_public_channel_rows_with_ytdlp(
                 channel_url=channel_url,
                 channel_id=channel_id,
                 max_results=max_results,
@@ -8132,7 +8181,7 @@ async def _youtube_fetch_public_channel_page_videos(
             return []
         page_rows = page_rows[: max(1, min(int(max_results or 100), 100))]
         if not any(int(float((row or {}).get("views", 0) or 0) or 0) > 0 for row in page_rows):
-            ytdlp_rows = _youtube_extract_public_channel_rows_with_ytdlp(
+            ytdlp_rows = await _youtube_extract_public_channel_rows_with_ytdlp(
                 channel_url=channel_url,
                 channel_id=channel_id,
                 max_results=max_results,
@@ -8170,7 +8219,7 @@ async def _youtube_fetch_public_channel_page_videos(
             merged_rows.append(merged)
         return merged_rows
     except Exception:
-        return _youtube_extract_public_channel_rows_with_ytdlp(
+        return await _youtube_extract_public_channel_rows_with_ytdlp(
             channel_url=channel_url,
             channel_id=channel_id,
             max_results=max_results,
@@ -8205,7 +8254,7 @@ def _youtube_caption_track_sort_key(track: dict, language: str = "en") -> tuple[
         language_rank,
         0 if status == "serving" else 1,
         1 if is_draft else 0,
-        0 if is_auto_synced else 1,
+        1 if is_auto_synced else 0,  # prefer manually timed tracks
         str(payload.get("id", "") or "").strip(),
     )
 
@@ -8398,41 +8447,29 @@ async def _youtube_fetch_owned_channel_videos(
     *,
     max_results: int = 250,
 ) -> list[dict]:
+    """Fetch owned channel videos using playlistItems (1 unit/page) instead of search (100 units/page)."""
     clean_channel_id = str(channel_id or "").strip()
     if not clean_channel_id:
         return []
-    remaining = max(1, min(int(max_results or 250), 500))
-    page_token = ""
-    video_ids: list[str] = []
-    seen_ids: set[str] = set()
-    while remaining > 0:
-        params = {
-            "part": "snippet",
-            "forMine": "true",
-            "type": "video",
-            "order": "date",
-            "maxResults": min(50, remaining),
-        }
-        if page_token:
-            params["pageToken"] = page_token
-        payload = await _youtube_api_get(access_token, "/search", params=params)
-        for raw in list(payload.get("items") or []):
-            if not isinstance(raw, dict):
-                continue
-            snippet = dict(raw.get("snippet") or {})
-            snippet_channel_id = str(snippet.get("channelId", "") or "").strip()
-            if snippet_channel_id and snippet_channel_id != clean_channel_id:
-                continue
-            vid = str(((raw.get("id") or {}).get("videoId")) or "").strip()
-            if not vid or vid in seen_ids:
-                continue
-            seen_ids.add(vid)
-            video_ids.append(vid)
-        remaining = int(max_results or 250) - len(video_ids)
-        page_token = str(payload.get("nextPageToken", "") or "").strip()
-        if not page_token or remaining <= 0:
-            break
-    return await _youtube_fetch_videos(access_token, video_ids)
+    # get uploads playlist ID from channel info (1 unit)
+    try:
+        payload = await _youtube_api_get(
+            access_token,
+            "/channels",
+            params={"part": "contentDetails", "id": clean_channel_id},
+        )
+        items = list(payload.get("items") or [])
+        if not items:
+            return []
+        uploads_playlist_id = str(
+            ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads", "") or ""
+        ).strip()
+        if not uploads_playlist_id:
+            return []
+    except Exception:
+        return []
+    # use playlistItems endpoint (1 unit/page) instead of search (100 units/page)
+    return await _youtube_fetch_uploads_playlist_videos(access_token, uploads_playlist_id, max_results=max_results)
 
 
 async def _youtube_fetch_video_analytics_bulk(
@@ -8916,7 +8953,6 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             },
         )
 
-    summary_headers = [str(v) for v in list(summary_payload.get("columnHeaders") or []) if isinstance(v, dict)]
     summary_rows = list(summary_payload.get("rows") or [])
     summary_map: dict[str, float] = {}
     if summary_rows:
@@ -11108,7 +11144,11 @@ async def _build_shorts_catalyst_extra_instructions(
     return "\n\n".join(part for part in parts if str(part or "").strip())
 
 
-async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> dict:
+_YOUTUBE_SYNC_COOLDOWN_SEC = 300  # 5 minutes between syncs per channel
+_youtube_last_sync_ts: dict[str, float] = {}  # channel_id -> last sync timestamp
+
+
+async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str, *, force: bool = False) -> dict:
     user_key = str(user_id or "").strip()
     channel_key = str(channel_id or "").strip()
     if not user_key or not channel_key:
@@ -11118,6 +11158,10 @@ async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> d
         record = dict((_youtube_bucket_for_user(user_key).get("channels") or {}).get(channel_key) or {})
     if not record:
         return {}
+    # cooldown guard: skip sync if we already synced this channel within 5 minutes
+    last_sync = _youtube_last_sync_ts.get(channel_key, 0.0)
+    if not force and (time.time() - last_sync) < _YOUTUBE_SYNC_COOLDOWN_SEC:
+        return _youtube_connection_public_view(record)
     try:
         refreshed = await _youtube_sync_channel_record(record)
     except Exception as e:
@@ -11125,6 +11169,7 @@ async def _youtube_sync_and_persist_for_user(user_id: str, channel_id: str) -> d
             record,
             sync_error=_clip_text(str(e), 220),
         )
+    _youtube_last_sync_ts[channel_key] = time.time()
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_key)
         bucket["channels"][channel_key] = refreshed
@@ -12654,20 +12699,20 @@ def _build_longform_scene_execution_prompt(
             flags=re.IGNORECASE,
         ).strip()
         documentary_prefix = (
-            "Fern-grade premium 3D psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
+            "Premium 3D CG psychology documentary scene, human-scale, emotionally invasive, designed environment."
             if documentary_archetype == "psychology_documentary"
-            else "Fern-grade premium 3D crime-case documentary scene, obviously CG, evidence-first, human-scale, and built around real case material. No live-action photography, no generic boardroom filler, no untouched dossier table, and no multi-skeleton crowd."
+            else "Premium 3D CG crime documentary scene, evidence-first, human-scale, real case material."
             if documentary_archetype == "crime_documentary"
-            else "Fern-grade premium 3D systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
+            else "Premium 3D CG systems documentary scene, proof-first, human-scale, expensive documentary environment."
         )
         if str(documentary_visual_description or "").strip().lower().startswith("fern-grade premium 3d"):
             documentary_prefix = ""
         documentary_environment_guidance = (
-            "Prefer active human pressure scenes, mirrored conversations, surveillance moments, executive meetings, interviews, and consequence frames over empty rooms, untouched desks, or static dossier tables."
+            "Prefer human pressure scenes, surveillance, meetings, consequence frames."
             if documentary_archetype == "psychology_documentary"
-            else "Prefer named-human close-ups, studio interiors, court corridors, phone and records evidence, source-capture monitors, route and timeline boards, surveillance-led consequence frames, and one dominant contradiction over boardrooms, static dossier tables, or empty archive rooms."
+            else "Prefer evidence close-ups, court corridors, timeline boards, consequence frames."
             if documentary_archetype == "crime_documentary"
-            else "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects."
+            else "Prefer boardrooms, archives, maps, consequence environments."
         )
         human_priority_lock = _longform_named_human_priority_lock(
             visual_description_raw,
@@ -12680,13 +12725,11 @@ def _build_longform_scene_execution_prompt(
             archetype_key=documentary_archetype,
         )
         subject_reference_phrase = (
-            f"Use the attached subject reference image for {subject_reference_name} only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            f"Preserve {subject_reference_name} identity from reference: same face, build, age, styling."
             if has_subject_reference and str(subject_reference_name or "").strip()
-            else "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            else "Preserve subject identity from reference: same face, build, age, styling."
             if has_subject_reference
-            else "Use the attached Cryptic Science case reference sheet for framing, lighting, set design, source-capture composition, and evidence-board discipline only; never reproduce timestamps, site names, captions, or layout text from the reference."
-            if documentary_archetype == "crime_documentary"
-            else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
+            else "Reference sheet for framing and lighting only; no text or layout reproduction."
         )
         documentary_output_guardrail = (
             "No legible text overlays, no chapter cards, no branded logos, no watermarks, no readable article text, and no giant wall text or monitor text in the scene."
@@ -12704,9 +12747,9 @@ def _build_longform_scene_execution_prompt(
             "Use the recurring skeleton as an editorial host only when useful; keep case participants human and never fill a room with multiple skeleton people." if documentary_archetype == "crime_documentary" and str(template or "").strip().lower() == "skeleton" else "",
             documentary_environment_guidance,
             documentary_output_guardrail,
-        ], max_items=8, max_chars=240)
+        ], max_items=8, max_chars=140)
         visual_delta = " ".join(part for part in visual_parts if part).strip()
-        return f"{documentary_prefix} {visual_delta}".strip()
+        return _clip_text(f"{documentary_prefix} {visual_delta}".strip(), 800)
     visual_parts = _dedupe_preserve_order([
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
@@ -13140,6 +13183,7 @@ async def generate_voiceover(text: str, output_path: str, template: str = "rando
                             "stability": vs.get("stability", 0.5),
                             "similarity_boost": vs.get("similarity_boost", 0.75),
                             "style": vs.get("style", 0.3),
+                            "speed": max(0.8, min(1.35, speed)),
                         },
                     },
                 )
@@ -15102,8 +15146,10 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
         payload["output_format"] = "png"
     elif model_id in {"recraft_v4", "recraft_v4_pro"}:
         payload["style"] = "realistic_image"
+        payload["image_size"] = image_size
     elif model_id == "nano_banana_pro":
         payload["output_format"] = "png"
+        payload["image_size"] = image_size
     return payload
 
 
@@ -17596,7 +17642,6 @@ COMFYUI_INPUT_DIR = "/workspace/ComfyUI/input"
 
 FAL_SUBMIT_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-to-video"
 FAL_STATUS_URL = "https://queue.fal.run/fal-ai/kling-video/v2.1/standard/image-to-video/requests"
-FAL_UPLOAD_URL = "https://fal.run/fal-ai/fal-file-storage/upload"
 
 
 def _fal_queue_urls(endpoint_id: str) -> tuple[str, str]:
@@ -17623,6 +17668,8 @@ def _build_fal_video_payload(
         payload["cfg_scale"] = 0.5
     elif model_id == "veo3_fast":
         payload["generate_audio"] = False
+        payload["duration"] = str(int(max(1.0, float(duration_sec or 5.0))))
+        payload.pop("aspect_ratio", None)
     return payload
 
 
@@ -17742,14 +17789,16 @@ async def _upload_image_to_fal(image_path: str) -> str:
         files = {"file_upload": (filename, io.BytesIO(img_bytes), "image/png")}
         resp2 = await client.post(rest_url, headers=headers, files=files)
         if resp2.status_code in (200, 201):
-            cdn_url = "https://api.fal.ai/v1/serverless/files/file/" + target_path
+            try:
+                cdn_url = str(resp2.json().get("url", "") or "").strip()
+            except Exception:
+                cdn_url = ""
+            if not cdn_url:
+                cdn_url = "https://api.fal.ai/v1/serverless/files/file/" + target_path
             log.info(f"Image uploaded to fal.ai REST: {cdn_url}")
             return cdn_url
 
-    import base64
-    log.warning("fal.ai CDN upload failed, using data URL fallback")
-    b64 = base64.b64encode(img_bytes).decode()
-    return "data:image/png;base64," + b64
+    raise RuntimeError(f"fal.ai CDN upload failed for {filename} — both presigned and REST upload methods returned errors")
 
 
 async def animate_image_kling(image_path: str, prompt: str, output_clip_path: str, duration: str = "5", aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
@@ -18990,9 +19039,9 @@ async def _composite_video_on_runpod(
             for idx in range(1, len(uploaded_remote_files)):
                 left = "0:v" if idx == 1 else f"v{idx-1}"
                 out = f"v{idx}"
-                offset = max(0.0, cumulative - transition_dur * idx)
+                offset = max(0.0, cumulative - transition_dur)
                 parts.append(f"[{left}][{idx}:v]xfade=transition={xfade_type}:duration={transition_dur:.3f}:offset={offset:.3f}[{out}]")
-                cumulative += durations[idx]
+                cumulative += durations[idx] - transition_dur
             final_label = f"v{len(uploaded_remote_files) - 1}"
             concat_cmd = (
                 f"ffmpeg -y {ff_inputs} -filter_complex \"{';'.join(parts)}\" "
@@ -19290,9 +19339,9 @@ async def composite_video(
         for idx in range(1, len(working_clips)):
             left = "0:v" if idx == 1 else f"v{idx-1}"
             out = f"v{idx}"
-            offset = max(0.0, cumulative - transition_dur * idx)
+            offset = max(0.0, cumulative - transition_dur)
             parts.append(f"[{left}][{idx}:v]xfade=transition={xfade_type}:duration={transition_dur:.3f}:offset={offset:.3f}[{out}]")
-            cumulative += durations[idx]
+            cumulative += durations[idx] - transition_dur
         final_label = f"v{len(working_clips)-1}"
         cmd.extend([
             "-filter_complex", ";".join(parts),
@@ -20632,15 +20681,19 @@ def _job_diag_finalize(job_id: str):
         month_key = str(job.get("credit_month_key", "") or "")
         if user_id and source in {"monthly", "topup"}:
             try:
-                asyncio.create_task(_refund_generation_credit(
+                job["credit_refunded"] = True  # mark immediately to prevent double-refund
+                task = asyncio.ensure_future(_refund_generation_credit(
                     user_id,
                     source,
                     month_key=month_key,
                     credits=int(job.get("credit_amount", 1) or 1),
                 ))
-                job["credit_refunded"] = True
+                task.add_done_callback(
+                    lambda t: log.warning(f"Credit refund failed for job {job_id}") if t.exception() else None
+                )
             except Exception:
-                pass
+                job["credit_refunded"] = False  # unmark on scheduling failure
+                log.warning(f"Credit refund scheduling failed for job {job_id}, user {user_id}")
     if status in {"complete", "error"} and job.get("credit_charged"):
         _append_usage_ledger({
             "type": "generation_terminal",
@@ -22632,6 +22685,18 @@ def _coerce_documentary_longform_channel_memory(
     )
 
 
+def _adapt_prompt_for_model(prompt: str, model_id: str) -> str:
+    """Adapt image prompt for optimal results with specific FAL models."""
+    text = str(prompt or "").strip()
+    if not text:
+        return text
+    if model_id == "seedream45":
+        if not text.lower().startswith("3d"):
+            text = "3D CG documentary render: " + text
+    # Condense to 800 chars max for better model adherence
+    return _clip_text(text, 800)
+
+
 def _longform_hosted_image_model_candidates(
     template: str,
     format_preset: str = "",
@@ -22639,12 +22704,14 @@ def _longform_hosted_image_model_candidates(
     reference_image_url: str = "",
 ) -> list[str]:
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        # Empire / long-form documentary scenes are locked to Grok.
-        # Seedream stays thumbnail-only and Imagen/Recraft do not replace the
-        # Fern-conditioned documentary scene lane.
-        candidates = ["grok_imagine"]
+        if reference_image_url:
+            # Grok first when reference conditioning is needed, others as fallback
+            candidates = ["grok_imagine", "seedream45", "imagen4_fast"]
+        else:
+            # Seedream/Imagen4 produce better 3D CG visuals at same or lower cost
+            candidates = ["imagen4_fast", "seedream45", "grok_imagine"]
     else:
-        candidates = ["grok_imagine"]
+        candidates = ["grok_imagine", "imagen4_fast", "seedream45"]
     deduped: list[str] = []
     for candidate in candidates:
         normalized = _normalize_creative_image_model_id(candidate, template=template)
@@ -22667,40 +22734,28 @@ async def _longform_generate_scene_image(
 ) -> dict:
     errors: list[str] = []
     documentary_passthrough = _longform_prefers_3d_documentary_visuals(template, format_preset)
-    if documentary_passthrough:
-        grok_profile = dict(CREATIVE_IMAGE_MODEL_MAP.get("grok_imagine") or {})
-        if not bool(grok_profile.get("enabled", False)):
-            raise RuntimeError("Long-form documentary scenes require Grok Imagine, but the Grok lane is not enabled.")
-        try:
-            return await generate_scene_image(
-                prompt,
-                output_path,
-                resolution=resolution,
-                negative_prompt=negative_prompt,
-                template=template,
-                reference_image_url=reference_image_url,
-                reference_lock_mode=reference_lock_mode,
-                best_of_enabled=best_of_enabled,
-                salvage_enabled=salvage_enabled,
-                prompt_passthrough=True,
-                selected_model_id="grok_imagine",
-            )
-        except Exception as e:
-            raise RuntimeError(f"Long-form documentary scene generation requires Grok Imagine and it failed: {e}")
     for model_id in _longform_hosted_image_model_candidates(
         template,
         format_preset,
         reference_image_url=reference_image_url,
     ):
+        adapted_prompt = _adapt_prompt_for_model(prompt, model_id)
+        adapted_negative = negative_prompt
+        # Imagen4 handles negatives better as a separate parameter
+        if model_id in {"imagen4_fast", "imagen4_ultra"} and "No live-action" in adapted_prompt:
+            inline_negatives = re.findall(r"No [^.]+\.", adapted_prompt)
+            for neg in inline_negatives[:3]:
+                adapted_prompt = adapted_prompt.replace(neg, "").strip()
+                adapted_negative = (adapted_negative + " " + neg.replace("No ", "").rstrip(".")).strip()
         for attempt in range(2):
             try:
                 return await generate_scene_image(
-                    prompt,
+                    adapted_prompt,
                     output_path,
                     resolution=resolution,
-                    negative_prompt=negative_prompt,
+                    negative_prompt=adapted_negative,
                     template=template,
-                    reference_image_url=reference_image_url,
+                    reference_image_url=reference_image_url if model_id == "grok_imagine" else "",
                     reference_lock_mode=reference_lock_mode,
                     best_of_enabled=best_of_enabled,
                     salvage_enabled=salvage_enabled,
@@ -28382,7 +28437,7 @@ async def sync_connected_youtube_channel(channel_id: str, request: Request):
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(401, "Auth required")
-    channel_public = await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id)
+    channel_public = await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id, force=True)
     if not channel_public:
         raise HTTPException(404, "Connected YouTube channel not found")
     return {"ok": True, "channel": channel_public}
