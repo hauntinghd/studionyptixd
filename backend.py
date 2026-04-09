@@ -5648,12 +5648,27 @@ async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security
     if cred is None:
         return None
     try:
-        payload = jwt.decode(
-            cred.credentials,
-            SUPABASE_JWT_SECRET,
-            audience="authenticated",
-            algorithms=["HS256"],
-        )
+        if SUPABASE_JWT_SECRET:
+            payload = jwt.decode(
+                cred.credentials,
+                SUPABASE_JWT_SECRET,
+                audience="authenticated",
+                algorithms=["HS256"],
+            )
+        else:
+            # Fallback: verify token via Supabase auth API when JWT secret is not configured
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/auth/v1/user",
+                    headers={
+                        "apikey": SUPABASE_ANON_KEY,
+                        "Authorization": f"Bearer {cred.credentials}",
+                    },
+                )
+                if resp.status_code != 200:
+                    return None
+                user_data = resp.json()
+                payload = {"sub": user_data.get("id", ""), "email": user_data.get("email", "")}
         user_id = payload.get("sub")
         email = payload.get("email", "")
         plan = HARDCODED_PLANS.get(email, "")
