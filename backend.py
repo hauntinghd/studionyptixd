@@ -7257,6 +7257,7 @@ async def generate_scene_image(
     resolution: str = "720p",
     negative_prompt: str = "",
     template: str = "",
+    channel_context: dict | None = None,
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
     best_of_enabled: bool = True,
@@ -7305,6 +7306,9 @@ async def generate_scene_image(
             log.warning(f"Image 1080p upscale skipped for {src.name}: {err.decode()[-200:]}")
 
     lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
+    channel_context = dict(channel_context or {})
+    channel_blocks_fal_scene = _channel_blocks_fal_scene_generation(channel_context)
+    channel_prefers_fal_scene = _channel_prefers_fal_scene_generation(channel_context)
     if template == "skeleton" and _is_template_default_reference(template, reference_image_url):
         log.info("Skeleton default style lock active: using reference DNA only and skipping direct image conditioning")
         reference_image_url = ""
@@ -7363,6 +7367,15 @@ async def generate_scene_image(
 
     explicit_image_model_requested = bool(str(selected_model_id or "").strip())
     explicit_image_model_id = _normalize_creative_image_model_id(selected_model_id, template=template)
+    if explicit_image_model_requested and channel_blocks_fal_scene:
+        explicit_profile = _creative_image_model_profile(explicit_image_model_id, template=template)
+        if str(explicit_profile.get("provider", "") or "").strip().lower() == "fal":
+            log.info(
+                "Channel policy disabled explicit fal scene model '%s'; using configured local/provider fallback lane instead",
+                explicit_image_model_id,
+            )
+            explicit_image_model_requested = False
+            explicit_image_model_id = DEFAULT_CREATIVE_IMAGE_MODEL_ID
     if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
@@ -7510,11 +7523,33 @@ async def generate_scene_image(
                 log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
 
     provider_order = _configured_image_provider_order()
+    if channel_blocks_fal_scene:
+        provider_order = [
+            provider
+            for provider in provider_order
+            if _normalize_image_provider_key(provider) not in {"fal", "xai", "grok"}
+        ]
+        if not provider_order:
+            provider_order = [
+                provider
+                for provider in _configured_image_provider_order()
+                if _normalize_image_provider_key(provider) not in {"fal", "xai", "grok"}
+            ]
+        if not provider_order:
+            provider_order = ["wan22", "sdxl"] if template == "skeleton" else ["sdxl"]
+        log.info("Channel policy: fal scene lane disabled for this request")
+    elif channel_prefers_fal_scene and bool(FAL_AI_KEY or XAI_API_KEY):
+        reordered = ["fal"]
+        for provider in provider_order:
+            if _normalize_image_provider_key(provider) in {"fal", "xai", "grok"}:
+                continue
+            reordered.append(provider)
+        provider_order = reordered
     skeleton_wan_lock = template == "skeleton" and bool(SKELETON_REQUIRE_WAN22) and not named_human_support
     if interactive_fast and template == "skeleton":
         if named_human_support:
             preferred_order: list[str] = []
-            if bool(FAL_AI_KEY or XAI_API_KEY):
+            if bool(FAL_AI_KEY or XAI_API_KEY) and not channel_blocks_fal_scene:
                 preferred_order.append("fal")
             configured = _configured_image_provider_order()
             for provider_key in configured:
@@ -7538,7 +7573,7 @@ async def generate_scene_image(
         if not provider_order:
             if skeleton_wan_lock:
                 provider_order = ["wan22"]
-            elif XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
+            elif (not channel_blocks_fal_scene) and XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
                 provider_order = ["fal"]
             else:
                 provider_order = ["sdxl"]
@@ -7584,7 +7619,7 @@ async def generate_scene_image(
         if not provider_order:
             if skeleton_wan_lock:
                 provider_order = ["wan22"]
-            elif XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
+            elif (not channel_blocks_fal_scene) and XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
                 provider_order = ["fal"]
             else:
                 provider_order = ["sdxl"]
@@ -7970,6 +8005,8 @@ async def generate_scene_image(
         return best_soft_local_result
 
     xai_enabled = (
+        not channel_blocks_fal_scene
+        and
         XAI_IMAGE_FALLBACK_ENABLED
         and any(p in xai_aliases for p in provider_order)
         and bool(FAL_AI_KEY or XAI_API_KEY)
@@ -11413,6 +11450,7 @@ async def run_generation_pipeline(
                 resolution=resolution,
                 negative_prompt=neg_prompt,
                 template=template,
+                channel_context=channel_context,
                 reference_image_url=scene_reference_url,
                 reference_lock_mode=reference_lock_mode,
             )
@@ -12097,22 +12135,70 @@ def _longform_scene_reference_bundle(session: dict | None, scene: dict | None, t
     }
 
 
-def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
+def _channel_context_haystack(channel_context: dict | None) -> str:
     channel_context = dict(channel_context or {})
-    haystack = " ".join(
-        str(channel_context.get(key, "") or "").strip()
-        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
-    ).lower()
+    parts: list[str] = []
+    for key in (
+        "title",
+        "channel_title",
+        "name",
+        "custom_url",
+        "channel_handle",
+        "handle",
+        "channel_url",
+        "url",
+        "id",
+        "channel_id",
+        "summary",
+        "channel_summary",
+        "workspace_focus",
+        "workspace",
+    ):
+        value = channel_context.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            parts.extend(str(item or "").strip() for item in value if str(item or "").strip())
+            continue
+        parts.append(str(value or "").strip())
+    return " ".join(parts).lower()
+
+
+def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
     return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
 
 
 def _is_cryptic_science_channel(channel_context: dict | None) -> bool:
-    channel_context = dict(channel_context or {})
-    haystack = " ".join(
-        str(channel_context.get(key, "") or "").strip()
-        for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
-    ).lower()
+    haystack = _channel_context_haystack(channel_context)
     return any(token in haystack for token in ("cryptic science", "crypticscience", "@crypticscience"))
+
+
+def _is_history_rewind_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
+    return any(
+        token in haystack
+        for token in (
+            "history rewind",
+            "historyrewind",
+            "@historyrewind",
+            "@historyyyrewindddd",
+            "historyyyrewindddd",
+        )
+    )
+
+
+def _is_nyptid_clips_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in ("nyptid clips", "nyptidclips", "@nyptidclips"))
+
+
+def _channel_prefers_fal_scene_generation(channel_context: dict | None) -> bool:
+    return _is_empire_magnates_channel(channel_context) or _is_cryptic_science_channel(channel_context)
+
+
+def _channel_blocks_fal_scene_generation(channel_context: dict | None) -> bool:
+    return _is_history_rewind_channel(channel_context) or _is_nyptid_clips_channel(channel_context)
 
 
 def _coerce_empire_longform_channel_memory(
@@ -12354,6 +12440,7 @@ async def _longform_generate_scene_image(
     negative_prompt: str,
     template: str,
     format_preset: str = "",
+    channel_context: dict | None = None,
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
     best_of_enabled: bool = False,
@@ -12372,6 +12459,7 @@ async def _longform_generate_scene_image(
                 resolution=resolution,
                 negative_prompt=negative_prompt,
                 template=template,
+                channel_context=channel_context,
                 reference_image_url=reference_image_url,
                 reference_lock_mode=reference_lock_mode,
                 best_of_enabled=best_of_enabled,
@@ -12394,6 +12482,7 @@ async def _longform_generate_scene_image(
                     resolution=resolution,
                     negative_prompt=negative_prompt,
                     template=template,
+                    channel_context=channel_context,
                     reference_image_url=reference_image_url,
                     reference_lock_mode=reference_lock_mode,
                     best_of_enabled=best_of_enabled,
@@ -12411,11 +12500,11 @@ async def _longform_generate_scene_image(
 
 def _longform_thumbnail_model_candidates(format_preset: str = "", channel_context: dict | None = None) -> list[str]:
     if _is_empire_magnates_channel(channel_context):
-        ordered = ["seedream45", "recraft_v4_pro", "imagen4_ultra", "recraft_v4", "grok_imagine"]
+        ordered = ["seedream45", "imagen4_fast", "recraft_v4_pro", "recraft_v4", "imagen4_ultra", "grok_imagine"]
     elif str(format_preset or "").strip().lower() == "documentary":
-        ordered = ["seedream45", "recraft_v4", "imagen4_ultra", "grok_imagine"]
+        ordered = ["seedream45", "imagen4_fast", "recraft_v4", "imagen4_ultra", "grok_imagine"]
     else:
-        ordered = ["recraft_v4", "seedream45", "imagen4_fast", "grok_imagine"]
+        ordered = ["seedream45", "imagen4_fast", "recraft_v4", "imagen4_ultra", "grok_imagine"]
     deduped: list[str] = []
     for candidate in ordered:
         normalized = _normalize_creative_image_model_id(candidate)
@@ -12689,6 +12778,7 @@ async def _longform_attach_scene_previews(
                 negative_prompt=neg_prompt,
                 template=template,
                 format_preset=format_preset,
+                channel_context=channel_context,
                 reference_image_url=reference_image_url,
                 reference_lock_mode=reference_lock_mode,
                 best_of_enabled=False,
@@ -13246,6 +13336,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                         negative_prompt=neg_prompt,
                         template=template,
                         format_preset=format_preset,
+                        channel_context=channel_context,
                         reference_image_url=reference_image_url,
                         reference_lock_mode=reference_lock_mode,
                         best_of_enabled=False,
@@ -16040,6 +16131,9 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
             reference_lock_mode=reference_lock_mode,
             art_style=art_style,
         )
+    channel_context = dict((dict(session.get("metadata_pack") or {})).get("youtube_channel") or {})
+    if not channel_context and str(session.get("youtube_channel_id", "") or "").strip():
+        channel_context = {"channel_id": str(session.get("youtube_channel_id", "") or "").strip()}
 
     img_path = str(TEMP_DIR / f"{req.session_id}_scene_{req.scene_index}.png")
     try:
@@ -16049,6 +16143,7 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
             resolution=resolution,
             negative_prompt=neg_prompt,
             template=template,
+            channel_context=channel_context,
             reference_image_url=scene_reference,
             reference_lock_mode=effective_reference_lock_mode,
             best_of_enabled=False,
@@ -16138,6 +16233,7 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
                         resolution=resolution,
                         negative_prompt=neg_prompt,
                         template=template,
+                        channel_context=channel_context,
                         reference_image_url=scene_reference,
                         reference_lock_mode=effective_reference_lock_mode,
                         best_of_enabled=False,
@@ -16522,6 +16618,9 @@ async def _run_creative_pipeline(
         reference_lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict")
         reference_dna = session.get("reference_dna", {}) if isinstance(session.get("reference_dna"), dict) else {}
         art_style = _normalize_art_style(session.get("art_style", "auto"), template=template)
+        channel_context = dict((dict(session.get("metadata_pack") or {})).get("youtube_channel") or {})
+        if not channel_context and str(session.get("youtube_channel_id", "") or "").strip():
+            channel_context = {"channel_id": str(session.get("youtube_channel_id", "") or "").strip()}
 
         fal_video_enabled = bool(FAL_AI_KEY)
         runway_video_enabled = bool(RUNWAY_API_KEY)
@@ -16585,6 +16684,7 @@ async def _run_creative_pipeline(
                     resolution=resolution,
                     negative_prompt=scene_negative_prompt,
                     template=template,
+                    channel_context=channel_context,
                     reference_image_url=_resolve_reference_for_scene(session, template, i),
                     reference_lock_mode=reference_lock_mode,
                     prompt_passthrough=prompt_passthrough,
@@ -17683,12 +17783,16 @@ async def _auto_regenerate_scene_image(body: dict, request: Request = None):
     out_name = f"scene_{scene_index + 1:02d}_regen_{ts}.png"
     out_path = str(_auto_scene_dir(job_id) / out_name)
     scene_reference_url = _resolve_reference_for_scene(state, template, scene_index) or reference_image_url
+    channel_context = dict((dict(state.get("metadata_pack") or {})).get("youtube_channel") or {})
+    if not channel_context and str(state.get("youtube_channel_id", "") or "").strip():
+        channel_context = {"channel_id": str(state.get("youtube_channel_id", "") or "").strip()}
     img_result = await generate_scene_image(
         full_prompt,
         out_path,
         resolution="720p",
         negative_prompt=neg_prompt,
         template=template,
+        channel_context=channel_context,
         reference_image_url=scene_reference_url,
         reference_lock_mode=reference_lock_mode,
     )
@@ -20007,6 +20111,19 @@ async def _enforce_thumbnail_1080(output_path: str) -> str:
     return output_path
 
 
+def _thumbnail_fal_model_candidates() -> list[str]:
+    ordered = ["seedream45", "imagen4_fast", "recraft_v4", "grok_imagine", "imagen4_ultra"]
+    deduped: list[str] = []
+    for candidate in ordered:
+        profile = dict(CREATIVE_IMAGE_MODEL_MAP.get(candidate) or {})
+        if not profile or not bool(profile.get("enabled", False)):
+            continue
+        model_id = str(profile.get("id", "") or "").strip().lower()
+        if model_id and model_id not in deduped:
+            deduped.append(model_id)
+    return deduped
+
+
 async def _generate_thumbnail_image(
     prompt: str,
     negative_prompt: str,
@@ -20015,19 +20132,48 @@ async def _generate_thumbnail_image(
     mode: str = "describe",
     style_ref_path: str = "",
 ) -> dict:
-    """Generate a thumbnail via Pikzels and save the image locally."""
-    if not PIKZELS_API_KEY:
-        raise RuntimeError("PIKZELS_API_KEY not configured")
-
+    """Generate a thumbnail via fal.ai first, then fallback to Pikzels."""
     mode_normalized = str(mode or "describe").strip().lower()
+    composed_prompt = str(prompt or "").strip()
+    if negative_prompt:
+        composed_prompt = f"{composed_prompt}\nAvoid: {negative_prompt.strip()}"
+    if style_ref_path and Path(style_ref_path).exists():
+        # Fal lanes currently do not support this local style-reference transfer endpoint.
+        composed_prompt = (
+            composed_prompt
+            + "\nStyle lock: preserve the same thumbnail clarity, contrast, and visual hierarchy as the selected studio reference style."
+        )
+
+    fal_errors: list[str] = []
+    for model_id in _thumbnail_fal_model_candidates():
+        try:
+            fal_result = await _generate_image_fal_selected_model(
+                model_id,
+                composed_prompt,
+                output_path,
+                resolution="1080p_landscape",
+                negative_prompt=negative_prompt,
+            )
+            return {
+                "path": output_path,
+                "output_url": str(fal_result.get("cdn_url", "") or ""),
+                "request_id": "",
+                "style_id": "",
+                "provider_mode": f"fal_{model_id}",
+                "provider": str(fal_result.get("provider", model_id) or model_id),
+                "provider_label": str(fal_result.get("provider_label", model_id) or model_id),
+            }
+        except Exception as fal_err:
+            fal_errors.append(f"{model_id}: {fal_err}")
+
+    if not PIKZELS_API_KEY:
+        detail = " | ".join(fal_errors[-3:]) if fal_errors else "no fal thumbnail models available"
+        raise RuntimeError(f"Thumbnail generation failed: {detail}")
+
     profile = await _refresh_thumbnail_style_profile(user)
     style_id = ""
     if str(profile.get("status", "") or "").strip().lower() == "ready":
         style_id = str(profile.get("style_id", "") or "").strip()
-
-    composed_prompt = str(prompt or "").strip()
-    if negative_prompt:
-        composed_prompt = f"{composed_prompt}\nAvoid: {negative_prompt.strip()}"
 
     if style_ref_path and Path(style_ref_path).exists():
         ref_token = await _register_thumbnail_share(Path(style_ref_path), user, ttl_sec=7200)
@@ -20067,14 +20213,16 @@ async def _generate_thumbnail_image(
         "request_id": str(result.get("request_id", "") or ""),
         "style_id": style_id,
         "provider_mode": provider_mode,
+        "provider": "pikzels",
+        "provider_label": "Pikzels",
     }
 
 
 async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
     if not XAI_API_KEY:
         raise HTTPException(500, "XAI_API_KEY not configured")
-    if not PIKZELS_API_KEY:
-        raise HTTPException(500, "PIKZELS_API_KEY not configured")
+    if not FAL_AI_KEY and not PIKZELS_API_KEY:
+        raise HTTPException(500, "Thumbnail image backend not configured (set FAL_AI_KEY or PIKZELS_API_KEY)")
     library_dir = _thumbnail_library_dir_for_user(user)
     output_dir = _thumbnail_output_dir_for_user(user)
 
@@ -20131,16 +20279,18 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
             )
 
             await _enforce_thumbnail_1080(output_path)
+            provider_key = str(render_result.get("provider", "pikzels") or "pikzels")
+            provider_mode = str(render_result.get("provider_mode", "") or "")
             thumb_gen_id = await _save_training_candidate(
                 thumb_prompt,
                 output_path,
                 template="thumbnail",
-                source="pikzels",
+                source=provider_key,
                 metadata={
                     "mode": req.mode,
                     "title_text": title_text,
                     "user_id": user.get("id", ""),
-                    "provider_mode": str(render_result.get("provider_mode", "") or ""),
+                    "provider_mode": provider_mode,
                     "provider_request_id": str(render_result.get("request_id", "") or ""),
                     "output_url": str(render_result.get("output_url", "") or ""),
                     "style_id": str(render_result.get("style_id", "") or ""),
@@ -20152,7 +20302,9 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
             jobs[job_id]["output_file"] = output_name
             jobs[job_id]["output_url"] = f"/api/thumbnails/generated/{output_name}"
             jobs[job_id]["generation_id"] = thumb_gen_id
-            jobs[job_id]["provider"] = "pikzels"
+            jobs[job_id]["provider"] = provider_key
+            jobs[job_id]["provider_label"] = str(render_result.get("provider_label", provider_key) or provider_key)
+            jobs[job_id]["provider_mode"] = provider_mode
             jobs[job_id]["provider_request_id"] = str(render_result.get("request_id", "") or "")
             log.info(f"[{job_id}] Thumbnail COMPLETE: {output_name}")
 
