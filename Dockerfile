@@ -22,21 +22,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend entrypoint and all extracted backend modules.
-COPY backend.py .
-COPY backend_settings.py .
-COPY backend_catalog.py .
-COPY backend_image_prompts.py .
-COPY backend_models.py .
-COPY backend_demo.py .
-COPY backend_state.py .
-COPY backend_queue.py .
-COPY backend_worker.py .
-COPY backend_catalyst_core.py .
-COPY backend_catalyst_profiles.py .
-COPY backend_catalyst_learning.py .
-COPY backend_catalyst_blueprint.py .
-COPY backend_catalyst_reference.py .
+# Copy all top-level Python modules so backend splits are always packaged.
+COPY *.py ./
 COPY client_secrets.json .
 COPY ops ./ops
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/

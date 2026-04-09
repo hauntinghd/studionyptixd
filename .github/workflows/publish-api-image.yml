@@ -8,23 +8,11 @@ on:
     paths:
       - Dockerfile
       - requirements.txt
-      - backend.py
-      - backend_settings.py
-      - backend_catalog.py
-      - backend_image_prompts.py
-      - backend_models.py
-      - backend_demo.py
-      - backend_state.py
-      - backend_queue.py
-      - backend_worker.py
-      - backend_catalyst_core.py
-      - backend_catalyst_profiles.py
-      - backend_catalyst_learning.py
-      - backend_catalyst_blueprint.py
-      - backend_catalyst_reference.py
+      - "*.py"
       - client_secrets.json
       - ops/run_render_service.sh
       - ViralShorts-App/**
+      - .github/workflows/publish-api-image.yml
 
 permissions:
   contents: read

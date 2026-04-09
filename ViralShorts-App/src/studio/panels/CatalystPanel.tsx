@@ -291,7 +291,7 @@ function pickCatalystChannelId(
 }
 
 export default function CatalystPanel() {
-    const { session } = useContext(AuthContext);
+    const { session, supabase } = useContext(AuthContext);
     const [payload, setPayload] = useState<CatalystHubPayload | null>(null);
     const [selectedChannelId, setSelectedChannelId] = useState('');
     const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('skeleton');
@@ -324,14 +324,63 @@ export default function CatalystPanel() {
     const hubRetriedRef = useRef(false);
     const selectedChannelIdRef = useRef('');
 
-    const bearerHeaders = useMemo<Record<string, string>>(() => {
-        const headers: Record<string, string> = {};
-        if (session) headers.Authorization = `Bearer ${session.access_token}`;
-        return headers;
-    }, [session]);
-    const jsonHeaders = useMemo<Record<string, string>>(
-        () => ({ 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) }),
-        [session]
+    const getActiveAccessToken = useCallback(async (forceRefresh = false): Promise<string> => {
+        const fallbackToken = String(session?.access_token || '').trim();
+        if (!supabase) return fallbackToken;
+        try {
+            const sessionResult = await supabase.auth.getSession();
+            const activeSession = sessionResult.data?.session || null;
+            const expiresAt = Number((activeSession as any)?.expires_at || 0);
+            const refreshToken = String((activeSession as any)?.refresh_token || '').trim();
+            const shouldRefresh = forceRefresh || (expiresAt > 0 && expiresAt <= Math.floor(Date.now() / 1000) + 45);
+            if (shouldRefresh && refreshToken && typeof (supabase.auth as any).refreshSession === 'function') {
+                const refreshed = await (supabase.auth as any).refreshSession({ refresh_token: refreshToken });
+                const refreshedSession = (refreshed as any)?.data?.session || null;
+                const refreshedToken = String((refreshedSession as any)?.access_token || '').trim();
+                if (refreshedToken) return refreshedToken;
+            }
+            const token = String((activeSession as any)?.access_token || '').trim();
+            if (token) return token;
+        } catch {
+            // fall back to current in-memory token
+        }
+        return fallbackToken;
+    }, [session?.access_token, supabase]);
+
+    const withAuthInit = useCallback(async (init: RequestInit = {}, forceRefresh = false): Promise<RequestInit> => {
+        const headers = new Headers(init.headers || undefined);
+        const token = await getActiveAccessToken(forceRefresh);
+        if (token) {
+            headers.set('Authorization', `Bearer ${token}`);
+            headers.set('X-Access-Token', token);
+        }
+        return { ...init, headers };
+    }, [getActiveAccessToken]);
+
+    const fetchJsonWithAuthRetry = useCallback(
+        async <T = any>(input: string, init: RequestInit = {}, timeoutMs = CATALYST_FETCH_TIMEOUT_MS): Promise<{ res: Response; data: T | Record<string, any> }> => {
+            let requestInit = await withAuthInit(init, false);
+            let result = await fetchJsonWithTimeout<T>(input, requestInit, timeoutMs);
+            if (result.res.status === 401 && supabase) {
+                requestInit = await withAuthInit(init, true);
+                result = await fetchJsonWithTimeout<T>(input, requestInit, timeoutMs);
+            }
+            return result;
+        },
+        [supabase, withAuthInit]
+    );
+
+    const fetchWithAuthRetry = useCallback(
+        async (input: string, init: RequestInit = {}): Promise<Response> => {
+            let requestInit = await withAuthInit(init, false);
+            let res = await fetch(input, requestInit);
+            if (res.status === 401 && supabase) {
+                requestInit = await withAuthInit(init, true);
+                res = await fetch(input, requestInit);
+            }
+            return res;
+        },
+        [supabase, withAuthInit]
     );
     const directApiBase = useMemo(() => {
         if (typeof window !== 'undefined') {
@@ -358,9 +407,9 @@ export default function CatalystPanel() {
             const url = new URL(`${API}/api/catalyst/hub`);
             if (channelId) url.searchParams.set('channel_id', channelId);
             if (refresh) url.searchParams.set('refresh', 'true');
-            const { res, data } = await fetchJsonWithTimeout<CatalystHubPayload>(
+            const { res, data } = await fetchJsonWithAuthRetry<CatalystHubPayload>(
                 url.toString(),
-                { headers: bearerHeaders },
+                {},
             );
             const errorPayload = data as Record<string, any>;
             if (!res.ok) throw new Error(String(errorPayload?.detail || errorPayload?.error || `Failed to load Catalyst hub (${res.status})`));
@@ -396,7 +445,7 @@ export default function CatalystPanel() {
             setLoading(false);
             setRefreshing(false);
         }
-    }, [bearerHeaders, session]);
+    }, [fetchJsonWithAuthRetry, session]);
 
     useEffect(() => {
         if (!session) return;
@@ -465,15 +514,17 @@ export default function CatalystPanel() {
         setYoutubeConnecting(true);
         setError('');
         try {
+            const accessToken = await getActiveAccessToken(true);
+            if (!accessToken) throw new Error('Session expired. Sign in again and retry.');
             const nextUrl = new URL(window.location.href);
             const activeChannelId = String(selectedChannelIdRef.current || '').trim();
             if (activeChannelId) nextUrl.searchParams.set('youtube_channel_id', activeChannelId);
-            startYouTubeBrowserConnect(session.access_token, nextUrl.toString());
+            startYouTubeBrowserConnect(accessToken, nextUrl.toString());
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to start YouTube connection'));
             setYoutubeConnecting(false);
         }
-    }, [session, youtubeConnecting]);
+    }, [getActiveAccessToken, session, youtubeConnecting]);
 
     const persistSelectedChannel = useCallback(async (nextChannelId: string) => {
         const normalizedId = String(nextChannelId || '').trim();
@@ -485,9 +536,9 @@ export default function CatalystPanel() {
         setRefreshingChannels(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/youtube/channels/select`, {
+            const res = await fetchWithAuthRetry(`${API}/api/youtube/channels/select`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ channel_id: normalizedId }),
             });
             const data = await readJsonResponse<any>(res);
@@ -498,7 +549,7 @@ export default function CatalystPanel() {
         } finally {
             setRefreshingChannels(false);
         }
-    }, [jsonHeaders, loadHub, session]);
+    }, [fetchWithAuthRetry, loadHub, session]);
 
     const handleRefresh = async (refreshOutcomes = false) => {
         const activeChannelId = String(selectedChannelIdRef.current || '').trim();
@@ -507,9 +558,9 @@ export default function CatalystPanel() {
         if (refreshOutcomes) setSyncingOutcomes(true);
         else setRefreshing(true);
         try {
-            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/refresh`, {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/refresh`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     channel_id: activeChannelId,
                     include_public_benchmarks: true,
@@ -532,9 +583,9 @@ export default function CatalystPanel() {
         setSaving(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/instructions`, {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/instructions`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     channel_id: activeChannelId,
                     directive,
@@ -563,9 +614,9 @@ export default function CatalystPanel() {
         setLaunching(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/catalyst/hub/launch`, {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/launch`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     channel_id: activeChannelId,
                     workspace_id: selectedWorkspaceId,
@@ -606,9 +657,7 @@ export default function CatalystPanel() {
         setRefreshingChannels(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithTimeout<any>(`${API}/api/youtube/channels?sync=true`, {
-                headers: bearerHeaders,
-            });
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/youtube/channels?sync=true`, {});
             if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to refresh channels (${res.status})`));
             const rows = Array.isArray(data?.channels) ? data.channels as CatalystChannel[] : [];
             const nextChannelId = pickCatalystChannelId(
@@ -676,15 +725,14 @@ export default function CatalystPanel() {
                     if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
                     if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
                     referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
-                    return fetch(`${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`, {
+                    return fetchWithAuthRetry(`${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`, {
                         method: 'POST',
-                        headers: bearerHeaders,
                         body: formData,
                     });
                 })()
-                : await fetch(`${API}/api/catalyst/hub/reference-video-analysis`, {
+                : await fetchWithAuthRetry(`${API}/api/catalyst/hub/reference-video-analysis`, {
                     method: 'POST',
-                    headers: jsonHeaders,
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         channel_id: channelIdForAnalysis,
                         workspace_id: selectedWorkspaceId,
@@ -710,9 +758,9 @@ export default function CatalystPanel() {
         setClearingReference(true);
         setError('');
         try {
-            const res = await fetch(`${API}/api/catalyst/hub/reference-video-analysis/clear`, {
+            const res = await fetchWithAuthRetry(`${API}/api/catalyst/hub/reference-video-analysis/clear`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     channel_id: channelIdForAnalysis,
                     workspace_id: selectedWorkspaceId,
@@ -739,9 +787,9 @@ export default function CatalystPanel() {
         setStoppingSessionId(busyLongformSessionId);
         setError('');
         try {
-            const res = await fetch(`${API}/api/longform/session/${busyLongformSessionId}/stop`, {
+            const res = await fetchWithAuthRetry(`${API}/api/longform/session/${busyLongformSessionId}/stop`, {
                 method: 'POST',
-                headers: jsonHeaders,
+                headers: { 'Content-Type': 'application/json' },
             });
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to stop active long-form session'));
