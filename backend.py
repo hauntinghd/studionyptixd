@@ -4038,7 +4038,7 @@ _SKELETON_EXTRA_PERSON_NEGATIVE_TOKENS = {
 
 def _extract_likely_named_human_subjects(*texts: str, max_items: int = 3) -> list[str]:
     pattern = re.compile(
-        r"\b[A-Z][A-Za-z0-9'’.-]*(?:\s+(?:[A-Z][A-Za-z0-9'’.-]*|the|The|de|De|da|Da|del|Del|la|La|le|Le|van|Van|von|Von|bin|Bin|ibn|Ibn|st\.?|St\.?)){1,3}\b"
+        r"\b[A-Z][A-Za-z0-9''.-]*(?:\s+(?:[A-Z][A-Za-z0-9''.-]*|the|The|de|De|da|Da|del|Del|la|La|le|Le|van|Van|von|Von|bin|Bin|ibn|Ibn|st\.?|St\.?)){1,3}\b"
     )
     seen: set[str] = set()
     out: list[str] = []
@@ -4088,7 +4088,7 @@ def _is_likely_named_human_subject(candidate: str) -> bool:
         meaningful += 1
         if lower in _SKELETON_NAMED_SUBJECT_NONPERSON_TOKENS:
             return False
-        if re.match(r"^[A-Z][A-Za-z0-9'’.-]*$", word) or re.match(r"^[A-Z]{2,}$", word):
+        if re.match(r"^[A-Z][A-Za-z0-9''.-]*$", word) or re.match(r"^[A-Z]{2,}$", word):
             titlelike += 1
             continue
         return False
@@ -5404,7 +5404,7 @@ _load_youtube_connections()
 _load_youtube_oauth_states()
 
 
-# â”€â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Auth â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _is_admin_user(user: Optional[dict]) -> bool:
     if not user:
@@ -5760,7 +5760,7 @@ async def get_user_plan(user: dict) -> dict:
     return PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
 
 
-# â”€â”€â”€ xAI Grok Script Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ xAI Grok Script Generation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 TEMPLATE_SYSTEM_PROMPTS = {
     "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where a canonical skeleton identity delivers rapid-fire comparisons. The reference channel is CrypticScience.
@@ -6857,7 +6857,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
     return best
 
 
-# â”€â”€â”€ ElevenLabs TTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ ElevenLabs TTS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 async def _fal_openrouter_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 120, model: str = "anthropic/claude-sonnet-4.6") -> dict:
@@ -14028,7 +14028,102 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return output_path
 
 
-# â”€â”€â”€ ComfyUI Image Generation with Upscaling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def generate_ass_motion_graphics(
+    chapters: list,
+    scene_durations: list[float],
+    output_path: str,
+    resolution: str = "720p",
+    video_width: int = 0,
+    video_height: int = 0,
+    topic: str = "",
+) -> str:
+    """Generate ASS motion graphics overlay: chapter titles, lower thirds, emphasis cards."""
+    if video_width and video_height:
+        res_w, res_h = int(video_width), int(video_height)
+    else:
+        cfg = RESOLUTION_CONFIGS.get(resolution, RESOLUTION_CONFIGS.get("720p", {}))
+        res_w = int(cfg.get("output_width", 1280) or 1280)
+        res_h = int(cfg.get("output_height", 720) or 720)
+
+    def ts(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        cs = int((seconds % 1) * 100)
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    # Title card font sizes
+    title_size = max(42, int(res_h * 0.065))
+    lower_size = max(28, int(res_h * 0.04))
+    chapter_label_size = max(22, int(res_h * 0.03))
+
+    header = f"""[Script Info]
+Title: NYPTID Motion Graphics
+ScriptType: v4.00+
+PlayResX: {res_w}
+PlayResY: {res_h}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: ChapterTitle,Noto Sans,{title_size},&H00FFFFFF,&H000000FF,&H00000000,&HB4000000,-1,0,0,0,100,100,3,0,1,4,2,8,40,40,{int(res_h * 0.12)},1
+Style: LowerThird,Noto Sans,{lower_size},&H00FFFFFF,&H000000FF,&H00CC0000,&HB4000000,-1,0,0,0,100,100,1,0,3,3,1,1,40,40,{int(res_h * 0.06)},1
+Style: ChapterLabel,Noto Sans,{chapter_label_size},&H0000CCFF,&H000000FF,&H00000000,&HB4000000,-1,0,0,0,100,100,2,0,1,2,1,7,40,40,{int(res_h * 0.06)},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    events = []
+    cumulative_time = 0.0
+    scene_idx = 0
+
+    for ch_idx, chapter in enumerate(chapters or []):
+        chapter = dict(chapter or {})
+        ch_title = str(chapter.get("title", "") or f"Chapter {ch_idx + 1}").strip()
+        scenes = list(chapter.get("scenes") or [])
+        ch_start = cumulative_time
+
+        # Chapter title card — fade in at chapter start, hold 3s, fade out
+        fade_in = r"{\fad(500,400)}"
+        events.append(
+            f"Dialogue: 1,{ts(ch_start)},{ts(ch_start + 3.5)},ChapterTitle,,0,0,0,,{fade_in}{ch_title}"
+        )
+
+        # Chapter number label — small, top-left aligned
+        ch_label = f"CHAPTER {ch_idx + 1}"
+        events.append(
+            f"Dialogue: 0,{ts(ch_start)},{ts(ch_start + 3.5)},ChapterLabel,,0,0,0,,{fade_in}{ch_label}"
+        )
+
+        # Lower third at chapter midpoint — shows the topic/subject
+        for sc_idx, scene in enumerate(scenes):
+            dur = scene_durations[scene_idx] if scene_idx < len(scene_durations) else 8.0
+            sc_start = cumulative_time
+            cumulative_time += dur
+            scene_idx += 1
+
+            # Add lower third on first and middle scenes of each chapter
+            if sc_idx == 0 or sc_idx == len(scenes) // 2:
+                narration = str((scene or {}).get("narration", "") or "").strip()
+                # Extract first sentence as lower third text
+                first_sentence = narration.split(".")[0].strip()[:80] if narration else ""
+                if first_sentence and len(first_sentence) > 15:
+                    lt_fade = r"{\fad(300,300)}"
+                    events.append(
+                        f"Dialogue: 0,{ts(sc_start + 0.5)},{ts(sc_start + min(dur, 4.0))},LowerThird,,0,0,0,,{lt_fade}{first_sentence}"
+                    )
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write("\n".join(events))
+        f.write("\n")
+
+    log.info(f"Motion graphics ASS generated: {output_path} ({len(events)} events)")
+    return output_path
+
+
+# --- ComfyUI Image Generation with Upscaling ---------------------------------
 
 
 
@@ -18452,7 +18547,7 @@ async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: st
     return output_clip_path
 
 
-# â”€â”€â”€ FFmpeg Video Compositor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ FFmpeg Video Compositor â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def frames_to_clip(frame_paths: list, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
     """Convert SVD frames into a video clip, stretched/looped to fill the scene duration."""
@@ -19682,7 +19777,7 @@ async def composite_video(
     return str(output_path)
 
 
-# â”€â”€â”€ Full Generation Pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Full Generation Pipeline â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 def _normalize_scenes_for_render(scenes: list) -> list:
@@ -21280,7 +21375,7 @@ async def run_generation_pipeline(
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
-# â”€â”€â”€ API Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ API Endpoints â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _create_or_update_project(project_id: str, data: dict):
     async with _projects_lock:
@@ -25617,7 +25712,15 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
         if acting_user_id and str(session.get("user_id", "") or "") != acting_user_id:
             raise HTTPException(403, "Forbidden")
         if session.get("paused_error"):
-            raise HTTPException(400, "Session is paused due to an unresolved chapter error")
+            # Auto-clear and bypass if all chapters are approved
+            chapters_check = list(session.get("chapters") or [])
+            all_approved = all("approved" in str((c or {}).get("status", "")) for c in chapters_check) if chapters_check else False
+            if all_approved:
+                session["paused_error"] = None
+                session["preflight_bypassed"] = True
+                _save_longform_sessions()
+            else:
+                raise HTTPException(400, "Session is paused due to an unresolved chapter error")
         review = _longform_review_state(session)
         if not review.get("all_approved", False):
             raise HTTPException(
@@ -32010,7 +32113,7 @@ async def get_project(project_id: str, request: Request = None):
     return {"project": proj}
 
 
-# â”€â”€â”€ Stripe Payments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Stripe Payments â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _stripe_find_customer_id_by_email(email: str) -> str:
     """Best-effort Stripe customer lookup for billing portal/checkout continuity."""
@@ -33033,7 +33136,7 @@ async def stripe_webhook(request: Request):
     return {"status": "ok"}
 
 
-# â”€â”€â”€ Admin: set plan for a user (admin-only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Admin: set plan for a user (admin-only) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 @app.post("/api/admin/set-plan")
 async def admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
@@ -33134,7 +33237,7 @@ async def admin_cancel_subscription(body: dict, user: dict = Depends(require_aut
         raise HTTPException(500, f"Failed to cancel subscription(s): {e}")
 
 
-# â”€â”€â”€ User Feedback Collection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ User Feedback Collection â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
@@ -33245,7 +33348,7 @@ async def get_admin_kpi(user: dict = Depends(require_auth)):
     }
 
 
-# â”€â”€â”€ Startup: seed accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Startup: seed accounts â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 SEED_ACCOUNTS = {
     "omatic657@gmail.com": {"plan": "admin", "role": "admin"},
@@ -33297,7 +33400,7 @@ async def seed_profiles():
         log.warning(f"Profile seeding failed: {e}")
 
 
-# â”€â”€â”€ Thumbnail System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Thumbnail System â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
@@ -34627,7 +34730,7 @@ async def create_demo_video(
     return {"status": "accepted", "job_id": job_id}
 
 
-# â”€â”€â”€ Static Files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Static Files â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
 dist_dir = Path(os.getenv("FRONTEND_DIST_DIR", str(_default_dist_dir))).resolve()
