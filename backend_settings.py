@@ -14,7 +14,7 @@ if env_path.exists():
 
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "") or "sk_c9d3573104596ff0bf69738092407422e512e493870e747b"
 PIKZELS_API_KEY = os.getenv("PIKZELS_API_KEY", "")
 ALGROW_API_KEY = os.getenv("ALGROW_API_KEY", "")
 ALGROW_API_BASE_URL = str(os.getenv("ALGROW_API_BASE_URL", "https://api.algrow.online") or "https://api.algrow.online").strip().rstrip("/")
