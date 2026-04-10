@@ -6860,8 +6860,36 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
 # â”€â”€â”€ ElevenLabs TTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
+async def _fal_openrouter_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 120, model: str = "anthropic/claude-sonnet-4.6") -> dict:
+    """Fallback LLM via FAL OpenRouter — Claude Sonnet 4.6 for script generation."""
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured for OpenRouter fallback")
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        resp = await client.post(
+            "https://fal.run/fal-ai/openrouter/router",
+            headers={"Authorization": f"Key {FAL_AI_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = str(data.get("output", "") or data.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON found in FAL OpenRouter response")
+    return json.loads(content[start:end])
+
+
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
     last_error: Exception | None = None
+    grok_rate_limited = False
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=timeout_sec) as client:
@@ -6880,7 +6908,14 @@ async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature
                         "temperature": max(0.2, float(temperature) - (attempt * 0.08)),
                     },
                 )
-                if resp.status_code in {429, 500, 502, 503, 504}:
+                if resp.status_code == 429:
+                    grok_rate_limited = True
+                    raise httpx.HTTPStatusError(
+                        f"Retryable xAI status 429",
+                        request=resp.request,
+                        response=resp,
+                    )
+                if resp.status_code in {500, 502, 503, 504}:
                     raise httpx.HTTPStatusError(
                         f"Retryable xAI status {resp.status_code}",
                         request=resp.request,
@@ -6895,10 +6930,19 @@ async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature
             return json.loads(content[start:end])
         except Exception as exc:
             last_error = exc
+            if grok_rate_limited and FAL_AI_KEY:
+                break  # fall through to FAL OpenRouter immediately
             if attempt >= 2:
                 break
             wait_seconds = (attempt + 1) * 2
             await asyncio.sleep(wait_seconds)
+    # Fallback to Claude Sonnet 4.6 via FAL OpenRouter
+    if FAL_AI_KEY:
+        try:
+            log.info("Grok rate-limited or failed — falling back to Claude Sonnet 4.6 via FAL OpenRouter")
+            return await _fal_openrouter_json_completion(system_prompt, user_prompt, temperature=temperature, timeout_sec=120)
+        except Exception as fallback_exc:
+            log.warning(f"FAL OpenRouter fallback also failed: {fallback_exc}")
     raise last_error if last_error is not None else RuntimeError("xAI JSON completion failed")
 
 
