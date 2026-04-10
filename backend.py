@@ -23415,7 +23415,8 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
                     else ("ready_for_finalize" if approved == len(chapters) else ("auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval"))
                 ),
             }
-            if catalyst_preflight.get("status") == "blocked" and approved == len(chapters):
+            force_accepted = any(bool((ch or {}).get("retry_count", 0)) for ch in chapters)
+            if catalyst_preflight.get("status") == "blocked" and approved == len(chapters) and not force_accepted and not live.get("preflight_bypassed"):
                 suggested_fix_note = _catalyst_default_fix_note_for_session(live, 0, "")
                 live["paused_error"] = {
                     "stage": "catalyst_preflight",
@@ -25441,6 +25442,7 @@ async def longform_resolve_error(session_id: str, req: LongFormResolveErrorReque
             session_live = _longform_sessions.get(session_id)
             if session_live:
                 session_live["paused_error"] = None
+                session_live["preflight_bypassed"] = True
                 session_live["status"] = "draft_review"
                 chapters_live = list(session_live.get("chapters") or [])
                 if chapter_index < len(chapters_live):
