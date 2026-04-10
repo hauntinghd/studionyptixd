@@ -13423,6 +13423,52 @@ def _probe_video_duration_seconds(video_path: str) -> float:
         return 0.0
 
 
+async def _detect_voice_pauses(audio_path: str, min_silence_sec: float = 0.3) -> list[float]:
+    """Use ffmpeg silencedetect to find natural voice pauses for beat-synced cuts."""
+    try:
+        cmd = [
+            "ffmpeg", "-i", str(audio_path),
+            "-af", f"silencedetect=noise=-35dB:d={min_silence_sec}",
+            "-f", "null", "-",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr_data = await proc.communicate()
+        stderr_text = stderr_data.decode(errors="replace")
+        pauses = []
+        for match in re.finditer(r"silence_start:\s*([\d.]+)", stderr_text):
+            pauses.append(float(match.group(1)))
+        return sorted(pauses)
+    except Exception:
+        return []
+
+
+def _align_scene_cuts_to_pauses(durations: list[float], pauses: list[float], tolerance: float = 0.5) -> list[float]:
+    """Nudge scene cut points to align with detected voice pauses for beat-synced editing."""
+    if not pauses or not durations:
+        return durations
+    adjusted = list(durations)
+    cumulative = 0.0
+    for i in range(len(adjusted) - 1):
+        cumulative += adjusted[i]
+        # Find nearest pause to this cut point
+        nearest = min(pauses, key=lambda p: abs(p - cumulative), default=None)
+        if nearest is not None and abs(nearest - cumulative) <= tolerance:
+            delta = nearest - cumulative
+            # Shift this scene's duration and compensate on next scene
+            adjusted[i] += delta
+            adjusted[i + 1] -= delta
+            if adjusted[i] < 2.0:
+                adjusted[i + 1] += adjusted[i] - 2.0
+                adjusted[i] = 2.0
+            if adjusted[i + 1] < 2.0:
+                adjusted[i] -= 2.0 - adjusted[i + 1]
+                adjusted[i + 1] = 2.0
+            cumulative = sum(adjusted[:i + 1])
+    return [max(1.0, d) for d in adjusted]
+
+
 def _rebalance_scene_durations_for_audio(
     scenes: list,
     audio_path: str,
@@ -18467,9 +18513,29 @@ def _ffmpeg_safe_text(text: str) -> str:
     return t
 
 
-async def static_image_to_clip(img_path: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
-    """Fallback: create a video clip from a static image with slow zoom."""
-    base_vf = "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+async def static_image_to_clip(img_path: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p", ken_burns: bool = True, scene_index: int = 0) -> str:
+    """Create a video clip from a static image with Ken Burns zoom/pan effects."""
+    frames = max(30, int(float(duration) * 30))
+    # Ken Burns: alternate between zoom-in, zoom-out, pan-left, pan-right per scene
+    if ken_burns:
+        zoom_w = int(out_w * 1.15)
+        zoom_h = int(out_h * 1.15)
+        kb_mode = scene_index % 4
+        if kb_mode == 0:
+            # Slow zoom in (1.0 -> 1.12)
+            zoom_vf = f"scale={zoom_w}:{zoom_h}:force_original_aspect_ratio=decrease,pad={zoom_w}:{zoom_h}:(ow-iw)/2:(oh-ih)/2:black,zoompan=z='min(1.12,1+0.0004*in)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={out_w}x{out_h}:fps=30"
+        elif kb_mode == 1:
+            # Slow zoom out (1.12 -> 1.0)
+            zoom_vf = f"scale={zoom_w}:{zoom_h}:force_original_aspect_ratio=decrease,pad={zoom_w}:{zoom_h}:(ow-iw)/2:(oh-ih)/2:black,zoompan=z='max(1.0,1.12-0.0004*in)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={out_w}x{out_h}:fps=30"
+        elif kb_mode == 2:
+            # Pan left to right
+            zoom_vf = f"scale={zoom_w}:{zoom_h}:force_original_aspect_ratio=decrease,pad={zoom_w}:{zoom_h}:(ow-iw)/2:(oh-ih)/2:black,zoompan=z='1.08':x='(iw-iw/zoom)/2+((iw-iw/zoom)/2)*sin(in/{frames}*PI)':y='ih/2-(ih/zoom/2)':d={frames}:s={out_w}x{out_h}:fps=30"
+        else:
+            # Pan right to left
+            zoom_vf = f"scale={zoom_w}:{zoom_h}:force_original_aspect_ratio=decrease,pad={zoom_w}:{zoom_h}:(ow-iw)/2:(oh-ih)/2:black,zoompan=z='1.08':x='(iw-iw/zoom)/2-((iw-iw/zoom)/2)*sin(in/{frames}*PI)':y='ih/2-(ih/zoom/2)':d={frames}:s={out_w}x{out_h}:fps=30"
+        base_vf = zoom_vf + ",format=yuv420p"
+    else:
+        base_vf = "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
 
     drawtext_vf = base_vf
     if text_overlay:
@@ -25558,27 +25624,28 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
                 400,
                 f"All chapters must be approved before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved).",
             )
-        catalyst_preflight = _catalyst_longform_preflight(session)
-        if catalyst_preflight.get("status") == "blocked":
-            suggested_fix_note = _catalyst_default_fix_note_for_session(session, 0, "")
-            session["paused_error"] = {
-                "stage": "catalyst_preflight",
-                "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
-                "blockers": list(catalyst_preflight.get("blockers") or []),
-                "chapter_index": 0,
-                "suggested_fix_note": suggested_fix_note,
-            }
-            progress = dict(session.get("draft_progress") or {})
-            progress["stage"] = "catalyst_preflight_blocked"
-            session["draft_progress"] = progress
-            session["status"] = "draft_review"
-            session["updated_at"] = time.time()
-            _save_longform_sessions()
-            blocker_summary = "; ".join([str(v).strip() for v in list(catalyst_preflight.get("blockers") or []) if str(v).strip()][:3])
-            raise HTTPException(
-                409,
-                f"Catalyst preflight blocked finalize. {blocker_summary or str(catalyst_preflight.get('summary', '') or '')}".strip(),
-            )
+        if not session.get("preflight_bypassed"):
+            catalyst_preflight = _catalyst_longform_preflight(session)
+            if catalyst_preflight.get("status") == "blocked":
+                suggested_fix_note = _catalyst_default_fix_note_for_session(session, 0, "")
+                session["paused_error"] = {
+                    "stage": "catalyst_preflight",
+                    "error": str(catalyst_preflight.get("summary", "") or "Catalyst preflight blocked finalize."),
+                    "blockers": list(catalyst_preflight.get("blockers") or []),
+                    "chapter_index": 0,
+                    "suggested_fix_note": suggested_fix_note,
+                }
+                progress = dict(session.get("draft_progress") or {})
+                progress["stage"] = "catalyst_preflight_blocked"
+                session["draft_progress"] = progress
+                session["status"] = "draft_review"
+                session["updated_at"] = time.time()
+                _save_longform_sessions()
+                blocker_summary = "; ".join([str(v).strip() for v in list(catalyst_preflight.get("blockers") or []) if str(v).strip()][:3])
+                raise HTTPException(
+                    409,
+                    f"Catalyst preflight blocked finalize. {blocker_summary or str(catalyst_preflight.get('summary', '') or '')}".strip(),
+                )
         if isinstance(session.get("paused_error"), dict) and str((session.get("paused_error") or {}).get("stage", "") or "") == "catalyst_preflight":
             session["paused_error"] = None
         current_job_id = str(session.get("job_id", "") or "").strip()

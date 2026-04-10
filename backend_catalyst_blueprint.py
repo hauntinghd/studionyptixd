@@ -74,7 +74,16 @@ def _heuristic_catalyst_edit_blueprint(
     archetype_packaging_rule = _clip_text(str(memory_view.get("archetype_packaging_rule", "") or ""), 220)
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
-    is_empire_magnates = bool(format_preset == "documentary" and not is_recap_lane and _is_empire_magnates_channel(channel_context))
+    # Detect Empire Magnates from channel context OR from topic/title keywords
+    _topic_haystack = " ".join([str(topic or ""), str(input_title or ""), str(input_description or "")]).lower()
+    is_empire_magnates = bool(
+        format_preset == "documentary" and not is_recap_lane
+        and (
+            _is_empire_magnates_channel(channel_context)
+            or bool(re.search(r"\bempire\s*magnates?\b", _topic_haystack))
+            or bool(re.search(r"\b(psychology|psychological|brain.*sabotage|self.destruction|manipulation|subconscious|dark\s*psych)", _topic_haystack))
+        )
+    )
     is_cryptic_science = bool(format_preset == "documentary" and not is_recap_lane and not is_empire_magnates and _is_cryptic_science_channel(channel_context))
     operator_summary = _clip_text(str(memory_view.get("operator_summary", "") or ""), 320)
     operator_directive = _clip_text(str(memory_view.get("operator_directive", "") or ""), 1200)
