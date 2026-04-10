@@ -18044,7 +18044,11 @@ async def _upload_image_to_fal(image_path: str) -> str:
             log.info(f"Image uploaded to fal.ai REST: {cdn_url}")
             return cdn_url
 
-    raise RuntimeError(f"fal.ai CDN upload failed for {filename} — both presigned and REST upload methods returned errors")
+    # Fallback: use base64 data URL when CDN upload fails — less reliable but unblocks animation
+    import base64
+    log.warning(f"fal.ai CDN upload failed for {filename}, falling back to base64 data URL")
+    b64 = base64.b64encode(img_bytes).decode()
+    return "data:image/png;base64," + b64
 
 
 async def animate_image_kling(image_path: str, prompt: str, output_clip_path: str, duration: str = "5", aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
