@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
@@ -15,6 +16,11 @@ from backend_models import (
     YouTubeOAuthStartRequest,
 )
 from routes import build_youtube_catalyst_router
+
+log = logging.getLogger("nyptid-studio")
+
+# In-memory state to prevent overlapping auto-tick runs
+_catalyst_auto_tick_running: dict[str, bool] = {}
 
 
 def build_youtube_catalyst_app_router(
@@ -44,6 +50,8 @@ def build_youtube_catalyst_app_router(
     upload_dir: Path,
     longform_owner_beta_enabled,
     harvest_catalyst_outcomes_for_channel,
+    youtube_upload_video_for_user=None,
+    youtube_get_velocity_for_user=None,
 ):
     async def _start_google_youtube_oauth(
         req: YouTubeOAuthStartRequest,
@@ -239,6 +247,122 @@ def build_youtube_catalyst_app_router(
             raise HTTPException(401, "Auth required")
         return await disconnect_connected_youtube_channel_for_user(user=user, channel_id=channel_id)
 
+    # ─── Autonomous Pipeline Endpoints ─────────────────────────────────
+
+    async def _catalyst_upload_video(
+        request: Request,
+        session_id: str = Form(""),
+        channel_id: str = Form(""),
+        privacy: str = Form("private"),
+    ):
+        """Upload a completed longform session's video to YouTube."""
+        user = await get_current_user_from_request(request)
+        if not user:
+            raise HTTPException(401, "Auth required")
+        if not youtube_upload_video_for_user:
+            raise HTTPException(501, "YouTube upload not configured")
+        return await youtube_upload_video_for_user(
+            user=user,
+            session_id=str(session_id).strip(),
+            channel_id=str(channel_id).strip(),
+            privacy=str(privacy).strip() or "private",
+        )
+
+    async def _catalyst_velocity(
+        request: Request,
+        channel_id: str = "",
+    ):
+        """Get latest video's view velocity for decay detection."""
+        user = await get_current_user_from_request(request)
+        if not user:
+            raise HTTPException(401, "Auth required")
+        if not youtube_get_velocity_for_user:
+            raise HTTPException(501, "Velocity detection not configured")
+        return await youtube_get_velocity_for_user(
+            user=user,
+            channel_id=str(channel_id).strip(),
+        )
+
+    async def _catalyst_auto_tick(
+        request: Request,
+        channel_id: str = Form(""),
+        workspace: str = Form("documentary"),
+    ):
+        """Autonomous pipeline tick: check decay → generate → upload.
+
+        Safe to call repeatedly; prevents overlapping runs.
+        """
+        user = await get_current_user_from_request(request)
+        if not user:
+            raise HTTPException(401, "Auth required")
+        user_id = str(user.get("id", user.get("sub", "")) or "unknown")
+        tick_key = f"{user_id}:{channel_id}"
+
+        if _catalyst_auto_tick_running.get(tick_key):
+            return {"status": "already_running", "message": "An autonomous run is already in progress for this channel"}
+
+        _catalyst_auto_tick_running[tick_key] = True
+        try:
+            # Step 1: Check velocity / decay
+            velocity_data = {}
+            if youtube_get_velocity_for_user and channel_id:
+                try:
+                    velocity_data = await youtube_get_velocity_for_user(user=user, channel_id=channel_id)
+                except Exception as vel_exc:
+                    log.warning("Auto-tick velocity check failed: %s", str(vel_exc)[:200])
+
+            is_decaying = velocity_data.get("is_decaying", True)  # Default to True if can't check
+            velocity_vph = velocity_data.get("velocity_vph", 0)
+
+            if not is_decaying:
+                return {
+                    "status": "not_decaying",
+                    "velocity_vph": velocity_vph,
+                    "message": f"Latest video still performing ({velocity_vph} views/hr). No new video needed yet.",
+                }
+
+            # Step 2: Launch new longform pipeline
+            log.info("Auto-tick: decay detected (%.1f vph), launching new longform for channel %s", velocity_vph, channel_id)
+            launch_result = await catalyst_hub_launch_longform_for_user(
+                user=user,
+                channel_id=channel_id,
+                workspace=workspace,
+                auto_pipeline=True,
+            )
+
+            return {
+                "status": "launched",
+                "velocity_vph": velocity_vph,
+                "session_id": launch_result.get("session_id", ""),
+                "message": f"Decay detected ({velocity_vph} vph). New longform pipeline launched.",
+            }
+        finally:
+            _catalyst_auto_tick_running[tick_key] = False
+
+    async def _catalyst_auto_pilot_toggle(
+        request: Request,
+        channel_id: str = Form(""),
+        enabled: str = Form("true"),
+        interval_hours: str = Form("6"),
+    ):
+        user = await get_current_user_from_request(request)
+        if not user:
+            raise HTTPException(401, "Auth required")
+        user_id = str(user.get("id", user.get("sub", "")) or "unknown")
+        key = f"{user_id}:{channel_id}"
+        from backend import _catalyst_auto_pilot_channels
+        _catalyst_auto_pilot_channels[key] = {
+            "enabled": str(enabled).lower() in ("true", "1", "yes"),
+            "interval_hours": max(1, min(24, float(interval_hours or 6))),
+            "last_check": 0,
+            "channel_id": channel_id,
+        }
+        return {
+            "status": "ok",
+            "enabled": _catalyst_auto_pilot_channels[key]["enabled"],
+            "interval_hours": _catalyst_auto_pilot_channels[key]["interval_hours"],
+        }
+
     return build_youtube_catalyst_router(
         start_google_youtube_oauth_endpoint=_start_google_youtube_oauth,
         start_google_youtube_oauth_browser_endpoint=_start_google_youtube_oauth_browser,
@@ -257,4 +381,8 @@ def build_youtube_catalyst_app_router(
         sync_youtube_channel_endpoint=_sync_connected_youtube_channel,
         sync_youtube_channel_outcomes_endpoint=_sync_connected_youtube_channel_outcomes,
         delete_youtube_channel_endpoint=_disconnect_connected_youtube_channel,
+        catalyst_auto_tick_endpoint=_catalyst_auto_tick,
+        catalyst_auto_pilot_endpoint=_catalyst_auto_pilot_toggle,
+        catalyst_upload_endpoint=_catalyst_upload_video if youtube_upload_video_for_user else None,
+        catalyst_velocity_endpoint=_catalyst_velocity if youtube_get_velocity_for_user else None,
     )

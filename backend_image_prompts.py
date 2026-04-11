@@ -367,7 +367,8 @@ NEGATIVE_PROMPT = (
     "blurry, low quality, watermark, text artifacts, deformed, "
     "ugly, bad anatomy, bad proportions, duplicate, error, "
     "jpeg artifacts, low resolution, worst quality, lowres, "
-    "oversaturated, undersaturated, noise, grain, pixelated"
+    "oversaturated, undersaturated, noise, grain, pixelated, "
+    "no text, no words, no letters, no writing, no readable text"
 )
 
 WAN22_I2V_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"

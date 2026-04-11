@@ -36,6 +36,7 @@ _build_scene_prompt_with_reference = (
 )
 _longform_subject_lock = lambda topic, input_title, input_description="": ""
 _xai_json_completion = None
+_fal_openrouter_json_completion = None
 
 
 def configure_video_pipeline_runtime_hooks(
@@ -45,12 +46,14 @@ def configure_video_pipeline_runtime_hooks(
     build_scene_prompt_with_reference=None,
     longform_subject_lock=None,
     xai_json_completion=None,
+    fal_openrouter_json_completion=None,
 ):
     global _named_human_subject_likeness_lock
     global _longform_named_human_priority_lock
     global _build_scene_prompt_with_reference
     global _longform_subject_lock
     global _xai_json_completion
+    global _fal_openrouter_json_completion
     if named_human_subject_likeness_lock is not None:
         _named_human_subject_likeness_lock = named_human_subject_likeness_lock
     if longform_named_human_priority_lock is not None:
@@ -61,6 +64,8 @@ def configure_video_pipeline_runtime_hooks(
         _longform_subject_lock = longform_subject_lock
     if xai_json_completion is not None:
         _xai_json_completion = xai_json_completion
+    if fal_openrouter_json_completion is not None:
+        _fal_openrouter_json_completion = fal_openrouter_json_completion
 
 
 DEFAULT_CREATIVE_IMAGE_MODEL_ID = "studio_default"
@@ -1471,19 +1476,19 @@ def _build_longform_scene_execution_prompt(
                 template=template,
             )
         documentary_visual_description = re.sub(
-            r"^Fern-grade premium 3D (psychology|systems|crime-case) documentary scene,\s*obviously CG,[^.]+\.\s*",
+            r"^(?:Fern-grade|Premium cinematic) (?:premium 3D )?(psychology|systems|crime-case) documentary scene,\s*obviously CG,[^.]+\.\s*",
             "",
             str(documentary_visual_description or "").strip(),
             flags=re.IGNORECASE,
         ).strip()
         documentary_prefix = (
-            "Fern-grade premium 3D psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
+            "Premium cinematic psychology documentary scene, obviously CG, human-scale, emotionally invasive, and set inside a real designed environment. No live-action photography, no isolated object pedestal, no literal anatomy."
             if documentary_archetype == "psychology_documentary"
-            else "Fern-grade premium 3D crime-case documentary scene, obviously CG, evidence-first, human-scale, and built around real case material. No live-action photography, no generic boardroom filler, no untouched dossier table, and no multi-skeleton crowd."
+            else "Premium cinematic crime-case documentary scene, obviously CG, evidence-first, human-scale, and built around real case material. No live-action photography, no generic boardroom filler, no untouched dossier table, and no multi-skeleton crowd."
             if documentary_archetype == "crime_documentary"
-            else "Fern-grade premium 3D systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
+            else "Premium cinematic systems documentary scene, obviously CG, proof-first, human-scale, and built around an expensive documentary environment. No live-action photography, no isolated object pedestal, no glossy machine hero shot."
         )
-        if str(documentary_visual_description or "").strip().lower().startswith("fern-grade premium 3d"):
+        if str(documentary_visual_description or "").strip().lower().startswith(("fern-grade premium 3d", "premium cinematic")):
             documentary_prefix = ""
         documentary_environment_guidance = (
             "Prefer active human pressure scenes, mirrored conversations, surveillance moments, executive meetings, interviews, and consequence frames over empty rooms, untouched desks, or static dossier tables."
@@ -1503,13 +1508,13 @@ def _build_longform_scene_execution_prompt(
             archetype_key=documentary_archetype,
         )
         subject_reference_phrase = (
-            f"Use the attached subject reference image for {subject_reference_name} only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            f"Use the attached subject reference image for {subject_reference_name} only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Magnates-grade in framing, lighting, set design, and CG discipline."
             if has_subject_reference and str(subject_reference_name or "").strip()
-            else "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Fern/Magnates-grade in framing, lighting, set design, and CG discipline."
+            else "Use the attached subject reference image for identity only: preserve the same face, hair, skin tone, build, age cues, and signature styling whenever that person appears. Keep the scene Magnates-grade in framing, lighting, set design, and CG discipline."
             if has_subject_reference
             else "Use the attached Cryptic Science case reference sheet for framing, lighting, set design, source-capture composition, and evidence-board discipline only; never reproduce timestamps, site names, captions, or layout text from the reference."
             if documentary_archetype == "crime_documentary"
-            else "Use the attached Fern/Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
+            else "Use the attached Magnates reference sheet for cinematic framing, lighting, set design, and CG discipline only; never copy text, logos, or layouts literally from the reference."
         )
         documentary_output_guardrail = (
             "No legible text overlays, no chapter cards, no branded logos, no watermarks, no readable article text, and no giant wall text or monitor text in the scene."
@@ -1900,8 +1905,8 @@ async def _generate_longform_chapter(
     edit_blueprint: dict | None = None,
     chapter_blueprint: dict | None = None,
 ) -> dict:
-    if _xai_json_completion is None:
-        raise RuntimeError("video_pipeline runtime hook 'xai_json_completion' is not configured")
+    if _xai_json_completion is None and _fal_openrouter_json_completion is None:
+        raise RuntimeError("video_pipeline runtime hook 'xai_json_completion' or 'fal_openrouter_json_completion' must be configured")
 
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
@@ -2005,7 +2010,16 @@ async def _generate_longform_chapter(
     if fix_note:
         user_prompt += f"Fix note from owner review: {fix_note}\n"
 
-    chapter_data = await _xai_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=90)
+    # Try FAL OpenRouter (Claude Sonnet 4.6) first, fall back to Grok
+    chapter_data = None
+    if _fal_openrouter_json_completion is not None:
+        try:
+            chapter_data = await _fal_openrouter_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=120)
+            log.info("Longform chapter gen succeeded via FAL OpenRouter (Claude Sonnet 4.6)")
+        except Exception as fal_exc:
+            log.warning("FAL OpenRouter chapter gen failed, falling back to Grok: %s", str(fal_exc)[:200])
+    if chapter_data is None:
+        chapter_data = await _xai_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=90)
     raw_scenes = chapter_data.get("scenes", [])
     scenes = _normalize_longform_scenes_for_render(raw_scenes)
     scenes = _repair_longform_generated_scenes(
@@ -2330,6 +2344,15 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             else "Create a viral short that stays tightly anchored to this exact topic.\n\n"
                  f"TOPIC:\n{topic_text}"
         )
+        # --- Try FAL OpenRouter (Claude Sonnet 4.6) first ---
+        if _fal_openrouter_json_completion is not None:
+            try:
+                result = await _fal_openrouter_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
+                log.info("Script generation succeeded via FAL OpenRouter (Claude Sonnet 4.6)")
+                return result
+            except Exception as fal_exc:
+                log.warning("FAL OpenRouter script gen failed, falling back to Grok: %s", str(fal_exc)[:200])
+        # --- Fallback to Grok (xAI) ---
         last_error: Exception | None = None
         for attempt in range(3):
             try:

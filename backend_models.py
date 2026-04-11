@@ -24,6 +24,7 @@ class GenerateRequest(BaseModel):
     reference_lock_mode: str = "strict"
     image_model_id: str = ""
     video_model_id: str = ""
+    background_music: str = ""
     scenes: list = []
 
 
@@ -68,6 +69,7 @@ class FinalizeRequest(BaseModel):
     subtitles_enabled: bool = True
     image_model_id: str = ""
     video_model_id: str = ""
+    background_music: str = ""
 
 
 class CheckoutRequest(BaseModel):

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import base64
 import hashlib
@@ -43,8 +43,10 @@ from audio import (
     _probe_audio_duration_seconds,
     _probe_video_duration_seconds,
     _quintuple_check_scene_sfx,
+    _detect_voice_pauses,
     _rebalance_scene_durations_for_audio,
     _seconds_to_ass_timestamp,
+    _snap_scene_cuts_to_pauses,
     generate_ass_scene_subtitles,
     generate_ass_subtitles,
     generate_scene_sfx,
@@ -480,6 +482,8 @@ from youtube import (
     _youtube_selected_channel_context,
     _youtube_start_oauth_for_user,
     _youtube_sync_and_persist_for_user,
+    youtube_get_latest_video_velocity,
+    youtube_upload_video,
 )
 from backend_catalog import (
     PLAN_LIMITS,
@@ -611,13 +615,14 @@ except Exception:
     paramiko = None
 
 try:
-    from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageStat
+    from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageStat
 except Exception:
     Image = None
     ImageChops = None
     ImageDraw = None
     ImageEnhance = None
     ImageFilter = None
+    ImageFont = None
     ImageStat = None
 
 try:
@@ -864,6 +869,54 @@ LONGFORM_PREVIEW_DIR = TEMP_DIR / "longform_previews"
 LONGFORM_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 _longform_sessions: dict[str, dict] = {}
 _longform_sessions_lock = asyncio.Lock()
+
+_catalyst_auto_pilot_channels: dict[str, dict] = {}  # {user_id:channel_id -> {enabled, last_check, interval_hours}}
+
+
+async def _catalyst_autonomous_monitor_tick():
+    """Background tick: check all auto-pilot channels for decay."""
+    for key, config in list(_catalyst_auto_pilot_channels.items()):
+        if not config.get("enabled"):
+            continue
+        last_check = float(config.get("last_check", 0) or 0)
+        interval = float(config.get("interval_hours", 6) or 6) * 3600
+        if time.time() - last_check < interval:
+            continue
+        try:
+            user_id, channel_id = key.split(":", 1)
+            # Fetch velocity
+            # Note: we need to get the access token from the connection store
+            connection = None
+            for conn_key, conn in _youtube_connections.items():
+                if str(conn.get("channel_id", "") or "") == channel_id:
+                    connection = conn
+                    break
+            if not connection:
+                continue
+            from youtube import youtube_get_latest_video_velocity, _youtube_ensure_access_token
+            access_token = await _youtube_ensure_access_token(connection)
+            if not access_token:
+                continue
+            velocity = await youtube_get_latest_video_velocity(access_token, channel_id)
+            config["last_check"] = time.time()
+            config["last_velocity"] = velocity
+
+            if velocity.get("is_decaying") and not config.get("session_active"):
+                log.info("Auto-pilot: decay detected for %s (%.1f vph), would trigger new pipeline", channel_id, velocity.get("velocity_vph", 0))
+                config["decay_detected_at"] = time.time()
+                # Don't auto-trigger yet — this is logged as a detection
+                # Full auto-trigger requires user to explicitly enable "auto_generate" mode
+        except Exception as e:
+            log.warning("Auto-pilot tick failed for %s: %s", key, str(e)[:200])
+
+
+async def _start_catalyst_monitor():
+    while True:
+        try:
+            await _catalyst_autonomous_monitor_tick()
+        except Exception as e:
+            log.warning("Catalyst monitor loop error: %s", str(e)[:200])
+        await asyncio.sleep(1800)  # 30 min
 _longform_analysis_semaphore = asyncio.Semaphore(1)
 _longform_draft_semaphore = asyncio.Semaphore(1)
 _longform_render_semaphore = asyncio.Semaphore(1)
@@ -4181,7 +4234,7 @@ _load_youtube_connections()
 _load_youtube_oauth_states()
 
 
-# â”€â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Auth â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _is_admin_user(user: Optional[dict]) -> bool:
     if not user:
@@ -4447,14 +4500,14 @@ async def get_user_plan(user: dict) -> dict:
     return PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
 
 
-# â”€â”€â”€ xAI Grok Script Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ xAI Grok Script Generation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 
 
 
 
-# â”€â”€â”€ ElevenLabs TTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ ElevenLabs TTS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
@@ -4497,6 +4550,65 @@ async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature
             wait_seconds = (attempt + 1) * 2
             await asyncio.sleep(wait_seconds)
     raise last_error if last_error is not None else RuntimeError("xAI JSON completion failed")
+
+
+async def _fal_openrouter_json_completion(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    timeout_sec: int = 120,
+    model: str = "anthropic/claude-sonnet-4.6",
+) -> dict:
+    """Call LLM via FAL OpenRouter (Claude Sonnet 4.6 primary). Same FAL_AI_KEY."""
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured for OpenRouter")
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
+                resp = await client.post(
+                    "https://fal.run/fal-ai/openrouter/router",
+                    headers={
+                        "Authorization": "Key " + FAL_AI_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": max(0.2, float(temperature) - (attempt * 0.05)),
+                    },
+                )
+                if resp.status_code in {429, 500, 502, 503, 504}:
+                    raise httpx.HTTPStatusError(
+                        f"Retryable FAL OpenRouter status {resp.status_code}",
+                        request=resp.request,
+                        response=resp,
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if not content:
+                    content = str(data.get("output", "") or data.get("result", "") or "")
+                if not content:
+                    raise ValueError("FAL OpenRouter returned empty content")
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end <= 0:
+                raise ValueError("No JSON found in FAL OpenRouter response")
+            return json.loads(content[start:end])
+        except Exception as exc:
+            last_error = exc
+            log.warning(
+                "FAL OpenRouter attempt %d/%d failed (%s): %s",
+                attempt + 1, 3, model, str(exc)[:200],
+            )
+            if attempt >= 2:
+                break
+            await asyncio.sleep((attempt + 1) * 2)
+    raise last_error if last_error is not None else RuntimeError("FAL OpenRouter JSON completion failed")
 
 
 async def _xai_json_completion_multimodal(
@@ -4666,6 +4778,7 @@ configure_video_pipeline_runtime_hooks(
     build_scene_prompt_with_reference=_build_scene_prompt_with_reference,
     longform_subject_lock=_longform_subject_lock,
     xai_json_completion=_xai_json_completion,
+    fal_openrouter_json_completion=_fal_openrouter_json_completion,
 )
 
 
@@ -5050,7 +5163,7 @@ def _render_source_context(
     return "\n".join(part for part in parts if part)
 
 
-# â”€â”€â”€ ComfyUI Image Generation with Upscaling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ ComfyUI Image Generation with Upscaling â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 
@@ -9220,7 +9333,7 @@ async def animate_image_wan22(image_path: str, prompt: str, output_clip_path: st
     return output_clip_path
 
 
-# â”€â”€â”€ FFmpeg Video Compositor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ FFmpeg Video Compositor â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def frames_to_clip(frame_paths: list, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
     """Convert SVD frames into a video clip, stretched/looped to fill the scene duration."""
@@ -9234,12 +9347,14 @@ async def frames_to_clip(frame_paths: list, duration: float, output_clip: str, o
         safe_text = _ffmpeg_safe_text(text_overlay).upper()
         font_size = 96 if resolution == "1080p" else 72
         border_w = 6 if resolution == "1080p" else 4
+        font_path = _resolve_ffmpeg_font_path()
         drawtext = (
             ",drawtext=text='" + safe_text + "'"
             + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
             + ":x=(w-text_w)/2:y=h*3/4"
-            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         )
+        if font_path:
+            drawtext += ":fontfile=" + font_path
 
     speed_factor = native_duration / duration if duration > 0 else 1.0
     speed_factor = max(0.25, min(speed_factor, 4.0))
@@ -9281,30 +9396,116 @@ def _ffmpeg_safe_text(text: str) -> str:
     return t
 
 
-async def static_image_to_clip(img_path: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p") -> str:
-    """Fallback: create a video clip from a static image with slow zoom."""
-    base_vf = "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+_RESOLVED_FONT_PATH: str | None = None
 
-    drawtext_vf = base_vf
+
+def _resolve_ffmpeg_font_path() -> str:
+    """Find a usable bold font for ffmpeg drawtext. Caches result. Works on Windows + Linux."""
+    global _RESOLVED_FONT_PATH
+    if _RESOLVED_FONT_PATH is not None:
+        return _RESOLVED_FONT_PATH
+    candidates = [
+        # Windows
+        "C\\\\:/Windows/Fonts/arialbd.ttf",
+        "C\\\\:/Windows/Fonts/impact.ttf",
+        "C\\\\:/Windows/Fonts/arial.ttf",
+        # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    ]
+    import os
+    for path in candidates:
+        # Normalize escaped Windows paths for existence check
+        check_path = path.replace("\\\\:", ":")
+        if os.path.exists(check_path):
+            _RESOLVED_FONT_PATH = path
+            log.info("Resolved ffmpeg font: %s", path)
+            return path
+    # Last resort — ffmpeg may find a default system font without fontfile
+    _RESOLVED_FONT_PATH = ""
+    log.warning("No bold font found for ffmpeg drawtext — text overlays may fail")
+    return ""
+
+
+_KEN_BURNS_MODES = ["zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up"]
+
+
+def _ken_burns_zoompan_filter(mode: str, out_w: int, out_h: int, duration: float, fps: int = 30) -> str:
+    """Build an ffmpeg zoompan filter string for the given Ken Burns mode."""
+    import random as _rng
+    total_frames = max(int(duration * fps), fps)
+    if mode == "random":
+        mode = _rng.choice(_KEN_BURNS_MODES)
+    if mode == "zoom_in":
+        return (
+            f"zoompan=z='min(zoom+0.0015,1.25)'"
+            f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+        )
+    elif mode == "zoom_out":
+        return (
+            f"zoompan=z='if(eq(on,1),1.25,max(zoom-0.0015,1.0))'"
+            f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+        )
+    elif mode == "pan_left":
+        return (
+            f"zoompan=z='1.15'"
+            f":x='iw/2-(iw/zoom/2)-on/{total_frames}*(iw-iw/zoom)'"
+            f":y='ih/2-(ih/zoom/2)'"
+            f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+        )
+    elif mode == "pan_right":
+        return (
+            f"zoompan=z='1.15'"
+            f":x='on/{total_frames}*(iw-iw/zoom)'"
+            f":y='ih/2-(ih/zoom/2)'"
+            f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+        )
+    elif mode == "pan_up":
+        return (
+            f"zoompan=z='1.15'"
+            f":x='iw/2-(iw/zoom/2)'"
+            f":y='ih/2-(ih/zoom/2)-on/{total_frames}*(ih-ih/zoom)'"
+            f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+        )
+    # fallback: gentle zoom in
+    return (
+        f"zoompan=z='min(zoom+0.001,1.15)'"
+        f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        f":d={total_frames}:s={out_w}x{out_h}:fps={fps}"
+    )
+
+
+async def static_image_to_clip(img_path: str, duration: float, output_clip: str, out_w: int, out_h: int, text_overlay: str = "", resolution: str = "720p", ken_burns_mode: str = "random") -> str:
+    """Create a video clip from a static image with Ken Burns zoom/pan effects."""
+    fps = 30
+    # Build Ken Burns zoompan filter
+    zoompan_vf = _ken_burns_zoompan_filter(ken_burns_mode, out_w, out_h, duration, fps)
+    kb_vf = zoompan_vf + ",format=yuv420p"
+
     if text_overlay:
         safe_text = _ffmpeg_safe_text(text_overlay).upper()
         font_size = 96 if resolution == "1080p" else 72
         border_w = 6 if resolution == "1080p" else 4
-        drawtext_vf = (
-            base_vf
-            + ",drawtext=text='" + safe_text + "'"
+        font_path = _resolve_ffmpeg_font_path()
+        dt_filter = (
+            ",drawtext=text='" + safe_text + "'"
             + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
             + ":x=(w-text_w)/2:y=h*3/4"
-            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         )
+        if font_path:
+            dt_filter += ":fontfile=" + font_path
+        kb_vf += dt_filter
 
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(img_path),
         "-t", str(duration),
-        "-vf", drawtext_vf,
+        "-vf", kb_vf,
         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-r", "30",
+        "-r", str(fps),
         str(output_clip),
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -9312,19 +9513,39 @@ async def static_image_to_clip(img_path: str, duration: float, output_clip: str,
     )
     _, stderr = await proc.communicate()
 
+    # Fallback 1: Ken Burns without text overlay
     if proc.returncode != 0 and text_overlay:
-        log.warning(f"Drawtext failed, retrying without text overlay: {stderr.decode()[-200:]}")
-        cmd_plain = [
+        log.warning(f"Ken Burns + drawtext failed, retrying without text: {stderr.decode()[-200:]}")
+        plain_kb_vf = zoompan_vf + ",format=yuv420p"
+        cmd_notxt = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", str(img_path),
+            "-t", str(duration),
+            "-vf", plain_kb_vf,
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-r", str(fps),
+            str(output_clip),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_notxt, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+
+    # Fallback 2: plain scale/pad (no Ken Burns) if zoompan fails
+    if proc.returncode != 0:
+        log.warning(f"Ken Burns zoompan failed, falling back to static scale/pad: {stderr.decode()[-200:]}")
+        base_vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+        cmd_fallback = [
             "ffmpeg", "-y",
             "-loop", "1", "-i", str(img_path),
             "-t", str(duration),
             "-vf", base_vf,
             "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            "-r", "30",
+            "-r", str(fps),
             str(output_clip),
         ]
         proc = await asyncio.create_subprocess_exec(
-            *cmd_plain, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd_fallback, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         _, stderr = await proc.communicate()
 
@@ -9342,12 +9563,14 @@ async def kling_clip_to_scene(kling_clip: str, duration: float, output_clip: str
         safe_text = _ffmpeg_safe_text(text_overlay).upper()
         font_size = 96 if resolution == "1080p" else 72
         border_w = 6 if resolution == "1080p" else 4
+        font_path = _resolve_ffmpeg_font_path()
         drawtext = (
             ",drawtext=text='" + safe_text + "'"
             + ":fontsize=" + str(font_size) + ":fontcolor=white:borderw=" + str(border_w) + ":bordercolor=black"
             + ":x=(w-text_w)/2:y=h*3/4"
-            + ":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         )
+        if font_path:
+            drawtext += ":fontfile=" + font_path
     vf = (
         "scale=" + str(out_w) + ":" + str(out_h) + ":force_original_aspect_ratio=decrease,"
         + "pad=" + str(out_w) + ":" + str(out_h) + ":(ow-iw)/2:(oh-ih)/2:black,"
@@ -9902,6 +10125,17 @@ async def composite_video(
         audio_path,
         minimum_scene_duration=minimum_scene_duration,
     )
+    # Beat-sync: snap scene cuts to natural voice pauses
+    if planned_scene_durations and audio_path:
+        try:
+            pause_points = _detect_voice_pauses(audio_path, min_silence_sec=0.25)
+            if pause_points:
+                pre_snap = list(planned_scene_durations)
+                planned_scene_durations = _snap_scene_cuts_to_pauses(planned_scene_durations, pause_points, tolerance=0.5)
+                snapped = sum(1 for a, b in zip(pre_snap, planned_scene_durations) if abs(a - b) > 0.05)
+                log.info("Beat-sync: %d/%d scene cuts snapped to voice pauses (%d pauses detected)", snapped, len(pre_snap), len(pause_points))
+        except Exception as bs_exc:
+            log.warning("Beat-sync pause detection failed (non-fatal): %s", str(bs_exc)[:200])
     if planned_scene_durations:
         log.info(
             "Composite durations aligned to audio: scenes=%s total=%.2fs audio=%.2fs min_scene=%.2fs",
@@ -9948,7 +10182,7 @@ async def composite_video(
                 clip_durations.append(float(duration))
                 continue
             except Exception as e:
-                log.warning(f"Kling clip processing failed for scene {i}: {e}")
+                log.warning(f"Kling clip failed for scene {i}, falling back to Ken Burns: {e}")
 
         if use_svd and asset.get("frames"):
             try:
@@ -9960,11 +10194,13 @@ async def composite_video(
                 clip_durations.append(float(duration))
                 continue
             except Exception as e:
-                log.warning(f"SVD clip failed for scene {i}, falling back to static: {e}")
+                log.warning(f"SVD clip failed for scene {i}, falling back to Ken Burns: {e}")
 
+        log.info(f"Scene {i}: using Ken Burns motion on static image")
         await static_image_to_clip(
             asset["image"], duration, clip_path,
             out_w, out_h, text_overlay, resolution,
+            ken_burns_mode="random",
         )
         scene_clips.append(Path(clip_path))
         clip_durations.append(float(duration))
@@ -10248,7 +10484,7 @@ async def composite_video(
     return str(output_path)
 
 
-# â”€â”€â”€ Full Generation Pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Full Generation Pipeline â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 def _normalize_scenes_for_render(scenes: list) -> list:
@@ -11540,6 +11776,13 @@ async def run_generation_pipeline(
             log.info(f"[{job_id}] Scene-timed captions generated without voice timestamps")
 
         sound_mix_profile = _creative_template_sound_mix_profile(template)
+        # Apply user background music preference (auto mode)
+        _bgm_user_map = {"dark ambient": "cinematic_dark_tension", "cinematic tension": "documentary_tension", "upbeat energy": "story_pulse_bed"}
+        _bgm_user = str(jobs.get(job_id, {}).get("background_music", "") or "").strip().lower()
+        if _bgm_user in _bgm_user_map:
+            sound_mix_profile["music_profile"] = _bgm_user_map[_bgm_user]
+        elif _bgm_user == "no background music":
+            sound_mix_profile["bgm_required"] = False
         sfx_paths = []
         if (_sfx_enabled() or _creative_template_force_sfx(template)) and ELEVENLABS_API_KEY:
             _job_set_stage(job_id, "generating_sfx", 78)
@@ -11668,7 +11911,7 @@ async def run_generation_pipeline(
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
-# â”€â”€â”€ API Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ API Endpoints â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _create_or_update_project(project_id: str, data: dict):
     async with _projects_lock:
@@ -12390,6 +12633,76 @@ def _coerce_cryptic_longform_channel_memory(
     return updated
 
 
+def _coerce_history_rewind_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+    topic: str = "",
+    input_title: str = "",
+) -> dict:
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_history_rewind_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "geopolitics_history"
+    updated["niche_label"] = "History / Geopolitics"
+    updated["archetype_key"] = "power_history"
+    updated["archetype_label"] = "Power History"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on one concrete historical consequence first, then anchor the claim with year, place, and actors in the next beat.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Use calm documentary pacing for background listening, but no filler: every beat must advance chronology, causality, or consequence.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Use premium map-room, archive, timeline, treaty-table, and battlefield-consequence frames with period-faithful context. Avoid fantasy props, anachronistic tech, and sensational fiction staging.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Use low, steady documentary atmosphere with restrained percussion and minimal jump-scare spikes so episodes remain easy to follow in the background.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Package around one historical contradiction and one evidence-backed turning point, never around fabricated shock claims.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "History Rewind should run as fact-locked documentary storytelling: evidence-led chronology, consequence-first framing, and no runtime padding.",
+        320,
+    )
+    existing_guardrails = [str(v).strip() for v in list(updated.get("operator_guardrails") or []) if str(v).strip()]
+    updated["operator_guardrails"] = _dedupe_preserve_order(
+        [
+            *existing_guardrails,
+            "Every major claim needs a concrete year, location, actor, or verifiable event anchor",
+            "No fabricated quotes, motives, casualty counts, or timelines",
+            "No runtime padding: if the researched material supports 20 minutes, keep it at 20 minutes",
+            "Keep narration smooth for background listening, but never vague or speculative",
+            "Flag disputed claims explicitly instead of presenting them as settled facts",
+        ],
+        max_items=10,
+        max_chars=180,
+    )
+    existing_niches = [str(v).strip() for v in list(updated.get("operator_target_niches") or []) if str(v).strip()]
+    updated["operator_target_niches"] = _dedupe_preserve_order(
+        [
+            *existing_niches,
+            "history documentary",
+            "geopolitics history",
+            "military history",
+            "civilization history",
+            "historical paradoxes",
+        ],
+        max_items=8,
+        max_chars=80,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
 def _coerce_documentary_longform_channel_memory(
     channel_context: dict | None,
     channel_memory: dict | None,
@@ -12403,7 +12716,14 @@ def _coerce_documentary_longform_channel_memory(
         channel_memory,
         format_preset=format_preset,
     )
-    return _coerce_cryptic_longform_channel_memory(
+    updated = _coerce_cryptic_longform_channel_memory(
+        channel_context,
+        updated,
+        format_preset=format_preset,
+        topic=topic,
+        input_title=input_title,
+    )
+    return _coerce_history_rewind_longform_channel_memory(
         channel_context,
         updated,
         format_preset=format_preset,
@@ -12447,7 +12767,12 @@ async def _longform_generate_scene_image(
     salvage_enabled: bool = False,
 ) -> dict:
     errors: list[str] = []
-    documentary_passthrough = _longform_prefers_3d_documentary_visuals(template, format_preset)
+    channel_context = dict(channel_context or {})
+    channel_blocks_fal_scene = _channel_blocks_fal_scene_generation(channel_context)
+    documentary_prefers_hosted = _longform_prefers_3d_documentary_visuals(template, format_preset)
+    documentary_passthrough = documentary_prefers_hosted and not channel_blocks_fal_scene
+    if documentary_prefers_hosted and channel_blocks_fal_scene:
+        log.info("Channel policy: documentary hosted scene lane disabled; using non-fal scene providers")
     if documentary_passthrough:
         grok_profile = dict(CREATIVE_IMAGE_MODEL_MAP.get("grok_imagine") or {})
         if not bool(grok_profile.get("enabled", False)):
@@ -12543,6 +12868,11 @@ async def _generate_longform_package_thumbnail(
                 negative_prompt=negative_prompt,
             )
             await _enforce_thumbnail_1080(output_path)
+            # Apply bold text overlay (Magnates Media style)
+            title_words = str(selected_title or "").strip().split()[:4]
+            overlay_text = " ".join(title_words).upper()
+            if overlay_text:
+                _apply_thumbnail_text_overlay(output_path, overlay_text)
             return {
                 **dict(result or {}),
                 "provider": str(result.get("provider", model_id) or model_id),
@@ -12559,6 +12889,10 @@ async def _generate_longform_package_thumbnail(
             mode="describe",
         )
         await _enforce_thumbnail_1080(output_path)
+        title_words = str(selected_title or "").strip().split()[:4]
+        overlay_text = " ".join(title_words).upper()
+        if overlay_text:
+            _apply_thumbnail_text_overlay(output_path, overlay_text)
         return {
             "local_path": output_path,
             "provider": "pikzels",
@@ -12607,17 +12941,17 @@ async def _longform_attach_scene_previews(
         neg_prompt = (
             neg_prompt
             + ", live-action photography, candid human photo, gritty warehouse realism, street-photo realism, film still, "
-            + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution, readable wall text, giant title words, fake UI typography, pseudo text, lower-third captions, anonymous stock-person face, mannequin face, waxy skin, deformed hands, extra fingers, deformed eyes"
+            + "photographic actor portrait, handheld live-action frame, generic medical textbook render, repetitive lab stage, wrong organ substitution, readable wall text, giant title words, fake UI typography, pseudo text, lower-third captions, anonymous stock-person face, mannequin face, waxy skin, deformed hands, extra fingers, deformed eyes, no text, no words, no letters"
         )
         if _is_empire_magnates_channel(channel_context):
             neg_prompt = (
                 neg_prompt
-                + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+                + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame, no text, no words, no letters"
             )
         elif _is_cryptic_science_channel(channel_context):
             neg_prompt = (
                 neg_prompt
-                + ", generic corporate boardroom, empty archive room, untouched dossier table, skeleton committee, multiple skeleton people, x-ray humans, static meeting room filler, anatomy filler, floating machine props, pseudo text, title words in frame"
+                + ", generic corporate boardroom, empty archive room, untouched dossier table, skeleton committee, multiple skeleton people, x-ray humans, static meeting room filler, anatomy filler, floating machine props, pseudo text, title words in frame, no text, no words, no letters"
             )
     skeleton_anchor = _canonical_skeleton_anchor() if template == "skeleton" else ""
     # Previews should be cheap and fast. Avoid strict conditioning that can force costly retries.
@@ -13232,7 +13566,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
             if _is_empire_magnates_channel(channel_context):
                 neg_prompt = (
                     neg_prompt
-                    + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame"
+                    + ", isolated floating object, pedestal product shot, centered spotlight object, hero object stage, macro machine cutaway, literal exposed brain, anatomy cross-section, glowing gear sphere, pseudo text, title words in frame, no text, no words, no letters"
                 )
             elif _is_cryptic_science_channel(channel_context):
                 neg_prompt = (
@@ -13437,6 +13771,15 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         if word_timings:
             subtitle_path = str(TEMP_DIR / f"{job_id}_lf_captions.ass")
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=template)
+        elif all_flat_scenes:
+            # Fallback: scene-level subtitles when word timings unavailable
+            subtitle_path = str(TEMP_DIR / f"{job_id}_lf_captions.ass")
+            try:
+                generate_ass_scene_subtitles(all_flat_scenes, subtitle_path, resolution=resolution, template=template)
+                log.info("Longform: generated scene-level ASS subtitles as word-timing fallback")
+            except Exception as ass_exc:
+                log.warning("Scene-level ASS subtitle fallback failed: %s", str(ass_exc)[:200])
+                subtitle_path = None
 
         sfx_paths: list[str] = []
         if sfx_enabled:
@@ -13873,6 +14216,11 @@ async def _create_longform_session_internal(
         ),
         same_arena_subject_fn=_same_arena_subject,
     )
+    # Strategy attribution: save fingerprint for outcome tracking
+    from backend_catalyst_learning import _catalyst_strategy_fingerprint
+    strategy_fp = _catalyst_strategy_fingerprint(edit_blueprint)
+    edit_blueprint["strategy_fingerprint"] = strategy_fp
+    log.info("Blueprint strategy fingerprint: %s", strategy_fp)
     chapters = [
         _longform_placeholder_chapter(
             i,
@@ -16515,6 +16863,7 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         "billing_source": "owner_override" if is_admin else credit_source,
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
+        "background_music": str(getattr(req, "background_music", "") or "").strip(),
     }
     _job_diag_init(job_id, "creative")
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -16765,6 +17114,13 @@ async def _run_creative_pipeline(
         jobs[job_id]["audio_warning"] = str(audio_assets.get("audio_warning", "") or "")
 
         sound_mix_profile = _creative_template_sound_mix_profile(template)
+        # Apply user background music preference (creative mode)
+        _bgm_user_map_c = {"dark ambient": "cinematic_dark_tension", "cinematic tension": "documentary_tension", "upbeat energy": "story_pulse_bed"}
+        _bgm_user_c = str(jobs.get(job_id, {}).get("background_music", "") or "").strip().lower()
+        if _bgm_user_c in _bgm_user_map_c:
+            sound_mix_profile["music_profile"] = _bgm_user_map_c[_bgm_user_c]
+        elif _bgm_user_c == "no background music":
+            sound_mix_profile["bgm_required"] = False
         sfx_paths = []
         if (_sfx_enabled() or _creative_template_force_sfx(template)) and ELEVENLABS_API_KEY:
             _job_set_stage(job_id, "generating_sfx", 78)
@@ -17479,6 +17835,66 @@ app.include_router(
 )
 
 
+async def _youtube_upload_video_for_user(*, user: dict, session_id: str, channel_id: str, privacy: str = "private") -> dict:
+    """Upload a completed longform session video to YouTube."""
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    # Get access token for the channel (returns tuple: access_token, connection_dict)
+    token_result = await _youtube_connected_channel_access_token(user, channel_id)
+    access_token = token_result[0] if isinstance(token_result, (tuple, list)) else str(token_result or "")
+    if not access_token:
+        raise HTTPException(401, "YouTube not connected or token expired. Reconnect your channel.")
+    # Find the session and its output video
+    live_session = _longform_sessions.get(session_id) or {}
+    if not live_session:
+        raise HTTPException(404, f"Session {session_id} not found")
+    output_path = str(live_session.get("output_file", "") or "")
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(400, "Session has no rendered video file")
+    # Get metadata
+    meta = dict(live_session.get("metadata_pack", {}) or {})
+    # A/B variant scoring: pick best title based on learning data
+    title_variants = meta.get("title_variants", [])
+    if title_variants and len(title_variants) > 1:
+        channel_memory = dict(live_session.get("_catalyst_channel_memory") or {})
+        ranked = _rank_title_variants(title_variants, channel_memory)
+        if ranked:
+            title = str(ranked[0]["title"])[:100]
+            log.info("A/B title selection: picked '%s' (score %.3f) from %d variants", title[:50], ranked[0]["predicted_score"], len(ranked))
+        else:
+            title = str(title_variants[0])[:100]
+    else:
+        title = str(title_variants[0] if title_variants else live_session.get("topic", "Untitled"))[:100]
+    desc_variants = meta.get("description_variants", [])
+    description = str(desc_variants[0] if desc_variants else "")[:5000]
+    tags = list(meta.get("tags", []) or [])[:30]
+    thumbnail_path = str(live_session.get("package_thumbnail_file", "") or "")
+    result = await youtube_upload_video(
+        access_token=access_token,
+        video_path=output_path,
+        title=title,
+        description=description,
+        tags=tags,
+        privacy=privacy,
+        thumbnail_path=thumbnail_path if thumbnail_path and Path(thumbnail_path).exists() else None,
+    )
+    log.info("YouTube upload complete for session %s: %s", session_id, result.get("video_url", ""))
+    return result
+
+
+async def _youtube_get_velocity_for_user(*, user: dict, channel_id: str) -> dict:
+    """Get latest video's view velocity for decay detection."""
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    token_result = await _youtube_connected_channel_access_token(user, channel_id)
+    access_token = token_result[0] if isinstance(token_result, (tuple, list)) else str(token_result or "")
+    if not access_token:
+        raise HTTPException(401, "YouTube not connected or token expired")
+    return await youtube_get_latest_video_velocity(access_token=access_token, channel_id=channel_id)
+
+
 app.include_router(
     build_youtube_catalyst_app_router(
         require_auth=require_auth,
@@ -17506,6 +17922,8 @@ app.include_router(
         upload_dir=TEMP_DIR / "catalyst_reference_evidence",
         longform_owner_beta_enabled=_longform_owner_beta_enabled,
         harvest_catalyst_outcomes_for_channel=_harvest_catalyst_outcomes_for_channel,
+        youtube_upload_video_for_user=_youtube_upload_video_for_user,
+        youtube_get_velocity_for_user=_youtube_get_velocity_for_user,
     )
 )
 
@@ -17637,6 +18055,7 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         "billing_source": "owner_override" if is_admin else (credit_source or "workspace_access"),
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
+        "background_music": str(getattr(req, "background_music", "") or "").strip(),
     }
     _job_diag_init(job_id, "auto")
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
@@ -17843,10 +18262,13 @@ async def _job_status_payload(job_id: str):
 
 
 async def _download_video_response(filename: str):
-    path = OUTPUT_DIR / filename
+    safe_filename = Path(filename).name  # Strip directory traversal (../ etc)
+    if not safe_filename:
+        raise HTTPException(400, "Invalid filename")
+    path = OUTPUT_DIR / safe_filename
     if not path.exists():
         raise HTTPException(404, "Video not found")
-    return FileResponse(str(path), media_type="video/mp4", filename=filename)
+    return FileResponse(str(path), media_type="video/mp4", filename=safe_filename)
 
 
 async def _render_chat_story(
@@ -18543,7 +18965,7 @@ app.include_router(
 )
 
 
-# â”€â”€â”€ Stripe Payments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Stripe Payments â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
 def _price_id_for_plan_id(plan_id: str) -> str:
@@ -19074,7 +19496,7 @@ async def _stripe_webhook(request: Request):
     return {"status": "ok"}
 
 
-# â”€â”€â”€ Admin: set plan for a user (admin-only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Admin: set plan for a user (admin-only) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS:
@@ -19173,7 +19595,7 @@ async def _admin_cancel_subscription(body: dict, user: dict = Depends(require_au
         raise HTTPException(500, f"Failed to cancel subscription(s): {e}")
 
 
-# â”€â”€â”€ User Feedback Collection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ User Feedback Collection â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
     if req.rating < 1 or req.rating > 5:
@@ -19298,7 +19720,7 @@ app.include_router(
 )
 
 
-# â”€â”€â”€ Startup: seed accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Startup: seed accounts â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 SEED_ACCOUNTS = {
     "omatic657@gmail.com": {"plan": "admin", "role": "admin"},
@@ -19350,7 +19772,12 @@ async def seed_profiles():
         log.warning(f"Profile seeding failed: {e}")
 
 
-# â”€â”€â”€ Thumbnail System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.on_event("startup")
+async def start_catalyst_monitor_loop():
+    asyncio.create_task(_start_catalyst_monitor())
+
+
+# â"€â"€â"€ Thumbnail System â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAIL_UPLOAD_DIR = THUMBNAIL_DIR / "library"
@@ -20111,6 +20538,96 @@ async def _enforce_thumbnail_1080(output_path: str) -> str:
     return output_path
 
 
+def _apply_thumbnail_text_overlay(image_path: str, text: str, position: str = "bottom_left") -> str:
+    """Apply bold text overlay to a thumbnail image using PIL. Magnates Media style."""
+    if not Image or not ImageDraw or not ImageFont:
+        log.warning("PIL not available for thumbnail text overlay")
+        return image_path
+    try:
+        img = Image.open(image_path).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        font_size = max(60, int(h * 0.08))
+        # Try Windows Arial Bold, then fallback
+        font = None
+        for font_path in [
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/impact.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ]:
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        text = str(text or "").strip().upper()
+        if not text:
+            return image_path
+        # Measure text
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        padding = int(w * 0.03)
+        if position == "center":
+            x = (w - text_w) // 2
+            y = int(h * 0.7)
+        else:  # bottom_left
+            x = padding
+            y = h - text_h - padding - 20
+        # Draw black stroke
+        stroke_width = max(3, int(font_size * 0.05))
+        draw.text((x, y), text, font=font, fill=(255, 255, 255, 255), stroke_width=stroke_width, stroke_fill=(0, 0, 0, 255))
+        # Save back as PNG (lossless)
+        img = img.convert("RGB")
+        img.save(image_path, quality=95)
+        log.info("Thumbnail text overlay applied: '%s' at %s", text[:30], position)
+        return image_path
+    except Exception as e:
+        log.warning("Failed to apply thumbnail text overlay: %s", str(e)[:200])
+        return image_path
+
+
+def _score_title_variant(title: str, packaging_wins_map: dict, packaging_watchouts_map: dict) -> float:
+    """Score a title variant based on historical packaging wins/watchouts."""
+    title_lower = str(title or "").lower()
+    score = 0.0
+    for pattern, entry in (packaging_wins_map or {}).items():
+        pattern_lower = str(pattern or "").lower()
+        # Check n-gram overlap
+        pattern_words = set(pattern_lower.split())
+        title_words = set(title_lower.split())
+        overlap = len(pattern_words & title_words)
+        if overlap >= 2:
+            weight = float(entry.get("effective", entry.get("score", entry)) if isinstance(entry, dict) else float(entry or 0))
+            score += weight * (overlap / max(1, len(pattern_words)))
+    for pattern, entry in (packaging_watchouts_map or {}).items():
+        pattern_lower = str(pattern or "").lower()
+        pattern_words = set(pattern_lower.split())
+        title_words = set(title_lower.split())
+        overlap = len(pattern_words & title_words)
+        if overlap >= 2:
+            weight = float(entry.get("effective", entry.get("score", entry)) if isinstance(entry, dict) else float(entry or 0))
+            score -= weight * 0.8 * (overlap / max(1, len(pattern_words)))
+    return round(score, 4)
+
+
+def _rank_title_variants(variants: list[str], channel_memory: dict) -> list[dict]:
+    """Rank title variants by predicted CTR based on historical learning data."""
+    if not variants:
+        return []
+    packaging_wins = dict(channel_memory.get("packaging_wins_map") or {})
+    packaging_watchouts = dict(channel_memory.get("packaging_watchouts_map") or {})
+    scored = []
+    for title in variants:
+        s = _score_title_variant(title, packaging_wins, packaging_watchouts)
+        scored.append({"title": title, "predicted_score": s})
+    scored.sort(key=lambda x: -x["predicted_score"])
+    return scored
+
+
 def _thumbnail_fal_model_candidates() -> list[str]:
     ordered = ["seedream45", "imagen4_fast", "recraft_v4", "grok_imagine", "imagen4_ultra"]
     deduped: list[str] = []
@@ -20734,7 +21251,7 @@ app.include_router(
 )
 
 
-# â”€â”€â”€ Static Files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Static Files â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
 dist_dir = Path(os.getenv("FRONTEND_DIST_DIR", str(_default_dist_dir))).resolve()

@@ -146,8 +146,8 @@ function SceneImageLoadingCard({ template }: { template: string }) {
 }
 
 const finaleCaptionFonts = ['Komika Axis', 'Montserrat Bold', 'Anton', 'Bebas Neue', 'Satoshi', 'Oswald', 'Archivo Black', 'League Spartan', 'Teko', 'Playfair Display'];
-const finaleMusicOptions = ['No Background Music'];
-const backgroundMusicComingSoon = true;
+const finaleMusicOptions = ['No Background Music', 'Dark Ambient', 'Cinematic Tension', 'Upbeat Energy', 'Auto (Match Template)'];
+const backgroundMusicComingSoon = false;
 const soundReferenceOptions = [
     { id: 'none', label: 'No Sound Reference', desc: 'Clean default timing and effects.' },
     { id: 'cinematic_impacts', label: 'Cinematic Impacts', desc: 'Trailer-style hits and transitions.' },
@@ -709,7 +709,22 @@ export default function CreatePanel() {
 
     useEffect(() => {
         if (!jobId) return;
+        let pollCount = 0;
+        const MAX_POLLS = 450; // 15 minutes at 2s intervals
         const interval = setInterval(async () => {
+            pollCount++;
+            if (pollCount > MAX_POLLS) {
+                setJobStatus((prev: any) => ({
+                    ...(prev || {}),
+                    job_id: jobId,
+                    status: 'error',
+                    progress: typeof prev?.progress === 'number' ? prev.progress : 0,
+                    error: 'Generation is taking longer than expected. Your video may still be rendering — refresh the page to check.',
+                }));
+                clearInterval(interval);
+                setLoading(false);
+                return;
+            }
             try {
                 const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
                 if (!res.ok) {
@@ -1264,6 +1279,7 @@ export default function CreatePanel() {
                     trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_image_url: referenceImageDataUrl,
                     reference_lock_mode: creativeReferenceLockMode,
+                    background_music: backgroundMusic !== 'No Background Music' ? backgroundMusic : '',
                 }),
             });
             const { data, raw } = await readJsonResponse<any>(res);
@@ -1806,6 +1822,7 @@ export default function CreatePanel() {
                     youtube_channel_id: youtubeChannelId.trim(),
                     trend_hunt_enabled: effectiveTrendHuntEnabled,
                     reference_lock_mode: creativeReferenceLockMode,
+                    background_music: backgroundMusic !== 'No Background Music' ? backgroundMusic : '',
                     narration: creativeNarration,
                     scenes: creativeScenes.map(s => ({
                         narration: "",

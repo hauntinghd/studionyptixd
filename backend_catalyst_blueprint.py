@@ -1,4 +1,4 @@
-﻿import json
+import json
 
 import re
 
@@ -22,6 +22,83 @@ def _is_empire_magnates_channel(channel_context: dict | None) -> bool:
         for key in ("title", "custom_url", "channel_handle", "channel_url", "id", "channel_id")
     ).lower()
     return any(token in haystack for token in ("empire magnates", "@empiremagnates", "empiremagnates"))
+
+def _build_catalyst_ranked_directive(memory_view: dict) -> str:
+    """Build a human-readable ranked directive from channel memory for the LLM.
+
+    Replaces raw JSON dump with actionable, confidence-scored instructions.
+    """
+    lines: list[str] = []
+
+    # Extract wins/watchouts with confidence from all signal maps
+    signal_categories = [
+        ("hook", "Hook/Opening"),
+        ("pacing", "Pacing"),
+        ("visual", "Visual Style"),
+        ("sound", "Sound Design"),
+        ("packaging", "Title/Packaging"),
+        ("retention", "Retention"),
+    ]
+
+    for key, label in signal_categories:
+        wins_map = memory_view.get(f"{key}_wins_map") or {}
+        watchouts_map = memory_view.get(f"{key}_watchouts_map") or {}
+
+        # Process wins
+        for value, entry in sorted(wins_map.items(), key=lambda x: -(float((x[1] if isinstance(x[1], (int, float)) else x[1].get("effective", x[1].get("score", 0)))) if x[1] else 0))[:3]:
+            if isinstance(entry, dict):
+                conf = min(1.0, int(entry.get("n", 1) or 1) / 8.0)
+                score = float(entry.get("effective", entry.get("score", 0)) or 0)
+            else:
+                conf = 0.5
+                score = float(entry or 0)
+            if score <= 0:
+                continue
+            if conf >= 0.7:
+                lines.append(f"ALWAYS [{label}]: {value} (confidence {conf:.0%}, {int(conf*8)} data points)")
+            elif conf >= 0.3:
+                lines.append(f"PREFER [{label}]: {value} (confidence {conf:.0%}, emerging pattern)")
+            else:
+                lines.append(f"EXPERIMENT [{label}]: {value} (confidence {conf:.0%}, too early to tell)")
+
+        # Process watchouts
+        for value, entry in sorted(watchouts_map.items(), key=lambda x: -(float((x[1] if isinstance(x[1], (int, float)) else x[1].get("effective", x[1].get("score", 0)))) if x[1] else 0))[:2]:
+            if isinstance(entry, dict):
+                conf = min(1.0, int(entry.get("n", 1) or 1) / 8.0)
+                score = float(entry.get("effective", entry.get("score", 0)) or 0)
+            else:
+                conf = 0.5
+                score = float(entry or 0)
+            if score <= 0:
+                continue
+            if conf >= 0.5:
+                lines.append(f"NEVER [{label}]: {value} (confidence {conf:.0%}, proven failure)")
+            else:
+                lines.append(f"AVOID [{label}]: {value} (confidence {conf:.0%}, likely harmful)")
+
+    # Add execution preferences
+    exec_prefs = []
+    for pref_key in ["preferred_cut_profile", "preferred_caption_rhythm", "preferred_opening_intensity",
+                      "preferred_interrupt_strength", "preferred_sound_density"]:
+        val = str(memory_view.get(pref_key, "") or "").strip()
+        if val:
+            exec_prefs.append(f"  - {pref_key.replace('preferred_', '').replace('_', ' ').title()}: {val}")
+    if exec_prefs:
+        lines.append("\nEXECUTION PREFERENCES (data-driven):")
+        lines.extend(exec_prefs)
+
+    # Add outcome summary
+    total_outcomes = int(memory_view.get("outcome_count", 0) or 0)
+    avg_ctr = float(memory_view.get("outcome_ctr_avg", 0) or 0)
+    avg_avp = float(memory_view.get("outcome_avp_avg", 0) or 0)
+    if total_outcomes > 0:
+        lines.append(f"\nCHANNEL BASELINE: {total_outcomes} videos analyzed, avg CTR {avg_ctr:.1f}%, avg retention {avg_avp:.0f}%")
+
+    if not lines:
+        return "No learning data available yet. Use best judgment for this channel's first video."
+
+    return "CATALYST LEARNING DIRECTIVE (ranked by confidence):\n" + "\n".join(lines)
+
 
 def _heuristic_catalyst_edit_blueprint(
     *,
@@ -1030,7 +1107,7 @@ async def _build_catalyst_edit_blueprint(
         f"Connected channel context: {json.dumps(channel_context or {}, ensure_ascii=True)}\n"
         f"Matched channel series cluster: {json.dumps(series_context.get('selected_cluster') or {}, ensure_ascii=True)}\n"
         f"Matched channel series cluster context: {_clip_text(str(series_context.get('cluster_context', '') or ''), 1200)}\n"
-        f"Catalyst channel memory: {json.dumps(series_context.get('memory_view') or {}, ensure_ascii=True)}\n"
+        f"Catalyst learning directives (ranked by confidence, data-driven):\n{_build_catalyst_ranked_directive(series_context.get('memory_view') or {})}\n\n"
         f"Reference documentary corpus: {_clip_text(reference_corpus_context, 3000)}\n"
         "Use this marketing doctrine as operating context:\n"
         f"{marketing_doctrine_text_fn(strategy_notes) if marketing_doctrine_text_fn else strategy_notes}"

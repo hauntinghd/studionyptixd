@@ -232,7 +232,24 @@ function formatCatalystGoogleError(value: string): string {
     ) {
         return 'This channel needs to be reconnected to Google before private YouTube metrics can refresh again.';
     }
+    if (
+        lower.includes('quotaexceeded')
+        || lower.includes('youtube.quota')
+        || lower.includes('exceeded your quota')
+        || lower.includes('quota exceeded')
+        || lower.includes('dailylimitexceeded')
+        || lower.includes('ratelimitexceeded')
+    ) {
+        return 'YouTube API quota is exhausted right now. Catalyst is still using public channel data, but private impressions/CTR/retention are temporarily unavailable.';
+    }
     return normalized;
+}
+
+function normalizeYouTubeOAuthStatus(value: string): 'connected' | 'error' | '' {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'connected') return 'connected';
+    if (normalized === 'error') return 'error';
+    return '';
 }
 
 function formatWhen(unix: number): string {
@@ -318,6 +335,13 @@ export default function CatalystPanel() {
     const [referenceAnalyticsImages, setReferenceAnalyticsImages] = useState<File[]>([]);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
+    const [autoTickRunning, setAutoTickRunning] = useState(false);
+    const [velocityData, setVelocityData] = useState<{ velocity_vph?: number; is_decaying?: boolean; title?: string } | null>(null);
+    const [autoTickResult, setAutoTickResult] = useState('');
+    const [autoPilotEnabled, setAutoPilotEnabled] = useState(false);
+    const [autoPilotInterval, setAutoPilotInterval] = useState('6');
+    const [autoPilotSaving, setAutoPilotSaving] = useState(false);
+    const [autoPilotLastCheck, setAutoPilotLastCheck] = useState('');
     const [stoppingSessionId, setStoppingSessionId] = useState('');
     const [error, setError] = useState('');
     const hubRetryTimeoutRef = useRef<number | null>(null);
@@ -450,6 +474,26 @@ export default function CatalystPanel() {
     useEffect(() => {
         if (!session) return;
         void loadHub('', false);
+    }, [loadHub, session]);
+
+    useEffect(() => {
+        if (!session || typeof window === 'undefined') return;
+        const currentUrl = new URL(window.location.href);
+        const oauthStatus = normalizeYouTubeOAuthStatus(currentUrl.searchParams.get('youtube') || '');
+        const oauthMessageRaw = String(currentUrl.searchParams.get('youtube_message') || '').trim();
+        const oauthMessage = formatCatalystGoogleError(oauthMessageRaw);
+        const requestedChannelId = String(currentUrl.searchParams.get('youtube_channel_id') || '').trim();
+        if (!oauthStatus && !oauthMessage) return;
+        currentUrl.searchParams.delete('youtube');
+        currentUrl.searchParams.delete('youtube_message');
+        window.history.replaceState({}, document.title, currentUrl.toString());
+        setYoutubeConnecting(false);
+        if (oauthStatus === 'error' || (!oauthStatus && oauthMessage)) {
+            setError(oauthMessage || 'Google OAuth connection failed. Please try again.');
+            return;
+        }
+        setError('');
+        void loadHub(requestedChannelId, false);
     }, [loadHub, session]);
 
     useEffect(() => {
@@ -648,6 +692,84 @@ export default function CatalystPanel() {
             setError(String(e?.message || e || 'Failed to launch Catalyst long-form run'));
         } finally {
             setLaunching(false);
+        }
+    };
+
+    const handleCheckVelocity = async () => {
+        const cid = String(selectedChannelIdRef.current || '').trim();
+        if (!cid || !session) return;
+        try {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/velocity?channel_id=${encodeURIComponent(cid)}`);
+            if (res.ok && data) setVelocityData(data);
+        } catch { /* ignore */ }
+    };
+
+    const handleAutoTick = async () => {
+        const cid = String(selectedChannelIdRef.current || '').trim();
+        if (!cid || !session) return;
+        setAutoTickRunning(true);
+        setAutoTickResult('');
+        try {
+            const body = new FormData();
+            body.append('channel_id', cid);
+            body.append('workspace', selectedWorkspaceId || 'documentary');
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-tick`, {
+                method: 'POST',
+                body,
+            });
+            if (!res.ok) throw new Error(String(data?.detail || 'Auto-tick failed'));
+            setAutoTickResult(String(data?.message || data?.status || 'Done'));
+            if (data?.status === 'launched') {
+                const sid = String(data?.session_id || '').trim();
+                if (sid) {
+                    try { sessionStorage.setItem(pendingLongformLaunchKey, sid); } catch {}
+                }
+            }
+        } catch (e: any) {
+            setAutoTickResult(String(e?.message || 'Failed'));
+        } finally {
+            setAutoTickRunning(false);
+        }
+    };
+
+    const handleAutoPilotToggle = async (newEnabled: boolean) => {
+        const cid = String(selectedChannelIdRef.current || '').trim();
+        if (!cid || !session) return;
+        setAutoPilotSaving(true);
+        try {
+            const body = new FormData();
+            body.append('channel_id', cid);
+            body.append('enabled', newEnabled ? 'true' : 'false');
+            body.append('interval_hours', autoPilotInterval);
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-pilot`, {
+                method: 'POST',
+                body,
+            });
+            if (!res.ok) throw new Error(String(data?.detail || 'Failed to toggle auto-pilot'));
+            setAutoPilotEnabled(Boolean(data?.enabled));
+            setAutoPilotLastCheck(new Date().toLocaleTimeString());
+        } catch (e: any) {
+            setAutoTickResult(String(e?.message || 'Failed'));
+        } finally {
+            setAutoPilotSaving(false);
+        }
+    };
+
+    const handleAutoPilotIntervalChange = async (newInterval: string) => {
+        setAutoPilotInterval(newInterval);
+        if (autoPilotEnabled) {
+            const cid = String(selectedChannelIdRef.current || '').trim();
+            if (!cid || !session) return;
+            try {
+                const body = new FormData();
+                body.append('channel_id', cid);
+                body.append('enabled', 'true');
+                body.append('interval_hours', newInterval);
+                await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-pilot`, {
+                    method: 'POST',
+                    body,
+                });
+            } catch { /* ignore */ }
         }
     };
 
@@ -1133,6 +1255,82 @@ export default function CatalystPanel() {
                                 Saved directives are written into Catalyst channel memory and reused by shorts and long-form guidance.
                             </span>
                         </div>
+                    </div>
+
+                    {/* ─── Auto Pilot ─── */}
+                    <div className="rounded-3xl border border-amber-500/20 bg-amber-500/[0.04] p-6">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-amber-300">
+                            <Bot className="h-4 w-4" />
+                            Auto Pilot
+                        </div>
+                        <p className="mt-2 text-xs text-gray-400">
+                            Persistent velocity monitor. When enabled, the backend checks your channel on an interval and detects decay automatically.
+                        </p>
+                        <div className="mt-4 flex flex-wrap items-center gap-3">
+                            {/* Auto Pilot ON/OFF toggle */}
+                            <button
+                                type="button"
+                                onClick={() => void handleAutoPilotToggle(!autoPilotEnabled)}
+                                disabled={autoPilotSaving || !resolvedChannelId}
+                                className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border-2 transition-colors duration-200 focus:outline-none disabled:opacity-50 ${autoPilotEnabled ? 'border-amber-500 bg-amber-500' : 'border-white/20 bg-white/10'}`}
+                            >
+                                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${autoPilotEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            </button>
+                            <span className={`text-xs font-semibold ${autoPilotEnabled ? 'text-amber-300' : 'text-gray-500'}`}>
+                                {autoPilotEnabled ? 'ON' : 'OFF'}
+                            </span>
+                            {/* Interval selector */}
+                            <select
+                                value={autoPilotInterval}
+                                onChange={(e) => void handleAutoPilotIntervalChange(e.target.value)}
+                                disabled={!resolvedChannelId}
+                                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-200 focus:border-amber-500/50 focus:outline-none disabled:opacity-50"
+                            >
+                                <option value="6">Every 6h</option>
+                                <option value="12">Every 12h</option>
+                                <option value="24">Every 24h</option>
+                            </select>
+                            {/* Manual check + tick buttons */}
+                            <button
+                                type="button"
+                                onClick={() => void handleCheckVelocity()}
+                                disabled={!resolvedChannelId}
+                                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-gray-200 hover:bg-white/10 disabled:opacity-50"
+                            >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                                Check Velocity
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleAutoTick()}
+                                disabled={autoTickRunning || !resolvedChannelId}
+                                className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
+                            >
+                                {autoTickRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BrainCircuit className="h-3.5 w-3.5" />}
+                                Auto Tick
+                            </button>
+                        </div>
+                        {/* Status display */}
+                        {velocityData && (
+                            <div className="mt-3 rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-xs text-gray-300">
+                                <span className="font-medium text-white">{velocityData.title || 'Latest video'}</span>
+                                {' — '}
+                                <span className={velocityData.is_decaying ? 'text-red-400' : 'text-green-400'}>
+                                    {velocityData.velocity_vph?.toFixed(1)} views/hr
+                                    {velocityData.is_decaying ? ' (decaying)' : ' (healthy)'}
+                                </span>
+                            </div>
+                        )}
+                        {autoPilotEnabled && (
+                            <div className="mt-2 flex items-center gap-2 text-xs text-amber-200/60">
+                                <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                Monitoring every {autoPilotInterval}h
+                                {autoPilotLastCheck && ` — last toggled: ${autoPilotLastCheck}`}
+                            </div>
+                        )}
+                        {autoTickResult && (
+                            <div className="mt-2 text-xs text-amber-200/80">{autoTickResult}</div>
+                        )}
                     </div>
 
                     <div className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">

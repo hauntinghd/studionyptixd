@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import html as html_lib
+import hmac
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ from backend_settings import (
     GOOGLE_OAUTH_SOURCE,
     GOOGLE_REDIRECT_URI,
     SITE_URL,
+    SUPABASE_JWT_SECRET,
     YOUTUBE_API_KEY,
     YOUTUBE_API_KEYS,
     YOUTUBE_CONNECTIONS_FILE,
@@ -49,6 +51,7 @@ YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
     "https://www.googleapis.com/auth/youtube.force-ssl",
+    "https://www.googleapis.com/auth/youtube.upload",
 ]
 YOUTUBE_AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -102,6 +105,137 @@ def _clip_text(value: str, max_chars: int = 240) -> str:
     if len(compact) <= max_chars:
         return compact
     return compact[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+
+def _youtube_clean_error_text(value: str) -> str:
+    text = html_lib.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text.endswith("."):
+        text = text[:-1].rstrip()
+    return text
+
+
+def _youtube_extract_error_reason_and_message(raw_text: str) -> tuple[str, str]:
+    reason = ""
+    message = _youtube_clean_error_text(raw_text)
+    try:
+        payload = json.loads(str(raw_text or ""))
+    except Exception:
+        return reason, message
+    if not isinstance(payload, dict):
+        return reason, message
+    error_payload = payload.get("error")
+    if isinstance(error_payload, dict):
+        error_message = _youtube_clean_error_text(error_payload.get("message", ""))
+        if error_message:
+            message = error_message
+        for row in list(error_payload.get("errors") or []):
+            if not isinstance(row, dict):
+                continue
+            row_reason = str(row.get("reason", "") or "").strip().lower()
+            row_message = _youtube_clean_error_text(row.get("message", ""))
+            if row_reason and not reason:
+                reason = row_reason
+            if row_message and not message:
+                message = row_message
+            if reason and message:
+                break
+    elif isinstance(payload.get("message"), str):
+        top_message = _youtube_clean_error_text(payload.get("message", ""))
+        if top_message:
+            message = top_message
+    return reason, message
+
+
+def _youtube_error_is_quota_related(value: str) -> bool:
+    lowered = str(value or "").strip().lower()
+    if not lowered:
+        return False
+    return any(
+        token in lowered
+        for token in (
+            "quotaexceeded",
+            "exceeded your quota",
+            "quota exceeded",
+            "youtube.quota",
+            "dailylimitexceeded",
+            "userratelimitexceeded",
+            "ratelimitexceeded",
+        )
+    )
+
+
+def _youtube_error_is_auth_related(value: str) -> bool:
+    lowered = str(value or "").strip().lower()
+    if not lowered:
+        return False
+    return any(
+        token in lowered
+        for token in (
+            "invalid_grant",
+            "token has been expired or revoked",
+            "token has been revoked",
+            "unauthorized_client",
+            "unauthorized",
+            "disabled_client",
+            "oauth client was disabled",
+            "oauth client is disabled or deleted",
+            "access_denied",
+            "insufficientpermissions",
+            "insufficient permissions",
+        )
+    )
+
+
+def _youtube_format_api_failure(status_code: int, raw_text: str, *, using_api_key: bool = False) -> str:
+    reason, clean_message = _youtube_extract_error_reason_and_message(raw_text)
+    probe = " ".join(
+        part
+        for part in (
+            reason,
+            clean_message,
+            _youtube_clean_error_text(raw_text),
+        )
+        if str(part or "").strip()
+    ).lower()
+    if _youtube_error_is_quota_related(probe):
+        if using_api_key:
+            return (
+                "YouTube API quota is exhausted for the configured key pool right now. "
+                "Catalyst will keep using public channel-page fallback data until quota resets."
+            )
+        return (
+            "YouTube API quota is exhausted for this Google project right now. "
+            "Catalyst can still use public channel fallback data, but private impressions/CTR/retention are temporarily unavailable."
+        )
+    if status_code in (401, 403) and _youtube_error_is_auth_related(probe):
+        return "YouTube authorization for this channel needs to be refreshed before private metrics can sync again."
+    detail = clean_message or _youtube_clean_error_text(raw_text)
+    if reason and reason not in detail.lower():
+        detail = f"{detail} (reason: {reason})"
+    return f"YouTube API failed ({status_code}): {_clip_text(detail, 240)}"
+
+
+def _youtube_private_metrics_limitation(sync_error: str) -> str:
+    probe = str(sync_error or "").strip()
+    if not probe:
+        return ""
+    if _youtube_error_is_quota_related(probe):
+        return (
+            "Private impressions, CTR, and retention metrics are temporarily unavailable because the YouTube API quota is exhausted. "
+            "Catalyst is using public channel fallback data."
+        )
+    if _youtube_error_is_auth_related(probe):
+        return (
+            "Private impressions, CTR, and retention metrics are unavailable until this channel is reconnected to Google OAuth. "
+            "Catalyst is using public channel fallback data."
+        )
+    return (
+        "Private impressions, CTR, and retention metrics are temporarily unavailable from YouTube, "
+        "so Catalyst is using public channel fallback data."
+    )
 
 
 def _dedupe_preserve_order(values: list[str], max_items: int = 250, max_chars: int = 128) -> list[str]:
@@ -197,6 +331,110 @@ def _save_youtube_oauth_states() -> None:
         )
     except Exception:
         pass
+
+
+def _youtube_oauth_state_signing_key() -> bytes:
+    for raw in (
+        SUPABASE_JWT_SECRET,
+        GOOGLE_CLIENT_SECRET,
+        GOOGLE_INSTALLED_CLIENT_SECRET,
+    ):
+        cleaned = str(raw or "").strip()
+        if cleaned:
+            return cleaned.encode("utf-8")
+    return b"nyptid-youtube-oauth-state"
+
+
+def _youtube_oauth_state_payload(payload: dict | None) -> dict:
+    item = dict(payload or {})
+    created_at_raw = item.get("created_at", 0.0)
+    try:
+        created_at = float(created_at_raw or 0.0)
+    except Exception:
+        created_at = 0.0
+    if created_at <= 0.0:
+        created_at = time.time()
+    oauth_mode = str(item.get("oauth_mode", "") or "").strip().lower()
+    if oauth_mode not in {"web", "installed"}:
+        oauth_mode = "web"
+    return {
+        "user_id": str(item.get("user_id", "") or "").strip(),
+        "created_at": created_at,
+        "next_url": str(item.get("next_url", "") or "").strip(),
+        "oauth_mode": oauth_mode,
+        "pkce_verifier": str(item.get("pkce_verifier", "") or "").strip(),
+    }
+
+
+def _youtube_oauth_state_encode(payload: dict | None) -> str:
+    canonical = _youtube_oauth_state_payload(payload)
+    raw_bytes = json.dumps(canonical, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        _youtube_oauth_state_signing_key(),
+        payload_b64.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    signature_b64 = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"v2.{payload_b64}.{signature_b64}"
+
+
+def _youtube_oauth_state_b64_decode(raw_value: str) -> bytes:
+    value = str(raw_value or "").strip()
+    padding = "=" * ((4 - (len(value) % 4)) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _youtube_oauth_state_decode(state_token: str) -> dict:
+    token = str(state_token or "").strip()
+    if not token.startswith("v2."):
+        return {}
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload_b64 = str(parts[1] or "").strip()
+    signature_b64 = str(parts[2] or "").strip()
+    if not payload_b64 or not signature_b64:
+        return {}
+    expected_signature = hmac.new(
+        _youtube_oauth_state_signing_key(),
+        payload_b64.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    expected_signature_b64 = base64.urlsafe_b64encode(expected_signature).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(expected_signature_b64, signature_b64):
+        return {}
+    try:
+        payload = json.loads(_youtube_oauth_state_b64_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    normalized = _youtube_oauth_state_payload(payload)
+    created_at = float(normalized.get("created_at", 0.0) or 0.0)
+    if created_at <= 0.0:
+        return {}
+    if time.time() - created_at > YOUTUBE_OAUTH_STATE_TTL_SEC:
+        return {}
+    if not str(normalized.get("user_id", "") or "").strip():
+        return {}
+    return normalized
+
+
+def _youtube_oauth_state_lookup(state_token: str, *, consume: bool = False) -> dict:
+    token = str(state_token or "").strip()
+    if not token:
+        return {}
+    if consume:
+        payload = dict(_youtube_oauth_states.pop(token, {}) or {})
+    else:
+        payload = dict(_youtube_oauth_states.get(token, {}) or {})
+    if payload:
+        return _youtube_oauth_state_payload(payload)
+    decoded = _youtube_oauth_state_decode(token)
+    if decoded and not consume:
+        _youtube_oauth_states[token] = dict(decoded)
+    return decoded
 
 
 def _youtube_web_auth_configured() -> bool:
@@ -448,20 +686,21 @@ async def _youtube_start_oauth_for_user(user: dict, next_url: str = "") -> dict:
     oauth_mode = _youtube_active_oauth_mode()
     if not oauth_mode:
         raise HTTPException(500, _youtube_auth_issue_message())
-    state_token = secrets.token_urlsafe(32)
     pkce_verifier = ""
     if oauth_mode == "installed":
         pkce_verifier, _ = _youtube_pkce_pair()
+    state_payload = {
+        "user_id": str(user.get("id", "") or "").strip(),
+        "created_at": time.time(),
+        "next_url": str(next_url or "").strip(),
+        "oauth_mode": oauth_mode,
+        "pkce_verifier": pkce_verifier,
+    }
+    state_token = _youtube_oauth_state_encode(state_payload)
     async with _youtube_oauth_states_lock:
         _load_youtube_oauth_states()
         _prune_youtube_oauth_states()
-        _youtube_oauth_states[state_token] = {
-            "user_id": str(user.get("id", "") or "").strip(),
-            "created_at": time.time(),
-            "next_url": str(next_url or "").strip(),
-            "oauth_mode": oauth_mode,
-            "pkce_verifier": pkce_verifier,
-        }
+        _youtube_oauth_states[state_token] = _youtube_oauth_state_payload(state_payload)
         _save_youtube_oauth_states()
     auth_url = _youtube_build_auth_url(state_token, oauth_mode)
     if oauth_mode == "installed":
@@ -585,7 +824,7 @@ async def _google_youtube_oauth_installed_helper_response(state: str = "") -> Re
     async with _youtube_oauth_states_lock:
         _load_youtube_oauth_states()
         _prune_youtube_oauth_states()
-        state_payload = dict(_youtube_oauth_states.get(state_token, {}) or {})
+        state_payload = _youtube_oauth_state_lookup(state_token, consume=False)
         _save_youtube_oauth_states()
     if not state_payload:
         return Response(
@@ -611,7 +850,7 @@ async def _google_youtube_oauth_complete_redirect(state: str = "", redirect_url:
     async with _youtube_oauth_states_lock:
         _load_youtube_oauth_states()
         _prune_youtube_oauth_states()
-        state_payload = dict(_youtube_oauth_states.pop(state_token, {}) or {})
+        state_payload = _youtube_oauth_state_lookup(state_token, consume=True)
         _save_youtube_oauth_states()
     if not state_payload:
         return RedirectResponse(_youtube_redirect_target("", False, "That YouTube connection request expired before it was completed"), status_code=302)
@@ -622,7 +861,7 @@ async def _google_youtube_oauth_callback_redirect(code: str = "", state: str = "
     async with _youtube_oauth_states_lock:
         _load_youtube_oauth_states()
         _prune_youtube_oauth_states()
-        state_payload = dict(_youtube_oauth_states.pop(str(state or "").strip(), {}) or {})
+        state_payload = _youtube_oauth_state_lookup(str(state or "").strip(), consume=True)
         _save_youtube_oauth_states()
     return await _youtube_finalize_oauth_connection(state_payload, code=code, error=error)
 
@@ -2107,10 +2346,11 @@ async def _youtube_refresh_public_channel_record_without_oauth(record: dict, syn
     if public_rows:
         fallback_snapshot = _youtube_apply_public_inventory_to_snapshot(fallback_snapshot, public_rows)
         historical_compare = dict(fallback_snapshot.get("historical_compare") or {})
+        private_metrics_limitation = _youtube_private_metrics_limitation(sync_error)
         historical_compare["limitations"] = _youtube_dedupe_clip_list(
             [
                 *[str(v).strip() for v in list(historical_compare.get("limitations") or []) if str(v).strip()],
-                ("Private impressions and CTR are unavailable while the connected YouTube OAuth client is failing, so public views are the strongest available signal." if sync_error else ""),
+                ("Private impressions and CTR are temporarily unavailable from YouTube, so public views are the strongest available signal." if sync_error else ""),
             ],
             max_items=6,
         )
@@ -2126,7 +2366,7 @@ async def _youtube_refresh_public_channel_record_without_oauth(record: dict, syn
         channel_audit["limitations"] = _youtube_dedupe_clip_list(
             [
                 *[str(v).strip() for v in list(channel_audit.get("limitations") or []) if str(v).strip()],
-                ("Private impressions, CTR, and retention metrics are unavailable until the connected YouTube OAuth client is healthy again." if sync_error else ""),
+                private_metrics_limitation,
             ],
             max_items=6,
         )
@@ -2581,7 +2821,7 @@ async def _youtube_api_get(access_token: str, path: str, *, params: dict | None 
             headers={"Authorization": f"Bearer {access_token}"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(f"YouTube API failed ({resp.status_code}): {_clip_text(resp.text, 260)}")
+        raise RuntimeError(_youtube_format_api_failure(resp.status_code, resp.text, using_api_key=False))
     payload = resp.json()
     if not isinstance(payload, dict):
         raise RuntimeError("YouTube API returned an invalid payload")
@@ -3472,7 +3712,7 @@ async def _youtube_public_api_get(path: str, *, params: dict | None = None, time
                     return payload, key
                 last_error = "YouTube API returned an invalid payload"
                 continue
-            last_error = f"YouTube API failed ({resp.status_code}): {_clip_text(resp.text, 260)}"
+            last_error = _youtube_format_api_failure(resp.status_code, resp.text, using_api_key=True)
     raise RuntimeError(last_error or "YouTube API key request failed")
 
 
@@ -4516,3 +4756,313 @@ async def _extract_reference_video_stream_clip(
             pass
         return {"video_path": "", "mode": "stream_clip", "error": error_text or "ffmpeg_stream_clip_failed"}
     return {"video_path": str(clip_path), "mode": "stream_clip", "error": ""}
+
+
+# ─── YouTube Video Upload (Resumable) ────────────────────────────────────────
+
+async def youtube_upload_video(
+    access_token: str,
+    video_path: str,
+    title: str,
+    description: str = "",
+    tags: list[str] | None = None,
+    privacy: str = "private",
+    category_id: str = "27",
+    thumbnail_path: str | None = None,
+) -> dict:
+    """Upload a video to YouTube using resumable upload protocol.
+
+    Returns {"video_id": "...", "video_url": "https://youtu.be/..."} on success.
+    """
+    video_file = Path(video_path)
+    if not video_file.exists() or video_file.stat().st_size == 0:
+        raise ValueError(f"Video file not found or empty: {video_path}")
+
+    file_size = video_file.stat().st_size
+    metadata = {
+        "snippet": {
+            "title": str(title or "Untitled")[:100],
+            "description": str(description or "")[:5000],
+            "tags": list(tags or [])[:30],
+            "categoryId": str(category_id),
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    log.info("YouTube upload starting: %s (%.1f MB, privacy=%s)", title[:50], file_size / 1e6, privacy)
+
+    # Step 1: Initiate resumable upload
+    async with httpx.AsyncClient(timeout=30) as client:
+        init_resp = await client.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos"
+            "?uploadType=resumable&part=snippet,status",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Length": str(file_size),
+                "X-Upload-Content-Type": "video/*",
+            },
+            content=json.dumps(metadata),
+        )
+        if init_resp.status_code not in {200, 308}:
+            raise RuntimeError(f"YouTube upload init failed ({init_resp.status_code}): {init_resp.text[:300]}")
+
+        upload_url = init_resp.headers.get("Location")
+        if not upload_url:
+            raise RuntimeError("YouTube upload init returned no Location header")
+
+    # Step 2: Upload video in 5MB chunks
+    chunk_size = 5 * 1024 * 1024  # 5MB
+    uploaded = 0
+    video_id = None
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        with open(video_path, "rb") as f:
+            while uploaded < file_size:
+                chunk = f.read(chunk_size)
+                end = uploaded + len(chunk) - 1
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {uploaded}-{end}/{file_size}",
+                    "Content-Type": "video/*",
+                }
+                resp = await client.put(upload_url, headers=headers, content=chunk)
+
+                if resp.status_code == 200 or resp.status_code == 201:
+                    # Upload complete
+                    result = resp.json()
+                    video_id = result.get("id", "")
+                    log.info("YouTube upload complete: video_id=%s", video_id)
+                    break
+                elif resp.status_code == 308:
+                    # Chunk accepted, continue
+                    uploaded += len(chunk)
+                    pct = int(uploaded / file_size * 100)
+                    if pct % 20 == 0:
+                        log.info("YouTube upload progress: %d%%", pct)
+                else:
+                    raise RuntimeError(
+                        f"YouTube upload chunk failed ({resp.status_code}): {resp.text[:300]}"
+                    )
+
+    if not video_id:
+        raise RuntimeError("YouTube upload completed but no video_id returned")
+
+    # Step 3: Set custom thumbnail if provided
+    if thumbnail_path and Path(thumbnail_path).exists():
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                with open(thumbnail_path, "rb") as thumb_f:
+                    thumb_resp = await client.post(
+                        f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
+                        f"?videoId={video_id}",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "image/png",
+                        },
+                        content=thumb_f.read(),
+                    )
+                    if thumb_resp.status_code == 200:
+                        log.info("YouTube thumbnail set for video %s", video_id)
+                    else:
+                        log.warning("YouTube thumbnail upload failed: %s", thumb_resp.text[:200])
+        except Exception as thumb_exc:
+            log.warning("YouTube thumbnail upload error: %s", str(thumb_exc)[:200])
+
+    return {
+        "video_id": video_id,
+        "video_url": f"https://youtu.be/{video_id}",
+    }
+
+
+async def youtube_get_latest_video_velocity(
+    access_token: str,
+    channel_id: str,
+) -> dict:
+    """Get the latest video's view velocity (views per hour since upload).
+
+    Returns {"video_id", "title", "views", "hours_since_upload", "velocity_vph", "is_decaying"}.
+    """
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Get latest video from channel
+        search_resp = await client.get(
+            f"{YOUTUBE_DATA_API_BASE}/search",
+            params={
+                "part": "snippet",
+                "channelId": channel_id,
+                "order": "date",
+                "maxResults": "1",
+                "type": "video",
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        search_resp.raise_for_status()
+        items = search_resp.json().get("items", [])
+        if not items:
+            return {"video_id": "", "velocity_vph": 0, "is_decaying": True, "error": "no_videos"}
+
+        video_id = items[0]["id"].get("videoId", "")
+        title = items[0]["snippet"].get("title", "")
+        published = items[0]["snippet"].get("publishedAt", "")
+
+        # Get view count
+        stats_resp = await client.get(
+            f"{YOUTUBE_DATA_API_BASE}/videos",
+            params={"part": "statistics", "id": video_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        stats_resp.raise_for_status()
+        stats_items = stats_resp.json().get("items", [])
+        views = int(stats_items[0]["statistics"].get("viewCount", 0)) if stats_items else 0
+
+        # Calculate velocity
+        try:
+            pub_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            hours = max(1, (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600)
+        except Exception:
+            hours = 24
+
+        velocity = round(views / hours, 2)
+        # Decay threshold: <50 views/hour after first 24 hours
+        is_decaying = hours >= 24 and velocity < 50
+
+        return {
+            "video_id": video_id,
+            "title": title,
+            "views": views,
+            "hours_since_upload": round(hours, 1),
+            "velocity_vph": velocity,
+            "is_decaying": is_decaying,
+        }
+
+
+async def youtube_fetch_niche_trending_signals(
+    niche_keywords: list[str],
+    max_results: int = 10,
+) -> list[dict]:
+    """Fetch trending videos for niche keywords from YouTube public API. No auth needed."""
+    if not niche_keywords:
+        return []
+    trending: list[dict] = []
+    try:
+        query = " | ".join(niche_keywords[:3])
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{YOUTUBE_DATA_API_BASE}/search",
+                params={
+                    "part": "snippet",
+                    "q": query,
+                    "order": "date",
+                    "maxResults": str(max_results),
+                    "type": "video",
+                    "publishedAfter": (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "relevanceLanguage": "en",
+                    "key": _youtube_public_api_key_candidates()[0] if _youtube_public_api_key_candidates() else "",
+                },
+            )
+            if resp.status_code != 200:
+                log.warning("YouTube trending search failed: %s", resp.status_code)
+                return []
+            items = resp.json().get("items", [])
+            for item in items:
+                snippet = item.get("snippet", {})
+                trending.append({
+                    "title": str(snippet.get("title", "") or ""),
+                    "channel": str(snippet.get("channelTitle", "") or ""),
+                    "published": str(snippet.get("publishedAt", "") or ""),
+                    "description": str(snippet.get("description", "") or "")[:200],
+                })
+    except Exception as e:
+        log.warning("YouTube trending signals fetch failed: %s", str(e)[:200])
+    return trending
+
+
+def score_topic_opportunity(
+    candidate_topic: str,
+    channel_titles: list[str],
+    trending_titles: list[str],
+    niche_keywords: list[str],
+) -> dict:
+    """Score a candidate topic by niche fit, gap, and trend momentum."""
+    candidate_lower = str(candidate_topic or "").lower()
+
+    # Niche alignment: how many niche keywords appear in the topic
+    niche_hits = sum(1 for kw in niche_keywords if kw.lower() in candidate_lower)
+    niche_score = min(1.0, niche_hits / max(1, len(niche_keywords))) if niche_keywords else 0.5
+
+    # Gap score: has channel already covered this? (lower = already covered)
+    channel_overlap = 0
+    for title in channel_titles:
+        common_words = set(candidate_lower.split()) & set(str(title).lower().split())
+        if len(common_words) >= 3:
+            channel_overlap += 1
+    gap_score = max(0.0, 1.0 - (channel_overlap / max(1, len(channel_titles))))
+
+    # Trend momentum: how many trending videos have similar keywords
+    trend_hits = 0
+    for title in trending_titles:
+        common_words = set(candidate_lower.split()) & set(str(title).lower().split())
+        if len(common_words) >= 2:
+            trend_hits += 1
+    trend_score = min(1.0, trend_hits / max(1, min(5, len(trending_titles))))
+
+    # Composite: weighted blend
+    composite = (niche_score * 0.3) + (gap_score * 0.4) + (trend_score * 0.3)
+
+    return {
+        "topic": candidate_topic,
+        "niche_score": round(niche_score, 3),
+        "gap_score": round(gap_score, 3),
+        "trend_score": round(trend_score, 3),
+        "composite_score": round(composite, 3),
+    }
+
+
+def _analyze_optimal_upload_window(
+    upload_history: list[dict],
+) -> dict:
+    """Analyze historical uploads to find optimal posting window.
+
+    Each entry: {"published_at": ISO str, "first_24h_views": int, "velocity_vph": float}
+    Returns: {"best_day": "Tuesday", "best_hour": 14, "confidence": 0.6}
+    """
+    if len(upload_history) < 3:
+        # Not enough data — use industry defaults
+        return {"best_day": "Tuesday", "best_hour": 14, "confidence": 0.0, "source": "industry_default"}
+
+    day_scores: dict[str, list[float]] = {}
+    hour_scores: dict[int, list[float]] = {}
+
+    for entry in upload_history:
+        try:
+            pub = str(entry.get("published_at", "") or "")
+            if not pub:
+                continue
+            dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+            day_name = dt.strftime("%A")
+            hour = dt.hour
+            velocity = float(entry.get("velocity_vph", 0) or 0)
+            if velocity > 0:
+                day_scores.setdefault(day_name, []).append(velocity)
+                hour_scores.setdefault(hour, []).append(velocity)
+        except Exception:
+            continue
+
+    if not day_scores or not hour_scores:
+        return {"best_day": "Tuesday", "best_hour": 14, "confidence": 0.0, "source": "industry_default"}
+
+    best_day = max(day_scores.items(), key=lambda x: sum(x[1]) / len(x[1]))[0]
+    best_hour = max(hour_scores.items(), key=lambda x: sum(x[1]) / len(x[1]))[0]
+    confidence = min(1.0, len(upload_history) / 15.0)
+
+    return {
+        "best_day": best_day,
+        "best_hour": best_hour,
+        "confidence": round(confidence, 2),
+        "source": "channel_data",
+        "sample_size": len(upload_history),
+    }

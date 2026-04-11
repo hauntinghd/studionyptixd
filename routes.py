@@ -357,6 +357,10 @@ def build_youtube_catalyst_router(
     sync_youtube_channel_endpoint,
     sync_youtube_channel_outcomes_endpoint,
     delete_youtube_channel_endpoint,
+    catalyst_auto_tick_endpoint=None,
+    catalyst_auto_pilot_endpoint=None,
+    catalyst_upload_endpoint=None,
+    catalyst_velocity_endpoint=None,
 ):
     router = APIRouter()
     router.add_api_route("/api/oauth/google/youtube/start", start_google_youtube_oauth_endpoint, methods=["POST"])
@@ -376,6 +380,14 @@ def build_youtube_catalyst_router(
     router.add_api_route("/api/youtube/channels/{channel_id}/sync", sync_youtube_channel_endpoint, methods=["POST"])
     router.add_api_route("/api/youtube/channels/{channel_id}/sync-outcomes", sync_youtube_channel_outcomes_endpoint, methods=["POST"])
     router.add_api_route("/api/youtube/channels/{channel_id}", delete_youtube_channel_endpoint, methods=["DELETE"])
+    if catalyst_auto_tick_endpoint:
+        router.add_api_route("/api/catalyst/hub/auto-tick", catalyst_auto_tick_endpoint, methods=["POST"])
+    if catalyst_auto_pilot_endpoint:
+        router.add_api_route("/api/catalyst/hub/auto-pilot", catalyst_auto_pilot_endpoint, methods=["POST"])
+    if catalyst_upload_endpoint:
+        router.add_api_route("/api/catalyst/hub/upload", catalyst_upload_endpoint, methods=["POST"])
+    if catalyst_velocity_endpoint:
+        router.add_api_route("/api/catalyst/hub/velocity", catalyst_velocity_endpoint, methods=["GET"])
     return router
 
 

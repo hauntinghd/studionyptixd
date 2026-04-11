@@ -1,4 +1,4 @@
-﻿import time
+import time
 from datetime import datetime
 import re
 from pathlib import Path
@@ -2475,6 +2475,42 @@ def _build_catalyst_outcome_record(
     return outcome_record
 
 
+import hashlib as _hashlib
+
+
+def _catalyst_strategy_fingerprint(strategy: dict) -> str:
+    """Create a stable hash of the key strategy decisions for attribution tracking."""
+    keys = ["hook_strategy", "pacing_strategy", "visual_strategy", "cut_profile", "opening_intensity"]
+    parts = [str(strategy.get(k, "") or "").strip().lower() for k in keys]
+    raw = "|".join(parts)
+    return _hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _catalyst_update_strategy_correlation(
+    memory: dict,
+    fingerprint: str,
+    outcome_score: float,
+) -> None:
+    """Track correlation between strategy fingerprints and outcomes."""
+    if not fingerprint:
+        return
+    corr_map = dict(memory.get("strategy_correlation_map") or {})
+    entry = corr_map.get(fingerprint)
+    if isinstance(entry, dict):
+        scores = list(entry.get("scores", []) or [])
+        scores.append(round(outcome_score, 2))
+        entry["scores"] = scores[-10:]  # Keep last 10
+        entry["avg"] = round(sum(entry["scores"]) / len(entry["scores"]), 2)
+        entry["n"] = len(entry["scores"])
+    else:
+        corr_map[fingerprint] = {"scores": [round(outcome_score, 2)], "avg": round(outcome_score, 2), "n": 1}
+    # Keep only top 20 fingerprints by recency
+    if len(corr_map) > 20:
+        sorted_fps = sorted(corr_map.items(), key=lambda x: -(x[1].get("n", 0) if isinstance(x[1], dict) else 0))
+        corr_map = dict(sorted_fps[:20])
+    memory["strategy_correlation_map"] = corr_map
+
+
 def _apply_catalyst_outcome_to_channel_memory(
     *,
     existing: dict | None,
@@ -2591,6 +2627,11 @@ def _apply_catalyst_outcome_to_channel_memory(
     _catalyst_update_weighted_signals(updated, "reference_packaging_rewrites_map", list(reference_comparison.get("packaging_rewrites") or []), weight)
     _catalyst_update_weighted_signals(updated, "reference_next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight)
     _catalyst_update_weighted_signals(updated, "next_video_moves_map", list(reference_comparison.get("next_run_moves") or []), weight * 0.8)
+    # Strategy attribution
+    fingerprint = str(outcome_record.get("strategy_fingerprint", "") or "").strip()
+    if fingerprint:
+        outcome_score = float(outcome_record.get("outcome_score", 0.0) or 0.0)
+        _catalyst_update_strategy_correlation(updated, fingerprint, outcome_score)
     for field_name, payload in (
         ("opening_intensity", execution_signals.get("opening_intensity") or {}),
         ("interrupt_strength", execution_signals.get("interrupt_strength") or {}),

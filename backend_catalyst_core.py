@@ -626,17 +626,40 @@ def _catalyst_merge_signal_lists(*groups: list[str], max_items: int = 10, max_ch
 
 
 def _catalyst_merge_weighted_signals(existing_map: dict | None, signals: list[str] | None, weight: float, *, max_items: int = 10, max_chars: int = 180) -> dict:
+    import time as _time
     merged = dict(existing_map or {})
     numeric_weight = float(weight or 0.0)
+    now = _time.time()
     if numeric_weight <= 0:
         return merged
     for raw in list(signals or []):
         value = _clip_text(str(raw or "").strip(), max_chars)
         if not value:
             continue
-        merged[value] = float(merged.get(value, 0.0) or 0.0) + numeric_weight
-    ranked = sorted(merged.items(), key=lambda item: (-float(item[1] or 0.0), str(item[0]).lower()))
-    return {str(text): float(score or 0.0) for text, score in ranked[:max_items]}
+        # Support both legacy float values and new {score, ts, n} dicts
+        existing = merged.get(value)
+        if isinstance(existing, dict):
+            existing["score"] = float(existing.get("score", 0.0) or 0.0) + numeric_weight
+            existing["ts"] = now
+            existing["n"] = int(existing.get("n", 0) or 0) + 1
+        elif isinstance(existing, (int, float)):
+            merged[value] = {"score": float(existing) + numeric_weight, "ts": now, "n": 2}
+        else:
+            merged[value] = {"score": numeric_weight, "ts": now, "n": 1}
+    # Apply temporal decay: effective_score = score * (0.95 ^ weeks_since_last_update)
+    decayed: list[tuple[str, dict]] = []
+    for key, entry in merged.items():
+        if isinstance(entry, dict):
+            ts = float(entry.get("ts", now) or now)
+            weeks = max(0, (now - ts) / 604800.0)
+            raw_score = float(entry.get("score", 0.0) or 0.0)
+            effective = raw_score * (0.95 ** weeks)
+            decayed.append((key, {**entry, "effective": round(effective, 4)}))
+        else:
+            # Legacy float value — no decay possible, just keep it
+            decayed.append((key, {"score": float(entry or 0.0), "ts": now, "n": 1, "effective": float(entry or 0.0)}))
+    decayed.sort(key=lambda item: (-item[1].get("effective", 0.0), str(item[0]).lower()))
+    return {text: data for text, data in decayed[:max_items]}
 
 
 def _catalyst_update_weighted_signals(target: dict, field_name: str, signals: list[str] | None, weight: float, *, max_items: int = 10, max_chars: int = 180) -> None:
@@ -658,6 +681,8 @@ def _catalyst_rank_weighted_choices(
     max_items: int = 5,
     max_chars: int = 120,
 ) -> list[dict]:
+    import time as _time
+    now = _time.time()
     rows: list[dict] = []
     choices: set[str] = set()
     for mapping in (dict(wins_map or {}), dict(watchouts_map or {})):
@@ -666,8 +691,23 @@ def _catalyst_rank_weighted_choices(
             if value:
                 choices.add(value)
     for value in choices:
-        wins = float(dict(wins_map or {}).get(value, 0.0) or 0.0)
-        watchouts = float(dict(watchouts_map or {}).get(value, 0.0) or 0.0)
+        w_entry = dict(wins_map or {}).get(value)
+        l_entry = dict(watchouts_map or {}).get(value)
+        # Extract effective score (handles both legacy floats and new dicts)
+        if isinstance(w_entry, dict):
+            wins = float(w_entry.get("effective", w_entry.get("score", 0.0)) or 0.0)
+            w_n = int(w_entry.get("n", 1) or 1)
+        else:
+            wins = float(w_entry or 0.0)
+            w_n = 1
+        if isinstance(l_entry, dict):
+            watchouts = float(l_entry.get("effective", l_entry.get("score", 0.0)) or 0.0)
+            l_n = int(l_entry.get("n", 1) or 1)
+        else:
+            watchouts = float(l_entry or 0.0)
+            l_n = 1
+        sample_count = w_n + l_n
+        confidence = min(1.0, sample_count / 8.0)
         score = wins - (watchouts * 0.9)
         rows.append(
             {
@@ -675,11 +715,13 @@ def _catalyst_rank_weighted_choices(
                 "wins": round(wins, 3),
                 "watchouts": round(watchouts, 3),
                 "score": round(score, 3),
+                "confidence": round(confidence, 3),
+                "sample_count": sample_count,
             }
         )
     rows.sort(
         key=lambda row: (
-            -float(row.get("score", 0.0) or 0.0),
+            -float(row.get("score", 0.0) or 0.0) * float(row.get("confidence", 0.5) or 0.5),
             -float(row.get("wins", 0.0) or 0.0),
             float(row.get("watchouts", 0.0) or 0.0),
             str(row.get("value", "") or "").lower(),
@@ -694,11 +736,12 @@ def _catalyst_pick_preferred_choice(
     fallback: str = "",
     *,
     max_chars: int = 120,
+    min_confidence: float = 0.3,
 ) -> str:
     ranked = _catalyst_rank_weighted_choices(wins_map, watchouts_map, max_items=1, max_chars=max_chars)
     if ranked:
         top = dict(ranked[0] or {})
-        if float(top.get("score", 0.0) or 0.0) > 0:
+        if float(top.get("score", 0.0) or 0.0) > 0 and float(top.get("confidence", 0.0) or 0.0) >= min_confidence:
             return _clip_text(str(top.get("value", "") or "").strip(), max_chars)
     return _clip_text(str(fallback or "").strip(), max_chars)
 

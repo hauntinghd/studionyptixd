@@ -432,16 +432,16 @@ def generate_ass_subtitles(word_timings: list, output_path: str, resolution: str
         outline_color = "&H00303030"
         back_color = "&H70000000"
     elif is_landscape:
-        font_size = max(36, int(res_h * 0.045))
-        outline = 3
+        font_size = max(42, int(res_h * 0.055))
+        outline = 4
         shadow = 1
-        margin_v = int(res_h * 0.08)
+        margin_v = int(res_h * 0.07)
         spacing = 2
-        scale_xy = 105
+        scale_xy = 102
         primary = "&H00FFFFFF"
         secondary = "&H000000FF"
         outline_color = "&H00000000"
-        back_color = "&H96000000"
+        back_color = "&H80000000"
     else:
         font_size = 72 if resolution == "1080p" else 52
         outline = 5 if resolution == "1080p" else 4
@@ -507,6 +507,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if skeleton_pro_style:
             # Subtle pop/fade reads closer to hand-edited NLE captions.
             pop_in = r"{\blur0.6\fad(35,45)\fscx100\fscy100\t(0,90,\fscx104\fscy104)\t(90,170,\fscx100\fscy100)}"
+        elif is_landscape:
+            # Broadcast documentary style: gentle fade, minimal scale
+            pop_in = r"{\blur0.4\fad(60,80)\fscx102\fscy102\t(0,80,\fscx100\fscy100)}"
         else:
             pop_in = r"{\fscx130\fscy130\t(0,60,\fscx105\fscy105)}"
         events.append(
@@ -554,16 +557,16 @@ def generate_ass_scene_subtitles(
         outline_color = "&H00303030"
         back_color = "&H70000000"
     elif is_landscape:
-        font_size = max(36, int(res_h * 0.045))
-        outline = 3
+        font_size = max(42, int(res_h * 0.055))
+        outline = 4
         shadow = 1
-        margin_v = int(res_h * 0.08)
+        margin_v = int(res_h * 0.07)
         spacing = 2
-        scale_xy = 105
+        scale_xy = 102
         primary = "&H00FFFFFF"
         secondary = "&H000000FF"
         outline_color = "&H00000000"
-        back_color = "&H96000000"
+        back_color = "&H80000000"
     else:
         font_size = 72 if resolution == "1080p" else 52
         outline = 5 if resolution == "1080p" else 4
@@ -960,6 +963,66 @@ def _probe_video_duration_seconds(video_path: str) -> float:
         return float((proc.stdout or "0").strip() or 0)
     except Exception:
         return 0.0
+
+
+def _detect_voice_pauses(audio_path: str, min_silence_sec: float = 0.3, silence_threshold_db: float = -35.0) -> list[float]:
+    """Use ffmpeg silencedetect to find natural voice pauses for beat-synced cuts."""
+    import re as _re
+    import subprocess
+    if not audio_path or not Path(audio_path).exists():
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-i", str(audio_path),
+                "-af", f"silencedetect=noise={silence_threshold_db}dB:d={min_silence_sec}",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        stderr_text = proc.stderr or ""
+        pauses: list[float] = []
+        for match in _re.finditer(r"silence_start:\s*([\d.]+)", stderr_text):
+            ts = float(match.group(1))
+            if ts > 0.1:
+                pauses.append(round(ts, 3))
+        return sorted(set(pauses))
+    except Exception:
+        return []
+
+
+def _snap_scene_cuts_to_pauses(
+    planned_durations: list[float],
+    pause_points: list[float],
+    tolerance: float = 0.5,
+) -> list[float]:
+    """Snap scene cut boundaries to nearest voice pauses within tolerance."""
+    if not planned_durations or not pause_points:
+        return list(planned_durations)
+    cumulative = []
+    total = 0.0
+    for d in planned_durations[:-1]:
+        total += d
+        cumulative.append(total)
+    adjusted_cuts: list[float] = []
+    for cut_time in cumulative:
+        best = cut_time
+        best_dist = tolerance + 1
+        for pause in pause_points:
+            dist = abs(pause - cut_time)
+            if dist < best_dist and dist <= tolerance:
+                best = pause
+                best_dist = dist
+        adjusted_cuts.append(best)
+    result: list[float] = []
+    prev = 0.0
+    for cut in adjusted_cuts:
+        dur = max(1.0, round(cut - prev, 2))
+        result.append(dur)
+        prev = cut
+    last_dur = max(1.0, round(sum(planned_durations) - prev, 2))
+    result.append(last_dur)
+    return result
 
 
 def _rebalance_scene_durations_for_audio(

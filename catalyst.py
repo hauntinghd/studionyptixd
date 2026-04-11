@@ -2376,7 +2376,64 @@ async def _derive_longform_seed_from_catalyst_hub(
         ),
         420,
     )
+    # Fetch trending signals for the channel's niche
+    trending_signals: list[dict] = []
     try:
+        from youtube import youtube_fetch_niche_trending_signals
+        niche_kws = list(set(
+            [str(s).strip() for s in (memory_public.get("niche_keywords") or []) if str(s).strip()]
+            + [str(s).strip() for s in (niche_list or []) if str(s).strip()]
+        ))[:5]
+        if niche_kws:
+            trending_signals = await youtube_fetch_niche_trending_signals(niche_kws, max_results=8)
+    except Exception as trend_exc:
+        log.warning("Trending signal fetch failed (non-fatal): %s", str(trend_exc)[:200])
+
+    trending_prompt_section = ""
+    if trending_signals:
+        trending_text = "\n".join(f"- {t['title']} (by {t['channel']})" for t in trending_signals[:6])
+        trending_prompt_section = f"\n\nTRENDING IN YOUR NICHE RIGHT NOW (use for topic inspiration, not duplication):\n{trending_text}\n"
+
+    try:
+        seed_user_prompt = "\n".join(
+            [
+                f"Workspace: {workspace_label}",
+                f"Channel summary: {channel_summary}",
+                f"Mission: {mission_text}",
+                f"Directive: {directive_text}",
+                ("Guardrails: " + "; ".join(guardrail_list[:6])) if guardrail_list else "",
+                ("Priority niches: " + ", ".join(niche_list[:6])) if niche_list else "",
+                f"Series/arc focus: {series_anchor or 'general'}",
+                f"Archetype: {archetype_label or 'general'}",
+                ("Top titles: " + " | ".join(top_titles[:6])) if top_titles else "",
+                ("Recent titles: " + " | ".join(recent_titles[:6])) if recent_titles else "",
+                ("Packaging learnings: " + "; ".join(packaging_learnings[:4])) if packaging_learnings else "",
+                ("Retention learnings: " + "; ".join(retention_learnings[:4])) if retention_learnings else "",
+                ("Channel audit: " + _clip_text(str(channel_audit.get("summary", "") or "").strip(), 380)) if channel_audit.get("summary") else "",
+                ("Audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:3])) if channel_audit.get("strengths") else "",
+                ("Audit warnings: " + "; ".join(list(channel_audit.get("warnings") or [])[:3])) if channel_audit.get("warnings") else "",
+                ("Audit next moves: " + "; ".join(list(channel_audit.get("next_moves") or [])[:4])) if channel_audit.get("next_moves") else "",
+                ("Audit candidate titles: " + " | ".join(list(channel_audit.get("next_video_candidates") or [])[:4])) if channel_audit.get("next_video_candidates") else "",
+                ("Reference playbook: " + reference_summary) if reference_summary else "",
+                ("Reference video title: " + _clip_text(str(reference_video_meta.get("title", "") or "").strip(), 180)) if reference_video_meta.get("title") else "",
+                ("Reference video summary: " + reference_summary) if reference_summary else "",
+                ("Reference hook system: " + "; ".join(reference_hook_rules[:4])) if reference_hook_rules else "",
+                ("Reference pacing system: " + "; ".join(reference_pacing_rules[:4])) if reference_pacing_rules else "",
+                ("Reference visual system: " + "; ".join(reference_visual_rules[:4])) if reference_visual_rules else "",
+                ("Reference sound system: " + "; ".join(reference_sound_rules[:4])) if reference_sound_rules else "",
+                ("Reference transition system: " + "; ".join(reference_transition_rules[:4])) if reference_transition_rules else "",
+                ("Reference structure map: " + "; ".join(reference_structure_map[:5])) if reference_structure_map else "",
+                ("Reference next moves: " + "; ".join(reference_next_video_moves[:5])) if reference_next_video_moves else "",
+                ("Reference candidate titles: " + " | ".join(reference_candidate_titles[:4])) if reference_candidate_titles else "",
+                ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
+                ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
+                ("Next moves: " + "; ".join(best_moves[:5])) if best_moves else "",
+                "Return a fresh next video idea, title, and description for this channel.",
+            ]
+        )
+        if trending_prompt_section:
+            seed_user_prompt += trending_prompt_section
+
         payload = await _xai_json_completion(
             system_prompt=(
                 "You create fresh next-video briefs for an automated faceless YouTube engine. "
@@ -2384,42 +2441,7 @@ async def _derive_longform_seed_from_catalyst_hub(
                 "Stay inside the channel's proven arena without copying old titles. "
                 "Titles must be clear, clickable, under 110 characters, and not generic."
             ),
-            user_prompt="\n".join(
-                [
-                    f"Workspace: {workspace_label}",
-                    f"Channel summary: {channel_summary}",
-                    f"Mission: {mission_text}",
-                    f"Directive: {directive_text}",
-                    ("Guardrails: " + "; ".join(guardrail_list[:6])) if guardrail_list else "",
-                    ("Priority niches: " + ", ".join(niche_list[:6])) if niche_list else "",
-                    f"Series/arc focus: {series_anchor or 'general'}",
-                    f"Archetype: {archetype_label or 'general'}",
-                    ("Top titles: " + " | ".join(top_titles[:6])) if top_titles else "",
-                    ("Recent titles: " + " | ".join(recent_titles[:6])) if recent_titles else "",
-                    ("Packaging learnings: " + "; ".join(packaging_learnings[:4])) if packaging_learnings else "",
-                    ("Retention learnings: " + "; ".join(retention_learnings[:4])) if retention_learnings else "",
-                    ("Channel audit: " + _clip_text(str(channel_audit.get("summary", "") or "").strip(), 380)) if channel_audit.get("summary") else "",
-                    ("Audit strengths: " + "; ".join(list(channel_audit.get("strengths") or [])[:3])) if channel_audit.get("strengths") else "",
-                    ("Audit warnings: " + "; ".join(list(channel_audit.get("warnings") or [])[:3])) if channel_audit.get("warnings") else "",
-                    ("Audit next moves: " + "; ".join(list(channel_audit.get("next_moves") or [])[:4])) if channel_audit.get("next_moves") else "",
-                    ("Audit candidate titles: " + " | ".join(list(channel_audit.get("next_video_candidates") or [])[:4])) if channel_audit.get("next_video_candidates") else "",
-                    ("Reference playbook: " + reference_summary) if reference_summary else "",
-                    ("Reference video title: " + _clip_text(str(reference_video_meta.get("title", "") or "").strip(), 180)) if reference_video_meta.get("title") else "",
-                    ("Reference video summary: " + reference_summary) if reference_summary else "",
-                    ("Reference hook system: " + "; ".join(reference_hook_rules[:4])) if reference_hook_rules else "",
-                    ("Reference pacing system: " + "; ".join(reference_pacing_rules[:4])) if reference_pacing_rules else "",
-                    ("Reference visual system: " + "; ".join(reference_visual_rules[:4])) if reference_visual_rules else "",
-                    ("Reference sound system: " + "; ".join(reference_sound_rules[:4])) if reference_sound_rules else "",
-                    ("Reference transition system: " + "; ".join(reference_transition_rules[:4])) if reference_transition_rules else "",
-                    ("Reference structure map: " + "; ".join(reference_structure_map[:5])) if reference_structure_map else "",
-                    ("Reference next moves: " + "; ".join(reference_next_video_moves[:5])) if reference_next_video_moves else "",
-                    ("Reference candidate titles: " + " | ".join(reference_candidate_titles[:4])) if reference_candidate_titles else "",
-                    ("Strongest signals: " + "; ".join(strongest_signals[:4])) if strongest_signals else "",
-                    ("Weak points: " + "; ".join(weak_points[:4])) if weak_points else "",
-                    ("Next moves: " + "; ".join(best_moves[:5])) if best_moves else "",
-                    "Return a fresh next video idea, title, and description for this channel.",
-                ]
-            ),
+            user_prompt=seed_user_prompt,
             temperature=0.35,
             timeout_sec=60,
         )
