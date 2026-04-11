@@ -14,7 +14,7 @@ if env_path.exists():
 
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "") or "sk_c9d3573104596ff0bf69738092407422e512e493870e747b"
 PIKZELS_API_KEY = os.getenv("PIKZELS_API_KEY", "")
 ALGROW_API_KEY = os.getenv("ALGROW_API_KEY", "")
 ALGROW_API_BASE_URL = str(os.getenv("ALGROW_API_BASE_URL", "https://api.algrow.online") or "https://api.algrow.online").strip().rstrip("/")
@@ -381,8 +381,8 @@ FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "0").lower() in ("1", "true", "ye
 SCRIPT_TO_SHORT_ENABLED = os.getenv("SCRIPT_TO_SHORT_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 STORY_ADVANCED_CONTROLS_ENABLED = os.getenv("STORY_ADVANCED_CONTROLS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 STORY_RETENTION_TUNING_ENABLED = os.getenv("STORY_RETENTION_TUNING_ENABLED", "1").lower() in ("1", "true", "yes", "on")
-DISABLE_ALL_SFX = os.getenv("DISABLE_ALL_SFX", "1").lower() in ("1", "true", "yes", "on")
-LONGFORM_BETA_ENABLED = os.getenv("LONGFORM_BETA_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+DISABLE_ALL_SFX = os.getenv("DISABLE_ALL_SFX", "0").lower() in ("1", "true", "yes", "on")
+LONGFORM_BETA_ENABLED = os.getenv("LONGFORM_BETA_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 LONGFORM_DEFAULT_TARGET_MINUTES = float(os.getenv("LONGFORM_DEFAULT_TARGET_MINUTES", "8"))
 LONGFORM_MIN_TARGET_MINUTES = float(os.getenv("LONGFORM_MIN_TARGET_MINUTES", "2"))
 LONGFORM_MAX_TARGET_MINUTES = float(os.getenv("LONGFORM_MAX_TARGET_MINUTES", "30"))

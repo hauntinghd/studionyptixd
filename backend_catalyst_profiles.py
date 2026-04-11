@@ -107,6 +107,30 @@ _CATALYST_SHORT_ARCHETYPE_EXECUTION_PACKS = {
         "payoff_hold_sec": 1.08,
         "default_execution_intensity": "medium",
     },
+    "psychology_documentary": {
+        "opening_intensity": "attack",
+        "interrupt_strength": "high",
+        "caption_rhythm": "pulse-synced",
+        "sound_density": "punchy",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "tension-rise",
+        "visual_variation_rule": "Alternate invasive personal consequence shots, hidden neural-mechanism reveals, and dark-stage emotional contradiction staging.",
+        "pattern_interrupt_interval_sec": 9,
+        "payoff_hold_sec": 1.14,
+        "default_execution_intensity": "high",
+    },
+    "crime_documentary": {
+        "opening_intensity": "aggressive",
+        "interrupt_strength": "medium",
+        "caption_rhythm": "measured",
+        "sound_density": "controlled",
+        "cut_profile": "contrast-cut",
+        "voice_pacing_bias": "steady",
+        "visual_variation_rule": "Alternate evidence-board reveals, timeline reconstructions, suspect focus shots, and location staging to build tension.",
+        "pattern_interrupt_interval_sec": 12,
+        "payoff_hold_sec": 1.22,
+        "default_execution_intensity": "medium",
+    },
 }
 
 

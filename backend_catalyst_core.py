@@ -136,7 +136,8 @@ def _catalyst_text_overlap_score(primary: str, secondary: str) -> float:
     right_tokens = set(re.findall(r"[a-z0-9']+", right))
     if not left_tokens or not right_tokens:
         return 0.0
-    return len(left_tokens & right_tokens) / max(len(left_tokens), 1)
+    union = left_tokens | right_tokens
+    return len(left_tokens & right_tokens) / max(len(union), 1)
 
 
 def _catalyst_channel_memory_key(user_id: str, channel_id: str, format_preset: str) -> str:
@@ -329,6 +330,33 @@ _CATALYST_ARCHETYPE_RULES = {
         "sound_rule": "Use measured build-up, clean reveal hits, and silence to sharpen the main point.",
         "packaging_rule": "Package around one dominant payoff and one visual contradiction that makes the viewer click immediately.",
     },
+    "psychology_documentary": {
+        "label": "Psychology Documentary",
+        "keywords": [
+            "psychology", "psychological", "brain", "mind", "behavior", "manipulation",
+            "bias", "cognitive", "subconscious", "narcissist", "emotional", "trauma",
+            "perception", "influence", "persuasion", "gaslighting", "personality",
+            "disorder", "mental", "deception",
+        ],
+        "hook_rule": "Open on an invasive personal contradiction — something the viewer's own mind does that they cannot see.",
+        "pace_rule": "Chain hidden behavior mechanisms into escalating personal consequences, building from unsettling to undeniable.",
+        "visual_rule": "Use premium dark-stage 3D mind-worlds, invasive neural mechanisms, emotional contradiction symbols, and consequence staging.",
+        "sound_rule": "Use invasive tension swells, ominous silence pockets, and hard reveal hits when the hidden mechanism clicks.",
+        "packaging_rule": "Package around one disturbing mental contradiction with strong personal consequence framing and dark premium staging.",
+    },
+    "crime_documentary": {
+        "label": "Crime Documentary",
+        "keywords": [
+            "crime", "murder", "case", "trial", "court", "suspect", "victim", "evidence",
+            "investigation", "detective", "forensic", "prison", "sentence", "verdict",
+            "disappearance", "mystery", "cold case", "serial", "killer", "missing",
+        ],
+        "hook_rule": "Open on the most chilling moment of the case — the discovery, the contradiction, or the detail that changes everything.",
+        "pace_rule": "Move from evidence to implication fast. Each new beat should add a twist, a suspect shift, or an irreversible consequence.",
+        "visual_rule": "Use high-contrast 3D-infographic documentary staging, evidence boards, timeline reconstructions, and location recreations.",
+        "sound_rule": "Use cold tension drones, sparse percussion hits, and silence before evidence reveals.",
+        "packaging_rule": "Package around one chilling detail, one suspect contradiction, or one visual that makes the viewer need the answer.",
+    },
 }
 
 
@@ -338,6 +366,8 @@ _CATALYST_NICHE_TO_ARCHETYPE = {
     "dark_psychology": "dark_psychology",
     "business_documentary": "systems_documentary",
     "geopolitics_history": "power_history",
+    "psychology_documentary": "psychology_documentary",
+    "crime_documentary": "crime_documentary",
 }
 
 
@@ -1570,7 +1600,7 @@ def _build_catalyst_execution_playbook(memory_public: dict | None) -> dict:
 def _catalyst_channel_memory_public_view(memory: dict | None, series_anchor_override: str = "") -> dict:
     data = _catalyst_apply_outcome_averages(memory)
     series_map = dict(data.get("series_memory_map") or {})
-    archetype_map = dict(memory or {}).get("archetype_memory_map") or {}
+    archetype_map = dict(data or {}).get("archetype_memory_map") or {}
     series_catalog = _dedupe_preserve_order(
         [
             _clip_text(str((row or {}).get("series_anchor", "") or ""), 120)
