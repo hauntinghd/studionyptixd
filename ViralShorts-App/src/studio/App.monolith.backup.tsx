@@ -1,0 +1,5364 @@
+import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
+import { Wand2, UploadCloud, FileVideo, CheckCircle2, Loader2, Download, Zap, Shield, ArrowRight, LogOut, User, Crown, Monitor, Lock, Clock, Film, Layers, Sliders, Clapperboard, Globe, Image, Palette, Camera, Trash2, Plus, Sparkles, Eye, X, Volume2, Play, Pause, Search, Star, Send, CreditCard } from 'lucide-react';
+import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
+
+const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
+const isLocalDevHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+const resolveSafeApiBase = (rawBase: string): string => {
+    const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
+    if (!cleaned) return "";
+    if (isLocalDevHost) return cleaned;
+    try {
+        const parsed = new URL(cleaned, window.location.origin);
+        const isMixedContent = window.location.protocol === "https:" && parsed.protocol === "http:";
+        const isLocalTarget = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+        const sameHost = parsed.hostname === window.location.hostname;
+        const hasCustomPort = parsed.port !== "" && parsed.port !== window.location.port;
+        const hasNonStandardPort = parsed.port !== "" && parsed.port !== "443" && parsed.port !== "80";
+        // In production, block same-host cross-port overrides (e.g. :8091) to avoid connection-reset fetch failures.
+        if (isMixedContent || isLocalTarget || (sameHost && hasCustomPort) || hasNonStandardPort) return "";
+        return cleaned;
+    } catch {
+        return "";
+    }
+};
+
+// Production must always use same-origin API routing; custom base URLs are local-dev only.
+const API = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "") : "";
+const rawGenerationApi = isLocalDevHost ? resolveSafeApiBase(viteEnv.VITE_GENERATION_API_BASE_URL || "") : "";
+const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
+const BOOT_CONFIG_TIMEOUT_MS = 8000;
+const GENERATION_API = (() => {
+    if (!rawGenerationApi) {
+        return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : "");
+    }
+
+    return rawGenerationApi;
+})();
+if (typeof window !== "undefined" && /firefox/i.test(window.navigator.userAgent)) {
+    (window as any).__NYPTID_FIREFOX_HOTFIX__ = FIREFOX_HOTFIX_TAG;
+}
+const CREATE_WORKFLOW_PERSISTENCE_ENABLED = false;
+const PUBLIC_TEMPLATE_IDS = new Set(['skeleton', 'story', 'motivation']);
+const CLONE_COMING_SOON = true;
+const Logo = ({ size = 24 }: { size?: number }) => (
+    <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
+);
+
+type Plan = 'none' | 'starter' | 'creator' | 'pro' | 'elite';
+type TopupPack = { price_id: string; pack: string; credits: number; price_usd: number };
+type PlanLimit = {
+    videos_per_month?: number;
+    animated_renders_per_month?: number;
+    non_animated_ops_per_month?: number;
+    max_duration_sec?: number;
+    max_resolution?: string;
+    can_clone?: boolean;
+    priority?: boolean;
+    demo_access?: boolean;
+};
+type PlanLimitMap = Record<string, PlanLimit>;
+type PlanFeatureMap = Record<string, string[]>;
+type PlanPriceMap = Record<string, number>;
+const PRICE_IDS: Record<string, string> = {
+    starter: "price_1T4eT7BL8lRmwao2hHcUbcny",
+    creator: "price_1T4eTUBL8lRmwao2EK3JDOpy",
+    pro: "price_1T4eTjBL8lRmwao2q6WkoZLH",
+    elite: "price_1T9uMwBL8lRmwao2Lk89pxiz",
+};
+
+interface AuthContextType {
+    session: Session | null;
+    supabase: SupabaseClient | null;
+    plan: Plan;
+    role: string;
+    loading: boolean;
+    billingActive: boolean;
+    monthlyCreditsRemaining: number;
+    topupCreditsRemaining: number;
+    creditsTotalRemaining: number;
+    requiresTopup: boolean;
+    topupPacks: TopupPack[];
+    demoAccess: boolean;
+    demoPriceId: string;
+    demoComingSoon: boolean;
+    maintenanceBannerEnabled: boolean;
+    maintenanceBannerMessage: string;
+    publicPlanLimits: PlanLimitMap;
+    publicPlanFeatures: PlanFeatureMap;
+    publicPlanPrices: PlanPriceMap;
+    signIn: (email: string, password: string) => Promise<string | null>;
+    signUp: (email: string, password: string) => Promise<string | null>;
+    signOut: () => Promise<void>;
+    checkout: (plan: string) => Promise<void>;
+    checkoutTopup: (priceId: string) => Promise<string | null>;
+    checkoutDemo: () => Promise<void>;
+    manageBilling: () => Promise<string | null>;
+}
+
+const AuthContext = createContext<AuthContextType>({
+    session: null, supabase: null, plan: 'none', role: 'user', loading: true, billingActive: false,
+    monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: [],
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: {}, publicPlanFeatures: {}, publicPlanPrices: {},
+    maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
+    signIn: async () => null, signUp: async () => null, signOut: async () => {},
+    checkout: async () => {}, checkoutTopup: async () => null, checkoutDemo: async () => {}, manageBilling: async () => null,
+});
+
+function AuthProvider({ children }: { children: React.ReactNode }) {
+    const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
+    const [session, setSession] = useState<Session | null>(null);
+    const [plan, setPlan] = useState<Plan>('none');
+    const [role, setRole] = useState<string>('user');
+    const [loading, setLoading] = useState(true);
+    const [billingActive, setBillingActive] = useState(false);
+    const [monthlyCreditsRemaining, setMonthlyCreditsRemaining] = useState(0);
+    const [topupCreditsRemaining, setTopupCreditsRemaining] = useState(0);
+    const [creditsTotalRemaining, setCreditsTotalRemaining] = useState(0);
+    const [requiresTopup, setRequiresTopup] = useState(false);
+    const [topupPacks, setTopupPacks] = useState<TopupPack[]>([]);
+    const [demoAccess, setDemoAccess] = useState(false);
+    const [demoPriceId, setDemoPriceId] = useState('');
+    const [demoComingSoon, setDemoComingSoon] = useState(true);
+    const [publicPlanLimits, setPublicPlanLimits] = useState<PlanLimitMap>({});
+    const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>({});
+    const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>({});
+    const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
+    const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
+
+    useEffect(() => {
+        (async () => {
+            let timeout: ReturnType<typeof setTimeout> | null = null;
+            const controller = new AbortController();
+            try {
+                timeout = setTimeout(() => controller.abort(), BOOT_CONFIG_TIMEOUT_MS);
+                const res = await fetch(`${API}/api/config`, { signal: controller.signal });
+                const cfg = await res.json();
+                if (cfg && typeof cfg === 'object') {
+                    if (cfg.plans && typeof cfg.plans === 'object') setPublicPlanLimits(cfg.plans as PlanLimitMap);
+                    if (cfg.plan_features && typeof cfg.plan_features === 'object') setPublicPlanFeatures(cfg.plan_features as PlanFeatureMap);
+                    if (cfg.plan_prices_usd && typeof cfg.plan_prices_usd === 'object') setPublicPlanPrices(cfg.plan_prices_usd as PlanPriceMap);
+                }
+                setMaintenanceBannerEnabled(Boolean(cfg.maintenance_banner_enabled));
+                setMaintenanceBannerMessage((cfg.maintenance_banner_message || "").trim());
+                if (Array.isArray(cfg.topup_packs)) {
+                    const packs = cfg.topup_packs
+                        .filter((p: any) => p && typeof p.price_id === 'string')
+                        .map((p: any) => ({
+                            price_id: p.price_id,
+                            pack: String(p.pack || ''),
+                            credits: Number(p.credits || 0),
+                            price_usd: Number(p.price_usd || 0),
+                        }))
+                        .sort((a: TopupPack, b: TopupPack) => a.credits - b.credits);
+                    setTopupPacks(packs);
+                }
+                if (cfg.supabase_url && cfg.supabase_anon_key) {
+                    const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+                    setSupabase(sb);
+                    const { data: { session: s } } = await sb.auth.getSession();
+                    setSession(s);
+                    sb.auth.onAuthStateChange((_e, s) => setSession(s));
+                }
+            } catch { /* no supabase config yet */ }
+            finally {
+                if (timeout) clearTimeout(timeout);
+                setLoading(false);
+            }
+        })();
+    }, []);
+
+    useEffect(() => {
+        if (!session) {
+            setPlan('none');
+            setRole('user');
+            setBillingActive(false);
+            setMonthlyCreditsRemaining(0);
+            setTopupCreditsRemaining(0);
+            setCreditsTotalRemaining(0);
+            setRequiresTopup(false);
+            setDemoAccess(false);
+            setDemoComingSoon(true);
+            return;
+        }
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/me`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const incomingPlan = (data.plan === 'free' ? 'none' : data.plan) || 'none';
+                    setPlan((['none', 'starter', 'creator', 'pro', 'elite'].includes(incomingPlan) ? incomingPlan : 'none') as Plan);
+                    setRole(data.role || 'user');
+                    setBillingActive(Boolean(data.billing_active));
+                    setMonthlyCreditsRemaining(Number(data.animated_credits_remaining ?? data.monthly_credits_remaining ?? 0));
+                    setTopupCreditsRemaining(Number(data.animated_topup_credits_remaining ?? data.topup_credits_remaining ?? 0));
+                    setCreditsTotalRemaining(Number(data.animated_credits_total_remaining ?? data.credits_total_remaining ?? 0));
+                    setRequiresTopup(Boolean(data.requires_topup));
+                    setDemoAccess(data.demo_access || false);
+                    if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
+                    setDemoComingSoon(data.demo_coming_soon !== false);
+                }
+            } catch {
+                setPlan('none');
+                setRole('user');
+                setBillingActive(false);
+                setMonthlyCreditsRemaining(0);
+                setTopupCreditsRemaining(0);
+                setCreditsTotalRemaining(0);
+                setRequiresTopup(false);
+                setDemoAccess(false);
+                setDemoComingSoon(true);
+            }
+        })();
+    }, [session]);
+
+    const signIn = useCallback(async (email: string, password: string): Promise<string | null> => {
+        if (!supabase) return "Auth not configured yet";
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        return error ? error.message : null;
+    }, [supabase]);
+
+    const signUp = useCallback(async (email: string, password: string): Promise<string | null> => {
+        if (!supabase) return "Auth not configured yet";
+        const { error } = await supabase.auth.signUp({
+            email,
+            password,
+            options: { emailRedirectTo: window.location.origin },
+        });
+        return error ? error.message : null;
+    }, [supabase]);
+
+    const signOut = useCallback(async () => {
+        if (supabase) await supabase.auth.signOut();
+        setSession(null);
+        setPlan('none');
+        setMonthlyCreditsRemaining(0);
+        setTopupCreditsRemaining(0);
+        setCreditsTotalRemaining(0);
+        setRequiresTopup(false);
+    }, [supabase]);
+
+    const checkout = useCallback(async (planName: string) => {
+        const priceId = PRICE_IDS[planName];
+        if (!priceId || !session) return;
+        try {
+            const res = await fetch(`${API}/api/checkout`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ price_id: priceId }),
+            });
+            const data = await res.json();
+            if (data.checkout_url) window.location.href = data.checkout_url;
+        } catch (e) { console.error("Checkout failed", e); }
+    }, [session]);
+
+    const checkoutDemo = useCallback(async () => {
+        if (!demoPriceId || !session) return;
+        try {
+            const res = await fetch(`${API}/api/checkout`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ price_id: demoPriceId }),
+            });
+            const data = await res.json();
+            if (data.checkout_url) window.location.href = data.checkout_url;
+        } catch (e) { console.error("Demo checkout failed", e); }
+    }, [session, demoPriceId]);
+
+    const checkoutTopup = useCallback(async (priceId: string): Promise<string | null> => {
+        if (!priceId || !session) return "Missing top-up price";
+        try {
+            const res = await fetch(`${API}/api/checkout/topup`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ price_id: priceId }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) return (data as any).detail || "Could not start top-up checkout";
+            if ((data as any).checkout_url) {
+                window.location.href = (data as any).checkout_url;
+                return null;
+            }
+            return "Checkout URL missing";
+        } catch (e) {
+            console.error("Top-up checkout failed", e);
+            return "Top-up checkout failed";
+        }
+    }, [session]);
+
+    const manageBilling = useCallback(async (): Promise<string | null> => {
+        if (!session) return "Not signed in";
+        try {
+            const res = await fetch(`${API}/api/billing-portal`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                return (data as any).detail || "Could not open billing portal";
+            }
+            if ((data as any).portal_url) {
+                window.location.href = (data as any).portal_url;
+                return null;
+            }
+            return "Billing portal URL missing";
+        } catch (e) {
+            console.error("Billing portal failed", e);
+            return "Billing portal request failed";
+        }
+    }, [session]);
+
+    return (
+        <AuthContext.Provider value={{
+            session, supabase, plan, role, loading, billingActive,
+            monthlyCreditsRemaining, topupCreditsRemaining, creditsTotalRemaining, requiresTopup, topupPacks,
+            demoAccess, demoPriceId, demoComingSoon,
+            publicPlanLimits, publicPlanFeatures, publicPlanPrices,
+            maintenanceBannerEnabled, maintenanceBannerMessage,
+            signIn, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,
+        }}>
+            {children}
+        </AuthContext.Provider>
+    );
+}
+
+function App() {
+    return (
+        <AuthProvider>
+            <AppShell />
+        </AuthProvider>
+    );
+}
+
+function AppShell() {
+    const { session, loading, role, billingActive, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
+    const [page, setPage] = useState<'landing' | 'dashboard' | 'auth' | 'account'>(() => {
+        try {
+            const saved = localStorage.getItem('nyptid_page');
+            if (saved === 'landing' || saved === 'dashboard' || saved === 'auth' || saved === 'account') {
+                return saved;
+            }
+        } catch {
+            // ignore storage errors and fall back
+        }
+        return 'landing';
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem('nyptid_page', page);
+        } catch {
+            // ignore storage errors
+        }
+    }, [page]);
+
+    useEffect(() => {
+        if (!session && page === 'dashboard') setPage('landing');
+        if (!session && page === 'account') setPage('auth');
+        if (loading) return;
+        const isAdmin = role === 'admin';
+        const paidAccess = isAdmin || billingActive;
+        if (session && !paidAccess && page === 'dashboard') {
+            setPage('landing');
+            setTimeout(() => {
+                const el = document.getElementById('pricing');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 0);
+            return;
+        }
+        // Keep logged-in paid users in studio on hard refresh.
+        if (session && paidAccess && (page === 'landing' || page === 'auth')) setPage('dashboard');
+    }, [session, loading, page, role, billingActive]);
+
+    return (
+        <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
+            {maintenanceBannerEnabled && (
+                <div className="sticky top-0 z-50 border-b border-amber-300/20 bg-amber-500/10 px-4 py-2 text-center text-xs sm:text-sm text-amber-100 backdrop-blur">
+                    {maintenanceBannerMessage || "Studio is under high load. Queue times may be longer than usual while we scale capacity."}
+                </div>
+            )}
+            {page === 'landing' && <LandingPage onNavigate={setPage} />}
+            {page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
+            {page === 'auth' && <AuthPage onNavigate={setPage} />}
+            {page === 'account' && <AccountPage onNavigate={setPage} />}
+        </div>
+    );
+}
+
+export default App;
+
+type PageNav = (p: 'landing' | 'dashboard' | 'auth' | 'account') => void;
+
+function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }) {
+    const { session, role, billingActive, signOut, manageBilling } = useContext(AuthContext);
+    const paidAccess = role === 'admin' || billingActive;
+
+    return (
+        <nav className="fixed top-0 w-full z-50 backdrop-blur-xl bg-[#09090b]/80 border-b border-white/5">
+            <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+                <button onClick={() => onNavigate('landing')} className="flex items-center gap-2.5 hover:opacity-80 transition">
+                    <Logo size={32} />
+                    <span className="text-xl font-bold tracking-tight">NYPTID Studio</span>
+                </button>
+                <div className="hidden xl:flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-2 py-1">
+                    <a href="/skeleton-ai-video-generator.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">Skeleton AI</a>
+                    <a href="/ai-story-video-generator.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">AI Stories</a>
+                    <a href="/motivation-video-maker.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">Motivation</a>
+                    <a href="/runpod-ai-video-workflow.html" className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition">RunPod</a>
+                </div>
+                <div className="flex items-center gap-3">
+                    {paidAccess ? (
+                        <button onClick={() => onNavigate('dashboard')}
+                            className={`px-4 py-2 text-sm font-medium rounded-lg transition ${active === 'dashboard' ? 'text-white bg-violet-600/20 border border-violet-500/30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}>
+                            Dashboard
+                        </button>
+                    ) : (
+                        <a href="#pricing"
+                            className="px-4 py-2 text-sm font-semibold text-white bg-violet-600 hover:bg-violet-500 rounded-lg transition-all shadow-lg shadow-violet-600/20">
+                            Choose Plan
+                        </a>
+                    )}
+                    <div className="w-px h-6 bg-white/10 mx-1" />
+                    {session ? (
+                        <div className="flex items-center gap-2">
+                            {paidAccess && (
+                                <button
+                                    onClick={async () => {
+                                        const err = await manageBilling();
+                                        if (err) alert(err);
+                                    }}
+                                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-lg transition"
+                                    title="Manage Billing"
+                                >
+                                    <CreditCard className="w-4 h-4" />
+                                    <span className="hidden sm:inline">Billing</span>
+                                </button>
+                            )}
+                            <button onClick={() => onNavigate('account')}
+                                className="flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-lg transition">
+                                <User className="w-4 h-4" />
+                                <span className="hidden sm:inline max-w-[120px] truncate">{session.user.email}</span>
+                            </button>
+                            <button onClick={signOut}
+                                className="p-2 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition" title="Sign Out">
+                                <LogOut className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ) : (
+                        <button onClick={() => onNavigate('auth')}
+                            className="px-5 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-500 rounded-lg transition-all shadow-lg shadow-violet-600/20">
+                            Sign In
+                        </button>
+                    )}
+                </div>
+            </div>
+        </nav>
+    );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AUTH PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
+    const { signIn, signUp, session } = useContext(AuthContext);
+    const [mode, setMode] = useState<'login' | 'signup'>('login');
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [success, setSuccess] = useState('');
+
+    useEffect(() => {
+        if (session) onNavigate('dashboard');
+    }, [session, onNavigate]);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        setSuccess('');
+        setLoading(true);
+
+        const result = mode === 'login'
+            ? await signIn(email, password)
+            : await signUp(email, password);
+
+        if (result) {
+            setError(result);
+        } else if (mode === 'signup') {
+            setSuccess('Account created. Check your inbox (and spam) for the verification email, confirm your address, then sign in and choose a paid plan to unlock generation.');
+        }
+        setLoading(false);
+    };
+
+    return (
+        <div className="min-h-screen flex items-center justify-center px-6">
+            <div className="w-full max-w-md">
+                <div className="text-center mb-8">
+                    <button onClick={() => onNavigate('landing')} className="inline-flex items-center gap-2.5 mb-6 hover:opacity-80 transition">
+                        <Logo size={40} />
+                    </button>
+                    <h1 className="text-3xl font-bold mb-2">{mode === 'login' ? 'Welcome Back' : 'Create Account'}</h1>
+                    <p className="text-gray-500">
+                        {mode === 'login' ? 'Sign in to start generating' : 'Join NYPTID Studio today'}
+                    </p>
+                </div>
+
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div>
+                        <label className="block text-sm text-gray-400 mb-1.5">Email</label>
+                        <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+                            required autoFocus
+                            className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition" />
+                    </div>
+                    <div>
+                        <label className="block text-sm text-gray-400 mb-1.5">Password</label>
+                        <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                            required minLength={6}
+                            className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition" />
+                    </div>
+
+                    {error && (
+                        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">{error}</div>
+                    )}
+                    {success && (
+                        <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-sm">{success}</div>
+                    )}
+
+                    {mode === 'signup' && !success && (
+                        <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.08] text-gray-300 text-sm">
+                            After account creation:
+                            <br />1) Verify your email.
+                            <br />2) Sign in.
+                            <br />3) Choose a paid plan on Pricing.
+                        </div>
+                    )}
+
+                    <button type="submit" disabled={loading}
+                        className="w-full py-3.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20">
+                        {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+                        {mode === 'login' ? 'Sign In' : 'Create Account'}
+                    </button>
+                </form>
+
+                <p className="text-center text-sm text-gray-500 mt-6">
+                    {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+                    <button onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setSuccess(''); }}
+                        className="text-violet-400 hover:text-violet-300 font-medium transition">
+                        {mode === 'login' ? 'Sign up' : 'Sign in'}
+                    </button>
+                </p>
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ACCOUNT PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
+    const {
+        session, plan, signOut, checkout, manageBilling, checkoutTopup, topupPacks,
+        monthlyCreditsRemaining, topupCreditsRemaining, creditsTotalRemaining,
+        publicPlanLimits,
+    } = useContext(AuthContext);
+    const [billingLoading, setBillingLoading] = useState(false);
+    const [billingError, setBillingError] = useState("");
+    const [topupError, setTopupError] = useState("");
+
+    useEffect(() => {
+        if (!session) onNavigate('auth');
+    }, [session, onNavigate]);
+
+    const planNames: Record<Plan, string> = { none: 'No Active Plan', starter: 'Starter', creator: 'Creator', pro: 'Pro', elite: 'Studio Elite' };
+    const planColors: Record<Plan, string> = { none: 'text-gray-400', starter: 'text-blue-400', creator: 'text-violet-400', pro: 'text-amber-400', elite: 'text-rose-300' };
+
+    return (
+        <>
+            <NavBar onNavigate={onNavigate} active="account" />
+            <div className="pt-24 max-w-2xl mx-auto px-6">
+                <h1 className="text-3xl font-bold mb-8">Your Account</h1>
+
+                <div className="space-y-6">
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <div className="flex items-center gap-4 mb-4">
+                            <div className="w-14 h-14 rounded-full bg-violet-500/10 flex items-center justify-center">
+                                <User className="w-7 h-7 text-violet-400" />
+                            </div>
+                            <div>
+                                <p className="font-bold text-lg">{session?.user.email}</p>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                    <Crown className={`w-4 h-4 ${planColors[plan]}`} />
+                                    <span className={`text-sm font-medium ${planColors[plan]}`}>{planNames[plan]} Plan</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <h3 className="font-bold text-lg mb-4">Plan Features</h3>
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <p className="text-gray-500">Finished animated shorts/month</p>
+                                <p className="font-bold text-white">{plan === 'none' ? '0' : String(publicPlanLimits[plan]?.animated_renders_per_month || publicPlanLimits[plan]?.videos_per_month || 0)}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Max Resolution</p>
+                                <p className="font-bold text-white">{plan === 'none' ? '-' : String(publicPlanLimits[plan]?.max_resolution || '720p')}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Clone Feature</p>
+                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'text-emerald-400' : 'text-gray-600'}`}>
+                                    {plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'Enabled' : 'Locked'}
+                                </p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Priority Queue</p>
+                                <p className={`font-bold ${plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'text-emerald-400' : 'text-gray-600'}`}>
+                                    {plan === 'creator' || plan === 'pro' || plan === 'elite' ? 'Yes' : 'No'}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <h3 className="font-bold text-lg mb-4">Hybrid Credits</h3>
+                        <p className="text-xs text-gray-500 mb-4">
+                            Shared evenly across Skeleton AI, AI Stories, and Motivation. No hidden per-template multipliers.
+                        </p>
+                        <div className="grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                                <p className="text-gray-500">Animated monthly left</p>
+                                <p className="font-bold text-white">{monthlyCreditsRemaining}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Animated top-up left</p>
+                                <p className="font-bold text-white">{topupCreditsRemaining}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">Animated total left</p>
+                                <p className="font-bold text-violet-300">{creditsTotalRemaining}</p>
+                            </div>
+                        </div>
+                        {topupPacks.length > 0 && (
+                            <div className="mt-5">
+                                <p className="text-gray-400 text-sm mb-3">Animated top-up packs (one-time purchase)</p>
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                    {topupPacks.map((pack) => (
+                                        <div key={pack.price_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3">
+                                            <div className="text-sm font-semibold text-white">{pack.credits} animated credits</div>
+                                            <div className="text-xs text-gray-500 mb-2">${pack.price_usd.toFixed(2)} one-time</div>
+                                            <div className="text-[11px] text-gray-400 mb-3">
+                                                Approx {pack.credits} renders total, usable across all 3 live templates.
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    setTopupError("");
+                                                    const err = await checkoutTopup(pack.price_id);
+                                                    if (err) setTopupError(err);
+                                                }}
+                                                className="w-full px-4 py-2 bg-violet-600/80 hover:bg-violet-500 text-white rounded-lg text-sm font-medium transition"
+                                            >
+                                                Purchase Pack
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                {topupError && <p className="mt-3 text-sm text-red-400">{topupError}</p>}
+                            </div>
+                        )}
+                    </div>
+
+                    {plan !== 'pro' && plan !== 'elite' && (
+                        <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/5 to-purple-500/5 border border-violet-500/20">
+                            <h3 className="font-bold text-lg mb-2">Upgrade Your Plan</h3>
+                            <p className="text-gray-400 text-sm mb-4">
+                                Unlock pro transitions, stronger SFX, priority rendering, and more.
+                            </p>
+                            <div className="flex gap-3">
+                                {plan === 'none' && (
+                                    <button onClick={() => checkout('starter')}
+                                        className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-600/20 text-sm">
+                                        Starter $9/mo
+                                    </button>
+                                )}
+                                {plan === 'starter' && (
+                                    <button onClick={() => checkout('creator')}
+                                        className="px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-violet-600/20 text-sm">
+                                        Creator $30/mo
+                                    </button>
+                                )}
+                                <button onClick={() => checkout('pro')}
+                                    className="px-5 py-2.5 bg-white/5 hover:bg-white/10 text-white font-medium rounded-xl transition border border-white/10 text-sm">
+                                    Pro $39/mo
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                        <h3 className="font-bold text-lg mb-2">Billing & Subscription</h3>
+                        <p className="text-gray-400 text-sm mb-4">
+                            Open Stripe billing portal to manage payment method or cancel your subscription anytime.
+                        </p>
+                        <button
+                            onClick={async () => {
+                                setBillingError("");
+                                setBillingLoading(true);
+                                const err = await manageBilling();
+                                if (err) setBillingError(err);
+                                setBillingLoading(false);
+                            }}
+                            disabled={billingLoading}
+                            className="px-5 py-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-60 text-white font-medium rounded-xl transition border border-white/10 text-sm"
+                        >
+                            {billingLoading ? "Opening..." : "Manage Billing"}
+                        </button>
+                        {billingError && <p className="mt-3 text-sm text-red-400">{billingError}</p>}
+                    </div>
+
+                    <button onClick={signOut}
+                        className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-medium rounded-xl transition border border-red-500/20">
+                        Sign Out
+                    </button>
+                </div>
+            </div>
+        </>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LANDING PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
+    const {
+        session, role, billingActive, checkout, checkoutDemo, demoComingSoon,
+        requiresTopup, topupPacks, checkoutTopup, creditsTotalRemaining,
+        publicPlanLimits, publicPlanFeatures, publicPlanPrices,
+    } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
+    const realShortLinks = [
+        "https://youtube.com/shorts/36-AAocHhg0?feature=share",
+        "https://youtube.com/shorts/K8-W6xmXF7w?feature=share",
+        "https://youtube.com/shorts/1y10LtdyQ_I?feature=share",
+        "https://youtube.com/shorts/UcTCAOUNa1I?feature=share",
+    ];
+    const liveTemplates = [
+        { title: 'Skeleton AI', desc: '3D skeleton characters in outfits. Career salary comparisons, dark humor, viral breakdowns.', icon: '💀', color: 'from-gray-600 to-gray-800' },
+        { title: 'AI Stories', desc: 'Cinematic visual stories with emotional arcs and strong retention hooks.', icon: '🎬', color: 'from-violet-600 to-violet-800' },
+        { title: 'Motivation', desc: 'Powerful life advice with epic cinematic landscapes. Screenshot-worthy.', icon: '🔥', color: 'from-amber-600 to-amber-800' },
+    ];
+    const comingSoonTemplates = ['Objects Explain', 'Would You Rather', 'Scary Stories', 'Historical Epic', 'Argument Debate', 'What If', 'Business', 'Finance', 'Tech', 'Crypto'];
+    const getPlanLimit = (name: string): PlanLimit => publicPlanLimits[name] || {};
+    const animatedLimit = (name: string, fallback: number): number =>
+        Number(getPlanLimit(name).animated_renders_per_month || getPlanLimit(name).videos_per_month || fallback);
+    const nonAnimatedLimit = (name: string, fallback: number): number =>
+        Number(getPlanLimit(name).non_animated_ops_per_month || animatedLimit(name, fallback) * 10);
+    const getPlanPrice = (name: string, fallback: number): number => {
+        const raw = publicPlanPrices[name];
+        return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+    };
+    const featureLabel = (f: string): string => ({
+        micro_escalation_lite: 'Micro-escalation Lite',
+        micro_escalation_plus: 'Micro-escalation Plus',
+        micro_escalation_pro: 'Micro-escalation Pro',
+        smart_transition_pack: 'Smart transition pack',
+        cinematic_transition_pack: 'Cinematic transition pack',
+        balanced_sfx_mix: 'Balanced SFX mix',
+        enhanced_sfx_mix: 'Enhanced audio mix (rolling out)',
+        pro_sfx_stack: 'Pro audio stack (rolling out)',
+        prompt_polish_booster: 'Prompt polish booster',
+        style_consistency_lock: 'Style consistency lock',
+        early_access_feature_waves: 'Early-access feature waves',
+        elite_priority_lane: 'Elite priority lane',
+    }[f] || f.replace(/_/g, ' '));
+
+    return (
+        <>
+            <NavBar onNavigate={onNavigate} />
+            {session && !billingActive && !isAdmin && (
+                <section className="pt-24 pb-4">
+                    <div className="max-w-5xl mx-auto px-6">
+                        <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                            <div className="font-semibold mb-1">Choose a plan to continue</div>
+                            <div>Your account is active, but generation is locked until payment is active.</div>
+                            <div className="mt-1">Next steps: verify your email, sign in, then pick Starter, Creator, or Pro below.</div>
+                        </div>
+                    </div>
+                </section>
+            )}
+            {session && billingActive && !isAdmin && requiresTopup && (
+                <section className="pt-24 pb-4">
+                    <div className="max-w-5xl mx-auto px-6">
+                        <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
+                            <div className="font-semibold mb-1">Animated credits used up</div>
+                            <div className="mb-2">You have {creditsTotalRemaining} animated credits left. Buy an animated top-up pack to keep rendering today.</div>
+                            <div className="flex flex-wrap gap-2">
+                                {topupPacks.map((pack) => (
+                                    <button
+                                        key={pack.price_id}
+                                        onClick={() => { checkoutTopup(pack.price_id); }}
+                                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium transition"
+                                    >
+                                        {pack.credits} animated credits • ${pack.price_usd.toFixed(2)}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            )}
+
+            {/* HERO */}
+            <section className="relative pt-32 pb-24 overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-b from-violet-600/10 via-transparent to-transparent" />
+                <div className="absolute top-20 left-1/2 -translate-x-1/2 w-[800px] h-[800px] bg-violet-600/5 rounded-full blur-[120px]" />
+
+                <div className="relative max-w-5xl mx-auto px-6 text-center">
+                    <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-sm font-medium mb-8">
+                        <Zap className="w-4 h-4" />
+                        42K Views in 28 Days -- Real Results Below
+                    </div>
+
+                    <h1 className="text-6xl md:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6">
+                        AI That Makes<br />
+                        <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 via-purple-400 to-indigo-400">
+                            Viral Shorts For You
+                        </span>
+                    </h1>
+
+                    <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+                        Real 3D animated scenes. Premium AI voiceovers in 19 languages. 720p animation-first output.
+                        Type a topic, pick a style, and get a repeatable short workflow designed to scale toward 300+ paying users.
+                    </p>
+
+                    <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
+                        <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
+                            className="group px-8 py-4 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl text-lg transition-all flex items-center gap-2 shadow-lg shadow-violet-600/25">
+                            {session ? 'Open Studio' : 'Start Creating'}
+                            <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                        </button>
+                        <button onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
+                            className="px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-medium rounded-xl text-lg transition-all border border-white/10">
+                            See Pricing
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-6 max-w-xl mx-auto mb-16">
+                        {[
+                            { val: '100K+', label: 'Total Channel Views' },
+                            { val: '1080p', label: 'Max Quality' },
+                            { val: '19', label: 'Languages' },
+                            { val: '<5 min', label: 'Per Video' },
+                        ].map((s, i) => (
+                            <div key={i}>
+                                <div className="text-2xl md:text-3xl font-bold text-white">{s.val}</div>
+                                <div className="text-xs md:text-sm text-gray-500">{s.label}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="max-w-3xl mx-auto">
+                        <p className="text-xs text-gray-600 uppercase tracking-wider mb-3 text-center">Real YouTube Analytics</p>
+                        <div className="rounded-2xl overflow-hidden border border-white/[0.08] shadow-2xl shadow-violet-600/5">
+                            <img src="/social-proof.png" alt="YouTube Studio analytics showing over 100K total views from NYPTID Studio generated content" className="w-full" />
+                        </div>
+                        <p className="text-xs text-gray-600 mt-3 text-center">100K+ total views to date. Metrics are pulled from real channel analytics and updated as new proof data is added.</p>
+                        <p className="text-xs text-gray-600 mt-1 text-center">Distribution today: YouTube Shorts export workflow. Direct posting to TikTok/Instagram is still marked Coming Soon.</p>
+                    </div>
+                </div>
+            </section>
+
+            {/* REAL OUTPUT PROOF */}
+            <section className="py-16 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6">
+                    <div className="text-center mb-10">
+                        <h2 className="text-3xl md:text-4xl font-bold mb-3">Real Shorts, Real Results</h2>
+                        <p className="text-gray-400 max-w-2xl mx-auto">
+                            No fake counters, no fake testimonials. Watch actual outputs and verify on YouTube.
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Featured Generated Short</p>
+                            <div className="rounded-xl overflow-hidden border border-white/[0.08] bg-black aspect-[9/16] max-h-[540px] mx-auto">
+                                <iframe
+                                    title="NYPTID Featured Short"
+                                    src="https://www.youtube.com/embed/36-AAocHhg0"
+                                    className="w-full h-full"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                    allowFullScreen
+                                />
+                            </div>
+                            <p className="text-xs text-gray-500 mt-3">
+                                Featured proof clip is embedded directly from your published channel output.
+                            </p>
+                        </div>
+                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Public YouTube Proof</p>
+                            <div className="space-y-2">
+                                {realShortLinks.map((url, i) => (
+                                    <a
+                                        key={url}
+                                        href={url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300 hover:border-violet-500/40 hover:text-white transition"
+                                    >
+                                        <span>Watch Short #{i + 1}</span>
+                                        <ArrowRight className="w-4 h-4" />
+                                    </a>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* TEMPLATES SHOWCASE */}
+            <section className="py-24 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-4xl font-bold mb-4">Choose Your Style</h2>
+                        <p className="text-gray-400 text-lg">Start with 3 live templates. More are clearly marked in development.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                        {liveTemplates.map((t, i) => (
+                            <div key={i} onClick={() => onNavigate(session ? 'dashboard' : 'auth')}
+                                className="group relative p-6 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:border-violet-500/30 hover:bg-violet-500/[0.03] transition-all cursor-pointer">
+                                <span className="absolute top-4 right-4 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    LIVE
+                                </span>
+                                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${t.color} flex items-center justify-center text-xl mb-4`}>
+                                    {t.icon}
+                                </div>
+                                <h3 className="text-lg font-bold mb-2 group-hover:text-violet-300 transition-colors">{t.title}</h3>
+                                <p className="text-gray-500 text-sm leading-relaxed">{t.desc}</p>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+                        <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Coming Soon Templates</p>
+                        <div className="flex flex-wrap gap-2">
+                            {comingSoonTemplates.map((name) => (
+                                <span key={name} className="text-xs px-3 py-1.5 rounded-full border border-white/[0.08] bg-black/20 text-gray-400">
+                                    {name}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* HOW IT WORKS */}
+            <section className="py-24 border-t border-white/5">
+                <div className="max-w-[1600px] mx-auto px-4 sm:px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-4xl font-bold mb-4">How It Works</h2>
+                        <p className="text-gray-400 text-lg">From idea to publish-ready short in 3 steps</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                        {[
+                            { step: '01', title: 'Choose Template & Topic', desc: 'Pick a template style and enter your topic. Our AI scriptwriter crafts hook-optimized scenes instantly.' },
+                            { step: '02', title: 'AI Generates Everything', desc: 'Dedicated GPU renders real 3D scenes. Premium AI voiceover in your chosen language. All fully automated.' },
+                            { step: '03', title: 'Download & Post', desc: 'Get a production-ready MP4 with text overlays, voiceover, and optimized metadata. Publish faster with a repeatable workflow.' },
+                        ].map((s, i) => (
+                            <div key={i} className="relative p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                                <div className="text-5xl font-black text-white/[0.04] absolute top-4 right-6">{s.step}</div>
+                                <h3 className="text-xl font-bold mb-3">{s.title}</h3>
+                                <p className="text-gray-500 leading-relaxed">{s.desc}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+
+            {/* WHY US vs COMPETITION */}
+            <section className="py-24 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-4xl font-bold mb-4">Why NYPTID Studio</h2>
+                        <p className="text-gray-400 text-lg">We're not another credit-burning API wrapper. Here's the difference.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+                        <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <div className="flex items-center gap-3 mb-6">
+                                <div className="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center text-sm font-bold text-red-400">X</div>
+                                <h3 className="text-lg font-bold text-gray-400">Typical Faceless Tools (WOXO, AutoShorts, etc.)</h3>
+                            </div>
+                            <ul className="space-y-3">
+                                {[
+                                    'Image slideshow with zoom = "video"',
+                                    'Credit-based -- costs add up fast',
+                                    'Shared API backends -- slow at peak',
+                                    '720p max on most plans',
+                                    'Generic templates, no customization',
+                                ].map((item, i) => (
+                                    <li key={i} className="flex items-start gap-2 text-sm text-gray-500">
+                                        <span className="text-red-400 mt-0.5">-</span>{item}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+
+                        <div className="p-8 rounded-2xl bg-violet-500/[0.03] border border-violet-500/20">
+                            <div className="flex items-center gap-3 mb-6">
+                                <Logo size={28} />
+                                <h3 className="text-lg font-bold text-violet-300">NYPTID Studio</h3>
+                            </div>
+                            <ul className="space-y-3">
+                                {[
+                                    'Real 3D rendered scenes -- not slideshows',
+                                    'Hybrid billing: animated renders + non-animated ops are tracked separately',
+                                    'Dedicated GPU infrastructure with queue-based scaling at peak load',
+                                    '720p output tuned for animation reliability',
+                                    '19 languages including Hindi, Spanish, Japanese',
+                                ].map((item, i) => (
+                                    <li key={i} className="flex items-start gap-2 text-sm text-gray-300">
+                                        <CheckCircle2 className="w-4 h-4 text-violet-400 shrink-0 mt-0.5" />{item}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                        <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <div className="w-12 h-12 rounded-xl bg-violet-500/10 flex items-center justify-center mb-5">
+                                <Zap className="w-6 h-6 text-violet-400" />
+                            </div>
+                            <h3 className="text-xl font-bold mb-3">Dedicated GPU Power</h3>
+                            <p className="text-gray-500 leading-relaxed">
+                                Dedicated high-VRAM GPUs render every frame. During peak usage, jobs are queued and processed in priority order to keep output stable.
+                            </p>
+                        </div>
+                        <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center mb-5">
+                                <Shield className="w-6 h-6 text-emerald-400" />
+                            </div>
+                            <h3 className="text-xl font-bold mb-3">Clone Any Viral Short</h3>
+                            <p className="text-gray-500 leading-relaxed">
+                                Upload a strong-performing short. AI detects the structure, reverse-engineers pacing, and generates a new version on your topic.
+                            </p>
+                        </div>
+                        <div className="p-8 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <div className="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center mb-5">
+                                <Monitor className="w-6 h-6 text-amber-400" />
+                            </div>
+                            <h3 className="text-xl font-bold mb-3">Reliable 720p Output</h3>
+                            <p className="text-gray-500 leading-relaxed">
+                                Generate with a 720p animation pipeline tuned for speed, consistency, and stable renders under load.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* COMING SOON */}
+            <section className="py-24 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm font-medium mb-6">
+                            <Clock className="w-4 h-4" />
+                            On the Roadmap
+                        </div>
+                        <h2 className="text-4xl font-bold mb-4">Coming Soon</h2>
+                        <p className="text-gray-400 text-lg max-w-2xl mx-auto">We're building Studio in focused phases so it can support sustained growth toward 300+ paying users.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {[
+                            {
+                                icon: <Film className="w-6 h-6 text-rose-400" />,
+                                iconBg: 'bg-rose-500/10',
+                                title: 'Long-Form Documentaries',
+                                desc: '10-20 minute AI-generated documentaries with full script, scene breakdown, voiceover, and cinematic 3D animation. YouTube-ready.',
+                                tag: 'Q2 2026',
+                            },
+                            {
+                                icon: <Clapperboard className="w-6 h-6 text-cyan-400" />,
+                                iconBg: 'bg-cyan-500/10',
+                                title: '3D Character Animation',
+                                desc: 'Consistent 3D characters across every scene with smooth animation, cinematic camera work, and studio-quality lighting.',
+                                tag: 'Q2 2026',
+                            },
+                            {
+                                icon: <Layers className="w-6 h-6 text-emerald-400" />,
+                                iconBg: 'bg-emerald-500/10',
+                                title: 'Scene-by-Scene Editor',
+                                desc: 'Pick, swap, and regenerate individual images per scene before final render. Full creative control over every frame.',
+                                tag: 'Q2 2026',
+                            },
+                            {
+                                icon: <Globe className="w-6 h-6 text-violet-400" />,
+                                iconBg: 'bg-violet-500/10',
+                                title: 'Multi-Niche Templates',
+                                desc: 'Business, Finance, Tech, Crypto, and Science templates are in progress and marked Coming Soon in-app.',
+                                tag: 'Q3 2026',
+                            },
+                            {
+                                icon: <Sliders className="w-6 h-6 text-amber-400" />,
+                                iconBg: 'bg-amber-500/10',
+                                title: 'Custom Video Length',
+                                desc: 'Slider from 15-second reels to 20+ minute long-form. The AI adapts pacing, scene count, and narration depth automatically.',
+                                tag: 'Q3 2026',
+                            },
+                            {
+                                icon: <Wand2 className="w-6 h-6 text-pink-400" />,
+                                iconBg: 'bg-pink-500/10',
+                                title: 'Full Sentient Pipeline',
+                                desc: 'End-to-end generation: topic research, SEO-optimized titles, thumbnails, descriptions, hashtags, and scheduled auto-posting.',
+                                tag: 'Q4 2026',
+                            },
+                        ].map((item, i) => (
+                            <div key={i} className="group relative p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06] hover:border-white/[0.12] transition-all">
+                                <span className="absolute top-4 right-4 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                                    {item.tag}
+                                </span>
+                                <div className={`w-12 h-12 rounded-xl ${item.iconBg} flex items-center justify-center mb-4`}>
+                                    {item.icon}
+                                </div>
+                                <h3 className="text-lg font-bold mb-2">{item.title}</h3>
+                                <p className="text-gray-500 text-sm leading-relaxed">{item.desc}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+
+            {/* PRICING */}
+            <section className="py-24 border-t border-white/5" id="pricing">
+                <div className="max-w-5xl mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-4xl font-bold mb-4">Simple, Honest Pricing</h2>
+                        <p className="text-gray-400 text-lg">Choose the plan that fits your output needs. Upgrade anytime as you scale.</p>
+                        <p className="text-gray-500 text-xs mt-2">Plan limits and capabilities are synced from live backend config.</p>
+                        <p className="text-gray-500 text-xs mt-1">Hybrid billing: only finished animated renders consume animated credits. Script/image operations use lighter non-animated meters.</p>
+                        <p className="text-gray-500 text-xs mt-1">This structure is designed to stay sustainable while you grow toward 300+ active paying users.</p>
+                        <p className="text-gray-500 text-xs mt-1">Limits are intentionally set for sustainable quality delivery at each plan tier.</p>
+                    </div>
+
+                    <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4 items-stretch">
+                        {/* STARTER */}
+                        <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <h3 className="text-lg font-bold mb-1">Starter</h3>
+                            <p className="text-gray-500 text-xs mb-5">Getting started</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('starter', 14)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    `Includes ${animatedLimit('starter', 50)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('starter', 80)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('starter').max_duration_sec || 60) / 60))} min per video`,
+                                    `${getPlanLimit('starter').max_resolution || '720p'} output`,
+                                    ...(publicPlanFeatures.starter || ['micro_escalation_lite', 'smart_transition_pack']).map(featureLabel),
+                                    'Standard speed',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <button onClick={() => session ? checkout('starter') : onNavigate('auth')}
+                                className="w-full py-2.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all border border-white/10">
+                                {session ? 'Choose Starter' : 'Sign Up to Subscribe'}
+                            </button>
+                        </div>
+
+                        {/* CREATOR */}
+                        <div className="relative p-6 rounded-2xl bg-violet-500/[0.05] border-2 border-violet-500/30 shadow-xl shadow-violet-500/5">
+                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-violet-600 text-white text-[10px] font-bold rounded-full tracking-wide">
+                                MOST POPULAR
+                            </span>
+                            <h3 className="text-lg font-bold mb-1">Creator</h3>
+                            <p className="text-gray-500 text-xs mb-5">For serious creators</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('creator', 30)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    `Includes ${animatedLimit('creator', 90)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('creator', 150)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('creator').max_duration_sec || 180) / 60))} min per video`,
+                                    `${getPlanLimit('creator').max_resolution || '720p'} output (high reliability)`,
+                                    ...(publicPlanFeatures.creator || ['micro_escalation_plus', 'smart_transition_pack', 'enhanced_sfx_mix']).map(featureLabel),
+                                    (getPlanLimit('creator').can_clone ? 'Clone feature included' : 'Clone feature locked'),
+                                    (getPlanLimit('creator').priority ? 'Priority speed' : 'Standard speed'),
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-300">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <button onClick={() => session ? checkout('creator') : onNavigate('auth')}
+                                className="w-full py-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold transition-all shadow-lg shadow-violet-600/25">
+                                {session ? 'Choose Creator' : 'Sign Up to Subscribe'}
+                            </button>
+                        </div>
+
+                        {/* PRO */}
+                        <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
+                            <h3 className="text-lg font-bold mb-1">Pro</h3>
+                            <p className="text-gray-500 text-xs mb-5">Agencies &amp; power users</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('pro', 39)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    `Includes ${animatedLimit('pro', 150)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('pro', 300)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
+                                    '3 live templates (Skeleton AI, AI Stories, Motivation)',
+                                    'Additional templates marked Coming Soon',
+                                    `${Math.max(1, Math.round(Number(getPlanLimit('pro').max_duration_sec || 300) / 60))} min per video`,
+                                    `${getPlanLimit('pro').max_resolution || '720p'} output (optimized animation)`,
+                                    ...(publicPlanFeatures.pro || ['micro_escalation_pro', 'cinematic_transition_pack', 'enhanced_sfx_mix', 'style_consistency_lock']).map(featureLabel),
+                                    (getPlanLimit('pro').can_clone ? 'Clone feature included' : 'Clone feature locked'),
+                                    (getPlanLimit('pro').priority ? 'Max priority speed' : 'Standard speed'),
+                                    'Priority support',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-400">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-violet-400 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <button onClick={() => session ? checkout('pro') : onNavigate('auth')}
+                                className="w-full py-2.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all border border-white/10">
+                                {session ? 'Choose Pro' : 'Sign Up to Subscribe'}
+                            </button>
+                        </div>
+
+                        {/* STUDIO ELITE */}
+                        <div className="relative p-6 rounded-2xl bg-gradient-to-b from-rose-500/[0.08] to-white/[0.02] border-2 border-rose-400/35 shadow-xl shadow-rose-500/10">
+                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-rose-400 text-black text-[10px] font-bold rounded-full tracking-wide">
+                                COMING SOON
+                            </span>
+                            <h3 className="text-lg font-bold mb-1">Studio Elite</h3>
+                            <p className="text-gray-400 text-xs mb-5">Premium creator lane</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('elite', 300)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    `Includes ${animatedLimit('elite', 350)} finished animated shorts/month`,
+                                    `${nonAnimatedLimit('elite', 800)} non-animated ops/month (script/image-gen meter)`,
+                                    'Animation hard-stop enforced; slideshow mode remains available when animated credits run out',
+                                    `Up to ${Math.max(1, Math.round(Number(getPlanLimit('elite').max_duration_sec || 420) / 60))} min per video`,
+                                    `${getPlanLimit('elite').max_resolution || '720p'} output (highest reliability)`,
+                                    ...(publicPlanFeatures.elite || ['elite_priority_lane', 'early_access_feature_waves', 'micro_escalation_pro', 'cinematic_transition_pack', 'enhanced_sfx_mix']).map(featureLabel),
+                                    '$100 / $300 / $500 animated top-up lanes',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-200">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-rose-300 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <button
+                                disabled
+                                className="w-full py-2.5 rounded-lg bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed text-sm font-bold">
+                                Pricing ID Pending
+                            </button>
+                        </div>
+
+                        {/* DEMO PRO */}
+                        <div className="relative p-6 rounded-2xl bg-gradient-to-b from-amber-500/[0.06] to-white/[0.02] border-2 border-amber-500/30 shadow-xl shadow-amber-500/5">
+                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-amber-500 text-black text-[10px] font-bold rounded-full tracking-wide">
+                                FOR BUSINESSES
+                            </span>
+                            <h3 className="text-lg font-bold mb-1">Demo Pro</h3>
+                            <p className="text-gray-500 text-xs mb-5">Product demos, not YouTube</p>
+                            <div className="flex items-baseline gap-1 mb-5">
+                                <span className="text-3xl font-extrabold">${getPlanPrice('demo_pro', 150)}</span>
+                                <span className="text-gray-500 text-sm">/mo</span>
+                            </div>
+                            <ul className="space-y-2.5 mb-6">
+                                {[
+                                    'AI Product Demo Generator',
+                                    'Upload screen recordings',
+                                    'AI writes voiceover scripts',
+                                    'Choose from 50+ voices',
+                                    'AI talking head presenter',
+                                    'Word-synced captions',
+                                    'Built for SaaS & startups',
+                                ].map((f, i) => (
+                                    <li key={i} className="flex items-center gap-2 text-xs text-gray-300">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />{f}
+                                    </li>
+                                ))}
+                            </ul>
+                            <p className="text-[10px] text-gray-600 mb-3 text-center">Not for YouTube/TikTok creators. For software teams turning screen recordings into polished product demos.</p>
+                            <button
+                                onClick={() => {
+                                    if (demoComingSoon && !isAdmin) return;
+                                    session ? checkoutDemo() : onNavigate('auth');
+                                }}
+                                disabled={demoComingSoon && !isAdmin}
+                                className={`w-full py-2.5 rounded-lg text-sm font-bold transition-all ${
+                                    demoComingSoon && !isAdmin
+                                        ? 'bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed'
+                                        : 'bg-amber-500 hover:bg-amber-400 text-black shadow-lg shadow-amber-500/25'
+                                }`}>
+                                {demoComingSoon && !isAdmin ? 'Coming Soon' : (session ? 'Choose Demo Pro' : 'Sign Up to Subscribe')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* FOOTER */}
+            <footer className="py-12 border-t border-white/5">
+                <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                        <Logo size={22} />
+                        <span className="font-bold">NYPTID Studio</span>
+                        <span className="text-gray-600 text-sm ml-2">by NYPTID Industries</span>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
+                        <a href="/skeleton-ai-video-generator.html" className="text-gray-500 hover:text-white transition-colors">Skeleton AI</a>
+                        <a href="/ai-story-video-generator.html" className="text-gray-500 hover:text-white transition-colors">AI Stories</a>
+                        <a href="/motivation-video-maker.html" className="text-gray-500 hover:text-white transition-colors">Motivation</a>
+                        <a href="/runpod-ai-video-workflow.html" className="text-gray-500 hover:text-white transition-colors">RunPod Workflow</a>
+                    </div>
+                    <p className="text-gray-600 text-sm">&copy; 2026 NYPTID Industries. All rights reserved.</p>
+                </div>
+            </footer>
+        </>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DASHBOARD PAGE (Gated Hub for Create + Clone)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
+    const { session, plan, role, billingActive } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
+    const [tab, setTab] = useState<'create' | 'clone' | 'thumbnails' | 'demo' | 'analytics'>('create');
+
+    useEffect(() => {
+        if (!session) onNavigate('auth');
+    }, [session, onNavigate]);
+    useEffect(() => {
+        if (!session) return;
+        if (isAdmin) return;
+        if (!billingActive) onNavigate('landing');
+    }, [session, isAdmin, billingActive, onNavigate]);
+    useEffect(() => {
+        if (CLONE_COMING_SOON && tab === 'clone') setTab('create');
+    }, [tab]);
+
+    if (!session) return null;
+
+    return (
+        <div className="min-h-screen">
+            <NavBar onNavigate={onNavigate} active="dashboard" />
+
+            <div className="max-w-5xl mx-auto px-6 pt-24 pb-6">
+                <div className="flex items-center justify-between mb-8">
+                    <div>
+                        <h1 className="text-2xl font-bold">Welcome back</h1>
+                        <p className="text-gray-500 text-sm mt-1">
+                            <span className="capitalize text-violet-400 font-medium">{plan}</span> plan
+                        </p>
+                    </div>
+                    <button onClick={() => onNavigate('account')}
+                        className="flex items-center gap-2 px-4 py-2 bg-white/[0.03] border border-white/[0.06] rounded-xl text-sm text-gray-400 hover:text-white hover:border-white/[0.12] transition">
+                        <Crown className="w-4 h-4" />
+                        Account
+                    </button>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                    <button onClick={() => setTab('create')}
+                        className={`w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-sm transition-all ${
+                            tab === 'create'
+                                ? 'bg-violet-600/90 text-white border-violet-500 shadow-lg shadow-violet-600/20'
+                                : 'bg-white/[0.02] text-gray-300 border-white/[0.08] hover:border-violet-500/40 hover:text-white'
+                        }`}>
+                        <span className="flex items-center gap-2 font-semibold">
+                            <Wand2 className="w-4 h-4" />
+                            Create
+                        </span>
+                        <span className="text-xs opacity-80">Build short videos</span>
+                    </button>
+                    <div className="p-1 bg-white/[0.03] border border-white/[0.06] rounded-xl">
+                        <div className="flex flex-wrap gap-1">
+                            <button onClick={() => !CLONE_COMING_SOON && setTab('clone')}
+                                disabled={CLONE_COMING_SOON}
+                                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                    tab === 'clone'
+                                        ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                        : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                } ${CLONE_COMING_SOON ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                                <FileVideo className="w-4 h-4" />
+                                Clone
+                                {CLONE_COMING_SOON ? (
+                                    <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 rounded">Soon</span>
+                                ) : plan !== 'creator' && plan !== 'pro' && plan !== 'elite' ? (
+                                    <Lock className="w-3 h-3 text-gray-500" />
+                                ) : null}
+                            </button>
+                            {isAdmin && (
+                                <button onClick={() => setTab('thumbnails')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'thumbnails'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Image className="w-4 h-4" />
+                                    Thumbnails
+                                </button>
+                            )}
+                            {isAdmin && (
+                                <button onClick={() => setTab('demo')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'demo'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Monitor className="w-4 h-4" />
+                                    Product Demo
+                                </button>
+                            )}
+                            {isAdmin && (
+                                <button onClick={() => setTab('analytics')}
+                                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                                        tab === 'analytics'
+                                            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+                                            : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Eye className="w-4 h-4" />
+                                    Product Analytics
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {tab === 'create'
+                ? <CreatePanel />
+                : tab === 'clone'
+                    ? (CLONE_COMING_SOON ? <CreatePanel /> : <ClonePanel />)
+                    : tab === 'demo'
+                        ? <DemoPanel />
+                        : tab === 'analytics'
+                            ? <AdminAnalyticsPanel />
+                            : <ThumbnailPanel />}
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CREATE PANEL (inside Dashboard)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+interface CreativeScene {
+    index: number;
+    narration: string;
+    visual_description: string;
+    duration_sec: number;
+    imageData?: string;
+    imageLoading?: boolean;
+    generation_id?: string;
+    imageError?: string;
+}
+
+interface CreatePanelPersistedState {
+    selectedTemplate: string;
+    resolution: '720p' | '1080p';
+    language: string;
+    creativeMode: 'auto' | 'creative' | 'script_to_short';
+    creativeStep: 'topic' | 'edit' | 'generating';
+    prompt: string;
+    sessionId: string | null;
+    creativeScenes: CreativeScene[];
+    creativeTitle: string;
+    creativeNarration: string;
+    creativeReferenceLockMode?: 'strict' | 'inspired';
+    animateOutputEnabled?: boolean;
+    storyAnimationEnabled?: boolean;
+    storyVoiceId?: string;
+    storyVoiceSpeed?: number;
+    storyPacingMode?: 'standard' | 'fast' | 'very_fast';
+    artStyle?: string;
+    cinematicBoostEnabled?: boolean;
+    jobId: string | null;
+    ts: number;
+}
+
+interface ProjectRow {
+    project_id: string;
+    template: string;
+    topic: string;
+    mode: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+    scene_count?: number;
+    session_id?: string;
+    job_id?: string;
+    output_file?: string;
+    title?: string;
+    resolution?: string;
+    language?: string;
+    animation_enabled?: boolean;
+    story_animation_enabled?: boolean;
+    scenes?: CreativeScene[];
+    narration?: string;
+    voice_id?: string;
+    voice_speed?: number;
+    pacing_mode?: 'standard' | 'fast' | 'very_fast';
+    art_style?: string;
+    cinematic_boost?: boolean;
+    error?: string;
+}
+
+function CreatePanel() {
+    const { session, role, creditsTotalRemaining, requiresTopup } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
+    const [prompt, setPrompt] = useState("");
+    const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
+    const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
+    const [jobId, setJobId] = useState<string | null>(null);
+    const [jobStatus, setJobStatus] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [language, setLanguage] = useState('en');
+    const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
+    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative' | 'script_to_short'>('auto');
+    const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
+    const [sessionId, setSessionId] = useState<string | null>(null);
+    const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
+    const creativeScenesRef = useRef<CreativeScene[]>([]);
+    creativeScenesRef.current = creativeScenes;
+    const [scriptLoading, setScriptLoading] = useState(false);
+    const [creativeTitle, setCreativeTitle] = useState("");
+    const [creativeNarration, setCreativeNarration] = useState("");
+    const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
+    const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+    const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
+    const [creativeReferenceLockMode, setCreativeReferenceLockMode] = useState<'strict' | 'inspired'>('strict');
+    const [animateOutputEnabled, setAnimateOutputEnabled] = useState(true);
+    const [storyAnimationEnabled, setStoryAnimationEnabled] = useState(true);
+    const [storyVoiceId, setStoryVoiceId] = useState("");
+    const [storyVoiceSpeed, setStoryVoiceSpeed] = useState(1);
+    const [storyPacingMode, setStoryPacingMode] = useState<'standard' | 'fast' | 'very_fast'>('standard');
+    const [artStyle, setArtStyle] = useState('auto');
+    const [cinematicBoostEnabled, setCinematicBoostEnabled] = useState(false);
+    const [storyVoices, setStoryVoices] = useState<any[]>([]);
+    const [storyVoicesLoading, setStoryVoicesLoading] = useState(false);
+    const [storyPreviewLoading, setStoryPreviewLoading] = useState(false);
+    const [storyVoicesSource, setStoryVoicesSource] = useState<'unknown' | 'elevenlabs' | 'fallback'>('unknown');
+    const [storyVoicesWarning, setStoryVoicesWarning] = useState('');
+    const [sceneBuildLoading, setSceneBuildLoading] = useState(false);
+    const [sceneBuildError, setSceneBuildError] = useState<string | null>(null);
+    const [scriptScenesReady, setScriptScenesReady] = useState(false);
+    const [imageBatchSize, setImageBatchSize] = useState<3 | 5 | 8 | 15>(3);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+    const [bulkImageGenRunning, setBulkImageGenRunning] = useState(false);
+    const [bulkImageGenDone, setBulkImageGenDone] = useState(0);
+    const [bulkImageGenTotal, setBulkImageGenTotal] = useState(0);
+    const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
+    const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
+    const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
+    const [projectsLoading, setProjectsLoading] = useState(false);
+    const [finalizeError, setFinalizeError] = useState<string | null>(null);
+    const [regeneratingAutoScenes, setRegeneratingAutoScenes] = useState<Record<number, boolean>>({});
+    const [showQuickStart, setShowQuickStart] = useState(false);
+    const [quickStartStep, setQuickStartStep] = useState(0);
+    const restoreDoneRef = useRef(false);
+    const hydratedSceneImagesSessionRef = useRef<string | null>(null);
+    const persistKey = session ? `nyptid_create_state_${session.user.id}` : "nyptid_create_state_guest";
+    const quickStartSeenKey = session ? `nyptid_quickstart_seen_${session.user.id}` : "nyptid_quickstart_seen_guest";
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(`${API}/api/languages`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setLanguages(data.languages || []);
+                }
+            } catch { /* silent */ }
+        })();
+    }, []);
+
+    // 1080p is now enabled by default; backend still enforces plan/env caps.
+    const canUse1080p = true;
+    const animationCreditExhausted = !isAdmin && (requiresTopup || Number(creditsTotalRemaining) <= 0);
+    const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
+
+    const templates = [
+        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
+        { id: 'story', title: 'AI Stories', desc: 'Cinematic story shorts', icon: '🎬' },
+        { id: 'motivation', title: 'Motivation', desc: 'Powerful life advice', icon: '🔥' },
+        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
+        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
+        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
+        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
+        { id: 'objects', title: 'Objects Explain', desc: 'Talking objects', icon: '🔌' },
+        { id: 'wouldyourather', title: 'Would You Rather', desc: 'Impossible dilemmas', icon: '🤔' },
+        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true crime', icon: '👻' },
+        { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
+        { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
+        { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
+    ];
+    const artStyleOptions = [
+        { id: 'auto', label: 'Auto (Model Best)', desc: 'Uses template-optimized style defaults.' },
+        { id: 'cinematic_realism', label: 'Cinematic Realism', desc: 'Photoreal cinematic look.' },
+        { id: 'commercial_polish', label: 'Commercial Polish', desc: 'Premium ad-style clarity.' },
+        { id: 'moody_noir', label: 'Moody Noir', desc: 'Dramatic low-key cinematic tone.' },
+        { id: 'bright_lifestyle', label: 'Bright Lifestyle', desc: 'Clean bright modern aesthetic.' },
+    ];
+    const supportsArtStyle = selectedTemplate !== 'skeleton';
+    const templateIds = new Set(templates.map(t => t.id));
+    useEffect(() => {
+        if (!templateIds.has(selectedTemplate)) {
+            setSelectedTemplate('skeleton');
+        }
+    }, [selectedTemplate]);
+    useEffect(() => {
+        if (selectedTemplate !== 'story' && storyAnimationEnabled !== true) {
+            setStoryAnimationEnabled(true);
+        }
+    }, [selectedTemplate, storyAnimationEnabled]);
+    useEffect(() => {
+        if (animationCreditExhausted && animateOutputEnabled) {
+            setAnimateOutputEnabled(false);
+            setStoryAnimationEnabled(false);
+        }
+    }, [animationCreditExhausted, animateOutputEnabled]);
+    useEffect(() => {
+        if (creativeMode !== 'script_to_short') {
+            setSceneBuildLoading(false);
+            setSceneBuildError(null);
+            setScriptScenesReady(false);
+            setBulkImageGenRunning(false);
+            setBulkImageGenDone(0);
+            setBulkImageGenTotal(0);
+        }
+    }, [creativeMode]);
+
+    const authHeaders = (): Record<string, string> => {
+        const h: Record<string, string> = { "Content-Type": "application/json" };
+        if (session) h["Authorization"] = `Bearer ${session.access_token}`;
+        return h;
+    };
+    const fileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => reject(new Error("Failed to read reference image"));
+        reader.readAsDataURL(file);
+    });
+
+    useEffect(() => {
+        if (!jobId) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
+                const data = await res.json();
+                setJobStatus(data);
+                if (data.status === "complete" || data.status === "error") {
+                    clearInterval(interval);
+                    setLoading(false);
+                }
+            } catch { /* retry */ }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [jobId]);
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!session || restoreDoneRef.current) return;
+        restoreDoneRef.current = true;
+        try {
+            const raw = localStorage.getItem(persistKey);
+            if (!raw) return;
+            const saved = JSON.parse(raw) as Partial<CreatePanelPersistedState>;
+            if (saved.selectedTemplate) setSelectedTemplate(saved.selectedTemplate);
+            if (saved.resolution === '720p' || saved.resolution === '1080p') setResolution(saved.resolution);
+            if (typeof saved.language === 'string' && saved.language) setLanguage(saved.language);
+            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative' || saved.creativeMode === 'script_to_short') setCreativeMode(saved.creativeMode);
+            if (saved.creativeStep === 'topic' || saved.creativeStep === 'edit' || saved.creativeStep === 'generating') setCreativeStep(saved.creativeStep);
+            if (typeof saved.prompt === 'string') setPrompt(saved.prompt);
+            if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null);
+            if (Array.isArray(saved.creativeScenes)) {
+                setCreativeScenes(
+                    saved.creativeScenes.map((s: any) => ({
+                        ...s,
+                        // Keep heavy base64 payloads on backend storage; hydrate on demand after restore.
+                        imageData: (typeof s?.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s?.imageData,
+                    }))
+                );
+            }
+            if (typeof saved.creativeTitle === 'string') setCreativeTitle(saved.creativeTitle);
+            if (typeof saved.creativeNarration === 'string') setCreativeNarration(saved.creativeNarration);
+            if (saved.creativeReferenceLockMode === 'strict' || saved.creativeReferenceLockMode === 'inspired') {
+                setCreativeReferenceLockMode(saved.creativeReferenceLockMode);
+            }
+            if (typeof saved.animateOutputEnabled === 'boolean') setAnimateOutputEnabled(saved.animateOutputEnabled);
+            if (typeof saved.storyAnimationEnabled === 'boolean') setStoryAnimationEnabled(saved.storyAnimationEnabled);
+            if (typeof saved.storyVoiceId === 'string') setStoryVoiceId(saved.storyVoiceId);
+            if (typeof saved.storyVoiceSpeed === 'number' && Number.isFinite(saved.storyVoiceSpeed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, saved.storyVoiceSpeed)));
+            }
+            if (saved.storyPacingMode === 'standard' || saved.storyPacingMode === 'fast' || saved.storyPacingMode === 'very_fast') {
+                setStoryPacingMode(saved.storyPacingMode);
+            }
+            if (typeof saved.artStyle === 'string' && saved.artStyle) {
+                setArtStyle(saved.artStyle);
+            }
+            if (typeof saved.cinematicBoostEnabled === 'boolean') {
+                setCinematicBoostEnabled(saved.cinematicBoostEnabled);
+            }
+            if (typeof saved.jobId === 'string' && saved.jobId) {
+                setJobId(saved.jobId);
+                setLoading(true);
+            }
+        } catch {
+            // ignore malformed saved state
+        }
+    }, [session, persistKey]);
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!session || !restoreDoneRef.current) return;
+        const safeScenes = creativeScenes.map((s) => ({
+            index: s.index,
+            narration: s.narration,
+            visual_description: s.visual_description,
+            duration_sec: s.duration_sec,
+            // Avoid persisting large base64 image payloads to localStorage.
+            imageData: (typeof s.imageData === 'string' && s.imageData.startsWith('data:')) ? undefined : s.imageData,
+            generation_id: s.generation_id,
+            imageError: s.imageError,
+            imageLoading: s.imageLoading,
+        }));
+        const snapshot: CreatePanelPersistedState = {
+            selectedTemplate,
+            resolution,
+            language,
+            creativeMode,
+            creativeStep,
+            prompt,
+            sessionId,
+            creativeScenes: safeScenes,
+            creativeTitle,
+            creativeNarration,
+            creativeReferenceLockMode,
+            animateOutputEnabled,
+            storyAnimationEnabled,
+            storyVoiceId,
+            storyVoiceSpeed,
+            storyPacingMode,
+            artStyle,
+            cinematicBoostEnabled,
+            jobId,
+            ts: Date.now(),
+        };
+        try {
+            localStorage.setItem(persistKey, JSON.stringify(snapshot));
+        } catch {
+            // ignore storage quota failures
+        }
+    }, [
+        session,
+        persistKey,
+        selectedTemplate,
+        resolution,
+        language,
+        creativeMode,
+        creativeStep,
+        prompt,
+        sessionId,
+        creativeScenes,
+        creativeTitle,
+        creativeNarration,
+        creativeReferenceLockMode,
+        animateOutputEnabled,
+        storyAnimationEnabled,
+        storyVoiceId,
+        storyVoiceSpeed,
+        storyPacingMode,
+        artStyle,
+        cinematicBoostEnabled,
+        jobId,
+    ]);
+
+    const quickStartSteps = [
+        {
+            title: "1) Pick Template + Mode",
+            text: "Choose Skeleton AI, AI Stories, or Motivation, then select Auto, Creative Control, or Script to Short.",
+        },
+        {
+            title: "2) Set Output + Prompt",
+            text: "Pick resolution/language, write your topic or full script, then attach optional style reference if needed.",
+        },
+        {
+            title: "3) Animation Credit Gate",
+            text: "If animated credits are available, you can keep Animation ON. If not, Studio forces Slideshow Mode automatically.",
+        },
+        {
+            title: "4) Generate Flow",
+            text: "Auto: generate directly. Creative/Script to Short: Generate Scenes -> Generate Images -> Final Render.",
+        },
+    ];
+
+    useEffect(() => {
+        if (!session) return;
+        try {
+            const seen = localStorage.getItem(quickStartSeenKey) === "1";
+            setShowQuickStart(!seen);
+            setQuickStartStep(0);
+        } catch {
+            setShowQuickStart(true);
+            setQuickStartStep(0);
+        }
+    }, [session, quickStartSeenKey]);
+
+    const dismissQuickStart = (dontShowAgain: boolean) => {
+        if (dontShowAgain) {
+            try { localStorage.setItem(quickStartSeenKey, "1"); } catch { /* ignore */ }
+        }
+        setShowQuickStart(false);
+    };
+
+    const quickStartCard = (showQuickStart && createSubTab === 'builder') ? (
+        <div className="fixed bottom-4 right-4 z-40 w-[330px] max-w-[calc(100vw-2rem)] rounded-2xl border border-amber-300/35 bg-[#2a1e09]/95 shadow-2xl shadow-black/50 p-4">
+            <div className="flex items-start justify-between gap-2">
+                <div>
+                    <p className="text-xs uppercase tracking-wider text-amber-300 font-semibold">Studio Quick Start</p>
+                    <p className="text-sm font-bold text-amber-100 mt-1">{quickStartSteps[quickStartStep]?.title}</p>
+                </div>
+                <button
+                    onClick={() => dismissQuickStart(false)}
+                    className="text-amber-200/80 hover:text-white transition"
+                    aria-label="Close quick start"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+            <p className="text-xs text-amber-100/90 mt-2 leading-relaxed">
+                {quickStartSteps[quickStartStep]?.text}
+            </p>
+            <div className="mt-3 flex items-center gap-1.5">
+                {quickStartSteps.map((_, i) => (
+                    <span key={`qs-dot-${i}`} className={`h-1.5 rounded-full transition-all ${i === quickStartStep ? 'w-5 bg-amber-300' : 'w-2 bg-amber-200/40'}`} />
+                ))}
+            </div>
+            <div className="mt-4 flex items-center justify-between">
+                <button
+                    onClick={() => setQuickStartStep((s) => Math.max(0, s - 1))}
+                    disabled={quickStartStep === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 disabled:opacity-40"
+                >
+                    Back
+                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => dismissQuickStart(true)}
+                        className="px-2.5 py-1.5 text-xs rounded-md border border-amber-200/30 text-amber-100 hover:bg-amber-200/10"
+                    >
+                        Don't show again
+                    </button>
+                    {quickStartStep < quickStartSteps.length - 1 ? (
+                        <button
+                            onClick={() => setQuickStartStep((s) => Math.min(quickStartSteps.length - 1, s + 1))}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-400 text-black hover:bg-amber-300"
+                        >
+                            Next
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => dismissQuickStart(false)}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-500 text-white hover:bg-emerald-400"
+                        >
+                            Got it
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    ) : null;
+
+    useEffect(() => {
+        if (!CREATE_WORKFLOW_PERSISTENCE_ENABLED) return;
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/status`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (cancelled) return;
+                setCreativeReferenceAttached(Boolean(data?.has_reference_image));
+                if (data?.reference_lock_mode === 'strict' || data?.reference_lock_mode === 'inspired') {
+                    setCreativeReferenceLockMode(data.reference_lock_mode);
+                }
+                if (typeof data?.art_style === 'string' && data.art_style) {
+                    setArtStyle(data.art_style);
+                }
+                if (data?.has_reference_image && !creativeReferenceImage) {
+                    setCreativeReferenceStatus('ready');
+                }
+            } catch {
+                // ignore restore status errors
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeReferenceImage]);
+
+    useEffect(() => {
+        if (!sessionId || (creativeMode !== 'creative' && creativeMode !== 'script_to_short') || !session) return;
+        if (hydratedSceneImagesSessionRef.current === sessionId) return;
+        if (!creativeScenes.some((s) => !s.imageData && !!s.generation_id)) return;
+        hydratedSceneImagesSessionRef.current = sessionId;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/scene-images`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (cancelled) return;
+                const byIndex = new Map<number, string>();
+                for (const item of (data?.scene_images || [])) {
+                    if (typeof item?.scene_index === 'number' && typeof item?.image_data === 'string') {
+                        byIndex.set(item.scene_index, item.image_data);
+                    }
+                }
+                if (byIndex.size === 0) return;
+                setCreativeScenes((prev) =>
+                    prev.map((scene) => {
+                        if (scene.imageData) return scene;
+                        const hydrated = byIndex.get(scene.index);
+                        return hydrated ? { ...scene, imageData: hydrated } : scene;
+                    })
+                );
+            } catch {
+                // silent hydrate failure; user can still regenerate per-scene
+                hydratedSceneImagesSessionRef.current = null;
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [sessionId, creativeMode, session, creativeScenes]);
+
+    const loadProjects = useCallback(async () => {
+        if (!session) return;
+        setProjectsLoading(true);
+        try {
+            const res = await fetch(`${API}/api/projects`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to load projects");
+            const data = await res.json();
+            setProjectDrafts(data.drafts || []);
+            setProjectRenders(data.renders || []);
+        } catch {
+            setProjectDrafts([]);
+            setProjectRenders([]);
+        } finally {
+            setProjectsLoading(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        if (createSubTab !== 'projects') return;
+        loadProjects();
+    }, [createSubTab, loadProjects]);
+
+    useEffect(() => {
+        if (selectedTemplate !== 'story') return;
+        if (!session) return;
+        let cancelled = false;
+        const run = async () => {
+            setStoryVoicesLoading(true);
+            try {
+                const res = await fetch(`${API}/api/voices`, {
+                    headers: { Authorization: `Bearer ${session.access_token}` },
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!cancelled) {
+                    const voices = Array.isArray(data?.voices) ? data.voices : [];
+                    setStoryVoices(voices);
+                    setStoryVoicesSource(data?.source === 'elevenlabs' ? 'elevenlabs' : (data?.source === 'fallback' ? 'fallback' : 'unknown'));
+                    setStoryVoicesWarning(String(data?.warning || ""));
+                    if (!storyVoiceId && voices.length > 0) {
+                        setStoryVoiceId(String(voices[0].voice_id || ""));
+                    }
+                }
+            } catch {
+                if (!cancelled) {
+                    setStoryVoices([]);
+                    setStoryVoicesSource('unknown');
+                    setStoryVoicesWarning("Voice catalog unavailable right now.");
+                }
+            } finally {
+                if (!cancelled) setStoryVoicesLoading(false);
+            }
+        };
+        void run();
+        return () => { cancelled = true; };
+    }, [selectedTemplate, session, storyVoiceId]);
+
+    const previewStoryVoice = async () => {
+        if (!session || !storyVoiceId || storyPreviewLoading) return;
+        setStoryPreviewLoading(true);
+        try {
+            const res = await fetch(`${API}/api/voices/preview`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ voice_id: storyVoiceId }),
+            });
+            if (!res.ok) throw new Error("Preview failed");
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => URL.revokeObjectURL(url);
+            void audio.play();
+        } catch {
+            alert("Voice preview failed");
+        } finally {
+            setStoryPreviewLoading(false);
+        }
+    };
+
+    const handleGenerate = async () => {
+        if (!prompt) return;
+        if (creativeMode === 'creative') {
+            await handleCreativeStart();
+            return;
+        }
+        if (creativeMode === 'script_to_short') {
+            await handleScriptToShortStart();
+            return;
+        }
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        try {
+            let referenceImageDataUrl = "";
+            if (creativeReferenceImage) {
+                referenceImageDataUrl = await fileToDataUrl(creativeReferenceImage);
+            }
+            const res = await fetch(`${GENERATION_API}/api/generate`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: 'auto',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    animation_enabled: effectiveAnimationEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    reference_image_url: referenceImageDataUrl,
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            const data = await res.json();
+            if (data.job_id) setJobId(data.job_id);
+            else { setLoading(false); }
+        } catch { setLoading(false); }
+    };
+
+    const handleRegenerateAutoScene = async (sceneIndex: number) => {
+        const targetJobId = jobId || jobStatus?.job_id;
+        if (!targetJobId) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
+        try {
+            const res = await fetch(`${GENERATION_API}/api/auto/regenerate-scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    job_id: targetJobId,
+                    scene_index: sceneIndex,
+                    mint_mode: mintMode,
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                throw new Error(data?.detail || "Failed to regenerate scene image");
+            }
+            const updatedImage = data?.image;
+            if (updatedImage) {
+                setJobStatus((prev: any) => {
+                    if (!prev) return prev;
+                    const nextImages = Array.isArray(prev.scene_images) ? [...prev.scene_images] : [];
+                    while (nextImages.length <= sceneIndex) nextImages.push(null);
+                    nextImages[sceneIndex] = updatedImage;
+                    return { ...prev, scene_images: nextImages };
+                });
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to regenerate scene image");
+        } finally {
+            setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: false }));
+        }
+    };
+
+    const handleScriptToShortStart = async () => {
+        const scriptText = prompt.trim();
+        if (!scriptText) return;
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("Script to Short");
+        setCreativeNarration(scriptText);
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        setCreativeStep('edit');
+    };
+
+    const handleGenerateScriptToShortScenes = async () => {
+        const scriptText = (creativeMode === 'script_to_short'
+            ? creativeNarration.trim()
+            : (prompt.trim() || creativeNarration.trim())
+        );
+        if (!scriptText) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
+        setSceneBuildLoading(true);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/script`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    prompt: scriptText,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    mode: generationMode,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    animation_enabled: effectiveAnimationEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                }),
+            });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(errText || "Failed to start Script to Short");
+            }
+            const data = await res.json();
+            setSessionId(data.session_id);
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(errText || "Failed to upload reference style image");
+                }
+                setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
+            }
+            const generatedScenes: CreativeScene[] = (data.scenes || []).map((s: any, i: number) => ({
+                index: i,
+                narration: String(s?.narration || ""),
+                visual_description: String(s?.visual_description || ""),
+                duration_sec: Number(s?.duration_sec || 5),
+            }));
+            setCreativeScenes(generatedScenes.length > 0 ? generatedScenes : [{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                duration_sec: 5,
+            }]);
+            setCreativeTitle(data.title || (creativeMode === 'script_to_short' ? "Script to Short" : (prompt || "Creative Draft")));
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(scriptText);
+            }
+            setScriptScenesReady(generatedScenes.length > 0);
+        } catch (e: any) {
+            setSceneBuildError(e?.message || "Failed to generate scenes");
+        } finally {
+            setSceneBuildLoading(false);
+        }
+    };
+
+    const handleCreativeStart = async () => {
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setScriptLoading(true);
+        setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/session`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    template: selectedTemplate,
+                    topic: prompt || "Untitled",
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            if (!res.ok) throw new Error("Failed to create session");
+            const data = await res.json();
+            setSessionId(data.session_id);
+
+            if (creativeReferenceImage) {
+                const uploadForm = new FormData();
+                uploadForm.append("session_id", data.session_id);
+                uploadForm.append("reference_image", creativeReferenceImage);
+                uploadForm.append("reference_lock_mode", creativeReferenceLockMode);
+                const refRes = await fetch(`${GENERATION_API}/api/creative/reference-image`, {
+                    method: "POST",
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                    body: uploadForm,
+                });
+                if (!refRes.ok) {
+                    const errText = await refRes.text().catch(() => "");
+                    throw new Error(errText || "Failed to upload reference style image");
+                }
+                setCreativeReferenceStatus('ready');
+                setCreativeReferenceAttached(true);
+            }
+
+            setCreativeTitle(prompt || "Untitled Short");
+            if (!creativeNarration.trim()) {
+                setCreativeNarration(prompt || "");
+            }
+            setCreativeScenes([{
+                index: 0,
+                narration: "",
+                visual_description: "",
+                duration_sec: 5,
+            }]);
+            setScriptScenesReady(false);
+            setCreativeStep('edit');
+        } catch (e: any) {
+            setCreativeReferenceStatus(creativeReferenceImage ? 'error' : 'idle');
+            alert(e.message || "Failed to start creative session");
+        } finally {
+            setScriptLoading(false);
+        }
+    };
+
+    const handleAddScene = () => {
+        setCreativeScenes(prev => [...prev, {
+            index: prev.length,
+            narration: "",
+            visual_description: "",
+            duration_sec: 5,
+        }]);
+    };
+
+    const handleRemoveScene = (index: number) => {
+        if (creativeScenes.length <= 1) return;
+        setCreativeScenes(prev => prev.filter((_, i) => i !== index).map((s, i) => ({ ...s, index: i })));
+    };
+
+    const handleGenerateSceneImage = async (sceneIndex: number) => {
+        if (!sessionId) return;
+        const currentScenes = creativeScenesRef.current;
+        if (sceneIndex >= currentScenes.length || !currentScenes[sceneIndex]) return;
+        const scene = currentScenes[sceneIndex];
+        if (!scene.visual_description.trim()) return;
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    prompt: scene.visual_description,
+                    scene_index: sceneIndex,
+                    session_id: sessionId,
+                    template: selectedTemplate,
+                    resolution: canUse1080p ? resolution : '720p',
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    reference_lock_mode: creativeReferenceLockMode,
+                }),
+            });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => "Unknown error");
+                console.error(`Scene ${sceneIndex} image gen failed:`, res.status, errText);
+                throw new Error(errText);
+            }
+            const data = await res.json();
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? { ...s, imageData: data.image_data, imageLoading: false, generation_id: data.generation_id } : s
+            ));
+        } catch (err: any) {
+            const msg = err?.message || "Image generation failed";
+            console.error(`Scene ${sceneIndex} image gen error:`, msg);
+            setCreativeScenes(prev => prev.map((s, i) =>
+                i === sceneIndex ? { ...s, imageLoading: false, imageError: msg } : s
+            ));
+        }
+    };
+
+    const handleGenerateSceneImageBatch = async () => {
+        if (!sessionId) return;
+        const scenes = creativeScenesRef.current;
+        const allTargets = scenes
+            .map((scene, idx) => ({ scene, idx }))
+            .filter(({ scene }) => !!scene.visual_description.trim());
+        if (allTargets.length === 0) return;
+        const pendingTargets = allTargets.filter(({ scene }) => !scene.imageData);
+        const candidatePool = pendingTargets.length > 0 ? pendingTargets : allTargets;
+        const batchLimit = Math.max(3, Number(imageBatchSize || 3));
+        const targets = candidatePool.slice(0, batchLimit);
+        if (targets.length === 0) return;
+        setBulkImageGenRunning(true);
+        setBulkImageGenTotal(targets.length);
+        setBulkImageGenDone(0);
+        try {
+            for (const { idx } of targets) {
+                await handleGenerateSceneImage(idx);
+                setBulkImageGenDone((prev) => prev + 1);
+            }
+        } finally {
+            setBulkImageGenRunning(false);
+        }
+    };
+
+    const handleUpdateScene = (index: number, field: keyof CreativeScene, value: string | number) => {
+        setCreativeScenes(prev => prev.map((s, i) =>
+            i === index ? { ...s, [field]: value } : s
+        ));
+    };
+
+    const summarizeSceneError = (message?: string) => {
+        const text = String(message || "").trim();
+        if (!text) return "Image generation failed";
+        return text.length > 260 ? `${text.slice(0, 260)}...` : text;
+    };
+
+    const handleFinalize = async () => {
+        setFinalizeError(null);
+        if (!sessionId) {
+            setFinalizeError("No active session. Please go back and start a new project.");
+            return;
+        }
+        if (!creativeNarration.trim()) {
+            setFinalizeError("Please write a script / narration before rendering.");
+            return;
+        }
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        setCreativeStep('generating');
+        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story';
+        const qualityMode = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
+        const transitionStyle = cinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
+        const microEscalationMode = cinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation');
+        try {
+            const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
+                method: "POST",
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    template: selectedTemplate,
+                    resolution: canUse1080p ? resolution : '720p',
+                    language,
+                    animation_enabled: effectiveAnimationEnabled,
+                    story_animation_enabled: selectedTemplate === 'story' ? effectiveAnimationEnabled : true,
+                    quality_mode: qualityMode,
+                    mint_mode: mintMode,
+                    art_style: supportsArtStyle ? artStyle : 'auto',
+                    transition_style: transitionStyle,
+                    micro_escalation_mode: microEscalationMode,
+                    cinematic_boost: cinematicBoostEnabled,
+                    voice_id: selectedTemplate === 'story' ? storyVoiceId : "",
+                    voice_speed: selectedTemplate === 'story' ? storyVoiceSpeed : 1,
+                    pacing_mode: selectedTemplate === 'story' ? storyPacingMode : 'standard',
+                    subtitles_enabled: selectedTemplate === 'story' ? subtitlesEnabled : true,
+                    reference_lock_mode: creativeReferenceLockMode,
+                    narration: creativeNarration,
+                    scenes: creativeScenes.map(s => ({
+                        narration: "",
+                        visual_description: s.visual_description,
+                        duration_sec: s.duration_sec,
+                    })),
+                }),
+            });
+            if (!res.ok) {
+                const errData = await res.json().catch(() => null);
+                const msg = errData?.detail || `Server error (${res.status}). The backend may be overloaded — try again in a moment.`;
+                setFinalizeError(msg);
+                setLoading(false);
+                setCreativeStep('edit');
+                return;
+            }
+            const data = await res.json();
+            if (data.job_id) {
+                setJobId(data.job_id);
+            } else {
+                setFinalizeError("Server returned no job ID. Please try again.");
+                setLoading(false);
+                setCreativeStep('edit');
+            }
+        } catch (err: any) {
+            setFinalizeError(err?.message || "Network error — the server may be down or overloaded. Please try again.");
+            setLoading(false);
+            setCreativeStep('edit');
+        }
+    };
+
+    const handleResetCreative = () => {
+        setCreativeStep('topic');
+        setSessionId(null);
+        setCreativeScenes([]);
+        setCreativeTitle("");
+        setCreativeNarration("");
+        setSceneBuildLoading(false);
+        setSceneBuildError(null);
+        setScriptScenesReady(false);
+        setCreativeReferenceStatus(creativeReferenceImage ? 'ready' : 'idle');
+        setCreativeReferenceAttached(false);
+        setBulkImageGenRunning(false);
+        setBulkImageGenDone(0);
+        setBulkImageGenTotal(0);
+        setJobId(null);
+        setJobStatus(null);
+        setLoading(false);
+        setFinalizeError(null);
+        try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
+    };
+
+    const openDraftProject = async (projectId: string) => {
+        if (!session) return;
+        try {
+            const res = await fetch(`${API}/api/projects/${projectId}`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error("Failed to open draft");
+            const data = await res.json();
+            const p: ProjectRow = data.project;
+            setCreateSubTab('builder');
+            setSelectedTemplate(p.template || 'skeleton');
+            setPrompt(p.topic || '');
+            if (p.resolution === '720p' || p.resolution === '1080p') setResolution(p.resolution);
+            if (p.language) setLanguage(p.language);
+            if (typeof p.story_animation_enabled === 'boolean') {
+                setStoryAnimationEnabled(p.story_animation_enabled);
+            } else {
+                setStoryAnimationEnabled(true);
+            }
+            if (typeof p.animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.animation_enabled);
+            } else if (typeof p.story_animation_enabled === 'boolean') {
+                setAnimateOutputEnabled(p.story_animation_enabled);
+            } else {
+                setAnimateOutputEnabled(true);
+            }
+            setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : (p.mode === 'creative' ? 'creative' : 'auto'));
+            if (typeof p.voice_id === 'string') setStoryVoiceId(p.voice_id);
+            if (typeof p.voice_speed === 'number' && Number.isFinite(p.voice_speed)) {
+                setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, p.voice_speed)));
+            }
+            if (p.pacing_mode === 'standard' || p.pacing_mode === 'fast' || p.pacing_mode === 'very_fast') {
+                setStoryPacingMode(p.pacing_mode);
+            }
+            if (typeof p.art_style === 'string' && p.art_style) {
+                setArtStyle(p.art_style);
+            } else {
+                setArtStyle('auto');
+            }
+            setCinematicBoostEnabled(Boolean(p.cinematic_boost));
+            if (p.mode === 'creative' || p.mode === 'script_to_short') {
+                setCreativeStep('edit');
+                setSessionId(p.session_id || null);
+                setSceneBuildLoading(false);
+                setCreativeScenes(Array.isArray(p.scenes) && p.scenes.length > 0 ? p.scenes : [{ index: 0, narration: "", visual_description: "", duration_sec: 5 }]);
+                setCreativeTitle(p.title || p.topic || 'Untitled Short');
+                setCreativeNarration(p.narration || "");
+                setScriptScenesReady(Boolean((p.session_id || "").trim()) && Array.isArray(p.scenes) && p.scenes.length > 0);
+                setSceneBuildError(null);
+            } else if (p.job_id) {
+                setJobId(p.job_id);
+                setLoading(true);
+            }
+        } catch (e: any) {
+            alert(e?.message || "Failed to open project");
+        }
+    };
+
+    if ((creativeMode === 'creative' || creativeMode === 'script_to_short') && creativeStep === 'edit') {
+    const hasNarration = creativeNarration.trim().length > 0;
+    const promptScenes = creativeScenes.filter((s) => !!s.visual_description.trim());
+    const promptSceneCount = promptScenes.length;
+    const imageReadyCount = promptScenes.filter((s) => !!s.imageData).length;
+    const allPromptedImagesReady = promptSceneCount > 0 && imageReadyCount === promptSceneCount;
+    const showGenerateScenes = creativeMode === 'creative' || creativeMode === 'script_to_short';
+
+        return (
+            <div className="max-w-4xl mx-auto px-6 pb-10 space-y-6">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h1 className="text-xl font-bold text-white">{creativeTitle}</h1>
+                        <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; Write your script, generate images, then render</p>
+                    </div>
+                    <button onClick={handleResetCreative} className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-gray-400 transition flex items-center gap-2">
+                        <ArrowRight className="w-4 h-4 rotate-180" /> Back
+                    </button>
+                </div>
+
+                {showGenerateScenes && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                        <p className="text-sm font-semibold text-amber-300">
+                            {creativeMode === 'script_to_short' ? 'Script to Short *IN PRE-ALPHA*' : 'Creative Scene Builder'}
+                        </p>
+                        <p className="text-xs text-amber-200/80 mt-1">Step 1: click Generate Scenes. Step 2: Generate Images in manual batches. No auto spending outside AUTO mode.</p>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <button
+                                onClick={handleGenerateScriptToShortScenes}
+                                disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
+                            >
+                                {sceneBuildLoading ? "Generating scenes..." : (scriptScenesReady ? "Regenerate Scenes" : "Generate Scenes")}
+                            </button>
+                            <select
+                                value={imageBatchSize}
+                                onChange={(e) => setImageBatchSize(Number(e.target.value) as 3 | 5 | 8 | 15)}
+                                className="bg-black/30 border border-white/[0.12] rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none"
+                                disabled={!sessionId || sceneBuildLoading || bulkImageGenRunning}
+                            >
+                                <option value={3}>Batch 3</option>
+                                <option value={5}>Batch 5</option>
+                                <option value={8}>Batch 8</option>
+                                <option value={15}>Batch 15</option>
+                            </select>
+                            <button
+                                onClick={handleGenerateSceneImageBatch}
+                                disabled={bulkImageGenRunning || !sessionId || sceneBuildLoading || promptSceneCount === 0}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white transition"
+                            >
+                                {bulkImageGenRunning ? "Generating images..." : "Generate Images"}
+                            </button>
+                            {!sessionId && (
+                                <p className="text-xs text-amber-100/90">Generate scenes first.</p>
+                            )}
+                            {(bulkImageGenRunning || bulkImageGenTotal > 0) && (
+                                <p className="text-xs text-amber-100/90">
+                                    {bulkImageGenRunning
+                                        ? `Batch progress: ${bulkImageGenDone}/${bulkImageGenTotal}`
+                                        : `Images ready: ${imageReadyCount}/${promptSceneCount}`}
+                                </p>
+                            )}
+                            {sceneBuildError && (
+                                <p className="text-xs text-red-300">{sceneBuildError}</p>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {sceneBuildLoading && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-4 flex items-center gap-3">
+                        <Loader2 className="w-4 h-4 text-cyan-300 animate-spin" />
+                        <p className="text-sm text-cyan-100">Generating scenes from your script... this can take 10-30 seconds.</p>
+                    </div>
+                )}
+
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-2">
+                    <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Script / Narration (voiceover for the entire short)</label>
+                    <textarea
+                        value={creativeNarration}
+                        onChange={(e) => setCreativeNarration(e.target.value)}
+                        rows={4}
+                        placeholder="Write the full voiceover script for your short here. This narration will play across all scenes..."
+                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y"
+                    />
+                    <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
+                </div>
+
+                {supportsArtStyle && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <p className="text-sm font-semibold text-white">Art Style</p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => setArtStyle(style.id)}
+                                    className={`rounded-lg p-3 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{style.label}</p>
+                                    <p className="text-xs text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">Voice + Pacing (Pre-Render)</p>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <select
+                                value={storyVoiceId}
+                                onChange={(e) => setStoryVoiceId(e.target.value)}
+                                className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                            >
+                                {storyVoicesLoading ? (
+                                    <option value="">Loading voices...</option>
+                                ) : storyVoices.length > 0 ? (
+                                    storyVoices.map((v: any) => (
+                                        <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                            {String(v.name || v.voice_id || "Voice")}
+                                        </option>
+                                    ))
+                                ) : (
+                                    <option value="">Default voice</option>
+                                )}
+                            </select>
+                            {storyVoicesWarning ? (
+                                <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                            ) : storyVoicesSource === 'fallback' ? (
+                                <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                            ) : null}
+                            <input
+                                type="range"
+                                min={0.8}
+                                max={1.35}
+                                step={0.05}
+                                value={storyVoiceSpeed}
+                                onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                className="w-full accent-cyan-500"
+                            />
+                            <div className="grid grid-cols-3 gap-1">
+                                {[
+                                    { id: 'standard', label: 'Standard' },
+                                    { id: 'fast', label: 'Fast' },
+                                    { id: 'very_fast', label: 'Very Fast' },
+                                ].map((p) => (
+                                    <button
+                                        key={p.id}
+                                        type="button"
+                                        onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                        className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                            storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                        }`}
+                                    >
+                                        {p.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <label className="flex items-center gap-2 text-xs text-gray-300 md:justify-end">
+                                <input
+                                    type="checkbox"
+                                    checked={subtitlesEnabled}
+                                    onChange={(e) => setSubtitlesEnabled(e.target.checked)}
+                                    className="accent-cyan-500"
+                                />
+                                Burn subtitles
+                            </label>
+                        </div>
+                    </div>
+                )}
+
+                <div className="space-y-4">
+                    {creativeScenes.map((scene, idx) => (
+                        <div key={idx} className="rounded-xl border border-white/[0.08] bg-white/[0.02] overflow-hidden">
+                            <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+                                <span className="text-sm font-bold text-violet-400">Scene {idx + 1}</span>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-1.5">
+                                        <label className="text-xs text-gray-600">Duration</label>
+                                        <select
+                                            value={scene.duration_sec}
+                                            onChange={(e) => handleUpdateScene(idx, 'duration_sec', Number(e.target.value))}
+                                            className="bg-black/30 border border-white/[0.08] rounded px-2 py-1 text-xs text-white focus:outline-none">
+                                            <option value={3}>3s</option>
+                                            <option value={4}>4s</option>
+                                            <option value={5}>5s</option>
+                                            <option value={6}>6s</option>
+                                            <option value={7}>7s</option>
+                                            <option value={8}>8s</option>
+                                            <option value={10}>10s</option>
+                                        </select>
+                                    </div>
+                                    {creativeScenes.length > 1 && (
+                                        <button onClick={() => handleRemoveScene(idx)} className="p-1 hover:bg-red-500/20 rounded transition" title="Remove scene">
+                                            <Trash2 className="w-4 h-4 text-red-400" />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="p-4 space-y-3">
+                                <div>
+                                    <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Image Prompt (what this scene looks like)</label>
+                                    <textarea
+                                        value={scene.visual_description}
+                                        onChange={(e) => handleUpdateScene(idx, 'visual_description', e.target.value)}
+                                        rows={2}
+                                        placeholder="Describe the visual for this scene, e.g. 'A 3D skeleton wearing a doctor's coat in a hospital setting, dark moody lighting'"
+                                        className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-none"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        onClick={() => handleGenerateSceneImage(idx)}
+                                        disabled={scene.imageLoading || !scene.visual_description.trim() || !sessionId || sceneBuildLoading}
+                                        className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2">
+                                        {scene.imageLoading ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
+                                        ) : scene.imageData ? (
+                                            <><Sparkles className="w-4 h-4" /> Regenerate</>
+                                        ) : (
+                                            <><Image className="w-4 h-4" /> Generate Image</>
+                                        )}
+                                    </button>
+                                    {scene.imageData && (
+                                        <span className="text-xs text-emerald-400 flex items-center gap-1">
+                                            <CheckCircle2 className="w-3 h-3" /> Image ready
+                                        </span>
+                                    )}
+                                </div>
+                                {scene.imageError && (
+                                    <p
+                                        className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2"
+                                        title={scene.imageError}
+                                    >
+                                        Error: {summarizeSceneError(scene.imageError)}
+                                    </p>
+                                )}
+                                {scene.imageData && (
+                                    <img src={scene.imageData} alt={`Scene ${idx + 1}`} className="rounded-lg w-full max-h-48 object-contain bg-black/40" />
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                <button onClick={handleAddScene}
+                    className="w-full py-3 border-2 border-dashed border-white/[0.1] hover:border-violet-500/40 rounded-xl text-gray-500 hover:text-violet-400 font-medium transition flex items-center justify-center gap-2">
+                    <Plus className="w-4 h-4" /> Add Scene
+                </button>
+
+                {finalizeError && (
+                    <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 flex items-start gap-3">
+                        <X className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5 cursor-pointer" onClick={() => setFinalizeError(null)} />
+                        <p className="text-sm text-red-300">{finalizeError}</p>
+                    </div>
+                )}
+
+                {!allPromptedImagesReady ? (
+                    <button
+                        onClick={handleGenerateSceneImageBatch}
+                        disabled={bulkImageGenRunning || sceneBuildLoading || !sessionId || promptSceneCount === 0}
+                        className="w-full py-4 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-cyan-600/20">
+                        {bulkImageGenRunning ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Generating images...</>
+                        ) : (
+                            <><Image className="w-5 h-5" /> Generate Images</>
+                        )}
+                    </button>
+                ) : (
+                    <button
+                        onClick={handleFinalize}
+                        disabled={loading || !hasNarration || !sessionId}
+                        className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-600/20">
+                        {loading ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Rendering your short...</>
+                        ) : (
+                            <><Film className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Animate & Render Final Video' : 'Render Slideshow Video'}</>
+                        )}
+                    </button>
+                )}
+
+                {!hasNarration && (
+                    <p className="text-center text-sm text-gray-600">Write your script above to render.</p>
+                )}
+                {!sessionId && (
+                    <p className="text-center text-sm text-amber-300">Generate scenes first, then render.</p>
+                )}
+                {sessionId && promptSceneCount > 0 && !allPromptedImagesReady && (
+                    <p className="text-center text-sm text-cyan-300">Generate images for all scene prompts before rendering.</p>
+                )}
+
+                {bulkImageGenRunning && (
+                    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[1px] flex items-center justify-center px-6">
+                        <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-slate-950/95 p-6 text-center space-y-3">
+                            <div className="flex items-center justify-center gap-2 text-cyan-200">
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                <p className="font-semibold">Generating images in batch...</p>
+                            </div>
+                            <p className="text-sm text-cyan-100/90">{bulkImageGenDone}/{bulkImageGenTotal} complete</p>
+                            <div className="h-2 w-full bg-white/10 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-cyan-500 transition-all"
+                                    style={{ width: `${bulkImageGenTotal > 0 ? Math.min(100, (bulkImageGenDone / bulkImageGenTotal) * 100) : 0}%` }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
+                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); setCreativeStep('edit'); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Back to Editor
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay className="w-full max-h-[500px] bg-black" src={`${GENERATION_API}/api/download/${jobStatus.output_file}`} />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                            <p className="text-gray-500 text-sm">
+                                                {jobStatus.resolution && <span className="text-violet-400 mr-2">{jobStatus.resolution}</span>}
+                                                {jobStatus.metadata?.tags?.map((t: string) => `#${t}`).join(' ')}
+                                            </p>
+                                        </div>
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                                    </div>
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" /> Download MP4
+                                    </a>
+                                    <button onClick={handleResetCreative}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Create Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} template={selectedTemplate} feature="creative" language={language} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                    </p>
+                                )}
+                                <JobDiagnostics jobStatus={jobStatus} />
+                            </div>
+                        )}
+                    </div>
+                )}
+                {quickStartCard}
+            </div>
+        );
+    }
+
+    return (
+            <div className="max-w-3xl mx-auto px-5 pb-10 space-y-5">
+                <div className="grid grid-cols-2 gap-2 p-1 rounded-xl border border-white/[0.06] bg-white/[0.02]">
+                    <button
+                        onClick={() => setCreateSubTab('builder')}
+                        className={`py-2.5 rounded-lg text-sm font-medium transition ${
+                            createSubTab === 'builder'
+                                ? 'bg-violet-600 text-white'
+                                : 'text-gray-400 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                    >
+                        Create
+                    </button>
+                    <button
+                        onClick={() => setCreateSubTab('projects')}
+                        className={`py-2.5 rounded-lg text-sm font-medium transition ${
+                            createSubTab === 'projects'
+                                ? 'bg-violet-600 text-white'
+                                : 'text-gray-400 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                    >
+                        Projects
+                    </button>
+                </div>
+                <div className="flex justify-end">
+                    {!showQuickStart && (
+                        <button
+                            onClick={() => { setQuickStartStep(0); setShowQuickStart(true); }}
+                            className="text-xs px-2.5 py-1 rounded-md border border-white/10 text-gray-300 hover:text-white hover:bg-white/5 transition"
+                        >
+                            Show Quick Start
+                        </button>
+                    )}
+                </div>
+
+                {createSubTab === 'projects' && (
+                    <div className="space-y-6">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-white">Your Projects</h2>
+                            <button onClick={loadProjects} className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300">Refresh</button>
+                        </div>
+                        {projectsLoading && <p className="text-sm text-gray-500">Loading projects...</p>}
+                        {!projectsLoading && (
+                            <>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Drafts</h3>
+                                    {projectDrafts.length === 0 && <p className="text-sm text-gray-500">No drafts yet.</p>}
+                                    {projectDrafts.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.topic || 'Untitled'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.mode} • {p.status} • {p.scene_count || 0} scenes</p>
+                                            </div>
+                                            <button onClick={() => openDraftProject(p.project_id)} className="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white">
+                                                Open
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold text-emerald-300 uppercase tracking-wider">Renders</h3>
+                                    {projectRenders.length === 0 && <p className="text-sm text-gray-500">No renders yet.</p>}
+                                    {projectRenders.map((p) => (
+                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                            <div>
+                                                <p className="text-sm font-semibold text-white">{p.title || p.topic || 'Untitled Render'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
+                                            </div>
+                                            {p.output_file ? (
+                                                <a href={`${GENERATION_API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
+                                            ) : (
+                                                <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {createSubTab !== 'builder' && null}
+                {createSubTab !== 'builder' ? null : (
+                <>
+                {/* TEMPLATE PICKER */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Template</h2>
+                    <div className="grid grid-cols-4 md:grid-cols-7 gap-2">
+                        {templates.map(t => {
+                            const isLocked = !isAdmin && !PUBLIC_TEMPLATE_IDS.has(t.id);
+                            return (
+                                <button key={t.id}
+                                    onClick={() => !loading && !isLocked && setSelectedTemplate(t.id)}
+                                    className={`p-2.5 rounded-lg text-center transition-all border relative ${
+                                        isLocked
+                                            ? 'border-white/[0.04] bg-white/[0.01] opacity-50 cursor-not-allowed'
+                                            : selectedTemplate === t.id
+                                                ? 'border-violet-500 bg-violet-500/10'
+                                                : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                                    } ${loading ? 'opacity-50' : ''}`}>
+                                    <div className="text-lg mb-0.5">{t.icon}</div>
+                                    <div className="text-[11px] font-medium truncate">{t.title}</div>
+                                    {isLocked && (
+                                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-xl">
+                                            <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Coming Soon</span>
+                                        </div>
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* MODE TOGGLE */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Creation Mode</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <button onClick={() => !loading && setCreativeMode('auto')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Wand2 className="w-4 h-4 mx-auto mb-1 text-violet-400" />
+                            <div className="text-xs font-bold">Auto</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">AI handles everything</div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('creative')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'creative' ? 'border-amber-500 bg-amber-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Sliders className="w-4 h-4 mx-auto mb-1 text-amber-400" />
+                            <div className="text-xs font-bold">Creative Control</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Edit prompts &amp; preview images</div>
+                        </button>
+                        <button onClick={() => !loading && setCreativeMode('script_to_short')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                creativeMode === 'script_to_short' ? 'border-cyan-500 bg-cyan-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            }`}>
+                            <Clapperboard className="w-4 h-4 mx-auto mb-1 text-cyan-400" />
+                            <div className="text-xs font-bold">Script to Short</div>
+                            <div className="text-[11px] text-cyan-300 mt-0.5">*IN PRE-ALPHA*</div>
+                        </button>
+                    </div>
+                </div>
+
+                {/* RESOLUTION PICKER */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Resolution</h2>
+                    <div className="flex gap-2">
+                        <button onClick={() => !loading && setResolution('720p')}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
+                                resolution === '720p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            } ${loading ? 'opacity-50' : ''}`}>
+                            <div className="text-base font-bold">720p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Faster generation</div>
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (!canUse1080p) return;
+                                if (!loading) setResolution('1080p');
+                            }}
+                            className={`flex-1 p-3 rounded-lg text-center transition-all border relative ${
+                                !canUse1080p ? 'opacity-50 cursor-not-allowed border-white/[0.04] bg-white/[0.01]' :
+                                resolution === '1080p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                            } ${loading ? 'opacity-50' : ''}`}>
+                            {!canUse1080p && (
+                                <div className="absolute top-2 right-2">
+                                    <Lock className="w-3.5 h-3.5 text-gray-600" />
+                                </div>
+                            )}
+                            <div className="text-base font-bold">1080p</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">
+                                {canUse1080p ? 'Best quality' : 'Temporarily unavailable'}
+                            </div>
+                        </button>
+                    </div>
+                </div>
+
+                {/* LANGUAGE */}
+                {languages.length > 0 && (
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Language</h2>
+                        <div className="flex flex-wrap gap-2">
+                            {languages.map(l => (
+                                <button key={l.code} onClick={() => !loading && setLanguage(l.code)}
+                                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all border ${
+                                        language === l.code
+                                            ? 'border-violet-500 bg-violet-500/10 text-violet-300'
+                                            : 'border-white/[0.06] text-gray-500 hover:border-white/20'
+                                    } ${loading ? 'opacity-50' : ''}`}>
+                                    {l.name}
+                                </button>
+                            ))}
+                        </div>
+                        {language !== 'en' && (
+                            <p className="text-xs text-violet-400 mt-2">Script and voiceover will be generated in {languages.find(l => l.code === language)?.name}</p>
+                        )}
+                    </div>
+                )}
+
+                {/* PROMPT */}
+                <div>
+                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+                        {creativeMode === 'script_to_short' ? 'Script Input' : 'Topic'}
+                    </h2>
+                    <div className="relative">
+                        {creativeMode === 'script_to_short' ? (
+                            <textarea
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                rows={6}
+                                placeholder="Paste your full script here. Next step is manual: open editor, click Generate Scenes, then generate image batches."
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 text-sm resize-y"
+                            />
+                        ) : (
+                            <input
+                                type="text"
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                disabled={loading || scriptLoading}
+                                placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
+                                    : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
+                                    : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
+                                    : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
+                                    : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
+                                    : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
+                                    : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
+                                    : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
+                                    : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
+                                    : selectedTemplate === 'history' ? "e.g., The fall of the Roman Empire"
+                                    : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
+                                    : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
+                                    : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
+                                    : "Enter your video topic..."}
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-sm"
+                                onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
+                            />
+                        )}
+                    </div>
+                </div>
+
+                {supportsArtStyle && (
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Art Style</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {artStyleOptions.map((style) => (
+                                <button
+                                    key={style.id}
+                                    type="button"
+                                    onClick={() => !loading && !scriptLoading && setArtStyle(style.id)}
+                                    className={`rounded-lg p-2.5 text-left transition border ${
+                                        artStyle === style.id
+                                            ? 'border-cyan-400/70 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20'
+                                    }`}
+                                >
+                                    <p className="text-xs font-semibold text-white">{style.label}</p>
+                                    <p className="text-[11px] text-gray-400 mt-1">{style.desc}</p>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">Available in Auto, Creative Control, and Script to Short. Skeleton AI uses its dedicated style system.</p>
+                    </div>
+                )}
+
+                <div>
+                    <div>
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Style Reference (Optional)</h2>
+                        <div className="mb-2 grid grid-cols-2 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('strict')}
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                                    creativeReferenceLockMode === 'strict'
+                                        ? 'border border-violet-400/70 bg-violet-500/15 text-violet-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Strict Reference Lock
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => !loading && !scriptLoading && setCreativeReferenceLockMode('inspired')}
+                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                                    creativeReferenceLockMode === 'inspired'
+                                        ? 'border border-amber-400/70 bg-amber-500/15 text-amber-200'
+                                        : 'border border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                }`}
+                            >
+                                Style Inspired
+                            </button>
+                        </div>
+                        <label className="block rounded-lg border border-dashed border-white/[0.12] hover:border-violet-500/40 bg-white/[0.02] p-3 cursor-pointer transition">
+                            <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                    const f = e.target.files?.[0] || null;
+                                    setCreativeReferenceImage(f);
+                                    setCreativeReferenceStatus(f ? 'ready' : 'idle');
+                                    if (f) setCreativeReferenceAttached(false);
+                                }}
+                            />
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <p className="text-xs text-white font-medium">
+                                        {creativeReferenceImage
+                                            ? creativeReferenceImage.name
+                                            : creativeReferenceAttached
+                                                ? 'Reference image already attached for this project'
+                                                : 'Upload reference style image'}
+                                    </p>
+                                    <p className="text-[11px] text-gray-500 mt-1">
+                                        Applied across this short in Auto, Creative Control, or Script to Short. Mode: {creativeReferenceLockMode === 'strict' ? 'Strict lock for maximum continuity' : 'Inspired lock for more variation'}.
+                                    </p>
+                                </div>
+                                <span className="px-2.5 py-1 rounded-md bg-violet-600/20 text-violet-300 text-[11px] font-semibold">
+                                    {creativeReferenceImage || creativeReferenceAttached ? 'Attached' : 'Recommended'}
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Output Type</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Animated uses Kling/FAL scene motion. Slideshow uses image-based camera motion only.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => !loading && !scriptLoading && !animationCreditExhausted && setAnimateOutputEnabled(v => !v)}
+                            disabled={loading || scriptLoading || animationCreditExhausted}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                            } disabled:opacity-50`}
+                        >
+                            {effectiveAnimationEnabled ? "Animation ON" : "Slideshow Mode"}
+                        </button>
+                    </div>
+                    {animationCreditExhausted && (
+                        <p className="text-[11px] text-amber-300 mt-2">
+                            Animated credits are exhausted. Animation is locked until renewal/top-up, so slideshow mode is forced.
+                        </p>
+                    )}
+                </div>
+
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold text-white">Cinematic Boost</p>
+                            <p className="text-[11px] text-gray-500 mt-1">
+                                Enables stricter continuity + premium transition profile (higher generation cost).
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => !loading && !scriptLoading && setCinematicBoostEnabled(v => !v)}
+                            disabled={loading || scriptLoading}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                cinematicBoostEnabled ? "bg-cyan-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                            } disabled:opacity-50`}
+                        >
+                            {cinematicBoostEnabled ? "Boost ON" : "Boost OFF"}
+                        </button>
+                    </div>
+                </div>
+
+                {creativeMode === 'creative' && selectedTemplate === 'story' && (canUse1080p ? resolution : '720p') === '720p' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">AI Stories Animation</p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Turn OFF to render with image-based camera motion only (no Kling scene animation).
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => !loading && !scriptLoading && !animationCreditExhausted && setAnimateOutputEnabled(v => !v)}
+                                disabled={loading || scriptLoading || animationCreditExhausted}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                    effectiveAnimationEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                                } disabled:opacity-50`}
+                            >
+                                {effectiveAnimationEnabled ? "Animation ON" : "Animation OFF"}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {selectedTemplate === 'story' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">Story Voice + Pacing</p>
+                                <p className="text-xs text-gray-500 mt-1">Choose ElevenLabs voice, tune speed, and set pacing before render.</p>
+                            </div>
+                            <button
+                                onClick={() => { void previewStoryVoice(); }}
+                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                            >
+                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice</label>
+                                <select
+                                    value={storyVoiceId}
+                                    onChange={(e) => setStoryVoiceId(e.target.value)}
+                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                                >
+                                    {storyVoicesLoading ? (
+                                        <option value="">Loading voices...</option>
+                                    ) : storyVoices.length > 0 ? (
+                                        storyVoices.map((v: any) => (
+                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                                {String(v.name || v.voice_id || "Voice")}
+                                            </option>
+                                        ))
+                                    ) : (
+                                        <option value="">Default voice</option>
+                                    )}
+                                </select>
+                                {storyVoicesWarning ? (
+                                    <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
+                                ) : storyVoicesSource === 'fallback' ? (
+                                    <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
+                                ) : null}
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
+                                <input
+                                    type="range"
+                                    min={0.8}
+                                    max={1.35}
+                                    step={0.05}
+                                    value={storyVoiceSpeed}
+                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                    className="w-full accent-cyan-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Pacing</label>
+                                <div className="grid grid-cols-3 gap-1">
+                                    {[
+                                        { id: 'standard', label: 'Standard' },
+                                        { id: 'fast', label: 'Fast' },
+                                        { id: 'very_fast', label: 'Very Fast' },
+                                    ].map((p) => (
+                                        <button
+                                            key={p.id}
+                                            type="button"
+                                            onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
+                                            className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
+                                                storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                            }`}
+                                        >
+                                            {p.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* GENERATE BUTTON */}
+                <button onClick={handleGenerate} disabled={loading || scriptLoading || ((creativeMode === 'auto' || creativeMode === 'script_to_short') && !prompt.trim())}
+                    className={`w-full py-3 ${creativeMode === 'creative' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : creativeMode === 'script_to_short' ? 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-600/20' : 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/20'} disabled:opacity-40 text-white font-bold rounded-lg text-base transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99]`}>
+                    {scriptLoading ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> {creativeReferenceStatus === 'uploading' ? 'Uploading reference style...' : 'Setting up...'}</>
+                    ) : loading ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> Generating your short...</>
+                    ) : creativeMode === 'creative' ? (
+                        <><Sliders className="w-5 h-5" /> Start Building Your Short</>
+                    ) : creativeMode === 'script_to_short' ? (
+                        <><Clapperboard className="w-5 h-5" /> Open Script Editor *IN PRE-ALPHA*</>
+                    ) : (
+                        <><Wand2 className="w-5 h-5" /> {effectiveAnimationEnabled ? 'Generate Animated Short' : 'Generate Slideshow Short'} at {canUse1080p ? resolution : '720p'}</>
+                    )}
+                </button>
+                {quickStartCard}
+
+                {/* JOB STATUS (auto mode) */}
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
+                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Try Again
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay
+                                    className="w-full max-h-[500px] bg-black"
+                                    src={`${GENERATION_API}/api/download/${jobStatus.output_file}`}
+                                />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                            <p className="text-gray-500 text-sm">
+                                                {jobStatus.resolution && <span className="text-violet-400 mr-2">{jobStatus.resolution}</span>}
+                                                {jobStatus.metadata?.tags?.map((t: string) => `#${t}`).join(' ')}
+                                            </p>
+                                        </div>
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                                    </div>
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" />
+                                        Download MP4
+                                    </a>
+                                    {jobStatus.resolution === '720p' && Array.isArray(jobStatus.scene_images) && jobStatus.scene_images.length > 0 && (
+                                        <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4 space-y-3">
+                                            <p className="text-xs uppercase tracking-wider text-gray-400 font-semibold">
+                                                Regenerate Scene Images (720p Training Data)
+                                            </p>
+                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                                {jobStatus.scene_images.map((sceneImg: any, idx: number) => {
+                                                    const imgUrl = String(sceneImg?.image_url || "");
+                                                    const src = imgUrl.startsWith("http") ? imgUrl : `${GENERATION_API}${imgUrl}`;
+                                                    const busy = !!regeneratingAutoScenes[idx];
+                                                    return (
+                                                        <div key={`auto-scene-${idx}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2 space-y-2">
+                                                            <div className="text-[10px] text-gray-500">Scene {idx + 1}</div>
+                                                            {imgUrl ? (
+                                                                <img src={src} alt={`Auto scene ${idx + 1}`} className="w-full h-28 object-cover rounded bg-black/40" />
+                                                            ) : (
+                                                                <div className="w-full h-28 rounded bg-black/40 flex items-center justify-center text-[10px] text-gray-600">No image</div>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleRegenerateAutoScene(idx)}
+                                                                disabled={busy}
+                                                                className="w-full py-1.5 rounded bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-[11px] font-semibold text-white"
+                                                            >
+                                                                {busy ? "Regenerating..." : "Regenerate"}
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button onClick={() => { setJobStatus(null); setJobId(null); }}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Create Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} template={selectedTemplate} feature="create" language={language} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.queue_position > 0 && jobStatus.status === 'queued' && (
+                                    <div className="flex items-center justify-center gap-2 text-sm">
+                                        <Clock className="w-4 h-4 text-violet-400" />
+                                        <p className="text-gray-400">
+                                            Position <span className="text-violet-400 font-bold">{jobStatus.queue_position}</span> of {jobStatus.queue_total} in queue
+                                        </p>
+                                    </div>
+                                )}
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                        {jobStatus.resolution && <span className="ml-1 text-violet-400">({jobStatus.resolution})</span>}
+                                    </p>
+                                )}
+                                {jobStatus.status === 'error' && (
+                                    <p className="text-center text-sm text-red-400">{jobStatus.error || 'Generation failed'}</p>
+                                )}
+                                <JobDiagnostics jobStatus={jobStatus} />
+                            </div>
+                        )}
+                    </div>
+                )}
+                </>
+                )}
+            </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CLONE PANEL (inside Dashboard)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function ClonePanel() {
+    const { session, plan } = useContext(AuthContext);
+    const [viralFile, setViralFile] = useState<File | null>(null);
+    const [topic, setTopic] = useState("");
+    const [viralUrl, setViralUrl] = useState("");
+    const [showSource, setShowSource] = useState(false);
+    const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
+    const [jobId, setJobId] = useState<string | null>(null);
+    const [jobStatus, setJobStatus] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+
+    const canClone = plan === 'creator' || plan === 'pro' || plan === 'elite';
+    const canUse1080p = true;
+
+    useEffect(() => {
+        if (!jobId) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
+                const data = await res.json();
+                setJobStatus(data);
+                if (data.status === "complete" || data.status === "error") {
+                    clearInterval(interval);
+                    setLoading(false);
+                }
+            } catch { /* retry */ }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [jobId]);
+
+    const handleClone = async () => {
+        if (!topic) return;
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+
+        const fullTopic = viralUrl ? `${topic} [Source: ${viralUrl}]` : topic;
+        const formData = new FormData();
+        formData.append("topic", fullTopic);
+        formData.append("resolution", canUse1080p ? resolution : '720p');
+        if (viralFile) formData.append("file", viralFile);
+
+        const headers: Record<string, string> = {};
+        if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+
+        try {
+            const res = await fetch(`${GENERATION_API}/api/clone`, { method: "POST", headers, body: formData });
+            const data = await res.json();
+            if (data.job_id) setJobId(data.job_id);
+            else setLoading(false);
+        } catch { setLoading(false); }
+    };
+
+    return (
+            <div className="max-w-3xl mx-auto px-6 pb-10 space-y-8">
+                <div className="text-center mb-4">
+                    <h1 className="text-2xl font-bold mb-2">Clone a Viral Short</h1>
+                    <p className="text-gray-500 text-sm max-w-lg mx-auto">Just tell us the new topic. AI auto-detects the best template, reverse-engineers what makes content go viral, and generates a new short for you.</p>
+                </div>
+
+                {!canClone && (
+                    <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center gap-3">
+                        <Lock className="w-5 h-5 text-amber-400 shrink-0" />
+                        <div>
+                            <p className="text-amber-300 text-sm font-medium">Clone requires Creator plan or higher</p>
+                            <p className="text-gray-500 text-xs mt-0.5">Upgrade to access the viral cloning engine.</p>
+                        </div>
+                    </div>
+                )}
+
+                <div>
+                    <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">New Topic</h2>
+                    <input
+                        type="text"
+                        value={topic}
+                        onChange={(e) => setTopic(e.target.value)}
+                        disabled={loading || !canClone}
+                        placeholder="e.g., Why F1 drivers earn more than NFL players"
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-lg"
+                        onKeyDown={(e) => e.key === 'Enter' && !loading && canClone && handleClone()}
+                    />
+                </div>
+
+                <button
+                    type="button"
+                    onClick={() => setShowSource(!showSource)}
+                    className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-300 transition"
+                >
+                    <Plus className={`w-4 h-4 transition-transform ${showSource ? 'rotate-45' : ''}`} />
+                    {showSource ? 'Hide source reference' : 'Add source video (optional)'}
+                </button>
+
+                {showSource && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in">
+                        <label className={`block border-2 border-dashed rounded-2xl p-6 text-center transition-all ${
+                            canClone ? 'border-white/[0.08] hover:border-violet-500/30 hover:bg-violet-500/[0.02] cursor-pointer' : 'border-white/[0.04] opacity-50 cursor-not-allowed'
+                        }`}>
+                            {viralFile ? (
+                                <div className="flex flex-col items-center gap-2">
+                                    <FileVideo className="w-7 h-7 text-violet-400" />
+                                    <p className="text-violet-300 font-medium text-xs">{viralFile.name}</p>
+                                    <p className="text-gray-600 text-[10px]">Click to change</p>
+                                </div>
+                            ) : (
+                                <div className="flex flex-col items-center gap-2">
+                                    <UploadCloud className="w-7 h-7 text-gray-600" />
+                                    <p className="text-gray-400 font-medium text-xs">Upload MP4</p>
+                                </div>
+                            )}
+                            <input type="file" className="hidden" accept="video/mp4" disabled={!canClone}
+                                onChange={e => { if (e.target.files) setViralFile(e.target.files[0]); }} />
+                        </label>
+
+                        <div className={`border-2 border-dashed rounded-2xl p-6 flex flex-col justify-center ${
+                            canClone ? 'border-white/[0.08]' : 'border-white/[0.04] opacity-50'
+                        }`}>
+                            <p className="text-gray-500 text-[10px] uppercase tracking-wider mb-2 text-center">Or paste a link</p>
+                            <input
+                                type="url"
+                                value={viralUrl}
+                                onChange={e => setViralUrl(e.target.value)}
+                                disabled={!canClone || loading}
+                                placeholder="https://tiktok.com/... or youtube.com/shorts/..."
+                                className="w-full bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 text-white placeholder:text-gray-600 text-xs focus:outline-none focus:ring-2 focus:ring-violet-500/50 disabled:opacity-50"
+                            />
+                        </div>
+                    </div>
+                )}
+
+                <div className="flex gap-3">
+                    <button onClick={() => !loading && setResolution('720p')}
+                        className={`flex-1 p-3 rounded-xl text-center transition-all border-2 ${
+                            resolution === '720p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02]'
+                        }`}>
+                        <div className="text-sm font-bold">720p</div>
+                        <div className="text-[10px] text-gray-500">Faster</div>
+                    </button>
+                    <button onClick={() => canUse1080p && !loading && setResolution('1080p')}
+                        className={`flex-1 p-3 rounded-xl text-center transition-all border-2 ${
+                            resolution === '1080p' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02]'
+                        } ${!canUse1080p ? 'opacity-40 cursor-not-allowed' : ''}`}>
+                        <div className="text-sm font-bold">1080p</div>
+                        <div className="text-[10px] text-gray-500">{canUse1080p ? 'Max quality' : 'Temporarily unavailable'}</div>
+                    </button>
+                </div>
+
+                <button onClick={handleClone} disabled={loading || !topic || !canClone}
+                    className="w-full py-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-violet-600/20 active:scale-[0.99]">
+                    {loading ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> Analyzing &amp; Generating...</>
+                    ) : (
+                        <><Wand2 className="w-5 h-5" /> Clone Viral Formula</>
+                    )}
+                </button>
+
+                {jobStatus && (
+                    <div className={`rounded-2xl border transition-all overflow-hidden ${
+                        jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                        jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                        'border-violet-500/20 bg-violet-500/[0.02]'
+                    }`}>
+                        {jobStatus.viral_analysis && (
+                            <div className="px-6 pt-5 pb-3 border-b border-white/5">
+                                <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Viral Analysis</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {jobStatus.viral_analysis.hook_type && (
+                                        <span className="px-2 py-1 bg-violet-500/10 text-violet-300 text-xs rounded-lg">Hook: {jobStatus.viral_analysis.hook_type}</span>
+                                    )}
+                                    {jobStatus.template && jobStatus.template !== 'analyzing...' && (
+                                        <span className="px-2 py-1 bg-cyan-500/10 text-cyan-300 text-xs rounded-lg">Template: {jobStatus.template}</span>
+                                    )}
+                                    {jobStatus.viral_analysis.pacing && (
+                                        <span className="px-2 py-1 bg-amber-500/10 text-amber-300 text-xs rounded-lg">Pacing: {jobStatus.viral_analysis.pacing}</span>
+                                    )}
+                                </div>
+                                {jobStatus.viral_analysis.what_made_it_viral && (
+                                    <p className="text-gray-400 text-xs mt-2 italic">{jobStatus.viral_analysis.what_made_it_viral}</p>
+                                )}
+                            </div>
+                        )}
+                        {jobStatus.status === 'error' ? (
+                            <div className="p-8 text-center">
+                                <p className="text-red-400 font-bold">Generation Failed</p>
+                                <p className="text-gray-500 text-sm mt-1">{jobStatus.error}</p>
+                                <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); }}
+                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                    Try Again
+                                </button>
+                            </div>
+                        ) : jobStatus.status === 'complete' ? (
+                            <div>
+                                <video controls autoPlay className="w-full max-h-[500px] bg-black"
+                                    src={`${GENERATION_API}/api/download/${jobStatus.output_file}`} />
+                                <div className="p-6 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="font-bold text-lg text-emerald-400">{jobStatus.metadata?.title}</h3>
+                                        <CheckCircle2 className="w-6 h-6 text-emerald-400 shrink-0" />
+                                    </div>
+                                    {jobStatus.metadata?.description && (
+                                        <p className="text-gray-500 text-xs">{jobStatus.metadata.description}</p>
+                                    )}
+                                    <a href={`${GENERATION_API}/api/download/${jobStatus.output_file}`} download
+                                        className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                        <Download className="w-5 h-5" /> Download MP4
+                                    </a>
+                                    <button onClick={() => { setJobStatus(null); setJobId(null); }}
+                                        className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                        Clone Another
+                                    </button>
+                                    <FeedbackWidget jobId={jobId || ''} feature="clone" />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 space-y-4">
+                                <ProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                {jobStatus.queue_position > 0 && jobStatus.status === 'queued' && (
+                                    <div className="flex items-center justify-center gap-2 text-sm">
+                                        <Clock className="w-4 h-4 text-violet-400" />
+                                        <p className="text-gray-400">
+                                            Position <span className="text-violet-400 font-bold">{jobStatus.queue_position}</span> of {jobStatus.queue_total} in queue
+                                        </p>
+                                    </div>
+                                )}
+                                {jobStatus.current_scene && jobStatus.total_scenes && (
+                                    <p className="text-center text-sm text-gray-600">
+                                        Rendering scene {jobStatus.current_scene} of {jobStatus.total_scenes}
+                                        {jobStatus.resolution && <span className="ml-1 text-violet-400">({jobStatus.resolution})</span>}
+                                    </p>
+                                )}
+                                {jobStatus.status === 'error' && (
+                                    <p className="text-center text-sm text-red-400">{jobStatus.error || 'Generation failed'}</p>
+                                )}
+                                <JobDiagnostics jobStatus={jobStatus} />
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THUMBNAIL PANEL (inside Dashboard)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+interface ThumbFile { id: string; name: string; size: number; url: string; created_at?: number; }
+
+interface TrainingStatus {
+    lora_available: boolean;
+    is_training: boolean;
+    total_images: number;
+    local_library_images?: number;
+    trained_images: number;
+    version: number;
+    last_train: number;
+}
+
+function AdminAnalyticsPanel() {
+    const { session } = useContext(AuthContext);
+    const [data, setData] = useState<any>(null);
+    const [billingAuditRows, setBillingAuditRows] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
+    const [bannerEnabled, setBannerEnabled] = useState(false);
+    const [bannerMessage, setBannerMessage] = useState("Studio is under high load. Queue times may be longer than usual while we scale capacity.");
+    const [savingBanner, setSavingBanner] = useState(false);
+
+    const loadAnalytics = useCallback(async () => {
+        if (!session) return;
+        setLoading(true);
+        setError("");
+        try {
+            const res = await fetch(`${API}/api/admin/analytics`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) throw new Error(`Failed to load analytics (${res.status})`);
+            const payload = await res.json();
+            setData(payload);
+            const auditRes = await fetch(`${API}/api/admin/billing-audit`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (auditRes.ok) {
+                const audit = await auditRes.json();
+                setBillingAuditRows(Array.isArray(audit.rows) ? audit.rows : []);
+            } else {
+                setBillingAuditRows([]);
+            }
+            setBannerEnabled(Boolean(payload.maintenance_banner_enabled));
+            setBannerMessage((payload.maintenance_banner_message || "").trim() || "Studio is under high load. Queue times may be longer than usual while we scale capacity.");
+        } catch (e: any) {
+            setError(e?.message || "Failed to load analytics");
+        } finally {
+            setLoading(false);
+        }
+    }, [session]);
+
+    useEffect(() => {
+        loadAnalytics();
+        const id = setInterval(loadAnalytics, 15000);
+        return () => clearInterval(id);
+    }, [loadAnalytics]);
+
+    const subscribers = data?.subscribers_by_tier || {};
+    const formatUsd = (v: number) => `$${Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const queueUtilization = Number(data?.queue_utilization_pct || 0);
+    const highLoadDetected = Boolean(data?.high_load_detected);
+
+    const saveBanner = useCallback(async () => {
+        if (!session) return;
+        setSavingBanner(true);
+        setError("");
+        try {
+            const res = await fetch(`${API}/api/admin/maintenance-banner`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({
+                    enabled: bannerEnabled,
+                    message: bannerMessage,
+                }),
+            });
+            if (!res.ok) throw new Error(`Failed to save banner (${res.status})`);
+            const updated = await res.json();
+            setData((prev: any) => ({
+                ...(prev || {}),
+                maintenance_banner_enabled: Boolean(updated.maintenance_banner_enabled),
+                maintenance_banner_message: updated.maintenance_banner_message || "",
+            }));
+        } catch (e: any) {
+            setError(e?.message || "Failed to save banner settings");
+        } finally {
+            setSavingBanner(false);
+        }
+    }, [session, bannerEnabled, bannerMessage]);
+
+    return (
+        <div className="max-w-5xl mx-auto px-6 pb-10 space-y-6">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h2 className="text-xl font-bold text-white">Product Analytics</h2>
+                    <p className="text-sm text-gray-500">Live admin metrics for usage, queue load, and paid tiers.</p>
+                </div>
+                <button onClick={loadAnalytics} className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300 transition">
+                    Refresh
+                </button>
+            </div>
+
+            {loading && <p className="text-gray-500 text-sm">Loading analytics...</p>}
+            {error && <p className="text-red-400 text-sm">{error}</p>}
+
+            {data && (
+                <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Active Users (est.)</p>
+                            <p className="text-2xl font-bold text-white mt-1">{data.active_users_estimate || 0}</p>
+                            <p className="text-xs text-gray-500 mt-1">Sign-ins (15m): {data.active_users_signins_15m || 0}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Active Generations</p>
+                            <p className="text-2xl font-bold text-white mt-1">{data.active_generations || 0}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                Queue depth: {data.queue_depth || 0} / {data.queue_max_depth || 0} • Workers: {data.queue_workers || 0}
+                            </p>
+                        </div>
+                        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider">Monthly Profit (proxy)</p>
+                            <p className="text-2xl font-bold text-emerald-400 mt-1">{formatUsd(data.monthly_profit_usd || 0)}</p>
+                            <p className="text-xs text-gray-500 mt-1">Source: {data.revenue_source || 'none'}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                Voices: {data.voice_provider_ok ? "ElevenLabs" : "Fallback"} ({data.voice_catalog_count || 0})
+                            </p>
+                        </div>
+                    </div>
+                    {data.voice_catalog_warning && (
+                        <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-4">
+                            <p className="text-xs text-amber-200 uppercase tracking-wider">Voice Provider Warning</p>
+                            <p className="text-sm text-amber-100 mt-1">{data.voice_catalog_warning}</p>
+                        </div>
+                    )}
+
+                    <div className={`rounded-xl border p-4 ${highLoadDetected ? "border-amber-400/40 bg-amber-500/10" : "border-white/[0.08] bg-white/[0.02]"}`}>
+                        <div className="flex items-center justify-between gap-4">
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase tracking-wider">Load Status</p>
+                                <p className={`text-lg font-bold mt-1 ${highLoadDetected ? "text-amber-300" : "text-emerald-300"}`}>
+                                    {highLoadDetected ? "High Load Detected" : "Normal Load"}
+                                </p>
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Queue utilization: {queueUtilization.toFixed(1)}% • Active per worker: {Number(data.active_generations_per_worker || 0).toFixed(2)}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">High Load Banner (Admin)</h3>
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/20 p-3">
+                            <div>
+                                <p className="text-sm text-white font-medium">Show warning banner</p>
+                                <p className="text-xs text-gray-500">Students see longer queue warning during heavy load.</p>
+                            </div>
+                            <button
+                                onClick={() => setBannerEnabled(v => !v)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${bannerEnabled ? "bg-emerald-600/80 text-white" : "bg-white/10 text-gray-300 hover:bg-white/15"}`}
+                            >
+                                {bannerEnabled ? "ON" : "OFF"}
+                            </button>
+                        </div>
+                        <textarea
+                            value={bannerMessage}
+                            onChange={(e) => setBannerMessage(e.target.value)}
+                            rows={2}
+                            className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all resize-none"
+                            placeholder="Studio is under high load. Queue times may be longer than usual while we scale capacity."
+                        />
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={saveBanner}
+                                disabled={savingBanner}
+                                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition disabled:opacity-60"
+                            >
+                                {savingBanner ? "Saving..." : "Save Banner"}
+                            </button>
+                            <p className="text-xs text-gray-500">Current: {data.maintenance_banner_enabled ? "Visible" : "Hidden"}</p>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">Paid Tiers</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Starter</p>
+                                <p className="text-lg font-bold text-white">{subscribers.starter || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Creator</p>
+                                <p className="text-lg font-bold text-white">{subscribers.creator || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Pro</p>
+                                <p className="text-lg font-bold text-white">{subscribers.pro || 0}</p>
+                            </div>
+                            <div className="rounded-lg bg-black/30 border border-white/[0.06] p-3">
+                                <p className="text-xs text-gray-500">Demo Pro</p>
+                                <p className="text-lg font-bold text-white">{subscribers.demo_pro || 0}</p>
+                            </div>
+                        </div>
+                        <p className="text-sm text-gray-400">
+                            Total paid subscribers: <span className="text-violet-300 font-semibold">{data.total_paid_subscribers || 0}</span>
+                            {" "}• Monthly revenue: <span className="text-emerald-300 font-semibold">{formatUsd(data.monthly_revenue_usd || 0)}</span>
+                        </p>
+                    </div>
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <h3 className="font-semibold text-white">Billing Audit (status source)</h3>
+                        <p className="text-xs text-gray-500">Tracks who paid, current status, renewal timestamp, and whether status comes from Stripe or profile fallback.</p>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-xs">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-white/[0.08]">
+                                        <th className="text-left py-2 pr-3">Email</th>
+                                        <th className="text-left py-2 pr-3">Plan</th>
+                                        <th className="text-left py-2 pr-3">Stripe</th>
+                                        <th className="text-left py-2 pr-3">Source</th>
+                                        <th className="text-left py-2">Next Renewal</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {billingAuditRows.length === 0 ? (
+                                        <tr>
+                                            <td className="py-3 text-gray-500" colSpan={5}>No paid billing rows found.</td>
+                                        </tr>
+                                    ) : billingAuditRows.map((row, idx) => (
+                                        <tr key={`${row.email || 'row'}-${idx}`} className="border-b border-white/[0.05] text-gray-300">
+                                            <td className="py-2 pr-3">{row.email || '-'}</td>
+                                            <td className="py-2 pr-3">{row.plan || '-'}</td>
+                                            <td className="py-2 pr-3">{row.stripe_status || '-'}</td>
+                                            <td className="py-2 pr-3">{row.status_source || '-'}</td>
+                                            <td className="py-2">
+                                                {row.next_renewal_unix ? new Date(Number(row.next_renewal_unix) * 1000).toLocaleString() : '-'}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </>
+            )}
+        </div>
+    );
+}
+
+function DemoPanel() {
+    const { session, role, demoAccess, checkoutDemo, demoComingSoon } = useContext(AuthContext);
+    const isAdmin = role === 'admin';
+    const [referenceFile, setReferenceFile] = useState<File | null>(null);
+    const [demoFile, setDemoFile] = useState<File | null>(null);
+    const [faceFile, setFaceFile] = useState<File | null>(null);
+    const [autoFace, setAutoFace] = useState(true);
+    const [productName, setProductName] = useState('');
+    const [referenceNotes, setReferenceNotes] = useState('');
+    const [pipPosition, setPipPosition] = useState('bottom-right');
+    const [loading, setLoading] = useState(false);
+    const [jobId, setJobId] = useState<string | null>(null);
+    const [jobStatus, setJobStatus] = useState<any>(null);
+
+    useEffect(() => {
+        if (!jobId) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
+                const data = await res.json();
+                setJobStatus(data);
+                if (data.status === "complete" || data.status === "error") {
+                    clearInterval(interval);
+                    setLoading(false);
+                }
+            } catch { /* retry */ }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [jobId]);
+
+    const [demoError, setDemoError] = useState<string | null>(null);
+    const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+    const [compressStatus, setCompressStatus] = useState<string | null>(null);
+
+    const [voices, setVoices] = useState<any[]>([]);
+    const [voicesLoading, setVoicesLoading] = useState(false);
+    const [selectedVoiceId, setSelectedVoiceId] = useState('');
+    const [voiceSearch, setVoiceSearch] = useState('');
+    const [previewAudio, setPreviewAudio] = useState<HTMLAudioElement | null>(null);
+    const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+    const [previewLoading, setPreviewLoading] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setVoicesLoading(true);
+            try {
+                const res = await fetch(`${API}/api/voices`, {
+                    headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (!cancelled) setVoices(data.voices || []);
+                }
+            } catch { /* silent */ }
+            if (!cancelled) setVoicesLoading(false);
+        })();
+        return () => { cancelled = true; };
+    }, [session]);
+
+    const handlePreviewVoice = async (voiceId: string, previewUrl?: string) => {
+        if (previewAudio) {
+            previewAudio.pause();
+            previewAudio.currentTime = 0;
+            setPreviewAudio(null);
+        }
+        if (playingVoiceId === voiceId) {
+            setPlayingVoiceId(null);
+            return;
+        }
+        if (previewUrl) {
+            const audio = new Audio(previewUrl);
+            audio.onended = () => { setPlayingVoiceId(null); setPreviewAudio(null); };
+            setPreviewAudio(audio);
+            setPlayingVoiceId(voiceId);
+            audio.play();
+            return;
+        }
+        setPreviewLoading(voiceId);
+        try {
+            const res = await fetch(`${API}/api/voices/preview`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+                body: JSON.stringify({ voice_id: voiceId }),
+            });
+            if (!res.ok) throw new Error('Preview failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => { setPlayingVoiceId(null); setPreviewAudio(null); URL.revokeObjectURL(url); };
+            setPreviewAudio(audio);
+            setPlayingVoiceId(voiceId);
+            audio.play();
+        } catch { /* silent */ }
+        setPreviewLoading(null);
+    };
+
+    const filteredVoices = voices.filter(v => {
+        if (!voiceSearch) return true;
+        const q = voiceSearch.toLowerCase();
+        return v.name?.toLowerCase().includes(q) || v.gender?.toLowerCase().includes(q) || v.accent?.toLowerCase().includes(q) || v.description?.toLowerCase().includes(q);
+    });
+
+    const MAX_FILE_MB = 50;
+
+    const compressVideoInBrowser = async (file: File, label: string): Promise<File> => {
+        const sizeMB = file.size / (1024 * 1024);
+        if (sizeMB <= MAX_FILE_MB) return file;
+
+        setCompressStatus(`Compressing ${label} (${sizeMB.toFixed(0)}MB → ~${Math.round(sizeMB * 0.15)}MB)...`);
+
+        return new Promise<File>((resolve, reject) => {
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+
+            const url = URL.createObjectURL(file);
+            video.src = url;
+
+            video.onloadedmetadata = () => {
+                const scale = Math.min(1, 720 / video.videoHeight);
+                const w = Math.round(video.videoWidth * scale / 2) * 2;
+                const h = Math.round(video.videoHeight * scale / 2) * 2;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d')!;
+
+                const targetBitrate = Math.min(1500000, Math.round((MAX_FILE_MB * 8_000_000) / (video.duration || 60)));
+                const stream = canvas.captureStream(24);
+
+                let recorder: MediaRecorder;
+                try {
+                    recorder = new MediaRecorder(stream, {
+                        mimeType: 'video/webm;codecs=vp8',
+                        videoBitsPerSecond: targetBitrate
+                    });
+                } catch {
+                    recorder = new MediaRecorder(stream, { videoBitsPerSecond: targetBitrate });
+                }
+
+                const chunks: Blob[] = [];
+                recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+                recorder.onstop = () => {
+                    URL.revokeObjectURL(url);
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    const compressed = new File([blob], file.name.replace(/\.\w+$/, '.webm'), { type: 'video/webm' });
+                    setCompressStatus(`Compressed ${label}: ${sizeMB.toFixed(0)}MB → ${(compressed.size / (1024*1024)).toFixed(0)}MB`);
+                    resolve(compressed);
+                };
+
+                recorder.onerror = () => {
+                    URL.revokeObjectURL(url);
+                    reject(new Error(`Browser compression failed for ${label}`));
+                };
+
+                recorder.start(100);
+                video.play();
+
+                const dur = video.duration;
+                const draw = () => {
+                    if (video.ended || video.paused) {
+                        recorder.stop();
+                        return;
+                    }
+                    ctx.drawImage(video, 0, 0, w, h);
+                    const pct = Math.round((video.currentTime / dur) * 100);
+                    setCompressStatus(`Compressing ${label}: ${pct}% (${sizeMB.toFixed(0)}MB → 720p)`);
+                    requestAnimationFrame(draw);
+                };
+                draw();
+
+                video.onended = () => { recorder.stop(); };
+            };
+
+            video.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error(`Could not load ${label} video for compression`));
+            };
+        });
+    };
+
+    const handleGenerate = async () => {
+        if (!demoFile) return;
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+        setDemoError(null);
+        setUploadProgress(0);
+        setCompressStatus(null);
+
+        try {
+            let finalDemo: File = demoFile;
+            let finalRef: File | null = referenceFile;
+
+            if (demoFile.size / (1024 * 1024) > MAX_FILE_MB) {
+                finalDemo = await compressVideoInBrowser(demoFile, 'demo video');
+            }
+            if (referenceFile && referenceFile.size / (1024 * 1024) > MAX_FILE_MB) {
+                finalRef = await compressVideoInBrowser(referenceFile, 'reference video');
+            }
+            setCompressStatus(null);
+
+            const formData = new FormData();
+            formData.append('demo_video', finalDemo);
+            if (finalRef) formData.append('reference_video', finalRef);
+            if (!autoFace && faceFile) formData.append('face_image', faceFile);
+            formData.append('product_name', productName);
+            formData.append('reference_notes', referenceNotes);
+            formData.append('pip_position', pipPosition);
+            if (selectedVoiceId) formData.append('voice_id', selectedVoiceId);
+
+            const totalSize = (finalDemo?.size || 0) + (finalRef?.size || 0) + (faceFile?.size || 0);
+            const totalMB = (totalSize / (1024 * 1024)).toFixed(0);
+
+            const result = await new Promise<any>((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${GENERATION_API}/api/demo`);
+                if (session) xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
+
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        setUploadProgress(Math.round((e.loaded / e.total) * 100));
+                    }
+                };
+
+                xhr.onload = () => {
+                    setUploadProgress(null);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try { resolve(JSON.parse(xhr.responseText)); }
+                        catch { reject(new Error('Invalid response from server')); }
+                    } else {
+                        try {
+                            const err = JSON.parse(xhr.responseText);
+                            reject(new Error(err.detail || `Server error: ${xhr.status}`));
+                        } catch { reject(new Error(`Upload failed (${xhr.status})`)); }
+                    }
+                };
+
+                xhr.onerror = () => {
+                    setUploadProgress(null);
+                    reject(new Error('Network error. Connection lost during upload.'));
+                };
+
+                xhr.ontimeout = () => {
+                    setUploadProgress(null);
+                    reject(new Error(`Upload timed out (${totalMB}MB is large -- try a shorter clip)`));
+                };
+
+                xhr.timeout = 600000;
+                xhr.send(formData);
+            });
+
+            if (result.job_id) setJobId(result.job_id);
+            else {
+                setDemoError('No job ID returned -- server may have rejected the request');
+                setLoading(false);
+            }
+        } catch (e: any) {
+            setDemoError(e?.message || 'Upload failed');
+            setLoading(false);
+            setUploadProgress(null);
+        }
+    };
+
+    const statusLabels: Record<string, string> = {
+        queued: 'Starting...',
+        compressing: 'Auto-compressing large video files...',
+        compressing_demo: 'Compressing demo video to 720p...',
+        compressing_reference: 'Compressing reference video to 720p...',
+        analyzing_reference: 'Analyzing reference video style...',
+        analyzing: 'Analyzing screen recording frame-by-frame...',
+        scripting: 'Writing voiceover script with AI...',
+        generating_voice: 'Generating voiceover with ElevenLabs...',
+        generating_sfx: 'Generating sound effects...',
+        generating_face: 'Generating AI presenter face...',
+        compositing: 'Compositing final demo video...',
+        complete: 'Done!',
+        error: 'Generation failed'
+    };
+
+    if (!demoAccess) {
+        return (
+            <div className="max-w-2xl mx-auto px-6 pb-10 pt-8">
+                <div className="text-center space-y-6">
+                    <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-600/20 to-purple-600/20 border border-violet-500/20">
+                        <Lock className="w-10 h-10 text-violet-400" />
+                    </div>
+                    <div>
+                        <h2 className="text-2xl font-bold mb-2">AI Product Demo Generator</h2>
+                        <p className="text-gray-400 text-sm max-w-md mx-auto">
+                            Transform raw screen recordings into polished, professional product demos with AI-generated voiceovers, talking head presenters, and synced captions.
+                        </p>
+                    </div>
+                    <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl p-6 space-y-4 text-left">
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Wand2 className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">AI Script Writing</p><p className="text-xs text-gray-500">Analyzes your screen recording and writes a professional voiceover script</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Volume2 className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">Choose Your Voice</p><p className="text-xs text-gray-500">Pick from dozens of premium ElevenLabs voices and preview before generating</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><User className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">AI Talking Head</p><p className="text-xs text-gray-500">Auto-generated presenter with lip-sync composited into your demo</p></div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center"><Film className="w-4 h-4 text-violet-400" /></div>
+                            <div><p className="text-sm font-medium text-gray-200">Word-Synced Captions</p><p className="text-xs text-gray-500">Perfectly timed captions burned into the final video</p></div>
+                        </div>
+                    </div>
+                    <div className="bg-gradient-to-r from-violet-600/10 to-purple-600/10 border border-violet-500/20 rounded-2xl p-6">
+                        <p className="text-3xl font-bold text-white">$150<span className="text-base font-normal text-gray-400">/month</span></p>
+                        <p className="text-sm text-gray-400 mt-1">Unlimited product demo videos</p>
+                        <button
+                            onClick={() => {
+                                if (demoComingSoon && !isAdmin) return;
+                                checkoutDemo();
+                            }}
+                            disabled={demoComingSoon && !isAdmin}
+                            className={`mt-4 w-full py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
+                                demoComingSoon && !isAdmin
+                                    ? 'bg-white/5 text-gray-500 border border-white/10 cursor-not-allowed'
+                                    : 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5'
+                            }`}>
+                            <Zap className="w-5 h-5" /> {demoComingSoon && !isAdmin ? 'Coming Soon' : 'Upgrade to Demo Pro'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
+            <div>
+                <h2 className="text-xl font-bold mb-2">AI Product Demo Generator</h2>
+                <p className="text-gray-500 text-sm">Upload a screen recording of your software + a face photo. AI writes the script, generates a talking head with lip-sync, and composites a professional product demo video.</p>
+            </div>
+
+            <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Reference Video <span className="text-gray-600 normal-case">(style guide)</span></h3>
+                        <label className={`flex flex-col items-center justify-center p-8 rounded-xl border-2 border-dashed transition-all cursor-pointer ${
+                            referenceFile ? 'border-violet-500 bg-violet-500/5' : 'border-white/[0.08] hover:border-violet-500/30 bg-white/[0.02]'
+                        }`}>
+                            <input type="file" accept="video/*" className="hidden" onChange={(e) => setReferenceFile(e.target.files?.[0] || null)} disabled={loading} />
+                            {referenceFile ? (
+                                <div className="text-center">
+                                    <Eye className="w-8 h-8 text-violet-400 mx-auto mb-2" />
+                                    <p className="text-sm text-violet-300 font-medium truncate max-w-[180px]">{referenceFile.name}</p>
+                                    <p className="text-xs text-gray-500 mt-1">{(referenceFile.size / 1024 / 1024).toFixed(1)} MB</p>
+                                </div>
+                            ) : (
+                                <div className="text-center">
+                                    <Eye className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                                    <p className="text-sm text-gray-400">Upload reference video</p>
+                                    <p className="text-xs text-gray-600 mt-1">The style you want to match</p>
+                                </div>
+                            )}
+                        </label>
+                    </div>
+
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Your Demo Video <span className="text-red-400">*</span></h3>
+                        <label className={`flex flex-col items-center justify-center p-8 rounded-xl border-2 border-dashed transition-all cursor-pointer ${
+                            demoFile ? 'border-violet-500 bg-violet-500/5' : 'border-white/[0.08] hover:border-violet-500/30 bg-white/[0.02]'
+                        }`}>
+                            <input type="file" accept="video/*" className="hidden" onChange={(e) => setDemoFile(e.target.files?.[0] || null)} disabled={loading} />
+                            {demoFile ? (
+                                <div className="text-center">
+                                    <Film className="w-8 h-8 text-violet-400 mx-auto mb-2" />
+                                    <p className="text-sm text-violet-300 font-medium truncate max-w-[180px]">{demoFile.name}</p>
+                                    <p className="text-xs text-gray-500 mt-1">{(demoFile.size / 1024 / 1024).toFixed(1)} MB</p>
+                                </div>
+                            ) : (
+                                <div className="text-center">
+                                    <UploadCloud className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                                    <p className="text-sm text-gray-400">Upload raw screen recording</p>
+                                    <p className="text-xs text-gray-600 mt-1">The software demo to edit</p>
+                                </div>
+                            )}
+                        </label>
+                    </div>
+                </div>
+
+                <div>
+                    <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">AI Presenter</h3>
+                        <button onClick={() => !loading && setAutoFace(!autoFace)}
+                            className={`text-xs px-3 py-1 rounded-full transition-all ${
+                                autoFace ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-white/[0.03] text-gray-500 border border-white/[0.08]'
+                            }`}>
+                            {autoFace ? 'Auto-Generate Face' : 'Upload Custom Face'}
+                        </button>
+                    </div>
+                    {autoFace ? (
+                        <div className="flex flex-col items-center justify-center p-8 rounded-xl border-2 border-dashed border-violet-500/30 bg-violet-500/5">
+                            <Sparkles className="w-8 h-8 text-violet-400 mx-auto mb-2" />
+                            <p className="text-sm text-violet-300 font-medium">AI-Generated Male Face</p>
+                            <p className="text-xs text-gray-500 mt-1">A unique, realistic face will be auto-generated</p>
+                        </div>
+                    ) : (
+                        <label className={`flex flex-col items-center justify-center p-8 rounded-xl border-2 border-dashed transition-all cursor-pointer ${
+                            faceFile ? 'border-violet-500 bg-violet-500/5' : 'border-white/[0.08] hover:border-violet-500/30 bg-white/[0.02]'
+                        }`}>
+                            <input type="file" accept="image/*" className="hidden" onChange={(e) => setFaceFile(e.target.files?.[0] || null)} disabled={loading} />
+                            {faceFile ? (
+                                <div className="text-center">
+                                    <User className="w-8 h-8 text-violet-400 mx-auto mb-2" />
+                                    <p className="text-sm text-violet-300 font-medium">{faceFile.name}</p>
+                                    <p className="text-xs text-gray-500 mt-1">{(faceFile.size / 1024 / 1024).toFixed(1)} MB</p>
+                                </div>
+                            ) : (
+                                <div className="text-center">
+                                    <User className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                                    <p className="text-sm text-gray-400">Upload face photo (optional)</p>
+                                    <p className="text-xs text-gray-600 mt-1">Leave empty to render without talking-head face</p>
+                                </div>
+                            )}
+                        </label>
+                    )}
+                </div>
+            </div>
+
+            <div className="space-y-4">
+                <div>
+                    <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">Product Name</h3>
+                    <input type="text" value={productName} onChange={(e) => setProductName(e.target.value)}
+                        disabled={loading} placeholder="e.g., BrayneAI, Notion, Stripe Dashboard"
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50" />
+                </div>
+
+                <div>
+                    <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">Style Notes (optional)</h3>
+                    <textarea value={referenceNotes} onChange={(e) => setReferenceNotes(e.target.value)}
+                        disabled={loading} placeholder="Describe the style you want: e.g., 'Energetic and fast-paced like a YC demo day pitch' or 'Calm and professional like an Apple keynote'"
+                        rows={2}
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50 resize-none" />
+                </div>
+
+                <div>
+                    <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">Voice</h3>
+                    {voicesLoading ? (
+                        <div className="flex items-center gap-2 text-gray-500 text-sm py-3">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Loading voices from ElevenLabs...
+                        </div>
+                    ) : voices.length === 0 ? (
+                        <p className="text-gray-600 text-sm py-2">No voices found. Using default.</p>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                <input type="text" value={voiceSearch} onChange={(e) => setVoiceSearch(e.target.value)}
+                                    placeholder="Search voices by name, gender, accent..."
+                                    className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all" />
+                            </div>
+                            <div className="max-h-48 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
+                                <button onClick={() => setSelectedVoiceId('')}
+                                    className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-all ${
+                                        !selectedVoiceId ? 'bg-violet-500/10 text-violet-300' : 'text-gray-400 hover:bg-white/[0.03]'
+                                    }`}>
+                                    <Volume2 className="w-4 h-4 flex-shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-medium truncate">Default Voice</p>
+                                        <p className="text-xs text-gray-600">Auto-selected based on template</p>
+                                    </div>
+                                </button>
+                                {filteredVoices.map(v => (
+                                    <div key={v.voice_id}
+                                        className={`flex items-center gap-3 px-4 py-2.5 transition-all ${
+                                            selectedVoiceId === v.voice_id ? 'bg-violet-500/10' : 'hover:bg-white/[0.03]'
+                                        }`}>
+                                        <button onClick={() => handlePreviewVoice(v.voice_id, v.preview_url)}
+                                            className="flex-shrink-0 w-8 h-8 rounded-full bg-white/[0.05] hover:bg-violet-500/20 flex items-center justify-center transition-all"
+                                            title="Preview voice">
+                                            {previewLoading === v.voice_id ? (
+                                                <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" />
+                                            ) : playingVoiceId === v.voice_id ? (
+                                                <Pause className="w-3.5 h-3.5 text-violet-400" />
+                                            ) : (
+                                                <Play className="w-3.5 h-3.5 text-gray-400" />
+                                            )}
+                                        </button>
+                                        <button onClick={() => setSelectedVoiceId(v.voice_id)}
+                                            className="flex-1 min-w-0 text-left">
+                                            <div className="flex items-center gap-2">
+                                                <p className={`text-sm font-medium truncate ${selectedVoiceId === v.voice_id ? 'text-violet-300' : 'text-gray-300'}`}>{v.name}</p>
+                                                {v.gender && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.05] text-gray-500 flex-shrink-0">{v.gender}</span>}
+                                            </div>
+                                            <p className="text-xs text-gray-600 truncate">
+                                                {[v.accent, v.age, v.description].filter(Boolean).join(' · ') || v.category || 'ElevenLabs voice'}
+                                            </p>
+                                        </button>
+                                        {selectedVoiceId === v.voice_id && (
+                                            <CheckCircle2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                            {selectedVoiceId && (
+                                <p className="text-xs text-violet-400">
+                                    Selected: {voices.find(v => v.voice_id === selectedVoiceId)?.name || selectedVoiceId}
+                                </p>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                <div>
+                    <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">Face Position</h3>
+                    <div className="grid grid-cols-4 gap-2">
+                        {[
+                            { id: 'bottom-right', label: 'Bottom Right' },
+                            { id: 'bottom-left', label: 'Bottom Left' },
+                            { id: 'top-right', label: 'Top Right' },
+                            { id: 'top-left', label: 'Top Left' },
+                        ].map(pos => (
+                            <button key={pos.id} onClick={() => !loading && setPipPosition(pos.id)}
+                                className={`p-2 rounded-lg text-xs font-medium transition-all border ${
+                                    pipPosition === pos.id ? 'border-violet-500 bg-violet-500/10 text-violet-300' : 'border-white/[0.06] text-gray-500 hover:border-white/20'
+                                } ${loading ? 'opacity-50' : ''}`}>
+                                {pos.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            <button onClick={handleGenerate}
+                disabled={loading || !demoFile}
+                className={`w-full py-4 rounded-xl font-semibold text-lg transition-all flex items-center justify-center gap-3 ${
+                    loading || !demoFile
+                        ? 'bg-gray-700/50 text-gray-500 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-600/20 hover:-translate-y-0.5'
+                }`}>
+                {loading ? (
+                    <><Loader2 className="w-5 h-5 animate-spin" /> Generating Demo...</>
+                ) : (
+                    <><Monitor className="w-5 h-5" /> Generate Product Demo</>
+                )}
+            </button>
+
+            {demoError && !jobStatus && (
+                <div className="bg-red-500/5 border border-red-500/20 rounded-xl px-5 py-4">
+                    <p className="text-red-400 text-sm font-medium">{demoError}</p>
+                </div>
+            )}
+
+            {compressStatus && !jobStatus && (
+                <div className="bg-white/[0.02] border border-amber-500/20 rounded-2xl overflow-hidden">
+                    <div className="px-6 pt-5 pb-4">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                            <p className="text-sm font-medium text-amber-300">{compressStatus}</p>
+                        </div>
+                        <p className="text-xs text-gray-600">Compressing in your browser to reduce upload size. This may take a moment...</p>
+                    </div>
+                </div>
+            )}
+
+            {uploadProgress !== null && !compressStatus && !jobStatus && (
+                <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl overflow-hidden">
+                    <div className="px-6 pt-5 pb-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <p className="text-sm font-medium flex items-center gap-2">
+                                <Loader2 className="w-4 h-4 animate-spin text-violet-400" />
+                                Uploading files to server...
+                            </p>
+                            <span className="text-xs text-gray-500">{uploadProgress}%</span>
+                        </div>
+                        <div className="w-full bg-white/[0.05] rounded-full h-2">
+                            <div className="bg-gradient-to-r from-blue-500 to-violet-500 h-2 rounded-full transition-all duration-300"
+                                style={{ width: `${uploadProgress}%` }} />
+                        </div>
+                        <p className="text-xs text-gray-600 mt-2">
+                            {uploadProgress < 100
+                                ? `Uploading ${((demoFile?.size || 0) / (1024*1024)).toFixed(0)}MB${referenceFile ? ` + ${((referenceFile.size) / (1024*1024)).toFixed(0)}MB` : ''} to server...`
+                                : 'Upload complete, server is processing...'}
+                        </p>
+                    </div>
+                </div>
+            )}
+
+            {jobStatus && (
+                <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl overflow-hidden">
+                    <div className="px-6 pt-5 pb-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <p className="text-sm font-medium">{statusLabels[jobStatus.status] || jobStatus.status}</p>
+                            <span className="text-xs text-gray-500">{jobStatus.progress || 0}%</span>
+                        </div>
+                        <div className="w-full bg-white/[0.05] rounded-full h-2">
+                            <div className="bg-gradient-to-r from-violet-500 to-purple-500 h-2 rounded-full transition-all duration-500"
+                                style={{ width: `${jobStatus.progress || 0}%` }} />
+                        </div>
+                    </div>
+
+                    {jobStatus.compress_info && (jobStatus.status === 'compressing' || jobStatus.status === 'compressing_demo' || jobStatus.status === 'compressing_reference') && (
+                        <div className="px-6 py-3 border-t border-white/[0.05]">
+                            <div className="flex items-center gap-2 text-xs text-amber-300">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                <span>Compressing {jobStatus.compress_info.label} video: {jobStatus.compress_info.original_size_mb}MB → 720p</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {jobStatus.compress_info && jobStatus.compress_info.compressed_size_mb && jobStatus.status !== 'compressing' && jobStatus.status !== 'compressing_demo' && jobStatus.status !== 'compressing_reference' && (
+                        <div className="px-6 py-2 border-t border-white/[0.05]">
+                            <p className="text-xs text-emerald-400">Compressed: {jobStatus.compress_info.original_size_mb}MB → {jobStatus.compress_info.compressed_size_mb}MB</p>
+                        </div>
+                    )}
+
+                    {jobStatus.script && (
+                        <div className="px-6 py-3 border-t border-white/[0.05]">
+                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Script Preview</p>
+                            <p className="text-xs text-gray-400 line-clamp-3">
+                                {jobStatus.script.segments?.slice(0, 3).map((s: any) => s.text || s.narration).join(' ')}
+                            </p>
+                        </div>
+                    )}
+
+                    {jobStatus.status === 'complete' && jobStatus.output_url && (
+                        <div className="px-6 py-4 border-t border-white/[0.05] space-y-3">
+                            <video controls className="w-full rounded-xl" src={`${GENERATION_API}${jobStatus.output_url}`} />
+                            <a href={`${GENERATION_API}${jobStatus.output_url}`} download
+                                className="flex items-center justify-center gap-2 w-full py-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl font-medium transition-all">
+                                <Download className="w-4 h-4" /> Download Demo Video
+                            </a>
+                            <FeedbackWidget jobId={jobId || ''} feature="product_demo" />
+                        </div>
+                    )}
+
+                    {jobStatus.status === 'error' && (
+                        <div className="px-6 py-4 border-t border-red-500/20">
+                            <p className="text-red-400 text-sm">{jobStatus.error || 'Generation failed. Please try again.'}</p>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+function ThumbnailPanel() {
+    const { session } = useContext(AuthContext);
+    const [subTab, setSubTab] = useState<'generate' | 'library'>('generate');
+    const [mode, setMode] = useState<'describe' | 'style_transfer' | 'screenshot_analysis'>('describe');
+    const [description, setDescription] = useState('');
+    const [styleDesc, setStyleDesc] = useState('');
+    const [selectedStyleRef, setSelectedStyleRef] = useState<string>('');
+    const [screenshotDesc, setScreenshotDesc] = useState('');
+    const [library, setLibrary] = useState<ThumbFile[]>([]);
+    const [uploading, setUploading] = useState(false);
+    const [jobId, setJobId] = useState<string | null>(null);
+    const [jobStatus, setJobStatus] = useState<any>(null);
+    const [loading, setLoading] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+    const [thumbFeedbackSent, setThumbFeedbackSent] = useState<Record<string, boolean>>({});
+    const [syncingLibrary, setSyncingLibrary] = useState(false);
+    const [syncMessage, setSyncMessage] = useState('');
+    const withThumbToken = useCallback((path: string) => {
+        const base = path.startsWith("/api/thumbnails/generated/") ? GENERATION_API : API;
+        if (!session?.access_token) return `${base}${path}`;
+        const sep = path.includes('?') ? '&' : '?';
+        return `${base}${path}${sep}access_token=${encodeURIComponent(session.access_token)}`;
+    }, [session]);
+
+    const fetchLibrary = useCallback(async () => {
+        try {
+            const res = await fetch(`${API}/api/thumbnails/library`, {
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+            });
+            if (res.ok) { const data = await res.json(); setLibrary(data.files || []); }
+        } catch { /* ignore */ }
+    }, [session]);
+
+    const fetchTrainingStatus = useCallback(async () => {
+        try {
+            const res = await fetch(`${API}/api/thumbnails/training-status`, {
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+            });
+            if (res.ok) { const data = await res.json(); setTrainingStatus(data); }
+        } catch { /* ignore */ }
+    }, [session]);
+
+    useEffect(() => { fetchLibrary(); fetchTrainingStatus(); }, [fetchLibrary, fetchTrainingStatus]);
+
+    useEffect(() => {
+        const interval = setInterval(fetchTrainingStatus, 15000);
+        return () => clearInterval(interval);
+    }, [fetchTrainingStatus]);
+
+    useEffect(() => {
+        if (!jobId) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${GENERATION_API}/api/status/${jobId}`);
+                const data = await res.json();
+                setJobStatus(data);
+                if (data.status === 'complete' || data.status === 'error') {
+                    clearInterval(interval);
+                    setLoading(false);
+                }
+            } catch { /* retry */ }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [jobId]);
+
+    const handleUpload = async (files: FileList) => {
+        setUploading(true);
+        const formData = new FormData();
+        Array.from(files).forEach(f => formData.append('files', f));
+        try {
+            const res = await fetch(`${API}/api/thumbnails/upload`, {
+                method: 'POST',
+                headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+                body: formData,
+            });
+            if (res.ok) await fetchLibrary();
+            else {
+                const txt = await res.text().catch(() => "");
+                alert(txt || `Upload failed (${res.status})`);
+            }
+        } catch { /* ignore */ }
+        setUploading(false);
+    };
+
+    const handleDelete = async (id: string) => {
+        await fetch(`${API}/api/thumbnails/library/${id}`, {
+            method: 'DELETE',
+            headers: session ? { Authorization: `Bearer ${session.access_token}` } : {},
+        });
+        setLibrary(prev => prev.filter(f => f.id !== id));
+        if (selectedStyleRef === id) setSelectedStyleRef('');
+    };
+
+    const handleSyncLibrary = useCallback(async () => {
+        if (!session) return;
+        setSyncingLibrary(true);
+        setSyncMessage('');
+        try {
+            const res = await fetch(`${API}/api/thumbnails/sync-library`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setSyncMessage(data?.detail || `Sync failed (${res.status})`);
+                setSyncingLibrary(false);
+                return;
+            }
+            const synced = Number(data?.synced || 0);
+            const failed = Number(data?.failed || 0);
+            const total = Number(data?.queued || 0);
+            if (data?.status === 'no_files') {
+                setSyncMessage('No local library files found on this server instance.');
+            } else if (failed > 0) {
+                setSyncMessage(`Synced ${synced}/${total}. ${failed} failed; check server logs.`);
+            } else {
+                setSyncMessage(`Sync complete: ${synced}/${total} thumbnails pushed to RunPod.`);
+            }
+            await fetchTrainingStatus();
+        } catch {
+            setSyncMessage('Sync request failed. Please try again.');
+        }
+        setSyncingLibrary(false);
+    }, [session, fetchTrainingStatus]);
+
+    const sendThumbFeedback = useCallback(async (generationId: string, accepted: boolean) => {
+        if (!generationId || !session) return;
+        if (thumbFeedbackSent[generationId]) return;
+        try {
+            const res = await fetch(`${API}/api/thumbnails/feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+                body: JSON.stringify({ generation_id: generationId, accepted }),
+            });
+            if (res.ok) {
+                setThumbFeedbackSent(prev => ({ ...prev, [generationId]: true }));
+            }
+        } catch {
+            // ignore feedback send failures
+        }
+    }, [session, thumbFeedbackSent]);
+
+    const handleGenerate = async () => {
+        if (!description && mode === 'describe') return;
+        if (jobStatus?.status === 'complete' && jobStatus?.generation_id) {
+            await sendThumbFeedback(jobStatus.generation_id, false);
+        }
+        setLoading(true);
+        setJobStatus(null);
+        setJobId(null);
+
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (session) headers['Authorization'] = `Bearer ${session.access_token}`;
+
+        try {
+            const body: any = { mode, description };
+            if (mode === 'style_transfer') {
+                body.style_reference_id = selectedStyleRef;
+                body.screenshot_description = styleDesc;
+            } else if (mode === 'screenshot_analysis') {
+                body.screenshot_description = screenshotDesc;
+            }
+
+            const res = await fetch(`${GENERATION_API}/api/thumbnails/generate`, {
+                method: 'POST', headers, body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (data.job_id) setJobId(data.job_id);
+            else setLoading(false);
+        } catch { setLoading(false); }
+    };
+
+    const modes = [
+        { id: 'describe' as const, icon: <Sparkles className="w-4 h-4" />, title: 'Describe', desc: 'Describe your video and get a pro thumbnail' },
+        { id: 'style_transfer' as const, icon: <Palette className="w-4 h-4" />, title: 'Style Transfer', desc: 'Copy a thumbnail style you like' },
+        { id: 'screenshot_analysis' as const, icon: <Camera className="w-4 h-4" />, title: 'Channel Analysis', desc: 'AI learns from what works for you' },
+    ];
+
+    return (
+        <div className="max-w-4xl mx-auto px-6 pb-10 space-y-8">
+            <div className="text-center mb-2">
+                <h1 className="text-2xl font-bold mb-2">AI Thumbnail Engine</h1>
+                <p className="text-gray-500 text-sm max-w-xl mx-auto">Generate click-worthy thumbnails that outperform human designers. Upload your proven winners to train the AI on your style.</p>
+            </div>
+
+            <div className="flex gap-1 p-1 bg-white/[0.03] border border-white/[0.06] rounded-xl">
+                <button onClick={() => setSubTab('generate')}
+                    className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                        subTab === 'generate' ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20' : 'text-gray-400 hover:text-white'
+                    }`}>
+                    <Sparkles className="w-4 h-4 inline mr-1.5" />Generate
+                </button>
+                <button onClick={() => setSubTab('library')}
+                    className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                        subTab === 'library' ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20' : 'text-gray-400 hover:text-white'
+                    }`}>
+                    <Image className="w-4 h-4 inline mr-1.5" />Library ({library.length})
+                </button>
+            </div>
+
+            {subTab === 'library' ? (
+                <div className="space-y-6">
+                    {trainingStatus && (
+                        <div className={`p-4 rounded-xl border flex items-center gap-3 ${
+                            trainingStatus.is_training
+                                ? 'bg-amber-500/5 border-amber-500/20'
+                                : trainingStatus.lora_available
+                                    ? 'bg-emerald-500/5 border-emerald-500/20'
+                                    : 'bg-white/[0.02] border-white/[0.06]'
+                        }`}>
+                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                trainingStatus.is_training ? 'bg-amber-500/10' : trainingStatus.lora_available ? 'bg-emerald-500/10' : 'bg-white/[0.05]'
+                            }`}>
+                                {trainingStatus.is_training
+                                    ? <Loader2 className="w-5 h-5 text-amber-400 animate-spin" />
+                                    : trainingStatus.lora_available
+                                        ? <Sparkles className="w-5 h-5 text-emerald-400" />
+                                        : <Eye className="w-5 h-5 text-gray-500" />
+                                }
+                            </div>
+                            <div className="flex-1">
+                                {(() => {
+                                    const remoteCount = Number(trainingStatus.total_images || 0);
+                                    const localCount = Number(trainingStatus.local_library_images || 0);
+                                    const pendingSync = remoteCount === 0 && localCount > 0;
+                                    const canSyncNow = localCount > remoteCount;
+                                    return (
+                                        <>
+                                <p className={`text-sm font-medium ${
+                                    trainingStatus.is_training ? 'text-amber-300' : trainingStatus.lora_available ? 'text-emerald-300' : 'text-gray-400'
+                                }`}>
+                                    {trainingStatus.is_training
+                                        ? 'AI is training on your thumbnails...'
+                                        : trainingStatus.lora_available
+                                            ? `Thumbnail AI trained (v${trainingStatus.version}, ${trainingStatus.trained_images} images)`
+                                            : pendingSync
+                                                ? `Syncing ${localCount} uploaded thumbnails to RunPod training set...`
+                                                : `Upload ${Math.max(0, 5 - remoteCount)} more thumbnails to start training`
+                                    }
+                                </p>
+                                <p className="text-gray-600 text-xs mt-0.5">
+                                    {remoteCount} images in RunPod training set
+                                    {localCount > remoteCount ? ` (${localCount} in local library)` : ''}
+                                    {trainingStatus.lora_available && trainingStatus.total_images > trainingStatus.trained_images &&
+                                        ` (${trainingStatus.total_images - trainingStatus.trained_images} new, will retrain soon)`
+                                    }
+                                </p>
+                                {canSyncNow && (
+                                    <>
+                                        <button
+                                            onClick={handleSyncLibrary}
+                                            disabled={syncingLibrary}
+                                            className="mt-2 px-3 py-1.5 rounded-lg text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white transition-all"
+                                        >
+                                            {syncingLibrary ? 'Syncing to RunPod...' : `Sync ${localCount - remoteCount} unsynced thumbnails now`}
+                                        </button>
+                                        {syncMessage && (
+                                            <p className="text-[11px] text-gray-500 mt-1">{syncMessage}</p>
+                                        )}
+                                    </>
+                                )}
+                                        </>
+                                    );
+                                })()}
+                            </div>
+                        </div>
+                    )}
+
+                    <label className="block border-2 border-dashed border-white/[0.08] hover:border-violet-500/30 hover:bg-violet-500/[0.02] rounded-2xl p-8 text-center cursor-pointer transition-all">
+                        <UploadCloud className={`w-10 h-10 mx-auto mb-3 ${uploading ? 'text-violet-400 animate-pulse' : 'text-gray-600'}`} />
+                        <p className="text-gray-300 font-medium">{uploading ? 'Uploading...' : 'Upload Thumbnails'}</p>
+                        <p className="text-gray-600 text-xs mt-1">PNG, JPG, WebP -- drag and drop or click. Upload as many as you want.</p>
+                        <input type="file" className="hidden" accept="image/png,image/jpeg,image/webp" multiple
+                            onChange={e => { if (e.target.files?.length) handleUpload(e.target.files); }} />
+                    </label>
+
+                    {library.length === 0 ? (
+                        <div className="text-center py-12">
+                            <Image className="w-12 h-12 mx-auto text-gray-700 mb-3" />
+                            <p className="text-gray-500">No thumbnails yet</p>
+                            <p className="text-gray-600 text-xs mt-1">Upload your best-performing thumbnails to train the AI on your style</p>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                            {library.map(f => (
+                                <div key={f.id} className="group relative rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.02] hover:border-violet-500/30 transition-all">
+                                    <img src={withThumbToken(f.url)} alt={f.name}
+                                        className="w-full aspect-video object-cover cursor-pointer"
+                                        onClick={() => setPreviewUrl(withThumbToken(f.url))} />
+                                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
+                                        <button onClick={() => setPreviewUrl(withThumbToken(f.url))}
+                                            className="p-2 bg-white/10 rounded-lg mr-2 hover:bg-white/20 transition">
+                                            <Eye className="w-4 h-4" />
+                                        </button>
+                                        <button onClick={() => handleDelete(f.id)}
+                                            className="p-2 bg-red-500/20 rounded-lg hover:bg-red-500/40 transition">
+                                            <Trash2 className="w-4 h-4 text-red-400" />
+                                        </button>
+                                    </div>
+                                    <div className="p-2">
+                                        <p className="text-[10px] text-gray-500 truncate">{f.name}</p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            ) : (
+                <div className="space-y-6">
+                    {trainingStatus?.lora_available && (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-xs">
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="text-emerald-300 font-medium">AI trained on {trainingStatus.trained_images} of your thumbnails</span>
+                            <span className="text-gray-600">v{trainingStatus.version}</span>
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-3 gap-3">
+                        {modes.map(m => (
+                            <button key={m.id} onClick={() => setMode(m.id)}
+                                className={`p-4 rounded-xl text-left transition-all border-2 ${
+                                    mode === m.id
+                                        ? 'border-violet-500 bg-violet-500/10'
+                                        : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
+                                }`}>
+                                <div className={`mb-2 ${mode === m.id ? 'text-violet-400' : 'text-gray-500'}`}>{m.icon}</div>
+                                <div className="text-sm font-bold">{m.title}</div>
+                                <div className="text-[10px] text-gray-500 mt-0.5">{m.desc}</div>
+                            </button>
+                        ))}
+                    </div>
+
+                    {mode === 'describe' && (
+                        <div>
+                            <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Describe Your Video</h2>
+                            <textarea
+                                value={description}
+                                onChange={e => setDescription(e.target.value)}
+                                disabled={loading}
+                                placeholder={"Describe your video in detail. The AI will design a click-optimized thumbnail.\ne.g., \"A comparison video about why software engineers earn more than doctors, shocking statistics, aimed at 18-30 year olds\""}
+                                rows={4}
+                                className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50 resize-none"
+                            />
+                        </div>
+                    )}
+
+                    {mode === 'style_transfer' && (
+                        <div className="space-y-4">
+                            <div>
+                                <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">
+                                    Select Style Reference
+                                    {library.length === 0 && <span className="text-amber-400 ml-2">(upload thumbnails to library first)</span>}
+                                </h2>
+                                {library.length > 0 ? (
+                                    <div className="grid grid-cols-4 md:grid-cols-6 gap-2">
+                                        {library.map(f => (
+                                            <button key={f.id} onClick={() => setSelectedStyleRef(f.id)}
+                                                className={`rounded-lg overflow-hidden border-2 transition-all ${
+                                                    selectedStyleRef === f.id ? 'border-violet-500 ring-2 ring-violet-500/30' : 'border-white/[0.06] hover:border-white/20'
+                                                }`}>
+                                                <img src={withThumbToken(f.url)} alt={f.name} className="w-full aspect-video object-cover" />
+                                            </button>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center">
+                                        <p className="text-gray-500 text-sm">Go to Library tab and upload thumbnail styles you like</p>
+                                    </div>
+                                )}
+                            </div>
+                            <div>
+                                <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Describe Your New Thumbnail</h2>
+                                <textarea
+                                    value={styleDesc}
+                                    onChange={e => setStyleDesc(e.target.value)}
+                                    disabled={loading}
+                                    placeholder="Describe what your new thumbnail should show, using the selected style as a reference..."
+                                    rows={3}
+                                    className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50 resize-none"
+                                />
+                            </div>
+                            <input type="hidden" value={description} />
+                            {!description && styleDesc && (
+                                <p className="text-amber-400 text-xs">Also fill in a brief overall description above for best results, or this field will be used.</p>
+                            )}
+                        </div>
+                    )}
+
+                    {mode === 'screenshot_analysis' && (
+                        <div className="space-y-4">
+                            <div>
+                                <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">Describe Your Channel's Thumbnails</h2>
+                                <textarea
+                                    value={screenshotDesc}
+                                    onChange={e => setScreenshotDesc(e.target.value)}
+                                    disabled={loading}
+                                    placeholder={"Paste a screenshot description of your YouTube channel, or describe what your thumbnails typically look like:\ne.g., \"My thumbnails use bold red/yellow text, shocked face reactions, dark backgrounds, and always show a comparison split screen. My best performing ones have numbers in them.\""}
+                                    rows={4}
+                                    className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50 resize-none"
+                                />
+                            </div>
+                            <div>
+                                <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">New Video to Make Thumbnail For</h2>
+                                <input
+                                    type="text"
+                                    value={description}
+                                    onChange={e => setDescription(e.target.value)}
+                                    disabled={loading}
+                                    placeholder="e.g., Top 5 richest YouTubers of 2026"
+                                    className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-5 py-4 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all disabled:opacity-50"
+                                />
+                            </div>
+                        </div>
+                    )}
+
+                    <button onClick={handleGenerate}
+                        disabled={loading || (!description && mode !== 'style_transfer') || (mode === 'style_transfer' && !styleDesc && !description)}
+                        className="w-full py-4 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-violet-600/20 active:scale-[0.99]">
+                        {loading ? (
+                            <><Loader2 className="w-5 h-5 animate-spin" /> Generating Thumbnail...</>
+                        ) : (
+                            <><Sparkles className="w-5 h-5" /> Generate Thumbnail</>
+                        )}
+                    </button>
+
+                    {jobStatus && (
+                        <div className={`rounded-2xl border transition-all overflow-hidden ${
+                            jobStatus.status === 'complete' ? 'border-emerald-500/30 bg-emerald-500/[0.03]' :
+                            jobStatus.status === 'error' ? 'border-red-500/30 bg-red-500/[0.03]' :
+                            'border-violet-500/20 bg-violet-500/[0.02]'
+                        }`}>
+                            {jobStatus.ai_analysis && (
+                                <div className="px-6 pt-5 pb-3 border-b border-white/5">
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">AI Design Strategy</p>
+                                    {jobStatus.ai_analysis.style_notes && (
+                                        <p className="text-gray-400 text-xs italic">{jobStatus.ai_analysis.style_notes}</p>
+                                    )}
+                                    {jobStatus.ai_analysis.patterns?.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5 mt-2">
+                                            {jobStatus.ai_analysis.patterns.map((p: string, i: number) => (
+                                                <span key={i} className="px-2 py-0.5 bg-violet-500/10 text-violet-300 text-[10px] rounded-lg">{p}</span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {jobStatus.status === 'error' ? (
+                                <div className="p-8 text-center">
+                                    <p className="text-red-400 font-bold">Generation Failed</p>
+                                    <p className="text-gray-500 text-sm mt-1">{jobStatus.error}</p>
+                                    <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); }}
+                                        className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
+                                        Try Again
+                                    </button>
+                                </div>
+                            ) : jobStatus.status === 'complete' ? (
+                                <div>
+                                    <img src={withThumbToken(jobStatus.output_url)} alt="Generated Thumbnail"
+                                        className="w-full cursor-pointer"
+                                        onClick={() => setPreviewUrl(withThumbToken(jobStatus.output_url))} />
+                                    <div className="p-6 space-y-3">
+                                        <div className="flex items-center gap-2">
+                                            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                                            <span className="text-emerald-400 font-bold">Thumbnail Ready</span>
+                                        </div>
+                                        <div className="flex gap-3">
+                                            <a href={withThumbToken(jobStatus.output_url)} download
+                                                onClick={() => { if (jobStatus.generation_id) void sendThumbFeedback(jobStatus.generation_id, true); }}
+                                                className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
+                                                <Download className="w-5 h-5" /> Download PNG
+                                            </a>
+                                            <button onClick={() => { void handleGenerate(); }}
+                                                className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
+                                                Regenerate Thumbnail
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="p-8">
+                                    <ThumbProgressBar progress={jobStatus.progress || 0} status={jobStatus.status} />
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {previewUrl && (
+                <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6"
+                    onClick={() => setPreviewUrl(null)}>
+                    <div className="relative max-w-4xl w-full">
+                        <button onClick={() => setPreviewUrl(null)}
+                            className="absolute -top-10 right-0 p-2 text-gray-400 hover:text-white transition">
+                            <X className="w-6 h-6" />
+                        </button>
+                        <img src={previewUrl} alt="Preview" className="w-full rounded-xl" />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ThumbProgressBar({ progress, status }: { progress: number; status: string }) {
+    const labels: Record<string, string> = {
+        queued: 'In queue...',
+        analyzing: 'AI designing your thumbnail...',
+        generating: 'Rendering on GPU...',
+        complete: 'Done!',
+        error: 'Error occurred',
+    };
+    return (
+        <div>
+            <div className="flex justify-between text-sm mb-3">
+                <span className="text-violet-300 font-medium">{labels[status] || status}</span>
+                <span className="text-gray-600 tabular-nums">{progress}%</span>
+            </div>
+            <div className="w-full bg-white/[0.05] rounded-full h-2.5 overflow-hidden">
+                <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-purple-500 transition-all duration-700 ease-out"
+                    style={{ width: `${progress}%` }} />
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHARED COMPONENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function FeedbackWidget({ jobId, template, feature, language }: { jobId?: string; template?: string; feature?: string; language?: string }) {
+    const { session } = useContext(AuthContext);
+    const [rating, setRating] = useState(0);
+    const [hoveredStar, setHoveredStar] = useState(0);
+    const [comment, setComment] = useState('');
+    const [submitted, setSubmitted] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+
+    if (submitted) {
+        return (
+            <div className="flex items-center gap-2 text-emerald-400 text-sm py-2">
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Thanks for the feedback!</span>
+            </div>
+        );
+    }
+
+    const handleSubmit = async () => {
+        if (!rating || !session) return;
+        setSubmitting(true);
+        try {
+            await fetch(`${API}/api/feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+                body: JSON.stringify({
+                    job_id: jobId || '',
+                    rating,
+                    comment,
+                    template: template || '',
+                    language: language || 'en',
+                    feature: feature || 'general',
+                }),
+            });
+            setSubmitted(true);
+        } catch { /* silent */ }
+        setSubmitting(false);
+    };
+
+    return (
+        <div className="space-y-3 pt-2 border-t border-white/[0.06]">
+            <p className="text-xs text-gray-500 uppercase tracking-wider font-medium">Rate this generation</p>
+            <div className="flex items-center gap-1">
+                {[1, 2, 3, 4, 5].map(s => (
+                    <button key={s}
+                        onMouseEnter={() => setHoveredStar(s)}
+                        onMouseLeave={() => setHoveredStar(0)}
+                        onClick={() => setRating(s)}
+                        className="p-0.5 transition-transform hover:scale-110">
+                        <Star className={`w-7 h-7 transition-colors ${
+                            s <= (hoveredStar || rating)
+                                ? 'text-amber-400 fill-amber-400'
+                                : 'text-gray-600'
+                        }`} />
+                    </button>
+                ))}
+                {rating > 0 && (
+                    <span className="text-xs text-gray-500 ml-2">
+                        {['', 'Poor', 'Fair', 'Good', 'Great', 'Amazing'][rating]}
+                    </span>
+                )}
+            </div>
+            {rating > 0 && (
+                <>
+                    <textarea value={comment} onChange={(e) => setComment(e.target.value)}
+                        placeholder="What did you like? What could be better? Any features you want?"
+                        rows={2}
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all resize-none" />
+                    <button onClick={handleSubmit} disabled={submitting}
+                        className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium rounded-xl transition-all disabled:opacity-50">
+                        {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        Submit Feedback
+                    </button>
+                </>
+            )}
+        </div>
+    );
+}
+
+function ProgressBar({ progress, status }: { progress: number; status: string }) {
+    const labels: Record<string, string> = {
+        queued: "In queue...",
+        analyzing: "Reverse-engineering viral formula...",
+        generating_script: "AI is writing the script...",
+        generating_images: "Generating scene images...",
+        animating_scenes: "Animating scenes with AI video...",
+        generating_voice: "Creating AI voiceover...",
+        generating_sfx: "Generating sound effects...",
+        compositing: "Compositing final video...",
+        complete: "Done!",
+        error: "Error occurred",
+    };
+
+    return (
+        <div>
+            <div className="flex justify-between text-sm mb-3">
+                <span className="text-violet-300 font-medium">{labels[status] || status}</span>
+                <span className="text-gray-600 tabular-nums">{progress}%</span>
+            </div>
+            <div className="w-full bg-white/[0.05] rounded-full h-2.5 overflow-hidden">
+                <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-purple-500 transition-all duration-700 ease-out"
+                    style={{ width: `${progress}%` }} />
+            </div>
+        </div>
+    );
+}
+
+function JobDiagnostics({ jobStatus }: { jobStatus: any }) {
+    const diagnostics = jobStatus?.diagnostics;
+    if (!diagnostics) return null;
+    const durations = diagnostics.stage_durations_sec || {};
+    const stageEntries = Object.entries(durations) as Array<[string, number]>;
+    const latestSceneEvent = Array.isArray(diagnostics.scene_events) && diagnostics.scene_events.length > 0
+        ? diagnostics.scene_events[diagnostics.scene_events.length - 1]
+        : null;
+    return (
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 space-y-2">
+            <p className="text-[11px] uppercase tracking-wide text-gray-500">Diagnostics</p>
+            <p className="text-xs text-gray-300">
+                Stage: <span className="text-violet-300">{diagnostics.current_stage || jobStatus?.status || 'unknown'}</span>
+            </p>
+            {jobStatus?.animation_warnings ? (
+                <p className="text-xs text-amber-300">Animation warnings: {jobStatus.animation_warnings}</p>
+            ) : null}
+            {stageEntries.length > 0 ? (
+                <p className="text-xs text-gray-400">
+                    {stageEntries.slice(-4).map(([k, v]) => `${k}: ${v}s`).join(" | ")}
+                </p>
+            ) : null}
+            {latestSceneEvent ? (
+                <p className="text-xs text-gray-400">
+                    Scene {latestSceneEvent.scene}/{latestSceneEvent.total_scenes}: {latestSceneEvent.event}
+                    {latestSceneEvent.detail ? ` (${latestSceneEvent.detail})` : ""}
+                </p>
+            ) : null}
+        </div>
+    );
+}

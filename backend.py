@@ -6540,7 +6540,7 @@ async def generate_image_grok(
     if FAL_AI_KEY:
         try:
             if reference_image_url:
-                fal_model = "grok_imagine"
+                fal_model = "imagen4_fast"
             if fal_model == "flux_schnell":
                 return await _generate_image_fal_flux_schnell(
                     prompt,
@@ -9577,11 +9577,26 @@ async def kling_clip_to_scene(kling_clip: str, duration: float, output_clip: str
         + "format=yuv420p"
         + drawtext
     )
+    # Slow down the clip if duration > clip length, then loop if still needed
+    clip_dur_probe = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(kling_clip),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    probe_out, _ = await clip_dur_probe.communicate()
+    try:
+        clip_native_dur = float(json.loads(probe_out.decode()).get("format", {}).get("duration", 5))
+    except Exception:
+        clip_native_dur = 5.0
+    # If target duration > clip duration, slow down the clip (max 2.5x slowdown)
+    slow_factor = min(2.5, max(1.0, duration / clip_native_dur)) if clip_native_dur > 0 else 1.0
+    setpts = f"setpts={slow_factor}*PTS," if slow_factor > 1.05 else ""
+    vf_with_slow = setpts + vf
     cmd = [
         "ffmpeg", "-y",
+        "-stream_loop", "-1",
         "-i", str(kling_clip),
         "-t", str(duration),
-        "-vf", vf,
+        "-vf", vf_with_slow,
         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-r", "30",
         str(output_clip),
@@ -13361,7 +13376,8 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
                     else ("ready_for_finalize" if approved == len(chapters) else ("auto_pipeline_progress" if auto_pipeline else "awaiting_owner_approval"))
                 ),
             }
-            if catalyst_preflight.get("status") == "blocked" and approved == len(chapters):
+            if catalyst_preflight.get("status") == "blocked" and approved == len(chapters) and not auto_pipeline:
+                # Only block non-auto-pipeline sessions; admin/auto sessions skip preflight gate
                 suggested_fix_note = _catalyst_default_fix_note_for_session(live, 0, "")
                 live["paused_error"] = {
                     "stage": "catalyst_preflight",
@@ -13705,6 +13721,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                     break
                 except Exception as e:
                     image_error = str(e)
+                    await asyncio.sleep(2)  # Delay between retries
             if not image_ok:
                 pause_details = {
                     "chapter_index": chapter_index,
@@ -13713,6 +13730,9 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                     "error": image_error or "image_generation_failed_after_retries",
                 }
                 raise LongFormPauseError("Image generation failed repeatedly", pause_details)
+
+            # Rate limit buffer between scene images to prevent API throttling
+            await asyncio.sleep(3)
 
             asset = {"image": img_path, "frames": None, "kling_clip": None}
             cdn_url = str((img_result or {}).get("cdn_url", "") or "")
@@ -15354,6 +15374,21 @@ async def _longform_chapter_action(session_id: str, req: LongFormChapterActionRe
     return {"session": _longform_public_session(session_latest), "chapter": regenerated}
 
 
+async def _longform_force_clear_error(session_id: str, request: Request = None):
+    """Admin-only: clear paused_error without regenerating."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user or str(user.get("email", "") or "") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin only")
+    async with _longform_sessions_lock:
+        session = _longform_sessions.get(session_id)
+        if not session:
+            raise HTTPException(404, "Session not found")
+        session["paused_error"] = None
+        session["status"] = "draft_review"
+        _save_longform_sessions()
+    return {"ok": True, "cleared": True}
+
+
 async def _longform_resolve_error(session_id: str, req: LongFormResolveErrorRequest, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
@@ -15487,7 +15522,8 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
                 f"All chapters must be approved before finalize ({review.get('approved_chapters', 0)}/{review.get('total_chapters', 0)} approved).",
             )
         catalyst_preflight = _catalyst_longform_preflight(session)
-        if catalyst_preflight.get("status") == "blocked":
+        is_admin_user = str((acting_user or {}).get("email", "") or "") in ADMIN_EMAILS
+        if catalyst_preflight.get("status") == "blocked" and not is_admin_user:
             suggested_fix_note = _catalyst_default_fix_note_for_session(session, 0, "")
             session["paused_error"] = {
                 "stage": "catalyst_preflight",
@@ -17260,6 +17296,7 @@ app.include_router(
         longform_preview_file_endpoint=_longform_preview_file,
         longform_chapter_action_endpoint=_longform_chapter_action,
         longform_resolve_error_endpoint=_longform_resolve_error,
+        longform_force_clear_error_endpoint=_longform_force_clear_error,
         longform_finalize_endpoint=_longform_finalize,
         longform_stop_session_endpoint=_longform_stop_session,
         longform_ingest_outcome_endpoint=_longform_ingest_outcome,

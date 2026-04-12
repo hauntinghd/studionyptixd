@@ -404,6 +404,7 @@ def build_longform_creative_router(
     longform_preview_file_endpoint,
     longform_chapter_action_endpoint,
     longform_resolve_error_endpoint,
+    longform_force_clear_error_endpoint=None,
     longform_finalize_endpoint,
     longform_stop_session_endpoint,
     longform_ingest_outcome_endpoint,
@@ -431,6 +432,8 @@ def build_longform_creative_router(
     router.add_api_route("/api/longform/preview/{filename}", longform_preview_file_endpoint, methods=["GET"])
     router.add_api_route("/api/longform/session/{session_id}/chapter-action", longform_chapter_action_endpoint, methods=["POST"])
     router.add_api_route("/api/longform/session/{session_id}/resolve-error", longform_resolve_error_endpoint, methods=["POST"])
+    if longform_force_clear_error_endpoint:
+        router.add_api_route("/api/longform/session/{session_id}/force-clear-error", longform_force_clear_error_endpoint, methods=["POST"])
     router.add_api_route("/api/longform/session/{session_id}/finalize", longform_finalize_endpoint, methods=["POST"])
     router.add_api_route("/api/longform/session/{session_id}/stop", longform_stop_session_endpoint, methods=["POST"])
     router.add_api_route("/api/longform/session/{session_id}/outcome", longform_ingest_outcome_endpoint, methods=["POST"])

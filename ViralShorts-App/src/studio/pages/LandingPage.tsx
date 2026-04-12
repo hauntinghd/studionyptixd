@@ -129,13 +129,13 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div>
                             <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-4 py-1.5 text-sm font-medium text-cyan-300">
                                 <Rocket className="h-4 w-4" />
-                                Faceless YouTube Operating System
+                                AI Content Creation Engine
                             </div>
                             <h1 className="mt-6 text-5xl font-extrabold leading-[1.02] tracking-tight text-white md:text-7xl">
-                                Build faceless YouTube content with one Studio.
+                                Create YouTube videos that outperform human editors.
                             </h1>
                             <p className="mt-6 max-w-3xl text-lg leading-relaxed text-gray-400">
-                                NYPTID Studio now sells one short-form product. Catalyst powers the Create workflow and Chat Story now, while the heavier lanes stay behind the curtain until they are genuinely ready. Studio sign-in works with email + password even when Google or YouTube OAuth is temporarily unhealthy.
+                                NYPTID Studio generates shorts, long-form documentaries, and full video packages with AI. Catalyst learns from every video you publish and gets smarter over time. Connect your YouTube channel and let the engine optimize your content automatically.
                             </p>
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
@@ -166,7 +166,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 )}
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
-                                <StatCard label="Live Templates" value="5" />
+                                <StatCard label="Live Templates" value="7" />
                                 <StatCard label="Free Renders" value="2" />
                                 <StatCard label="Auth" value="Email + Google" />
                             </div>

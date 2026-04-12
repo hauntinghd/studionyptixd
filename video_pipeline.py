@@ -308,6 +308,32 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "fal_endpoint_id": "fal-ai/kling-video/v2.1/master/image-to-video",
         "enabled": bool(FAL_AI_KEY),
     },
+    {
+        "id": "pixverse_c1",
+        "label": "PixVerse C1 (Film Grade)",
+        "provider": "fal",
+        "tier": "elite",
+        "summary": "Film-grade hyper-realistic video. Use for hero scenes (opening, climax, chapter intros).",
+        "speed": "Slow",
+        "credit_multiplier": 6,
+        "estimated_unit_usd": 0.09,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/pixverse/c1/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "pixverse_v6",
+        "label": "PixVerse V6",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Latest PixVerse model. Strong motion, good quality-to-cost ratio.",
+        "speed": "Balanced",
+        "credit_multiplier": 3,
+        "estimated_unit_usd": 0.07,
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/pixverse/v6/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
 ]
 CREATIVE_VIDEO_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_VIDEO_MODEL_PROFILES}
 
@@ -322,8 +348,8 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
         return requested
     for candidate in (
         DEFAULT_CREATIVE_IMAGE_MODEL_ID,
-        "grok_imagine",
         "imagen4_fast",
+        "grok_imagine",
     ):
         profile = CREATIVE_IMAGE_MODEL_MAP.get(candidate)
         if profile and bool(profile.get("enabled", False)):
@@ -334,7 +360,7 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
 def _normalize_scene_image_model_id(value: str | None, template: str = "") -> str:
     normalized = _normalize_creative_image_model_id(value, template=template)
     if str(template or "").strip().lower() == "skeleton":
-        return "grok_imagine"
+        return "imagen4_fast"
     return normalized
 
 
@@ -1253,11 +1279,11 @@ def _build_documentary_scene_repair(
             narration_line = f"The consequence around {focus_phrase} is already visible by the time the system is noticed."
     visual_line = (
         (
-            f"Fern-grade premium 3D psychology documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
+            f"Premium cinematic psychology documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
             f"{action_line} Use controlled cinematic CG, premium human-scale interiors, restrained symbolism, and real social pressure instead of abstract props. "
             f"No empty room, no untouched table, no static dossier still life, no isolated object pedestal, no literal anatomy, and no floating machine filler."
             if archetype_key == "psychology_documentary"
-            else f"Fern-grade premium 3D crime-case documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
+            else f"Premium cinematic crime-case documentary scene set in {proof_mode}. Center the frame on {focus_phrase}. "
             f"{action_line} Use designed evidence layouts, source-capture logic, readable human consequence, and premium editorial CG. "
             f"No generic boardroom filler, no untouched archive room, no committee of skeletons, no x-ray humans, no floating machine props, no anonymous stock-person face, and no legible article text."
             if archetype_key == "crime_documentary"
@@ -1374,7 +1400,7 @@ def _render_longform_blueprint_prompt_context(
     if not lines:
         return ""
     return _clip_text(
-        "Catalyst planning notes (planning only, never quote these literally inside narration or visual_description):\n"
+        "--- INTERNAL PLANNING NOTES (DO NOT COPY ANY OF THIS TEXT INTO NARRATION OR VISUAL FIELDS — these are direction notes for YOU the writer, NOT script content) ---\n"
         + "\n".join(lines),
         2200,
     )
@@ -1495,6 +1521,8 @@ def _build_longform_scene_execution_prompt(
             if documentary_archetype == "psychology_documentary"
             else "Prefer named-human close-ups, studio interiors, court corridors, phone and records evidence, source-capture monitors, route and timeline boards, surveillance-led consequence frames, and one dominant contradiction over boardrooms, static dossier tables, or empty archive rooms."
             if documentary_archetype == "crime_documentary"
+            else "Prefer ancient temples, marble columns, agoras, amphitheaters, classical architecture, ancient battlefields, Mediterranean landscapes, torchlit interiors, scroll-filled libraries, and historical human consequence over modern offices or boardrooms."
+            if re.search(r"\b(ancient|greek|greece|roman|rome|medieval|renaissance|classical|hellenic|sparta|athens|egypt|persian|byzantine|ottoman|viking|celtic|feudal)\b", str(topic or "").lower() + " " + str(input_title or "").lower())
             else "Prefer designed rooms, dossier tables, surveillance setups, boardrooms, archives, maps, human consequence, and grounded symbolic environments over isolated floating objects."
         )
         human_priority_lock = _longform_named_human_priority_lock(
@@ -1534,7 +1562,26 @@ def _build_longform_scene_execution_prompt(
             documentary_output_guardrail,
         ], max_items=8, max_chars=240)
         visual_delta = " ".join(part for part in visual_parts if part).strip()
-        return f"{documentary_prefix} {visual_delta}".strip()
+        full_documentary_prompt = f"{documentary_prefix} {visual_delta}".strip()
+        # For skeleton template in documentary mode: inject condensed skeleton identity
+        # (the full _build_skeleton_image_prompt creates prompts too long for image models)
+        if str(template or "").strip().lower() == "skeleton":
+            skeleton_identity = (
+                "Photorealistic 3D cinematic render. The main character is a translucent glass-skinned humanoid skeleton figure "
+                "with ivory-white bones visible through a smooth transparent glass body shell, realistic natural human eyes "
+                "(visible iris, pupil, wet reflections, natural eye color, NOT glowing). "
+                "The glass skin refracts light with subtle caustic highlights. "
+            )
+            return f"{skeleton_identity}{full_documentary_prompt}".strip()
+        return _build_scene_prompt_with_reference(
+            template=template,
+            visual_description=full_documentary_prompt,
+            quality_mode="cinematic",
+            skeleton_anchor=skeleton_anchor,
+            reference_dna={},
+            reference_lock_mode="strict",
+            art_style=art_style,
+        )
     visual_parts = _dedupe_preserve_order([
         visual_description,
         f"Scene role: {execution['scene_role'].replace('_', ' ')}." if execution.get("scene_role") else "",
@@ -1846,7 +1893,7 @@ def _longform_fallback_chapter(
             "duration_sec": 5.0,
             "narration": " ".join(part for part in [blueprint_hook or narration_mode, blueprint_focus or blueprint_improvement] if part).strip(),
             "visual_description": (
-                f"Fern-grade premium 3D documentary scene focused on {topic_focus}. "
+                f"Premium cinematic documentary scene focused on {topic_focus}. "
                 f"Use {blueprint_visual_motif or visual_mode}, cinematic environmental storytelling, readable focal hierarchy, strong depth, and at least one grounded human, room, or proof context when relevant, "
                 f"and one unmistakable visual change from the previous beat. Shock device: {blueprint_shock or 'clear escalation or contrast'}. "
                 "Keep the named subject exact; do not substitute a different organ, device, or symbol. "
@@ -1925,11 +1972,15 @@ async def _generate_longform_chapter(
         f"Generate {scene_goal}-{scene_goal + 2} scenes. Each scene must include scene_num, duration_sec, narration, visual_description, text_overlay, motion_direction, sfx_direction, engagement_purpose. "
         "narration must be concise and engaging; visual_description must be render-ready and specific. "
         "motion_direction must describe the camera or motion-graphics beat; sfx_direction must describe the sound-design accent; engagement_purpose must explain why the scene keeps attention. "
-        + ("Most scenes should land between 8 and 12 seconds so the chapter can breathe without exploding render count. " if documentary_mode else "Every scene duration_sec must be exactly 5. ")
+        + ("Most scenes should land between 8 and 12 seconds so the chapter can breathe without exploding render count. Each scene narration MUST be 30-60 words (2-4 full sentences) to fill the duration. One-sentence narrations are too short. " if documentary_mode else "Every scene duration_sec must be exactly 5. ")
         + "Narration-first rule: each visual_description must directly visualize that same scene's narration beat. "
         "Optimize for retention, clean structure, and YouTube packaging strength instead of generic filler. "
-        "Never copy planning language or Catalyst instructions literally into narration or visual_description. "
-        "Do not write meta phrases like 'open on', 'start directly on', 'subject focus', 'current Catalyst archetype', 'next run should', 'use premium', or 'avoid' inside scene fields."
+        "CRITICAL RULE: narration must be ORIGINAL DOCUMENTARY SCRIPT written for a viewer, NOT planning notes or instructions. "
+        "Never copy planning language, Catalyst instructions, blueprint text, improvement targets, or focus directives into narration or visual_description fields. "
+        "Do not write meta phrases like 'open on', 'start directly on', 'subject focus', 'the trigger behind', 'the case around', 'the contradiction around', "
+        "'current Catalyst archetype', 'next run should', 'keep the promise', 'deliver a clean reversal', 'ground the theory', or 'avoid' inside scene fields. "
+        "Every narration line must sound like a real documentary narrator speaking to a YouTube audience — conversational, specific, fact-driven, and emotionally engaging. "
+        "Each scene narration should be 2-4 sentences long (25-50 words) with concrete facts, names, studies, or examples — NOT abstract planning language."
     )
     system_prompt += " " + subject_lock
     if _longform_prefers_3d_documentary_visuals(template, format_preset):
@@ -1956,7 +2007,7 @@ async def _generate_longform_chapter(
         elif documentary_archetype == "systems_documentary":
             system_prompt += (
                 " Systems-documentary lock: visualize control through dossiers, boardrooms, ledgers, networks, maps, infrastructure, and consequence frames. "
-                "Favor Fern-grade systems staging and Magnates-style expensive consequence framing over generic floating-object stages, random lab props, anatomy filler, and glossy machine hero shots unless the narration explicitly requires them."
+                "Favor premium cinematic systems staging and Magnates-style expensive consequence framing over generic floating-object stages, random lab props, anatomy filler, and glossy machine hero shots unless the narration explicitly requires them."
             )
     if format_preset == "recap" or str(edit_blueprint.get("niche_key", "") or "").strip().lower() == "manga_recap":
         recap_anchor = _clip_text(str(edit_blueprint.get("series_anchor", "") or topic or input_title or "the series"), 120)

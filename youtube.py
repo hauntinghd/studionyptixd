@@ -60,6 +60,31 @@ YOUTUBE_DATA_API_BASE = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_ANALYTICS_API_BASE = "https://youtubeanalytics.googleapis.com/v2"
 YOUTUBE_ALGROW_LONGFORM_WORKSPACES = {"documentary", "recap", "explainer", "story_channel"}
 
+# YouTube API response cache (5-minute TTL) to reduce quota usage
+_youtube_api_cache: dict[str, tuple[float, any]] = {}
+_YOUTUBE_CACHE_TTL_SEC = 300  # 5 minutes
+
+
+def _youtube_cache_get(key: str):
+    """Get cached API response if still valid."""
+    entry = _youtube_api_cache.get(key)
+    if entry:
+        ts, data = entry
+        if time.time() - ts < _YOUTUBE_CACHE_TTL_SEC:
+            return data
+        del _youtube_api_cache[key]
+    return None
+
+
+def _youtube_cache_set(key: str, data):
+    """Cache an API response."""
+    _youtube_api_cache[key] = (time.time(), data)
+    # Prune old entries
+    now = time.time()
+    stale = [k for k, (ts, _) in _youtube_api_cache.items() if now - ts > _YOUTUBE_CACHE_TTL_SEC * 2]
+    for k in stale:
+        _youtube_api_cache.pop(k, None)
+
 _youtube_connections: dict[str, dict] = {}
 _youtube_connections_lock = asyncio.Lock()
 _youtube_oauth_states: dict[str, dict] = {}
@@ -1056,6 +1081,12 @@ async def _youtube_fetch_channel_search(access_token: str, channel_id: str, orde
     clean_channel_id = str(channel_id or "").strip()
     if not clean_channel_id:
         return []
+    # Check cache first (search = 100 quota units per call)
+    cache_key = f"search:{clean_channel_id}:{order}:{max_results}"
+    cached = _youtube_cache_get(cache_key)
+    if cached is not None:
+        log.info("YouTube search cache hit for %s (saved 100 quota units)", clean_channel_id)
+        return cached
     remaining = max(1, min(int(max_results or 12), 250))
     page_token = ""
     video_ids: list[str] = []
@@ -1084,7 +1115,9 @@ async def _youtube_fetch_channel_search(access_token: str, channel_id: str, orde
         page_token = str(payload.get("nextPageToken", "") or "").strip()
         if not page_token or remaining <= 0:
             break
-    return await _youtube_fetch_videos(access_token, video_ids)
+    result = await _youtube_fetch_videos(access_token, video_ids)
+    _youtube_cache_set(cache_key, result)
+    return result
 
 
 async def _youtube_fetch_owned_channel_videos(

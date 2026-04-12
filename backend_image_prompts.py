@@ -2,6 +2,9 @@ SKELETON_IMAGE_PROMPT_PREFIX = ""
 
 SKELETON_IMAGE_STYLE_PREFIX = (
     "Photorealistic 3D cinematic character render, Unreal Engine 5 quality. "
+    "The skeleton character has a smooth transparent glass-like body shell encasing the full bone structure, "
+    "with realistic human-like eyes (visible iris, pupil, wet reflections, natural eye color). "
+    "The glass skin catches and refracts lighting creating subtle caustic highlights on the bones inside. "
     "Premium commercial lighting, clean subject separation, realistic materials, natural contrast, crisp detail. "
     "No illustration, no cartoon, no anime, no sketch."
 )
@@ -16,8 +19,8 @@ SKELETON_MASTER_CONSISTENCY_PROMPT = (
 )
 
 SKELETON_IMAGE_SUFFIX = (
-    "Character anatomy rules: ivory-white anatomical skeleton with realistic large eyeballs (visible iris and wet reflections), consistent skull proportions, and consistent bone structure every scene. "
-    "A clearly visible translucent soft-tissue silhouette around torso/limbs is REQUIRED in every scene, but no full human skin face. "
+    "Character anatomy rules: ivory-white anatomical skeleton encased in a transparent glass-like body shell, with realistic natural human eyes (visible iris, pupil, wet reflections, natural brown or amber eye color — NOT glowing, NOT hollow, NOT empty sockets). "
+    "A clearly visible translucent glass-skin body silhouette around the entire figure is REQUIRED in every scene, but no full human skin face. "
     "Default to no clothing, uniforms, armor, masks, or costumes on the skeleton body unless the scene explicitly requests a specific outfit. "
     "Composition priority: keep the skeleton prominent and mobile-readable while preserving a rich topic-matched background or readable cutaway context. "
     "Vary framing by scene instead of repeating the same centered medium hero shot. "
@@ -77,7 +80,8 @@ SKELETON_NEGATIVE_PROMPT = (
     "jpeg artifacts, pixelated, ugly, low resolution, "
     "inconsistent skull geometry between scenes, changing eye size between scenes, mismatched bone shape between scenes, "
     "glowing eyes, fire eyes, laser eyes, empty eye sockets, no eyes, hollow eyes, "
-    "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose"
+    "robotic motion, stiff pose, mannequin, puppet, jerky movement, unnatural pose, "
+    "no text, no words, no letters, no writing, no readable text, no captions, no titles, no watermark"
 )
 
 HISTORY_IMAGE_PROMPT_PREFIX = (

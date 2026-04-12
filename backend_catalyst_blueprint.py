@@ -142,13 +142,28 @@ def _heuristic_catalyst_edit_blueprint(
     archetype_packaging_rule = _clip_text(str(memory_view.get("archetype_packaging_rule", "") or ""), 220)
     niche_follow_up_rule = _clip_text(str(memory_view.get("niche_follow_up_rule", "") or selected_cluster.get("follow_up_rule", "") or ""), 220)
     is_recap_lane = bool(format_preset == "recap" or niche_key == "manga_recap")
-    is_empire_magnates = bool(format_preset == "documentary" and not is_recap_lane and _is_empire_magnates_channel(channel_context))
+    # Detect channel identity from channel_context OR topic/description keywords (fixes no-OAuth local rendering)
+    _strategy_topic_haystack = " ".join([
+        str(topic or "").strip().lower(),
+        str(input_title or "").strip().lower(),
+        str(input_description or "").strip().lower(),
+    ])
+    is_empire_magnates = bool(
+        format_preset == "documentary" and not is_recap_lane and (
+            _is_empire_magnates_channel(channel_context)
+            or any(kw in _strategy_topic_haystack for kw in ("empire magnates", "empiremagnates", "empire magnates psychology"))
+        )
+    )
     operator_summary = _clip_text(str(memory_view.get("operator_summary", "") or ""), 320)
     operator_directive = _clip_text(str(memory_view.get("operator_directive", "") or ""), 1200)
     operator_mission = _clip_text(str(memory_view.get("operator_mission", "") or ""), 220)
     operator_guardrails = [str(v).strip() for v in list(memory_view.get("operator_guardrails") or []) if str(v).strip()]
     operator_target_niches = [str(v).strip() for v in list(memory_view.get("operator_target_niches") or []) if str(v).strip()]
     empire_psychology_mode = False
+    # Also detect psychology mode from topic/strategy even without Empire Magnates channel
+    if not is_empire_magnates and format_preset == "documentary" and not is_recap_lane:
+        if re.search(r"\b(psychology|psychological|brain|mind|manipulat|bias|subconscious|dark triad|narcissi|machiavelli|psychopath|cognitive)\b", _strategy_topic_haystack):
+            is_empire_magnates = True  # Use psychology documentary rules
     if is_empire_magnates:
         psychology_haystack = " ".join([
             str(topic or "").strip().lower(),
