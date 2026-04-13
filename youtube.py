@@ -794,10 +794,13 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
             _save_youtube_connections()
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
         if default_channel_id:
-            try:
-                await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
-            except Exception:
-                pass
+            # Sync in background — don't block the OAuth redirect (prevents Render 502 timeout)
+            async def _background_sync():
+                try:
+                    await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
+                except Exception:
+                    pass
+            asyncio.create_task(_background_sync())
         success_message = "YouTube channel connected"
         if oauth_mode == "installed":
             success_message = "YouTube channel connected through the installed Google client fallback"
