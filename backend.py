@@ -11567,6 +11567,7 @@ async def run_generation_pipeline(
             lang_instruction = f"\n\nIMPORTANT: Write ALL narration text in {lang_name}. The visual_description fields should remain in English (for image generation), but ALL narration/voiceover text MUST be in {lang_name}."
         catalyst_shorts_instructions = str(job_state.get("catalyst_shorts_instructions", "") or "").strip()
         extra_instructions = lang_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")
+        channel_context = {}  # Initialize before try/except so it's always defined
         try:
             script_data = await generate_script(template, topic, extra_instructions=extra_instructions)
         except Exception as e:
