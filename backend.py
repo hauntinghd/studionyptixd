@@ -7560,6 +7560,12 @@ async def generate_scene_image(
             except Exception as repair_err:
                 log.warning(f"Skeleton Grok-only repair pass failed: {repair_err}")
         if template == "skeleton" and not bool(result.get("qa_ok", False)):
+            # Accept lower scores when using explicitly selected models (e.g. Imagen4 for short-form)
+            qa_score = float(result.get("qa_score", 0.0) or 0.0)
+            if selected_model_id and qa_score >= 25.0:
+                log.info(f"Skeleton QA soft-accept for {selected_model_id}: score={qa_score}")
+                result["qa_ok"] = True
+                return result
             if interactive_fast:
                 notes = _interactive_soft_accept_notes(result["qa_notes"])
                 if not _skeleton_notes_are_severe(notes):
