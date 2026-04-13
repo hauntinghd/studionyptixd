@@ -11683,15 +11683,28 @@ async def run_generation_pipeline(
             _job_set_stage(job_id, "generating_images", 10 + int((step_base / total_steps) * 55))
             _job_record_scene_event(job_id, i, len(scenes), "image_start")
 
-            full_prompt = _build_scene_prompt_with_reference(
-                template=template,
-                visual_description=scene.get("visual_description", ""),
-                quality_mode=quality_mode,
-                skeleton_anchor=skeleton_anchor,
-                reference_dna=reference_dna,
-                reference_lock_mode=reference_lock_mode,
-                art_style=art_style,
-            )
+            visual_desc = scene.get("visual_description", "")
+            if template == "skeleton":
+                # Use condensed skeleton prompt for short-form (the full prompt is 2800+ words and breaks image models)
+                skeleton_identity = (
+                    "Photorealistic 3D cinematic render, Unreal Engine 5 quality. "
+                    "The main character is a translucent glass-skinned humanoid skeleton figure "
+                    "with ivory-white bones visible through a smooth transparent glass body shell, "
+                    "realistic natural human eyes (visible iris, pupil, wet reflections, natural eye color, NOT glowing). "
+                    "The glass skin refracts light with subtle caustic highlights. "
+                    "Premium commercial lighting, clean subject separation, crisp detail. "
+                )
+                full_prompt = f"{skeleton_identity}SCENE: {visual_desc}"
+            else:
+                full_prompt = _build_scene_prompt_with_reference(
+                    template=template,
+                    visual_description=visual_desc,
+                    quality_mode=quality_mode,
+                    skeleton_anchor=skeleton_anchor,
+                    reference_dna=reference_dna,
+                    reference_lock_mode=reference_lock_mode,
+                    art_style=art_style,
+                )
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
             scene_reference_url = _resolve_reference_for_scene(job_state, template, i) or (
                 skeleton_reference_image_url if template == "skeleton" else reference_image_url
@@ -11705,6 +11718,7 @@ async def run_generation_pipeline(
                 channel_context=channel_context,
                 reference_image_url=scene_reference_url,
                 reference_lock_mode=reference_lock_mode,
+                selected_model_id="imagen4_fast" if template == "skeleton" else "",
             )
             if template == "skeleton" and not skeleton_reference_image_url and i == 0:
                 skeleton_reference_image_url = _file_to_data_image_url(img_path)
