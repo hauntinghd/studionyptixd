@@ -11724,7 +11724,7 @@ async def run_generation_pipeline(
                 channel_context=channel_context,
                 reference_image_url=scene_reference_url,
                 reference_lock_mode=reference_lock_mode,
-                selected_model_id="imagen4_fast" if template == "skeleton" else "",
+                selected_model_id="imagen4_preview" if template == "skeleton" else "",
             )
             if template == "skeleton" and not skeleton_reference_image_url and i == 0:
                 skeleton_reference_image_url = _file_to_data_image_url(img_path)

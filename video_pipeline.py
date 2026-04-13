@@ -169,6 +169,20 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         "supports_reference_conditioning": False,
     },
     {
+        "id": "imagen4_preview",
+        "label": "Imagen 4 Preview",
+        "provider": "fal",
+        "tier": "basic",
+        "summary": "Google's standard Imagen 4 model. Best quality-to-cost ratio.",
+        "speed": "Fast",
+        "credit_cost_per_image": 0,
+        "estimated_unit_usd": 0.03,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/imagen4/preview",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+    },
+    {
         "id": "imagen4_ultra",
         "label": "Imagen 4 Ultra",
         "provider": "fal",
@@ -360,7 +374,7 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
 def _normalize_scene_image_model_id(value: str | None, template: str = "") -> str:
     normalized = _normalize_creative_image_model_id(value, template=template)
     if str(template or "").strip().lower() == "skeleton":
-        return "imagen4_fast"
+        return "imagen4_preview"
     return normalized
 
 
