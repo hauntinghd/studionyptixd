@@ -751,15 +751,21 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
     if not user_id or not code:
         return RedirectResponse(_youtube_redirect_target(next_url, False, "Google OAuth callback was missing state or code"), status_code=302)
     try:
-        token_payload = await _google_exchange_code_for_tokens(code, oauth_mode, code_verifier)
+        token_payload = await asyncio.wait_for(
+            _google_exchange_code_for_tokens(code, oauth_mode, code_verifier),
+            timeout=10,
+        )
         access_token = str(token_payload.get("access_token", "") or "").strip()
         refresh_token = str(token_payload.get("refresh_token", "") or "").strip()
         expires_in = max(300, int(token_payload.get("expires_in", 3600) or 3600))
         scope = str(token_payload.get("scope", "") or "").strip()
         auth_context = _youtube_auth_context(oauth_mode)
-        channels = await _youtube_fetch_my_channels(access_token)
+        try:
+            channels = await asyncio.wait_for(_youtube_fetch_my_channels(access_token), timeout=15)
+        except asyncio.TimeoutError:
+            channels = []
         if not channels:
-            return RedirectResponse(_youtube_redirect_target(next_url, False, "Google account returned no YouTube channels"), status_code=302)
+            return RedirectResponse(_youtube_redirect_target(next_url, False, "Google account returned no YouTube channels. Try again — YouTube may be slow."), status_code=302)
         now = time.time()
         async with _youtube_connections_lock:
             _load_youtube_connections()
