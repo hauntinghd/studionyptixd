@@ -11696,7 +11696,6 @@ async def run_generation_pipeline(
 
             if template == "skeleton":
                 # BYPASS generate_scene_image entirely for skeleton — call Imagen4 Preview directly
-                # This avoids the 2800-word prompt builder, Flux Schnell fallback, and QA gate rejection
                 skeleton_identity = (
                     "Photorealistic 3D cinematic render, Unreal Engine 5 quality. "
                     "The main character is a translucent glass-skinned humanoid skeleton figure "
@@ -11706,15 +11705,24 @@ async def run_generation_pipeline(
                     "Premium commercial lighting, clean subject separation, crisp detail. "
                 )
                 full_prompt = f"{skeleton_identity}SCENE: {visual_desc}"
-                aspect = "16:9" if str(resolution or "").endswith("_landscape") else "9:16"
-                img_result = await _generate_image_fal_selected_model(
-                    "imagen4_fast",  # Uses fal-ai/imagen4/preview/fast endpoint
-                    full_prompt,
-                    img_path,
-                    resolution=resolution,
-                    negative_prompt=neg_prompt,
-                )
-                log.info(f"[{job_id}] Skeleton scene {i+1} generated via Imagen4 (direct bypass)")
+                aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
+                # Call Imagen4 Preview directly via FAL API (not /fast, not Flux Schnell)
+                async with httpx.AsyncClient(timeout=60) as _img_client:
+                    _img_resp = await _img_client.post(
+                        "https://fal.run/fal-ai/imagen4/preview",
+                        headers={"Authorization": "Key " + FAL_AI_KEY, "Content-Type": "application/json"},
+                        json={"prompt": full_prompt, "num_images": 1, "aspect_ratio": aspect, "output_format": "png"},
+                    )
+                    if _img_resp.status_code not in (200, 201):
+                        raise RuntimeError(f"Imagen4 Preview failed: {_img_resp.status_code}")
+                    _img_url = _img_resp.json().get("images", [{}])[0].get("url", "")
+                    if not _img_url:
+                        raise RuntimeError("Imagen4 Preview returned no image URL")
+                    _img_data = await _img_client.get(_img_url)
+                    with open(img_path, "wb") as _f:
+                        _f.write(_img_data.content)
+                img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "imagen4_preview"}
+                log.info(f"[{job_id}] Skeleton scene {i+1} generated via Imagen4 Preview (direct API)")
             else:
                 full_prompt = _build_scene_prompt_with_reference(
                     template=template,
@@ -11768,7 +11776,8 @@ async def run_generation_pipeline(
                         str(TEMP_DIR), i, gen_ts,
                         duration_sec=scene.get("duration_sec", 5),
                         image_cdn_url=cdn_url,
-                        prefer_wan=(template == "skeleton"),
+                        prefer_wan=False,
+                        video_model_id="kling21_standard" if template == "skeleton" else "",
                     )
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
