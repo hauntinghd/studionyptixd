@@ -11704,7 +11704,9 @@ async def run_generation_pipeline(
                     "The glass skin refracts light with subtle caustic highlights. "
                     "Premium commercial lighting, clean subject separation, crisp detail. "
                 )
-                full_prompt = f"{skeleton_identity}SCENE: {visual_desc}"
+                # Inject topic context so every scene has relevant environment
+                topic_context = str(topic or "").strip()
+                full_prompt = f"{skeleton_identity}TOPIC: {topic_context}. SCENE: The glass-skinned skeleton figure in a setting directly related to {topic_context}. {visual_desc}"
                 aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
                 # Call Imagen4 Preview directly via FAL API (not /fast, not Flux Schnell)
                 async with httpx.AsyncClient(timeout=60) as _img_client:
