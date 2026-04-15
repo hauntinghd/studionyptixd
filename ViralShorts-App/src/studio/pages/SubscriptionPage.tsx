@@ -22,6 +22,7 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         manageBilling,
         publicPlanLimits,
         publicPlanPrices,
+        verifyPayPalOrder,
     } = useContext(AuthContext);
     const params = useMemo(() => {
         if (typeof window === 'undefined') return new URLSearchParams();
@@ -30,6 +31,10 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const requestedPlanId = String(params.get('plan') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const subscriptionError = String(params.get('error') || '').trim();
+    const paypalProvider = String(params.get('provider') || '').trim().toLowerCase() === 'paypal';
+    const paypalOrderId = String(params.get('order_id') || '').trim();
+    const [paypalVerifyState, setPaypalVerifyState] = useState<'idle' | 'verifying' | 'verified' | 'failed' | 'revoked'>('idle');
+    const [paypalVerifyError, setPaypalVerifyError] = useState('');
     const [actionError, setActionError] = useState('');
     const [loadingPlanId, setLoadingPlanId] = useState('');
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
@@ -79,6 +84,31 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
             trackMembershipPurchaseCompleted(planId, value);
         });
     }, [normalizedCurrentPlan, publicPlanPrices, requestedPlanId, subscriptionResult]);
+
+    // Second-factor verification for PayPal redirects — backend confirms capture before
+    // we show the success banner. Prevents spoofed redirect URLs from showing fake success.
+    useEffect(() => {
+        if (!paypalProvider || !paypalOrderId || subscriptionResult !== 'success') return;
+        let cancelled = false;
+        setPaypalVerifyState('verifying');
+        setPaypalVerifyError('');
+        (async () => {
+            const result = await verifyPayPalOrder(paypalOrderId);
+            if (cancelled) return;
+            if (!result.ok) {
+                setPaypalVerifyState('failed');
+                setPaypalVerifyError(result.error || 'Unable to verify payment');
+                return;
+            }
+            if (result.revoked) {
+                setPaypalVerifyState('revoked');
+                return;
+            }
+            setPaypalVerifyState(result.captured ? 'verified' : 'failed');
+            if (!result.captured) setPaypalVerifyError('PayPal has not confirmed capture yet.');
+        })();
+        return () => { cancelled = true; };
+    }, [paypalProvider, paypalOrderId, subscriptionResult, verifyPayPalOrder]);
 
     const currentStatus = billingActive ? `Active on ${capitalizePlan(normalizedCurrentPlan)}` : 'Free plan active';
 
@@ -252,9 +282,24 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                         {actionError}
                     </p>
                 )}
-                {subscriptionResult === 'success' && (
+                {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
                     <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
                         Your monthly plan is active. Included credits now burn before the wallet.
+                    </p>
+                )}
+                {paypalProvider && paypalVerifyState === 'verifying' && (
+                    <p className="mt-6 rounded-2xl border border-sky-500/20 bg-sky-500/10 px-5 py-4 text-sm text-sky-100">
+                        Confirming your PayPal payment with our servers…
+                    </p>
+                )}
+                {paypalProvider && paypalVerifyState === 'failed' && (
+                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
+                        We couldn't confirm your PayPal payment yet. {paypalVerifyError ? `Details: ${paypalVerifyError}. ` : ''}If funds were charged, refresh this page in a minute.
+                    </p>
+                )}
+                {paypalProvider && paypalVerifyState === 'revoked' && (
+                    <p className="mt-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-5 py-4 text-sm text-rose-100">
+                        This PayPal order was refunded or reversed. Access has been removed. If this is a mistake, contact support.
                     </p>
                 )}
                 {subscriptionResult === 'manual' && (

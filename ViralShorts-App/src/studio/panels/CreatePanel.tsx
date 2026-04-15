@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
-import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, hasChatStoryTemplateAccess, startYouTubeBrowserConnect } from '../shared';
+import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
@@ -44,7 +44,7 @@ interface CreatePanelPersistedState {
     videoModelId?: string;
     cinematicBoostEnabled?: boolean;
     createSubTab?: 'builder' | 'projects';
-    workspaceStage?: 'script' | 'scenes' | 'finale';
+    workspaceStage?: 'script' | 'scenes' | 'audio';
     subtitlesEnabled?: boolean;
     voiceProvider?: 'custom' | 'elevenlabs';
     customVoiceId?: string;
@@ -173,10 +173,10 @@ const fallbackVideoModelCatalog: CreativeModelProfile[] = [
 ];
 
 export default function CreatePanel() {
-    const { session, role, billingActive, plan, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
+    const { session, role, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
-    const [selectedTemplate, setSelectedTemplate] = useState('story');
+    const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
     const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
     const [jobId, setJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<any>(null);
@@ -223,7 +223,7 @@ export default function CreatePanel() {
     const [bulkImageGenDone, setBulkImageGenDone] = useState(0);
     const [bulkImageGenTotal, setBulkImageGenTotal] = useState(0);
     const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
-    const [workspaceStage, setWorkspaceStage] = useState<'script' | 'scenes' | 'finale'>('script');
+    const [workspaceStage, setWorkspaceStage] = useState<'script' | 'scenes' | 'audio'>('script');
     const [scenePromptEditorIndex, setScenePromptEditorIndex] = useState<number | null>(null);
     const [projectDrafts, setProjectDrafts] = useState<ProjectRow[]>([]);
     const [projectRenders, setProjectRenders] = useState<ProjectRow[]>([]);
@@ -254,6 +254,12 @@ export default function CreatePanel() {
     const [animationCreditPromptMode, setAnimationCreditPromptMode] = useState<'video' | 'image'>('video');
     const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
     const [renderMonitorDismissed, setRenderMonitorDismissed] = useState(false);
+    // Remix Script state — pull captions from a TikTok/YouTube/IG URL and drop into the textarea.
+    const [remixUrl, setRemixUrl] = useState('');
+    const [remixLoading, setRemixLoading] = useState(false);
+    const [remixError, setRemixError] = useState('');
+    const [remixSourceTitle, setRemixSourceTitle] = useState('');
+    const [remixWarning, setRemixWarning] = useState('');
     const restoreDoneRef = useRef(false);
     const hydratedSceneImagesSessionRef = useRef<string | null>(null);
     const lastTrackedCompletedJobRef = useRef('');
@@ -339,7 +345,8 @@ export default function CreatePanel() {
     const animationCreditsAvailable = Number(creditsTotalRemaining || 0);
     const animationCreditExhausted = !isAdmin && (requiresTopup || animationCreditsAvailable <= 0);
     const effectiveAnimationEnabled = !animationCreditExhausted && animateOutputEnabled;
-    const templateSupportsVoiceControls = selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+    // Voice controls supported on all kept templates (Casey 2026-04-15: dual-mode requires voice config)
+    const templateSupportsVoiceControls = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
     const cinematicBoostAlwaysOn = true;
     const effectiveCinematicBoostEnabled = cinematicBoostAlwaysOn || cinematicBoostEnabled;
     const defaultSkeletonStyleLockActive = selectedTemplate === 'skeleton' && !creativeReferenceImage && !creativeReferenceAttached;
@@ -347,31 +354,26 @@ export default function CreatePanel() {
     const workspaceTabs = [
         { id: 'script', label: 'Script' },
         { id: 'scenes', label: 'Scenes' },
-        { id: 'finale', label: 'Finale' },
+        { id: 'audio', label: 'Audio' },
     ] as const;
 
+    // Final 9-template list per Casey 2026-04-15. Removed: story, motivation, chatstory, argument,
+    // reddit, top5, objects, wouldyourather, whatif. Added: dilemma (AI Moral Dilemma Arena, new niche).
     const templates = [
-        { id: 'story', title: 'AI Stories', desc: 'Cinematic story shorts', icon: '🎬' },
-        { id: 'motivation', title: 'Motivation', desc: 'Powerful life advice', icon: '🔥' },
         { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparisons', icon: '💀' },
-        { id: 'chatstory', title: 'Chat Story', desc: 'Message-based premium shorts', icon: '💬' },
+        { id: 'daytrading', title: 'Day Trading', desc: 'Trading and investing shorts', icon: '📈' },
+        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Cinematic impossible-choice shorts', icon: '⚖️' },
         { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
         { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
         { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
         { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
-        { id: 'objects', title: 'Objects Explain', desc: 'Talking objects', icon: '🔌' },
-        { id: 'wouldyourather', title: 'Would You Rather', desc: 'Impossible dilemmas', icon: '🤔' },
         { id: 'scary', title: 'Scary Stories', desc: 'Horror & true crime', icon: '👻' },
         { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
-        { id: 'argument', title: 'Argument Debate', desc: 'Two sides debate', icon: '🗣️' },
-        { id: 'whatif', title: 'What If', desc: 'Hypothetical scenarios', icon: '🌍' },
-        { id: 'daytrading', title: 'Day Trading', desc: 'Trading and investing shorts', icon: '📈' },
     ];
     const supportsArtStyle = selectedTemplate !== 'skeleton';
-    const publicDefaultTemplateId = 'story';
+    const publicDefaultTemplateId = 'skeleton';
     const templateIds = new Set(templates.map(t => t.id));
-    const liveTemplateIds = new Set(['story', 'motivation', 'skeleton', 'daytrading', 'chatstory']);
-    const chatStoryTemplateUnlocked = hasChatStoryTemplateAccess(plan, billingActive, role);
+    const liveTemplateIds = new Set(['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history']);
     const liveWorkspaceTemplates = templates.filter((template) => liveTemplateIds.has(template.id));
     const currentTemplateMeta = templates.find((template) => template.id === selectedTemplate) || templates[0];
     const supportsTrendHunt = selectedTemplate === 'skeleton';
@@ -385,27 +387,17 @@ export default function CreatePanel() {
             setSelectedTemplate(publicDefaultTemplateId);
         }
     }, [selectedTemplate]);
+    // Stale-template guard: if user lands on a removed template (chatstory/story/motivation/etc),
+    // bounce them to the public default. Removed templates may still appear in sessionStorage from old sessions.
     useEffect(() => {
-        if (selectedTemplate === 'chatstory' && !chatStoryTemplateUnlocked) {
+        const REMOVED = new Set(['story', 'motivation', 'chatstory', 'argument', 'reddit', 'top5', 'objects', 'wouldyourather', 'whatif']);
+        if (REMOVED.has(selectedTemplate)) {
             setSelectedTemplate(publicDefaultTemplateId);
         }
-    }, [selectedTemplate, chatStoryTemplateUnlocked]);
+    }, [selectedTemplate]);
     useEffect(() => {
-        if (!session || !chatStoryTemplateUnlocked) return;
-        try {
-            if (sessionStorage.getItem(pendingChatStoryTemplateStorageKey) !== 'chatstory') return;
-            sessionStorage.removeItem(pendingChatStoryTemplateStorageKey);
-        } catch {
-            return;
-        }
-        setCreateSubTab('builder');
-        setSelectedTemplate('chatstory');
-        setTemplateChooserOpen(false);
-        setSubscriptionPromptOpen(false);
-        setSubscriptionPromptError(null);
-    }, [session, chatStoryTemplateUnlocked, pendingChatStoryTemplateStorageKey]);
-    useEffect(() => {
-        if (selectedTemplate !== 'story' && storyAnimationEnabled !== true) {
+        // Always keep storyAnimationEnabled true (legacy story-template flag, no-op for current templates)
+        if (storyAnimationEnabled !== true) {
             setStoryAnimationEnabled(true);
         }
     }, [selectedTemplate, storyAnimationEnabled]);
@@ -516,30 +508,40 @@ export default function CreatePanel() {
     }, [selectedTemplate, voiceProvider, customVoiceId, storyPacingMode, soundReferencePreset, applyCustomVoicePreset]);
 
     const renderWorkspaceStageTabs = () => (
-        <div className="flex flex-wrap gap-2 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-2">
-            {workspaceTabs.map((tab) => (
-                <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setWorkspaceStage(tab.id)}
-                    className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                        workspaceStage === tab.id
-                            ? 'bg-violet-600 text-white'
-                            : 'bg-black/20 text-gray-400 hover:bg-white/[0.04] hover:text-white'
-                    }`}
-                >
-                    {tab.label}
-                </button>
-            ))}
+        <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-1.5">
+            {workspaceTabs.map((tab, idx) => {
+                const active = workspaceStage === tab.id;
+                return (
+                    <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setWorkspaceStage(tab.id)}
+                        className={`group flex items-center gap-2.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                            active
+                                ? 'bg-gradient-to-r from-violet-600 to-cyan-600 text-white shadow-md shadow-violet-900/20'
+                                : 'bg-transparent text-gray-400 hover:bg-white/[0.04] hover:text-white'
+                        }`}
+                    >
+                        <span
+                            className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                                active ? 'bg-white/20 text-white' : 'bg-white/[0.05] text-gray-400 group-hover:bg-white/[0.1] group-hover:text-white'
+                            }`}
+                        >
+                            {idx + 1}
+                        </span>
+                        {tab.label}
+                    </button>
+                );
+            })}
         </div>
     );
     const renderCustomVoiceLibraryCard = () => (
         <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
             <div className="flex items-start justify-between gap-3">
                 <div>
-                    <p className="text-sm font-semibold text-white">Finale Audio</p>
+                    <p className="text-sm font-semibold text-white">Audio Engine</p>
                     <p className="mt-1 text-xs text-gray-500">
-                        Use the live Studio voice stack now. Background music stays marked as coming soon until the hosted soundtrack flow is ready.
+                        ElevenLabs voice stack with custom presets per template. Background music is disabled — NYPTID testing showed it hurts retention.
                     </p>
                 </div>
                 <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
@@ -826,8 +828,11 @@ export default function CreatePanel() {
             if (saved.createSubTab === 'builder' || saved.createSubTab === 'projects') {
                 setCreateSubTab(saved.createSubTab);
             }
-            if (saved.workspaceStage === 'script' || saved.workspaceStage === 'scenes' || saved.workspaceStage === 'finale') {
+            if (saved.workspaceStage === 'script' || saved.workspaceStage === 'scenes' || saved.workspaceStage === 'audio') {
                 setWorkspaceStage(saved.workspaceStage);
+            } else if ((saved.workspaceStage as unknown) === 'finale') {
+                // Backward-compat: older saved state used 'finale'; migrate to 'audio'.
+                setWorkspaceStage('audio');
             }
             if (typeof saved.subtitlesEnabled === 'boolean') {
                 setSubtitlesEnabled(saved.subtitlesEnabled);
@@ -1229,6 +1234,44 @@ export default function CreatePanel() {
         }
     };
 
+    const handleRemixIngest = useCallback(async () => {
+        const url = remixUrl.trim();
+        if (!url) return;
+        setRemixError('');
+        setRemixWarning('');
+        setRemixSourceTitle('');
+        setRemixLoading(true);
+        try {
+            const res = await fetch(`${API}/api/creative/ingest-url`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...authHeaders(),
+                },
+                body: JSON.stringify({ url, language }),
+            });
+            const { data, raw } = await readJsonResponse<any>(res);
+            if (!res.ok) {
+                const msg = extractResponseErrorMessage(data, raw, 'Could not read that URL');
+                setRemixError(String(msg));
+                return;
+            }
+            const payload = (data || {}) as any;
+            const transcript = String(payload.transcript || '').trim();
+            if (!transcript) {
+                setRemixError('No captions found on that video.');
+                return;
+            }
+            setPrompt(transcript);
+            setRemixSourceTitle(String(payload.title || '').trim() || 'source video');
+            setRemixWarning(String(payload.warning || '').trim());
+        } catch (e: any) {
+            setRemixError(String(e?.message || 'Failed to reach Studio backend'));
+        } finally {
+            setRemixLoading(false);
+        }
+    }, [remixUrl, language, authHeaders]);
+
     const handleGenerate = async () => {
         if (!prompt) return;
         setGenerateError(null);
@@ -1240,10 +1283,10 @@ export default function CreatePanel() {
             await handleScriptToShortStart();
             return;
         }
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         setLoading(true);
         setGenerateError(null);
         setJobStatus(null);
@@ -1303,7 +1346,7 @@ export default function CreatePanel() {
     const handleRegenerateAutoScene = async (sceneIndex: number) => {
         const targetJobId = jobId || jobStatus?.job_id;
         if (!targetJobId) return;
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         setGenerateError(null);
         setRegeneratingAutoScenes(prev => ({ ...prev, [sceneIndex]: true }));
         try {
@@ -1359,10 +1402,10 @@ export default function CreatePanel() {
             : (prompt.trim() || creativeNarration.trim())
         );
         if (!scriptText) return;
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const generationMode = creativeMode === 'script_to_short' ? 'script_to_short' : 'creative';
         setSceneBuildLoading(true);
         setSceneBuildError(null);
@@ -1462,10 +1505,10 @@ export default function CreatePanel() {
     };
 
     const handleCreativeStart = async () => {
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         setScriptLoading(true);
         setGenerateError(null);
         setCreativeReferenceStatus(creativeReferenceImage ? 'uploading' : 'idle');
@@ -1582,10 +1625,10 @@ export default function CreatePanel() {
             openAnimationCreditPrompt(imageCreditCost, 'image');
             return;
         }
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         setCreativeScenes(prev => prev.map((s, i) => i === sceneIndex ? { ...s, imageLoading: true, imageError: undefined } : s));
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/scene-image`, {
@@ -1792,10 +1835,10 @@ export default function CreatePanel() {
         setJobStatus(null);
         setJobId(null);
         setCreativeStep('generating');
-        const mintMode = selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'daytrading';
+        const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         const qualityMode = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'cinematic' : 'standard');
         const transitionStyle = effectiveCinematicBoostEnabled ? 'cinematic' : (selectedTemplate === 'skeleton' ? 'dramatic' : 'smooth');
-        const microEscalationMode = effectiveCinematicBoostEnabled ? true : (selectedTemplate === 'skeleton' || selectedTemplate === 'story' || selectedTemplate === 'motivation' || selectedTemplate === 'daytrading');
+        const microEscalationMode = effectiveCinematicBoostEnabled ? true : ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
         try {
             const res = await fetch(`${GENERATION_API}/api/creative/finalize`, {
                 method: "POST",
@@ -2466,7 +2509,7 @@ export default function CreatePanel() {
                 setScriptScenesReady(Boolean((p.session_id || "").trim()) && Array.isArray(p.scenes) && p.scenes.length > 0);
                 setSceneBuildError(null);
                 if (readyPromptCount > 0 && readyImageCount === readyPromptCount) {
-                    setWorkspaceStage('finale');
+                    setWorkspaceStage('audio');
                 } else if (readyPromptCount > 0) {
                     setWorkspaceStage('scenes');
                 } else {
@@ -2475,7 +2518,7 @@ export default function CreatePanel() {
             } else if (p.job_id) {
                 setJobId(p.job_id);
                 setLoading(true);
-                setWorkspaceStage('finale');
+                setWorkspaceStage('audio');
             }
         } catch (e: any) {
             setProjectsError(e?.message || "Failed to open project");
@@ -2606,24 +2649,24 @@ export default function CreatePanel() {
         { label: 'Script ready', done: hasNarration },
         { label: 'Scenes planned', done: promptSceneCount > 0 },
         { label: 'Images ready', done: allPromptedImagesReady },
-        { label: 'Finale ready', done: hasNarration && allPromptedImagesReady && Boolean(sessionId) },
+        { label: 'Audio ready', done: hasNarration && allPromptedImagesReady && Boolean(sessionId) },
     ];
-    const activeStageCopy: Record<'script' | 'scenes' | 'finale', { title: string; description: string }> = {
+    const activeStageCopy: Record<'script' | 'scenes' | 'audio', { title: string; description: string }> = {
         script: {
-            title: 'Script Workspace',
+            title: 'Script',
             description: creativeMode === 'script_to_short'
-                ? 'Paste the exact narration here, then move into Scenes to generate prompt beats locked to the script order.'
+                ? 'Paste the exact narration, then move into Scenes to generate prompt beats locked to the script order.'
                 : 'Lock the narration, art style, and sound direction before moving into scene generation.',
         },
         scenes: {
-            title: 'Scene Workspace',
+            title: 'Scenes',
             description: creativeMode === 'script_to_short'
-                ? 'Generate script-locked scene prompts, then fix or regenerate images scene-by-scene before final render.'
+                ? 'Generate script-locked scene prompts, then fix or regenerate images scene-by-scene before render.'
                 : 'Generate images, fix prompts scene-by-scene, and keep every beat production-ready before render.',
         },
-        finale: {
-            title: 'Finale Workspace',
-            description: 'Lock voices, captions, pacing, and export settings before the final render.',
+        audio: {
+            title: 'Audio',
+            description: 'Lock voice, captions, pacing, and export settings, then render your short.',
         },
     };
 
@@ -2651,7 +2694,7 @@ export default function CreatePanel() {
                         <h1 className="text-xl font-bold text-white">{creativeTitle || activeTemplateMeta?.title || 'Untitled Project'}</h1>
                         <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Control'} &middot; {resolution} &middot; {language.toUpperCase()}</p>
                     </div>
-                    {workspaceStage === 'finale' ? (
+                    {workspaceStage === 'audio' ? (
                         <button
                             type="button"
                             onClick={globalToggleAnimationMode}
@@ -2737,7 +2780,7 @@ export default function CreatePanel() {
                     </div>
                 )}
 
-                {workspaceStage === 'finale' && (
+                {workspaceStage === 'audio' && (
                     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
                         <button
                             type="button"
@@ -2918,81 +2961,116 @@ export default function CreatePanel() {
                     </div>
                 )}
 
-                {workspaceStage === 'finale' && renderCustomVoiceLibraryCard()}
+                {workspaceStage === 'audio' && renderCustomVoiceLibraryCard()}
 
-                {workspaceStage === 'finale' && templateSupportsVoiceControls && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                {workspaceStage === 'audio' && templateSupportsVoiceControls && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-5">
                         <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-semibold text-white">Voice + Pacing (Pre-Render)</p>
+                            <div>
+                                <p className="text-sm font-semibold text-white">Voice &amp; Pacing</p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">These settings lock before render — preview a line to double-check before shipping.</p>
+                            </div>
                             <button
                                 onClick={() => { void previewStoryVoice(); }}
                                 disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
+                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 text-white hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed transition whitespace-nowrap"
                             >
                                 {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
                             </button>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <select
-                                value={storyVoiceId}
-                                onChange={(e) => setStoryVoiceId(e.target.value)}
-                                className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
-                            >
-                                {storyVoicesLoading ? (
-                                    <option value="">Loading voices...</option>
-                                ) : storyVoices.length > 0 ? (
-                                    storyVoices.map((v: any) => (
-                                        <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
-                                            {String(v.name || v.voice_id || "Voice")}
-                                        </option>
-                                    ))
-                                ) : (
-                                    <option value="">Default voice</option>
-                                )}
-                            </select>
-                            {storyVoicesWarning ? (
-                                <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
-                            ) : storyVoicesSource === 'fallback' ? (
-                                <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
-                            ) : null}
-                            {storyPreviewError ? (
-                                <p className="text-[11px] text-red-300 mt-1">{storyPreviewError}</p>
-                            ) : null}
-                            <input
-                                type="range"
-                                min={0.8}
-                                max={1.35}
-                                step={0.05}
-                                value={storyVoiceSpeed}
-                                onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
-                                className="w-full accent-cyan-500"
-                            />
-                            <div className="grid grid-cols-3 gap-1">
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Voice</label>
+                                <select
+                                    value={storyVoiceId}
+                                    onChange={(e) => setStoryVoiceId(e.target.value)}
+                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
+                                >
+                                    {storyVoicesLoading ? (
+                                        <option value="">Loading voices...</option>
+                                    ) : storyVoices.length > 0 ? (
+                                        storyVoices.map((v: any) => (
+                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                                {String(v.name || v.voice_id || "Voice")}
+                                            </option>
+                                        ))
+                                    ) : (
+                                        <option value="">Default voice</option>
+                                    )}
+                                </select>
+                                {storyVoicesWarning ? (
+                                    <p className="text-[11px] text-amber-300">{storyVoicesWarning}</p>
+                                ) : storyVoicesSource === 'fallback' ? (
+                                    <p className="text-[11px] text-gray-500">Using fallback voice catalog.</p>
+                                ) : null}
+                                {storyPreviewError ? (
+                                    <p className="text-[11px] text-red-300">{storyPreviewError}</p>
+                                ) : null}
+                            </div>
+
+                            <div className="space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Speed</label>
+                                    <span className="text-[11px] text-gray-400 font-mono">{storyVoiceSpeed.toFixed(2)}x</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min={0.8}
+                                    max={1.35}
+                                    step={0.05}
+                                    value={storyVoiceSpeed}
+                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                    className="w-full accent-cyan-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-gray-600 font-mono">
+                                    <span>0.80x</span>
+                                    <span>1.00x</span>
+                                    <span>1.35x</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Pacing</label>
+                            <div className="grid grid-cols-3 gap-2">
                                 {[
-                                    { id: 'standard', label: 'Standard' },
-                                    { id: 'fast', label: 'Fast' },
-                                    { id: 'very_fast', label: 'Very Fast' },
+                                    { id: 'standard', label: 'Standard', desc: 'Conversational' },
+                                    { id: 'fast', label: 'Fast', desc: 'Energetic' },
+                                    { id: 'very_fast', label: 'Very Fast', desc: 'High-velocity' },
                                 ].map((p) => (
                                     <button
                                         key={p.id}
                                         type="button"
                                         onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
-                                        className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
-                                            storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
+                                        className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+                                            storyPacingMode === p.id
+                                                ? 'bg-cyan-600 text-white border-cyan-500/40 shadow-md shadow-cyan-600/20'
+                                                : 'bg-white/[0.03] text-gray-300 border-white/[0.06] hover:bg-white/[0.06] hover:border-white/[0.1]'
                                         }`}
                                     >
-                                        {p.label}
+                                        <div>{p.label}</div>
+                                        <div className={`text-[10px] mt-0.5 ${storyPacingMode === p.id ? 'text-cyan-100/80' : 'text-gray-500'}`}>{p.desc}</div>
                                     </button>
                                 ))}
                             </div>
-                            <label className="flex items-center gap-2 text-xs text-gray-300 md:justify-end">
+                        </div>
+
+                        <div className="rounded-lg border border-white/[0.06] bg-black/20 px-4 py-3 flex items-center justify-between">
+                            <div>
+                                <p className="text-sm text-white font-medium">Burn subtitles into video</p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">Recommended — most short-form plays muted at first.</p>
+                            </div>
+                            <label className="relative inline-flex items-center cursor-pointer">
                                 <input
                                     type="checkbox"
                                     checked={subtitlesEnabled}
                                     onChange={(e) => setSubtitlesEnabled(e.target.checked)}
-                                    className="accent-cyan-500"
+                                    className="sr-only peer"
                                 />
-                                Burn subtitles
+                                <div className="w-11 h-6 bg-white/[0.08] rounded-full peer-checked:bg-cyan-600 transition-colors">
+                                    <div className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform mt-0.5 ml-0.5 ${subtitlesEnabled ? 'translate-x-5' : ''}`} />
+                                </div>
                             </label>
                         </div>
                     </div>
@@ -3142,7 +3220,7 @@ export default function CreatePanel() {
                     </button>
                 )}
 
-                {workspaceStage === 'finale' && finalizeError && (
+                {workspaceStage === 'audio' && finalizeError && (
                     <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 flex items-start gap-3">
                         <X className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5 cursor-pointer" onClick={() => setFinalizeError(null)} />
                         <p className="text-sm text-red-300">{finalizeError}</p>
@@ -3166,7 +3244,7 @@ export default function CreatePanel() {
                     </div>
                 ))}
 
-                {workspaceStage === 'finale' && (
+                {workspaceStage === 'audio' && (
                     <button
                         onClick={() => {
                             if (animationCreditsShort) {
@@ -3185,13 +3263,13 @@ export default function CreatePanel() {
                     </button>
                 )}
 
-                {workspaceStage === 'finale' && !hasNarration && (
+                {workspaceStage === 'audio' && !hasNarration && (
                     <p className="text-center text-sm text-gray-600">Write your script above to render.</p>
                 )}
-                {workspaceStage === 'finale' && !sessionId && (
+                {workspaceStage === 'audio' && !sessionId && (
                     <p className="text-center text-sm text-amber-300">Generate scenes first, then render.</p>
                 )}
-                {workspaceStage === 'finale' && sessionId && promptSceneCount > 0 && !allPromptedImagesReady && (
+                {workspaceStage === 'audio' && sessionId && promptSceneCount > 0 && !allPromptedImagesReady && (
                     <p className="text-center text-sm text-cyan-300">Generate images for all scene prompts before rendering.</p>
                 )}
 
@@ -3547,6 +3625,51 @@ export default function CreatePanel() {
                     </div>
                 )}
 
+                {/* REMIX SCRIPT — pull a transcript from a TikTok/YouTube/IG URL */}
+                {creativeMode === 'script_to_short' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-gradient-to-br from-violet-500/[0.03] to-cyan-500/[0.03] p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white flex items-center gap-2">
+                                    <Sparkles className="h-4 w-4 text-cyan-300" />
+                                    Remix From URL
+                                </p>
+                                <p className="mt-1 text-xs text-gray-400">
+                                    Paste a TikTok, YouTube, or Instagram Reel URL. We'll pull the captions so you can remix the script in seconds.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                            <input
+                                type="url"
+                                value={remixUrl}
+                                onChange={(e) => setRemixUrl(e.target.value)}
+                                disabled={remixLoading || loading || scriptLoading}
+                                placeholder="https://www.tiktok.com/@creator/video/..."
+                                className="flex-1 bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/40 disabled:opacity-50"
+                                onKeyDown={(e) => { if (e.key === 'Enter' && !remixLoading && remixUrl.trim()) { void handleRemixIngest(); } }}
+                            />
+                            <button
+                                type="button"
+                                onClick={() => void handleRemixIngest()}
+                                disabled={remixLoading || !remixUrl.trim() || loading || scriptLoading}
+                                className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                            >
+                                {remixLoading ? <><Loader2 className="h-4 w-4 animate-spin" /> Pulling…</> : <>Pull Transcript <ArrowRight className="h-4 w-4" /></>}
+                            </button>
+                        </div>
+                        {remixError && (
+                            <p className="text-xs text-red-300">{remixError}</p>
+                        )}
+                        {remixSourceTitle && !remixError && (
+                            <p className="text-[11px] text-emerald-300">
+                                Pulled from <span className="font-semibold">{remixSourceTitle}</span>
+                                {remixWarning ? <> — <span className="text-amber-300">{remixWarning}</span></> : null}
+                            </p>
+                        )}
+                    </div>
+                )}
+
                 {/* PROMPT */}
                 <div>
                     <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
@@ -3569,19 +3692,14 @@ export default function CreatePanel() {
                                 onChange={(e) => setPrompt(e.target.value)}
                                 disabled={loading || scriptLoading}
                                 placeholder={selectedTemplate === 'skeleton' ? "e.g., Software Engineer vs Doctor salary comparison"
-                                    : selectedTemplate === 'story' ? "e.g., A broke student finds a mysterious briefcase and one choice changes everything"
                                     : selectedTemplate === 'daytrading' ? "e.g., The day trading mistake that wipes beginners in the first 15 minutes"
+                                    : selectedTemplate === 'dilemma' ? "e.g., Save one stranger's life or stop five crimes you'll never know about"
                                     : selectedTemplate === 'business' ? "e.g., Why most startups fail before product-market fit"
                                     : selectedTemplate === 'finance' ? "e.g., How compound interest turns small savings into wealth"
                                     : selectedTemplate === 'tech' ? "e.g., The AI tool stack every solo founder should know"
                                     : selectedTemplate === 'crypto' ? "e.g., Why token utility matters more than hype in 2026"
-                                    : selectedTemplate === 'objects' ? "e.g., Your microwave explains how it works"
-                                    : selectedTemplate === 'wouldyourather' ? "e.g., Would you rather have unlimited money or unlimited time?"
                                     : selectedTemplate === 'scary' ? "e.g., The disappearance at Cecil Hotel"
                                     : selectedTemplate === 'history' ? "e.g., The fall of the Roman Empire"
-                                    : selectedTemplate === 'argument' ? "e.g., Is college worth it in 2026?"
-                                    : selectedTemplate === 'motivation' ? "e.g., Why most people quit right before success"
-                                    : selectedTemplate === 'whatif' ? "e.g., What if Earth stopped spinning for 1 second?"
                                     : "Enter your video topic..."}
                                 className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all disabled:opacity-50 text-sm"
                                 onKeyDown={(e) => e.key === 'Enter' && !loading && !scriptLoading && handleGenerate()}
@@ -3751,7 +3869,7 @@ export default function CreatePanel() {
                 </>
                 )}
 
-                {workspaceStage === 'finale' && (
+                {workspaceStage === 'audio' && (
                 <>
                 <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                     <div className="space-y-3">
@@ -3885,16 +4003,16 @@ export default function CreatePanel() {
                         {workspaceStage !== 'script' && (
                             <button
                                 type="button"
-                                onClick={() => setWorkspaceStage(workspaceStage === 'finale' ? 'scenes' : 'script')}
+                                onClick={() => setWorkspaceStage(workspaceStage === 'audio' ? 'scenes' : 'script')}
                                 className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/[0.06]"
                             >
                                 Back
                             </button>
                         )}
-                        {workspaceStage !== 'finale' && (
+                        {workspaceStage !== 'audio' && (
                             <button
                                 type="button"
-                                onClick={() => setWorkspaceStage(workspaceStage === 'script' ? 'scenes' : 'finale')}
+                                onClick={() => setWorkspaceStage(workspaceStage === 'script' ? 'scenes' : 'audio')}
                                 className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-200 transition hover:bg-white/[0.06]"
                             >
                                 Next
@@ -3902,7 +4020,7 @@ export default function CreatePanel() {
                             </button>
                         )}
                     </div>
-                    {workspaceStage !== 'finale' && (
+                    {workspaceStage !== 'audio' && (
                         <button
                             onClick={handleGenerate}
                             disabled={loading || scriptLoading || !prompt.trim()}

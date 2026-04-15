@@ -281,6 +281,8 @@ def build_billing_router(
     create_checkout_endpoint,
     create_topup_checkout_endpoint,
     paypal_return_endpoint,
+    paypal_webhook_endpoint,
+    paypal_verify_order_endpoint,
     create_billing_portal_session_endpoint,
     join_waitlist_endpoint,
     stripe_webhook_endpoint,
@@ -294,6 +296,8 @@ def build_billing_router(
     router.add_api_route("/api/checkout", create_checkout_endpoint, methods=["POST"])
     router.add_api_route("/api/checkout/topup", create_topup_checkout_endpoint, methods=["POST"])
     router.add_api_route("/api/paypal/return", paypal_return_endpoint, methods=["GET"])
+    router.add_api_route("/api/paypal/webhook", paypal_webhook_endpoint, methods=["POST"])
+    router.add_api_route("/api/paypal/verify/{order_id}", paypal_verify_order_endpoint, methods=["GET"])
     router.add_api_route("/api/billing-portal", create_billing_portal_session_endpoint, methods=["POST"])
     router.add_api_route("/api/waitlist/join", join_waitlist_endpoint, methods=["POST"])
     router.add_api_route("/api/stripe-webhook", stripe_webhook_endpoint, methods=["POST"])
@@ -410,6 +414,7 @@ def build_longform_creative_router(
     longform_ingest_outcome_endpoint,
     longform_auto_ingest_outcome_endpoint,
     creative_generate_script_endpoint,
+    creative_ingest_url_endpoint,
     creative_create_session_endpoint,
     creative_reference_image_endpoint,
     creative_reference_file_endpoint,
@@ -439,6 +444,7 @@ def build_longform_creative_router(
     router.add_api_route("/api/longform/session/{session_id}/outcome", longform_ingest_outcome_endpoint, methods=["POST"])
     router.add_api_route("/api/longform/session/{session_id}/outcome/auto", longform_auto_ingest_outcome_endpoint, methods=["POST"])
     router.add_api_route("/api/creative/script", creative_generate_script_endpoint, methods=["POST"])
+    router.add_api_route("/api/creative/ingest-url", creative_ingest_url_endpoint, methods=["POST"])
     router.add_api_route("/api/creative/session", creative_create_session_endpoint, methods=["POST"])
     router.add_api_route("/api/creative/reference-image", creative_reference_image_endpoint, methods=["POST"])
     router.add_api_route("/api/creative/reference-file/{filename}", creative_reference_file_endpoint, methods=["GET"])

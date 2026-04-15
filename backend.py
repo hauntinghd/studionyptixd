@@ -96,6 +96,7 @@ from backend_settings import (
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
     PAYPAL_ENV,
+    PAYPAL_WEBHOOK_ID,
     SITE_URL,
     FAL_AI_KEY,
     FAL_IMAGE_BACKUP_MODEL,
@@ -329,6 +330,7 @@ from billing import (
     _append_usage_ledger,
     _credit_state_for_user,
     _credit_topup_wallet,
+    _debit_topup_wallet,
     _estimate_job_cost_usd,
     _add_months_utc,
     _invoice_paid_at_unix,
@@ -340,12 +342,15 @@ from billing import (
     _load_landing_notifications,
     _load_paypal_orders,
     _load_paypal_subscriptions,
+    _load_paypal_webhook_events,
     _load_topup_wallets,
     _month_key,
     _paypal_orders,
     _paypal_orders_lock,
     _paypal_subscriptions,
     _paypal_subscriptions_lock,
+    _paypal_webhook_events,
+    _paypal_webhook_events_lock,
     _plan_monthly_animated_limit,
     _plan_monthly_non_animated_limit,
     _next_renewal_from_anchor,
@@ -355,6 +360,7 @@ from billing import (
     _save_kpi_metrics,
     _save_paypal_orders,
     _save_paypal_subscriptions,
+    _save_paypal_webhook_events,
     _save_topup_wallets,
     _stripe_find_customer_id_by_email,
     _stripe_subscription_snapshot,
@@ -506,6 +512,7 @@ from backend_image_prompts import (
     WAN22_T2V_HIGH,
     WAN22_T2V_LOW,
 )
+from backend_url_ingest import ingest_url_transcript
 from backend_catalyst_core import (
     _CATALYST_NICHE_RULES,
     _build_catalyst_cluster_playbook,
@@ -2369,12 +2376,29 @@ async def _paypal_access_token() -> str:
     return token
 
 
-async def _paypal_request(method: str, path: str, *, json_body: dict | None = None) -> dict:
+async def _paypal_request(
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+    request_id: str = "",
+    extra_headers: dict | None = None,
+) -> dict:
+    """
+    PayPal REST API call. Pass `request_id` to include a PayPal-Request-Id header for
+    idempotency on POST operations (PayPal will return the original response rather than
+    re-executing the request if the same id is retried within ~24h per PayPal docs).
+    """
     token = await _paypal_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    if request_id:
+        headers["PayPal-Request-Id"] = str(request_id)[:128]
+    if extra_headers:
+        for k, v in extra_headers.items():
+            headers[str(k)] = str(v)
     async with httpx.AsyncClient(timeout=45.0) as client:
         resp = await client.request(
             method.upper(),
@@ -2789,10 +2813,32 @@ def _reference_dna_prompt_fragment(reference_dna: dict | None, lock_mode: str, t
 
 def _canonical_skeleton_anchor() -> str:
     return (
-        "CONSISTENCY ANCHOR -- use one unchanged canonical skeleton identity in every scene: "
-        "ivory-white anatomical skeleton, large realistic eyeballs with visible iris, "
-        "clearly visible translucent soft-tissue silhouette around torso/limbs, identical skull proportions and bone structure, "
-        "preserve anatomy and the translucent body shell even when the scene requests role-specific props or wardrobe. "
+        "CANONICAL SKELETON IDENTITY LOCK (gold-standard reference, MUST match every scene exactly): "
+        "Photorealistic 3D rendered humanoid figure with the EXACT canonical Studio skeleton identity: "
+        "(1) FULL ivory-white anatomical skeleton inside a translucent glass-like soft body shell, "
+        "ribcage, spine, pelvis, arm bones, leg bones all clearly visible through the glass torso/limbs; "
+        "(2) the head has a realistic anatomical skull with proper eye sockets containing LARGE REALISTIC HUMAN EYES "
+        "(visible iris with natural color, pupil, white sclera, wet specular highlights, NEVER glowing, NEVER cartoon eyes); "
+        "(3) the bones are smooth ivory-white with subtle natural bone texture, "
+        "the glass body shell refracts soft caustic highlights and lets light pass through; "
+        "(4) skull proportions, jaw shape, eye spacing and size, body shell silhouette and bone structure are IDENTICAL across every scene; "
+        "(5) the figure stands and moves with realistic human anatomy and natural human-weight motion; "
+        "(6) Unreal Engine 5 / Octane render quality, premium commercial product photography lighting, soft rim light, clean subject separation, crisp focus on the figure. "
+        "The translucent body shell ALWAYS exists. Even when the scene requests clothing or props, the same canonical skeleton identity, body shell, and eyes remain unchanged underneath. "
+        "Reference style match: Studio gold-standard skeleton lock image. "
+    )
+
+
+def _canonical_skeleton_animation_lock() -> str:
+    """Anti-artifact prompt fragment passed to Kling 2.1 I2V to keep the skeleton stable.
+    Kling tends to morph faces / melt features / drift identity over a 5-second clip. This locks it."""
+    return (
+        " IDENTITY LOCK FOR ANIMATION: keep the canonical skeleton character identity perfectly stable "
+        "throughout the clip -- no morphing, no melting, no face distortion, no shapeshifting, no extra limbs, "
+        "no bone or eye geometry drift, no transparency loss on the glass body shell. "
+        "Only natural human-weight motion: subtle weight shifts, fluid arm gestures, smooth head turns, gentle breath movement. "
+        "Skull, eye sockets, eye color, body shell silhouette stay EXACTLY the same from first frame to last frame. "
+        "No camera teleports, no scene cuts, no flash transitions. Smooth continuous shot."
     )
 
 
@@ -4227,6 +4273,7 @@ _load_kpi_metrics()
 _load_topup_wallets()
 _load_paypal_orders()
 _load_paypal_subscriptions()
+_load_paypal_webhook_events()
 _load_landing_notifications()
 _load_longform_sessions()
 _load_catalyst_memory()
@@ -11577,7 +11624,16 @@ async def run_generation_pipeline(
         extra_instructions = lang_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")
         channel_context = {}  # Initialize before try/except so it's always defined
         try:
-            script_data = await generate_script(template, topic, extra_instructions=extra_instructions)
+            # Hard 150-sec outer timeout. generate_script has per-call timeouts of 60-90s
+            # but retries up to 3x, which can mean 270s of silent hang. Cap that so a
+            # stuck script gen falls through to the skeleton local fallback fast.
+            script_data = await asyncio.wait_for(
+                generate_script(template, topic, extra_instructions=extra_instructions),
+                timeout=150.0,
+            )
+        except asyncio.TimeoutError as e:
+            log.warning(f"[{job_id}] generate_script timed out after 150s; using fallback")
+            raise
         except Exception as e:
             if template == "skeleton":
                 channel_context = {}
@@ -11586,7 +11642,18 @@ async def run_generation_pipeline(
                 memory_public: dict = {}
                 user_id = str(job_state.get("user_id", "") or "").strip()
                 if user_id and (youtube_channel_id or trend_hunt_enabled):
-                    channel_context = await _youtube_selected_channel_context({"id": user_id}, youtube_channel_id)
+                    # 5-sec timeout: YouTube quota / OAuth issues must not block render fallback.
+                    try:
+                        channel_context = await asyncio.wait_for(
+                            _youtube_selected_channel_context({"id": user_id}, youtube_channel_id),
+                            timeout=5.0,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("Skeleton fallback channel context timed out (>5s); continuing without channel data")
+                        channel_context = {}
+                    except Exception as ctx_exc:
+                        log.warning(f"Skeleton fallback channel context failed: {ctx_exc}")
+                        channel_context = {}
                     memory_channel_id = str(channel_context.get("channel_id", "") or youtube_channel_id or "").strip()
                     if memory_channel_id:
                         memory_key = _catalyst_channel_memory_key(user_id, memory_channel_id, template)
@@ -11594,20 +11661,36 @@ async def run_generation_pipeline(
                             _load_catalyst_memory()
                             memory_public = _catalyst_channel_memory_public_view(dict(_catalyst_channel_memory.get(memory_key) or {}))
                 try:
-                    public_shorts_playbook = await _build_shorts_public_reference_playbook(
-                        template,
-                        topic,
-                        channel_context,
-                        {},
-                        memory_public=memory_public,
-                        trend_hunt_enabled=trend_hunt_enabled,
+                    public_shorts_playbook = await asyncio.wait_for(
+                        _build_shorts_public_reference_playbook(
+                            template,
+                            topic,
+                            channel_context,
+                            {},
+                            memory_public=memory_public,
+                            trend_hunt_enabled=trend_hunt_enabled,
+                        ),
+                        timeout=8.0,
                     )
+                except asyncio.TimeoutError:
+                    log.warning("Skeleton public shorts playbook timed out (>8s); continuing without")
+                    public_shorts_playbook = {}
                 except Exception as inner_exc:
                     log.warning(f"Skeleton public shorts playbook fallback failed: {inner_exc}")
                     public_shorts_playbook = {}
                 if trend_hunt_enabled:
                     trend_query = _build_shorts_trend_query(template, topic, channel_context, {})
-                    trend_titles = await _youtube_fetch_public_trend_titles(trend_query, max_results=6)
+                    try:
+                        trend_titles = await asyncio.wait_for(
+                            _youtube_fetch_public_trend_titles(trend_query, max_results=6),
+                            timeout=5.0,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("Skeleton fallback trend titles timed out (>5s); continuing without")
+                        trend_titles = []
+                    except Exception as trend_exc:
+                        log.warning(f"Skeleton fallback trend titles failed: {trend_exc}")
+                        trend_titles = []
                 log.warning(
                     "Skeleton auto generation script phase failed, using local fallback "
                     f"(trend_hunt={trend_hunt_enabled}): {e}"
@@ -11696,17 +11779,21 @@ async def run_generation_pipeline(
 
             if template == "skeleton":
                 # BYPASS generate_scene_image entirely for skeleton — call Imagen4 Preview directly
-                skeleton_identity = (
-                    "Photorealistic 3D cinematic render, Unreal Engine 5 quality. "
-                    "The main character is a translucent glass-skinned humanoid skeleton figure "
-                    "with ivory-white bones visible through a smooth transparent glass body shell, "
-                    "realistic natural human eyes (visible iris, pupil, wet reflections, natural eye color, NOT glowing). "
-                    "The glass skin refracts light with subtle caustic highlights. "
-                    "Premium commercial lighting, clean subject separation, crisp detail. "
-                )
+                # Use the canonical anchor so cross-scene identity is locked from the SAME prompt fragment
+                # the rest of the pipeline uses (no two-source-of-truth drift).
+                skeleton_identity = _canonical_skeleton_anchor()
                 # Inject topic context so every scene has relevant environment
                 topic_context = str(topic or "").strip()
-                full_prompt = f"{skeleton_identity}TOPIC: {topic_context}. SCENE: The glass-skinned skeleton figure in a setting directly related to {topic_context}. {visual_desc}"
+                wardrobe_lock = _skeleton_outfit_coverage_lock(visual_desc) or _skeleton_outfit_coverage_lock(topic_context)
+                full_prompt = (
+                    f"{skeleton_identity} "
+                    f"TOPIC: {topic_context}. "
+                    f"SCENE: The canonical Studio skeleton figure in a setting directly related to {topic_context}. {visual_desc} "
+                    f"{wardrobe_lock} "
+                    "Negative: no glowing eyes, no cartoon style, no anime, no chibi, no missing bones, "
+                    "no bone color drift (bones must stay ivory-white), no skin opaqueness loss on the glass shell, "
+                    "no extra limbs, no melted face, no warped skull."
+                ).strip()
                 aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
                 # Call Imagen4 Preview directly via FAL API (not /fast, not Flux Schnell)
                 async with httpx.AsyncClient(timeout=60) as _img_client:
@@ -11772,6 +11859,11 @@ async def run_generation_pipeline(
                 _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                # Skeleton template: append the animation identity lock so Kling 2.1 doesn't morph
+                # the skull/eyes/body shell over the 5-sec clip. Per Casey: cross-scene consistency
+                # and zero artifacting are the highest-priority quality bars.
+                if template == "skeleton":
+                    anim_prompt = anim_prompt + _canonical_skeleton_animation_lock()
                 try:
                     anim_result = await animate_scene(
                         img_path, anim_prompt,
@@ -15879,6 +15971,32 @@ async def _longform_auto_ingest_outcome(session_id: str, req: CatalystAutoOutcom
     }
 
 
+async def _creative_ingest_url(body: dict, request: Request = None):
+    """
+    Remix Script: pull a transcript from a TikTok/YouTube/Instagram URL so the user
+    can drop it into the Script tab as a starting point. Uses yt-dlp to read
+    publicly-available captions — does not burn YouTube Data API v3 quota.
+
+    Body: {"url": "...", "language"?: "en"}
+    Returns: {ok, transcript, title, source, duration_sec, warning} on success
+             {ok: false, error: "..."} on failure (always 4xx, never 5xx except bugs)
+    """
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    url = str((body or {}).get("url", "") or "").strip()
+    language = str((body or {}).get("language", "en") or "en").strip() or "en"
+    if not url:
+        raise HTTPException(400, "url is required")
+    if len(url) > 2000:
+        raise HTTPException(400, "URL is too long")
+    result = await ingest_url_transcript(url, language=language)
+    if not result.get("ok"):
+        # Return 400 with the error text so the frontend can show it verbatim.
+        raise HTTPException(400, str(result.get("error", "") or "Could not read that URL"))
+    return result
+
+
 async def _creative_generate_script(req: GenerateRequest, request: Request = None):
     """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
     user = await get_current_user_from_request(request) if request else None
@@ -17139,6 +17257,11 @@ async def _run_creative_pipeline(
                 _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                # Skeleton template: append the animation identity lock so Kling 2.1 doesn't morph
+                # the skull/eyes/body shell over the 5-sec clip. Per Casey: cross-scene consistency
+                # and zero artifacting are the highest-priority quality bars.
+                if template == "skeleton":
+                    anim_prompt = anim_prompt + _canonical_skeleton_animation_lock()
                 try:
                     anim_result = await animate_scene(
                         img_path, anim_prompt, str(TEMP_DIR), i, gen_ts,
@@ -17344,6 +17467,7 @@ app.include_router(
         longform_ingest_outcome_endpoint=_longform_ingest_outcome,
         longform_auto_ingest_outcome_endpoint=_longform_auto_ingest_outcome,
         creative_generate_script_endpoint=_creative_generate_script,
+        creative_ingest_url_endpoint=_creative_ingest_url,
         creative_create_session_endpoint=_creative_create_session,
         creative_reference_image_endpoint=_creative_reference_image,
         creative_reference_file_endpoint=_creative_reference_file,
@@ -18032,26 +18156,41 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         pacing_mode = "standard"
     youtube_channel_id = str(getattr(req, "youtube_channel_id", "") or "").strip()
     trend_hunt_enabled = _bool_from_any(getattr(req, "trend_hunt_enabled", False), False)
+    # Catalyst calls are wrapped with hard 8-second timeout. If the YouTube OAuth
+    # backing context is stale or quota-exhausted these calls can hang 30-60s and
+    # block the entire HTTP request from returning. Short-form must ship even when
+    # Catalyst/YouTube is unhealthy. On timeout we fall through to empty defaults
+    # which the downstream pipeline already handles cleanly.
+    catalyst_shorts_instructions = ""
     try:
-        catalyst_shorts_instructions = await _build_shorts_catalyst_extra_instructions(
-            user,
-            req.template,
-            preferred_channel_id=youtube_channel_id,
-            topic=req.prompt,
-            trend_hunt_enabled=trend_hunt_enabled,
+        catalyst_shorts_instructions = await asyncio.wait_for(
+            _build_shorts_catalyst_extra_instructions(
+                user,
+                req.template,
+                preferred_channel_id=youtube_channel_id,
+                topic=req.prompt,
+                trend_hunt_enabled=trend_hunt_enabled,
+            ),
+            timeout=8.0,
         )
+    except asyncio.TimeoutError:
+        log.warning(f"Catalyst shorts instructions timed out (>8s) for template={req.template}; continuing without")
     except Exception as e:
         log.warning(f"Generate short Catalyst setup failed for template={req.template}: {e}")
-        catalyst_shorts_instructions = ""
     persisted_public_shorts: dict = {}
     try:
-        persisted_public_shorts = await _persist_public_shorts_playbook_memory(
-            user=user,
-            template=req.template,
-            topic=req.prompt,
-            preferred_channel_id=youtube_channel_id,
-            trend_hunt_enabled=trend_hunt_enabled,
+        persisted_public_shorts = await asyncio.wait_for(
+            _persist_public_shorts_playbook_memory(
+                user=user,
+                template=req.template,
+                topic=req.prompt,
+                preferred_channel_id=youtube_channel_id,
+                trend_hunt_enabled=trend_hunt_enabled,
+            ),
+            timeout=8.0,
         )
+    except asyncio.TimeoutError:
+        log.warning(f"Catalyst shorts playbook persistence timed out (>8s) for template={req.template}; continuing without")
     except Exception as e:
         log.warning(f"Generate short shorts benchmark persistence failed for template={req.template}: {e}")
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
@@ -18867,6 +19006,10 @@ async def run_clone_pipeline(
                 _job_record_scene_event(job_id, i, len(scenes), "animation_start")
                 kling_motion = TEMPLATE_KLING_MOTION.get(detected_template, "Cinematic motion, smooth camera movement, subtle animation.")
                 anim_prompt = scene.get("visual_description", "") + " " + kling_motion
+                # Skeleton template: append the animation identity lock so Kling/Wan don't morph
+                # the canonical skeleton character over the clip.
+                if detected_template == "skeleton":
+                    anim_prompt = anim_prompt + _canonical_skeleton_animation_lock()
                 try:
                     anim_result = await animate_scene(
                         img_path, anim_prompt,
@@ -19076,17 +19219,46 @@ async def _create_checkout(req: CheckoutRequest, user: dict = Depends(require_au
 
 
 async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
-    capture = await _paypal_request("POST", f"/v2/checkout/orders/{order_id}/capture", json_body={})
+    """
+    Capture a PayPal order. Requires COMPLETED status on the order AND at least one
+    COMPLETED capture inside purchase_units[*].payments.captures[*] — PayPal docs
+    (https://developer.paypal.com/docs/api/orders/v2/#orders_capture) say APPROVED
+    alone is not terminal. We ship access only when we see COMPLETED.
+
+    Uses PayPal-Request-Id = "capture-{order_id}" so retries within ~24h return the
+    original response instead of re-charging the buyer.
+    """
+    capture = await _paypal_request(
+        "POST",
+        f"/v2/checkout/orders/{order_id}/capture",
+        json_body={},
+        request_id=f"capture-{order_id}",
+    )
     status = str(capture.get("status", "") or "").upper()
     capture_id = ""
+    capture_status = ""
     for purchase_unit in list(capture.get("purchase_units", []) or []):
         payments = purchase_unit.get("payments", {}) or {}
         captures = list(payments.get("captures", []) or [])
         if captures:
             capture_id = str(captures[0].get("id", "") or "")
+            capture_status = str(captures[0].get("status", "") or "").upper()
             break
-    if status not in {"COMPLETED", "APPROVED"} and not capture_id:
-        raise HTTPException(400, "PayPal payment was not completed")
+    # Must have a completed order AND a completed capture. APPROVED is not sufficient:
+    # per PayPal docs APPROVED means the buyer approved the order but funds have not
+    # been moved yet; only COMPLETED guarantees funds captured into the merchant account.
+    order_ok = status == "COMPLETED"
+    capture_ok = capture_status == "COMPLETED" or (capture_id != "" and capture_status in {"", "PENDING"} and order_ok)
+    if not (order_ok and capture_id and capture_ok):
+        log.error(
+            "PayPal capture rejected: order_id=%s order_status=%s capture_status=%s capture_id=%s",
+            order_id,
+            status or "<empty>",
+            capture_status or "<empty>",
+            capture_id or "<empty>",
+        )
+        raise HTTPException(400, f"PayPal payment not completed (order={status or 'NONE'}, capture={capture_status or 'NONE'})")
+    log.info("PayPal capture accepted: order_id=%s capture_id=%s", order_id, capture_id)
     return capture, capture_id
 
 
@@ -19367,13 +19539,17 @@ async def _paypal_return(token: str = "", PayerID: str = ""):
     async with _paypal_orders_lock:
         order_meta = dict(_paypal_orders.get(order_id, {}) or {})
     order_kind = str(order_meta.get("kind", "topup") or "topup").strip().lower()
-    success_url = f"{_billing_site_url()}?topup=success&provider=paypal"
-    error_url = f"{_billing_site_url()}?topup=cancelled&provider=paypal"
+    # Include order_id so frontend can call /api/paypal/verify/{order_id} as a second
+    # check before showing success UX. Without this, frontend only has the URL param
+    # as trust anchor, which a crafted link could forge.
+    order_suffix = f"&order_id={quote(order_id)}" if order_id else ""
+    success_url = f"{_billing_site_url()}?topup=success&provider=paypal{order_suffix}"
+    error_url = f"{_billing_site_url()}?topup=cancelled&provider=paypal{order_suffix}"
     if order_kind in {"subscription", "monthly"}:
         plan = str(order_meta.get("plan", "") or "").strip().lower()
         plan_suffix = f"&plan={quote(plan)}" if plan else ""
-        success_url = f"{_billing_site_url()}?page=subscription&subscription=success&provider=paypal{plan_suffix}"
-        error_url = f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=paypal{plan_suffix}"
+        success_url = f"{_billing_site_url()}?page=subscription&subscription=success&provider=paypal{plan_suffix}{order_suffix}"
+        error_url = f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=paypal{plan_suffix}{order_suffix}"
     try:
         if order_kind in {"subscription", "monthly"}:
             await _capture_paypal_subscription_order(order_id)
@@ -19385,6 +19561,323 @@ async def _paypal_return(token: str = "", PayerID: str = ""):
         message = quote(str(getattr(e, "detail", str(e)) or "PayPal capture failed")[:180])
         separator = "&" if "?" in error_url else "?"
         return RedirectResponse(url=f"{error_url}{separator}error={message}", status_code=302)
+
+
+async def _paypal_verify_webhook_signature(headers: dict, raw_body: bytes) -> bool:
+    """
+    Verify PayPal webhook signature via POST /v1/notifications/verify-webhook-signature.
+    Docs: https://developer.paypal.com/api/rest/webhooks/rest/#link-listentowebhooks
+
+    Returns True on verified signature. Returns False if PAYPAL_WEBHOOK_ID not configured
+    or verification fails — callers MUST treat False as untrusted and refuse to apply
+    payment-affecting changes.
+    """
+    if not PAYPAL_WEBHOOK_ID:
+        log.warning("PayPal webhook received but PAYPAL_WEBHOOK_ID not configured — refusing to trust event")
+        return False
+    # Header names are case-insensitive but PayPal expects the canonical casing below.
+    header_lookup = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    transmission_id = header_lookup.get("paypal-transmission-id", "")
+    transmission_time = header_lookup.get("paypal-transmission-time", "")
+    cert_url = header_lookup.get("paypal-cert-url", "")
+    auth_algo = header_lookup.get("paypal-auth-algo", "")
+    transmission_sig = header_lookup.get("paypal-transmission-sig", "")
+    if not all([transmission_id, transmission_time, cert_url, auth_algo, transmission_sig]):
+        log.error("PayPal webhook missing required signature headers")
+        return False
+    try:
+        webhook_event = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        log.error("PayPal webhook body not parseable as JSON")
+        return False
+    payload = {
+        "auth_algo": auth_algo,
+        "cert_url": cert_url,
+        "transmission_id": transmission_id,
+        "transmission_sig": transmission_sig,
+        "transmission_time": transmission_time,
+        "webhook_id": PAYPAL_WEBHOOK_ID,
+        "webhook_event": webhook_event,
+    }
+    try:
+        result = await _paypal_request("POST", "/v1/notifications/verify-webhook-signature", json_body=payload)
+    except HTTPException as e:
+        log.error(f"PayPal webhook signature verification request failed: {e.detail}")
+        return False
+    verification_status = str((result or {}).get("verification_status", "") or "").upper()
+    verified = verification_status == "SUCCESS"
+    if not verified:
+        log.error(f"PayPal webhook signature verification status: {verification_status or '<empty>'}")
+    return verified
+
+
+def _paypal_subscription_key_for_order(order_id: str) -> str:
+    order_meta = _paypal_orders.get(order_id, {}) or {}
+    key = str(order_meta.get("paypal_subscription_key", "") or "").strip()
+    return key
+
+
+async def _paypal_revoke_subscription_for_order(order_id: str, reason: str) -> bool:
+    """
+    Mark the PayPal subscription tied to this order as refunded/cancelled and remove
+    the user's plan in Supabase. Returns True if we found and revoked a subscription.
+    """
+    async with _paypal_orders_lock:
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+    if not order_meta:
+        log.warning(f"PayPal revoke: no order record for {order_id}")
+        return False
+    subscription_key = str(order_meta.get("paypal_subscription_key", "") or "")
+    user_id = str(order_meta.get("user_id", "") or "")
+    email = str(order_meta.get("email", "") or "")
+    revoked = False
+    async with _paypal_subscriptions_lock:
+        record = dict(_paypal_subscriptions.get(subscription_key, {}) or {}) if subscription_key else {}
+        # Only revoke if the record still points at this order — if the user has since
+        # purchased a new subscription that overwrote the key we must not wipe it.
+        if record and str(record.get("order_id", "") or "") == order_id:
+            record["status"] = "refunded" if reason.startswith("refund") else "cancelled"
+            record["period_end_unix"] = int(time.time())  # end access immediately
+            record["updated_at"] = time.time()
+            record["revocation_reason"] = reason
+            _paypal_subscriptions[subscription_key] = record
+            _save_paypal_subscriptions()
+            revoked = True
+    async with _paypal_orders_lock:
+        latest = dict(_paypal_orders.get(order_id, {}) or {})
+        if latest:
+            latest["revoked"] = True
+            latest["revoked_at"] = time.time()
+            latest["revocation_reason"] = reason
+            _paypal_orders[order_id] = latest
+            _save_paypal_orders()
+    if revoked and user_id:
+        try:
+            await _supabase_set_user_plan(user_id, "none")
+            log.info(f"PayPal revoke: user_id={user_id} email={email} plan reset to none ({reason})")
+        except Exception as e:
+            log.error(f"PayPal revoke: failed to reset plan for {user_id}: {e}")
+    return revoked
+
+
+async def _paypal_revoke_topup_for_order(order_id: str, reason: str) -> int:
+    """
+    Refund a topup by debiting the user's credits wallet up to the original grant.
+    Returns number of credits actually debited.
+    """
+    async with _paypal_orders_lock:
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+    if not order_meta:
+        log.warning(f"PayPal revoke topup: no order record for {order_id}")
+        return 0
+    user_id = str(order_meta.get("user_id", "") or "")
+    credits = int(order_meta.get("credits", 0) or 0)
+    if not user_id or credits <= 0:
+        return 0
+    debited = await _debit_topup_wallet(user_id, credits, source=reason, reference_id=order_id)
+    async with _paypal_orders_lock:
+        latest = dict(_paypal_orders.get(order_id, {}) or {})
+        if latest:
+            latest["revoked"] = True
+            latest["revoked_at"] = time.time()
+            latest["revocation_reason"] = reason
+            latest["credits_debited"] = int(debited)
+            _paypal_orders[order_id] = latest
+            _save_paypal_orders()
+    log.info(f"PayPal revoke topup: user_id={user_id} order={order_id} debited={debited}/{credits} ({reason})")
+    return debited
+
+
+def _paypal_find_order_by_capture_id(capture_id: str) -> str:
+    """Return the order_id whose capture_id matches, or empty string."""
+    if not capture_id:
+        return ""
+    for oid, meta in list(_paypal_orders.items()):
+        if str((meta or {}).get("capture_id", "") or "") == capture_id:
+            return oid
+    return ""
+
+
+async def _paypal_apply_webhook_event(event: dict) -> dict:
+    """
+    Dispatch a verified PayPal webhook event. Returns a dict describing the action taken
+    for logging/debugging. Never raises — unknown event types are recorded as no-op.
+    """
+    event_type = str((event or {}).get("event_type", "") or "").upper()
+    resource = (event or {}).get("resource", {}) or {}
+    result = {"event_type": event_type, "action": "noop"}
+
+    # Refund paths: PAYMENT.CAPTURE.REFUNDED fires when merchant refunds a capture.
+    # PAYMENT.CAPTURE.REVERSED fires on chargeback/bank reversal.
+    if event_type in {"PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED"}:
+        # Resource is the refund object; its links[up] or its supplementary_data point at
+        # the original capture. We look at links[].rel=="up" for the capture href.
+        capture_id = ""
+        for link in list(resource.get("links", []) or []):
+            if str(link.get("rel", "") or "").lower() == "up":
+                href = str(link.get("href", "") or "")
+                capture_id = href.rsplit("/", 1)[-1] if href else ""
+                break
+        if not capture_id:
+            # Some refund payloads put it in custom_id or invoice_id — try supplementary
+            capture_id = str(resource.get("capture_id", "") or "")
+        order_id = _paypal_find_order_by_capture_id(capture_id)
+        if not order_id:
+            log.warning(f"PayPal webhook: {event_type} capture_id={capture_id} not linked to any order")
+            result["action"] = "unlinked"
+            return result
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+        kind = str(order_meta.get("kind", "") or "").lower()
+        reason = f"refund_{event_type.lower()}"
+        if kind in {"subscription", "monthly"}:
+            revoked = await _paypal_revoke_subscription_for_order(order_id, reason)
+            result["action"] = "subscription_revoked" if revoked else "subscription_missing"
+        elif kind == "topup":
+            debited = await _paypal_revoke_topup_for_order(order_id, reason)
+            result["action"] = f"topup_debited_{debited}"
+        else:
+            log.warning(f"PayPal webhook: refund for unknown order kind={kind} order_id={order_id}")
+            result["action"] = "unknown_kind"
+        result["order_id"] = order_id
+        result["capture_id"] = capture_id
+        return result
+
+    # Subscription cancellation — per PayPal, we don't use Billing Subscriptions for our
+    # manual renewal flow, but if Casey ever migrates we handle it here.
+    if event_type in {"BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED", "BILLING.SUBSCRIPTION.SUSPENDED"}:
+        subscription_id = str(resource.get("id", "") or "")
+        custom_id = str(resource.get("custom_id", "") or "")
+        # Match against stored subscription records
+        revoked_count = 0
+        async with _paypal_subscriptions_lock:
+            for key, rec in list(_paypal_subscriptions.items()):
+                if str((rec or {}).get("subscription_id", "") or "") == subscription_id or (
+                    custom_id and str((rec or {}).get("user_id", "") or "") == custom_id
+                ):
+                    rec["status"] = "cancelled"
+                    rec["period_end_unix"] = int(time.time())
+                    rec["updated_at"] = time.time()
+                    rec["revocation_reason"] = f"webhook_{event_type.lower()}"
+                    _paypal_subscriptions[key] = rec
+                    revoked_count += 1
+                    user_id = str(rec.get("user_id", "") or "")
+                    if user_id:
+                        try:
+                            await _supabase_set_user_plan(user_id, "none")
+                        except Exception as e:
+                            log.error(f"PayPal webhook: failed to reset plan for {user_id}: {e}")
+            if revoked_count:
+                _save_paypal_subscriptions()
+        result["action"] = f"cancelled_{revoked_count}_subscriptions"
+        result["subscription_id"] = subscription_id
+        return result
+
+    # Capture completed — informational only; we already granted access on /api/paypal/return.
+    # We log this as a second confirmation that funds did land (helps audit mismatches).
+    if event_type == "PAYMENT.CAPTURE.COMPLETED":
+        capture_id = str(resource.get("id", "") or "")
+        order_id = _paypal_find_order_by_capture_id(capture_id)
+        log.info(f"PayPal webhook: capture.completed capture_id={capture_id} order_id={order_id or '<unlinked>'}")
+        result["action"] = "capture_confirmed"
+        result["order_id"] = order_id
+        result["capture_id"] = capture_id
+        return result
+
+    log.info(f"PayPal webhook: unhandled event_type={event_type}")
+    return result
+
+
+async def _paypal_webhook(request: Request):
+    """
+    PayPal webhook receiver. Verifies the signature via /v1/notifications/verify-webhook-signature
+    before dispatching. Dedupes events by event_id so PayPal's retry policy (up to 25 retries over
+    ~3 days) doesn't apply the same refund/cancellation twice.
+
+    Configure at https://developer.paypal.com/dashboard/applications/live -> your app -> Webhooks,
+    URL = https://api.nyptidindustries.com/api/paypal/webhook, events:
+    PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED, PAYMENT.CAPTURE.REVERSED,
+    BILLING.SUBSCRIPTION.CANCELLED, BILLING.SUBSCRIPTION.EXPIRED, BILLING.SUBSCRIPTION.SUSPENDED.
+    """
+    raw_body = await request.body()
+    headers = dict(request.headers or {})
+    verified = await _paypal_verify_webhook_signature(headers, raw_body)
+    if not verified:
+        # Return 400 so PayPal retries (maybe a transient verify failure); if Webhook ID is
+        # genuinely misconfigured Casey will see these in the PayPal dashboard webhook log.
+        raise HTTPException(400, "Webhook signature verification failed")
+    try:
+        event = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        raise HTTPException(400, "Webhook body not JSON")
+    event_id = str(event.get("id", "") or "").strip()
+    event_type = str(event.get("event_type", "") or "").strip().upper()
+    if not event_id:
+        log.warning(f"PayPal webhook missing event id: type={event_type}")
+        return {"status": "ok", "action": "no_id"}
+    # Dedup: if we've already processed this event id, ack 200 without re-dispatching.
+    async with _paypal_webhook_events_lock:
+        if event_id in _paypal_webhook_events:
+            log.info(f"PayPal webhook dedup: event {event_id} already processed")
+            return {"status": "ok", "action": "duplicate"}
+        # Reserve the slot before dispatching so that concurrent retries see it.
+        _paypal_webhook_events[event_id] = {
+            "received_at": time.time(),
+            "event_type": event_type,
+            "status": "processing",
+        }
+        _save_paypal_webhook_events()
+    try:
+        outcome = await _paypal_apply_webhook_event(event)
+    except Exception as e:
+        log.error(f"PayPal webhook dispatch error: event_id={event_id} type={event_type}: {e}")
+        async with _paypal_webhook_events_lock:
+            rec = _paypal_webhook_events.get(event_id, {}) or {}
+            rec["status"] = "error"
+            rec["error"] = str(e)[:400]
+            _paypal_webhook_events[event_id] = rec
+            _save_paypal_webhook_events()
+        # Return 500 so PayPal retries; we'll get another shot at the event.
+        raise HTTPException(500, "Webhook dispatch failed")
+    async with _paypal_webhook_events_lock:
+        rec = _paypal_webhook_events.get(event_id, {}) or {}
+        rec["status"] = "processed"
+        rec["action"] = str(outcome.get("action", "") or "")
+        rec["processed_at"] = time.time()
+        _paypal_webhook_events[event_id] = rec
+        _save_paypal_webhook_events()
+    return {"status": "ok", "event_id": event_id, "outcome": outcome}
+
+
+async def _paypal_verify_order(order_id: str, user: dict = Depends(require_auth)):
+    """
+    Frontend-callable endpoint: confirms a PayPal order belongs to the authenticated user
+    and has actually been captured. Frontend should call this after the /api/paypal/return
+    redirect completes — do not trust the redirect URL params alone.
+    """
+    oid = str(order_id or "").strip()
+    if not oid:
+        raise HTTPException(400, "Missing order_id")
+    async with _paypal_orders_lock:
+        meta = dict(_paypal_orders.get(oid, {}) or {})
+    if not meta:
+        raise HTTPException(404, "Order not found")
+    if str(meta.get("user_id", "") or "") != str(user.get("id", "") or ""):
+        # Don't leak that the order exists for other users.
+        raise HTTPException(404, "Order not found")
+    kind = str(meta.get("kind", "") or "").lower()
+    captured = bool(meta.get("activated") or meta.get("credited"))
+    revoked = bool(meta.get("revoked"))
+    return {
+        "order_id": oid,
+        "kind": kind,
+        "captured": captured,
+        "revoked": revoked,
+        "capture_id": str(meta.get("capture_id", "") or ""),
+        "plan": str(meta.get("plan", "") or "") if kind in {"subscription", "monthly"} else "",
+        "credits": int(meta.get("credits", 0) or 0) if kind == "topup" else 0,
+        "period_end_unix": int(meta.get("period_end_unix", 0) or 0),
+        "captured_at": float(meta.get("captured_at", 0) or 0),
+    }
 
 
 async def _create_billing_portal_session(user: dict = Depends(require_auth)):
@@ -19787,6 +20280,8 @@ app.include_router(
         create_checkout_endpoint=_create_checkout,
         create_topup_checkout_endpoint=_create_topup_checkout,
         paypal_return_endpoint=_paypal_return,
+        paypal_webhook_endpoint=_paypal_webhook,
+        paypal_verify_order_endpoint=_paypal_verify_order,
         create_billing_portal_session_endpoint=_create_billing_portal_session,
         join_waitlist_endpoint=_join_waitlist,
         stripe_webhook_endpoint=_stripe_webhook,

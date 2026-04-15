@@ -230,6 +230,11 @@ STRIPE_TOPUP_PUBLIC_ENABLED = os.getenv("STRIPE_TOPUP_PUBLIC_ENABLED", "0").lowe
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
 PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
+# Webhook ID from PayPal dashboard (https://developer.paypal.com/dashboard/applications/live)
+# Required for live webhook signature verification via /v1/notifications/verify-webhook-signature.
+# When empty, webhook endpoint still accepts events but logs a warning and only succeeds for
+# non-sensitive events; payment-affecting events require a verified signature.
+PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 FAL_IMAGE_BACKUP_MODEL = str(os.getenv("FAL_IMAGE_BACKUP_MODEL", "imagen4_fast") or "imagen4_fast").strip().lower()

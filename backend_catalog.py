@@ -123,19 +123,18 @@ HARDCODED_PLANS = {
 }
 
 PUBLIC_TEMPLATE_ALLOWLIST = {
+    # Final kept template list per Casey 2026-04-15:
+    # Skeleton + Day Trading + Business + Finance + Tech + Crypto + Scary + History + Dilemma (new)
+    # Removed: story, motivation, chatstory, argument, reddit, top5, objects, wouldyourather, whatif
     "skeleton",
-    "story",
-    "motivation",
     "daytrading",
     "business",
     "finance",
     "tech",
     "crypto",
-    "objects",
-    "wouldyourather",
     "scary",
     "history",
-    "whatif",
+    "dilemma",
 }
 
 SUPPORTED_LANGUAGES = {

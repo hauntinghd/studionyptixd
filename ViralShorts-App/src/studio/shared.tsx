@@ -488,6 +488,17 @@ export interface AuthContextType {
     checkoutDemo: () => Promise<void>;
     manageBilling: () => Promise<string | null>;
     joinWaitingList: (plan: string, priceUsd: number) => Promise<string | null>;
+    verifyPayPalOrder: (orderId: string) => Promise<PayPalVerifyResult>;
+}
+
+export interface PayPalVerifyResult {
+    ok: boolean;
+    captured: boolean;
+    revoked: boolean;
+    kind: string;
+    plan?: string;
+    credits?: number;
+    error?: string;
 }
 
 export const AuthContext = createContext<AuthContextType>({
@@ -505,6 +516,7 @@ export const AuthContext = createContext<AuthContextType>({
     signIn: async () => null, signInWithGoogle: async () => null, signUp: async () => null, signOut: async () => {},
     checkout: async () => null, checkoutTopup: async () => null, checkoutDemo: async () => {}, manageBilling: async () => null,
     joinWaitingList: async () => null,
+    verifyPayPalOrder: async () => ({ ok: false, captured: false, revoked: false, kind: '', error: 'Not initialized' }),
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -1079,6 +1091,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return "Waiting list has been removed from Studio.";
     }, []);
 
+    const verifyPayPalOrder = useCallback(async (orderId: string): Promise<PayPalVerifyResult> => {
+        const trimmed = String(orderId || '').trim();
+        if (!trimmed) return { ok: false, captured: false, revoked: false, kind: '', error: 'Missing order id' };
+        if (!session) return { ok: false, captured: false, revoked: false, kind: '', error: 'Not signed in' };
+        try {
+            const res = await fetch(`${API}/api/paypal/verify/${encodeURIComponent(trimmed)}`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            const { data } = await readJsonResponse<any>(res);
+            const payload = data || {};
+            if (!res.ok) {
+                return { ok: false, captured: false, revoked: false, kind: '', error: String(payload.detail || 'Verify failed') };
+            }
+            return {
+                ok: true,
+                captured: Boolean(payload.captured),
+                revoked: Boolean(payload.revoked),
+                kind: String(payload.kind || ''),
+                plan: String(payload.plan || ''),
+                credits: Number(payload.credits || 0),
+            };
+        } catch (e: any) {
+            return { ok: false, captured: false, revoked: false, kind: '', error: String(e?.message || 'Verify failed') };
+        }
+    }, [session]);
+
     return (
         <AuthContext.Provider value={{
             session, supabase, plan, role, ownerOverride, loading, billingActive, membershipActive, membershipPlanId,
@@ -1093,7 +1131,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             maintenanceBannerEnabled, maintenanceBannerMessage,
             waitlistOnlyMode, waitlistRequiresStripePayment,
             signIn, signInWithGoogle, signUp, signOut, checkout, checkoutTopup, checkoutDemo, manageBilling,
-            joinWaitingList,
+            joinWaitingList, verifyPayPalOrder,
         }}>
             {children}
         </AuthContext.Provider>

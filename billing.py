@@ -25,6 +25,8 @@ KPI_METRICS_PATH = TEMP_DIR / "kpi_metrics.json"
 TOPUP_WALLET_PATH = TEMP_DIR / "topup_wallets.json"
 PAYPAL_ORDERS_PATH = TEMP_DIR / "paypal_orders.json"
 PAYPAL_SUBSCRIPTIONS_PATH = TEMP_DIR / "paypal_subscriptions.json"
+PAYPAL_WEBHOOK_EVENTS_PATH = TEMP_DIR / "paypal_webhook_events.json"
+PAYPAL_WEBHOOK_EVENTS_RETENTION = 5000  # cap dedup store to avoid unbounded growth
 USAGE_LEDGER_PATH = TEMP_DIR / "usage_ledger.jsonl"
 LANDING_NOTIFICATIONS_PATH = TEMP_DIR / "landing_notifications.json"
 LANDING_NOTIFICATIONS_LIMIT = 120
@@ -46,6 +48,9 @@ _paypal_orders: dict[str, dict] = {}
 _paypal_orders_lock = asyncio.Lock()
 _paypal_subscriptions: dict[str, dict] = {}
 _paypal_subscriptions_lock = asyncio.Lock()
+# Webhook event dedup store: event_id -> {received_at, event_type, resource_id}
+_paypal_webhook_events: dict[str, dict] = {}
+_paypal_webhook_events_lock = asyncio.Lock()
 _landing_notifications: list[dict] = []
 _landing_notifications_lock = asyncio.Lock()
 
@@ -127,6 +132,36 @@ def _save_paypal_subscriptions() -> None:
     try:
         PAYPAL_SUBSCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
         PAYPAL_SUBSCRIPTIONS_PATH.write_text(json.dumps(_paypal_subscriptions, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_paypal_webhook_events() -> None:
+    try:
+        if PAYPAL_WEBHOOK_EVENTS_PATH.exists():
+            data = json.loads(PAYPAL_WEBHOOK_EVENTS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _paypal_webhook_events.clear()
+                _paypal_webhook_events.update(data)
+                return
+    except Exception:
+        pass
+    _paypal_webhook_events.clear()
+
+
+def _save_paypal_webhook_events() -> None:
+    try:
+        # Trim oldest events if store exceeds retention cap
+        if len(_paypal_webhook_events) > PAYPAL_WEBHOOK_EVENTS_RETENTION:
+            sorted_items = sorted(
+                _paypal_webhook_events.items(),
+                key=lambda kv: float((kv[1] or {}).get("received_at", 0) or 0),
+            )
+            keep = sorted_items[-PAYPAL_WEBHOOK_EVENTS_RETENTION:]
+            _paypal_webhook_events.clear()
+            _paypal_webhook_events.update(dict(keep))
+        PAYPAL_WEBHOOK_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PAYPAL_WEBHOOK_EVENTS_PATH.write_text(json.dumps(_paypal_webhook_events, indent=2), encoding="utf-8")
     except Exception:
         pass
 
@@ -377,6 +412,36 @@ async def _credit_topup_wallet(user_id: str, credits: int, source: str, stripe_s
         "stripe_session_id": stripe_session_id,
         "ts": time.time(),
     })
+
+
+async def _debit_topup_wallet(user_id: str, credits: int, source: str, reference_id: str = "") -> int:
+    """
+    Reverse a topup credit grant — typically called when PayPal issues a refund.
+    Clamps at zero so we never drive the wallet negative (if the user already spent
+    the credits, we absorb the loss rather than creating an awkward negative balance).
+    Returns the number of credits actually debited (may be less than requested).
+    """
+    if not user_id or credits <= 0:
+        return 0
+    debited = 0
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(user_id)
+        current = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
+        debited = min(current, int(credits))
+        wallet["animated_topup_credits"] = max(0, current - debited)
+        wallet["topup_credits"] = wallet["animated_topup_credits"]
+        wallet["updated_at"] = time.time()
+        _save_topup_wallets()
+    _append_usage_ledger({
+        "type": "topup_refund",
+        "user_id": user_id,
+        "credits": -int(debited),
+        "credits_requested": int(credits),
+        "source": source,
+        "reference_id": reference_id,
+        "ts": time.time(),
+    })
+    return int(debited)
 
 
 def _estimate_job_cost_usd(job_state: dict) -> float:

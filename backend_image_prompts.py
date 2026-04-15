@@ -1,4 +1,14 @@
-SKELETON_IMAGE_PROMPT_PREFIX = ""
+SKELETON_IMAGE_PROMPT_PREFIX = (
+    "Photorealistic 3D rendered humanoid figure with the EXACT canonical Studio skeleton identity: "
+    "FULL ivory-white anatomical skeleton inside a translucent glass-like soft body shell, "
+    "ribcage, spine, pelvis, arm bones, leg bones all clearly visible through the glass torso/limbs; "
+    "the head has a realistic anatomical skull with proper eye sockets containing LARGE REALISTIC HUMAN EYES "
+    "(visible iris with natural color, pupil, white sclera, wet specular highlights, NEVER glowing); "
+    "skull proportions, jaw shape, eye spacing/size, body shell silhouette and bone structure are IDENTICAL across every scene; "
+    "Unreal Engine 5 / Octane render quality, premium commercial product photography lighting, "
+    "soft rim light, clean subject separation, crisp focus on the figure. "
+    "The translucent body shell ALWAYS exists. Reference style match: Studio gold-standard skeleton lock image. "
+)
 
 SKELETON_IMAGE_STYLE_PREFIX = (
     "Photorealistic 3D cinematic character render, Unreal Engine 5 quality. "
@@ -44,6 +54,13 @@ TEMPLATE_KLING_MOTION = {
     "scary": "Horror atmosphere: extremely slow camera drift through dark environments, subtle movements in shadows, flickering lights, creeping dread. Almost imperceptible motion that builds unease.",
     "motivation": "Epic cinematic: slow-motion camera sweep across landscape, golden light shifts, silhouette figure in the distance, wind and weather movement, inspirational energy.",
     "whatif": "Scientific visualization: transformation from normal to hypothetical, dramatic scale changes, time-lapse effects, before-and-after morphing, epic camera pullback to show scale.",
+    # Phase 3 additions: each template's animation lock — defines exact motion language Kling uses
+    "daytrading": "Subtle controlled motion: charts on screens animate with realistic candle-by-candle price action, ticker scrolls slowly across panel, trader hand moves on keyboard with confident precision, slow camera push-in or sideways drift across multi-monitor setup, monitor light flicker stays subtle and consistent. NO chaotic camera shake, NO frantic motion. Premium financial documentary cinematography pacing.",
+    "business": "Slow cinematic prestige-drama motion: smooth dolly forward through corporate space, executive turns head toward camera with confident composure, hand gestures during meeting are deliberate and weighted, soft camera push-in on hero subject, gentle natural lighting shift. NO jerky cuts, NO music-video frantic energy. Bloomberg / Forbes editorial documentary pacing.",
+    "finance": "Wall Street energy with controlled cinematic motion: slow camera glide across trading floor, ticker symbols scroll with realistic speed, gold bullion catches light as camera circles, mechanical watch second hand sweeps. Subtle volumetric dust particles drift in trading-floor light shafts. Premium financial-network broadcast cinematography pacing.",
+    "tech": "Precise techno-cinematic motion: code scrolls smoothly on monitor, server rack LEDs blink in believable patterns, fiber-optic cables pulse with light, slow macro push-in on silicon detail, subtle data-flow visualization across screens. NO fake holographic UI floating in air. Tech-documentary editorial pacing.",
+    "crypto": "Neon-noir cinematic motion: slow camera drift across multi-monitor crypto setup with chart panels animating realistically, neon city light reflections move on rain-slick window, physical Bitcoin coins catch light as camera orbits, vaporwave color accents pulse subtly. Premium crypto-documentary cinematic pacing.",
+    "dilemma": "High-tension cinematic motion: slow controlled camera push-in on hero subject as the dilemma is delivered, atmospheric haze drifts across frame, dramatic lighting shifts subtly with stakes, branching outcome cuts use smooth scene-swap transitions. Stopwatch overlay (if present) ticks with realistic precision. Prestige-drama feature-film pacing.",
 }
 
 TEMPLATE_SFX_PROMPTS = {
@@ -63,6 +80,13 @@ TEMPLATE_SFX_PROMPTS = {
     "scary": "Deep horror drone with creaking door, eerie whisper ambience, jump scare tension riser stinger",
     "motivation": "Inspirational cinematic orchestra swell, uplifting epic brass rise, triumphant achievement stinger",
     "whatif": "Mind-bending sci-fi transition whoosh, reality warping bass drop, cosmic scale reveal impact",
+    # Phase 3 additions
+    "daytrading": "Trading floor ambience with subtle keyboard click, market alert chime, dramatic price-drop bass sting on key reveals",
+    "business": "Premium corporate boardroom ambience, professional notification chime, confident success stinger with elegant brass sub",
+    "finance": "Wall Street trading floor ambience with NYSE bell echo, ticker scroll sound, dramatic market-impact stinger",
+    "tech": "Cyber whoosh transition with digital UI clicks, server room hum, holographic interface confirmation chime",
+    "crypto": "Vaporwave synth pulse with deep neon bass, Bitcoin coin clink, dramatic chart-pump impact stinger",
+    "dilemma": "Tension stopwatch ticking under riser, dramatic decision-point bass impact, suspenseful comment-bait reveal stinger",
 }
 
 SKELETON_NEGATIVE_PROMPT = (
@@ -329,6 +353,125 @@ WHATIF_NEGATIVE_PROMPT = (
     "jpeg artifacts, pixelated, ugly"
 )
 
+# ===== Studio Phase 3 master visual prompts (per Casey 2026-04-15) =====
+# Each kept template gets a strong visual identity prefix that LOCKS art direction
+# regardless of script source (AI-generated or user-provided). The user-selected
+# art_style preset still composes ON TOP of these via _build_scene_prompt_with_reference.
+
+DAYTRADING_IMAGE_PROMPT_PREFIX = (
+    "Premium photoreal day trader workspace cinematography, "
+    "professional trader at multi-monitor desk with glowing candlestick charts, level-2 ladders, time-and-sales, DOM, volume profile, heatmaps, "
+    "dark moody finance noir grading -- deep blacks, electric blue + green PnL accents, focused warm desk lamp, "
+    "city skyline at night through floor-to-ceiling window with bokeh light, "
+    "macro shots of price action sweeping across screens, fingers on keyboard, focused trader expression, "
+    "Bloomberg-terminal grade UI realism (no fake sci-fi panels), real broker-style chart windows, "
+    "shot on ARRI with anamorphic flare, Wall Street film color grade, "
+    "8k ultra HD, premium financial documentary quality, "
+)
+DAYTRADING_NEGATIVE_PROMPT = (
+    "money rain, fake stacks of cash, lambo, mansion shots, gold chains, cheesy luxury cliches, "
+    "fake sci-fi holographic UI, magical glowing currency symbols floating in air, generic stock photo, "
+    "cartoon, anime, low poly, plastic toy, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
+BUSINESS_IMAGE_PROMPT_PREFIX = (
+    "Cinematic premium business documentary cinematography, "
+    "executive boardroom interiors with marble + dark wood + brass detailing, glass-walled conference rooms with city views, "
+    "tailored navy/charcoal suits, confident posture, sharp meeting energy, "
+    "high-end office lobbies, modern corporate skyscrapers at golden hour, founder garages-to-empire visual contrast, "
+    "Forbes / Bloomberg editorial photography aesthetic, controlled directional lighting, clean negative space, "
+    "rule-of-thirds compositions with hero subject left-third, "
+    "shot on ARRI Alexa with prime cinema lens, premium prestige drama color grade, "
+    "8k ultra HD, corporate-cinematic editorial quality, "
+)
+BUSINESS_NEGATIVE_PROMPT = (
+    "fake luxury cliches, money piles, lambos, mansion brag shots, generic stock photo handshake, "
+    "cluttered backgrounds, low-end office space, fluorescent overhead lighting, "
+    "cartoon, anime, low poly, plastic toy, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
+FINANCE_IMAGE_PROMPT_PREFIX = (
+    "Premium photoreal Wall Street financial documentary cinematography, "
+    "trading floor with rows of monitors and stock tickers, NYSE bell, gold bullion, vintage tickertape backdrop, "
+    "macro detail of expensive mechanical watches, fountain pens on signed contracts, leather banker chairs, "
+    "deep navy + gold + dark wood color palette with selective spot lighting, "
+    "Bloomberg / CNBC broadcast-quality realism, real ticker symbols and chart panels (not generic sci-fi UI), "
+    "shot on ARRI with anamorphic lens, financial documentary editorial grade, "
+    "8k ultra HD, premium finance-network production quality, "
+)
+FINANCE_NEGATIVE_PROMPT = (
+    "fake currency floating mid-air, money rain, lambo flex, dollar-sign icons, generic crypto bro shots, "
+    "fake sci-fi holographic finance UI, glowing magic charts, plastic toy money, "
+    "cartoon, anime, low poly, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
+TECH_IMAGE_PROMPT_PREFIX = (
+    "Cinematic photoreal Silicon Valley tech documentary cinematography, "
+    "developer hands typing on mechanical keyboard with dark IDE on screen, server rack room with cool blue LED accents, "
+    "ultra-detailed close-ups of motherboards, GPU silicon, fiber optic cables glowing, "
+    "minimalist startup workspaces with whiteboard markings, dual-monitor coding setups, "
+    "neutral grey + electric cyan + warm desk lamp accent palette, sharp depth of field, controlled lighting, "
+    "modern Apple-product-photography clarity meets cinematic moody hacker aesthetic, "
+    "shot on ARRI with macro lens, premium tech editorial grade, "
+    "8k ultra HD, Wired-magazine + cinematic film quality, "
+)
+TECH_NEGATIVE_PROMPT = (
+    "fake hacker hoodie cliches, glowing green Matrix code rain (unless explicitly requested), generic stock photo, "
+    "cartoon, anime, low poly, plastic toy, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, fake floating UI panels, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
+CRYPTO_IMAGE_PROMPT_PREFIX = (
+    "Cinematic neon crypto documentary cinematography, "
+    "moody trader at multi-monitor crypto setup with glowing chart panels, dark room ambient lighting, "
+    "macro details of physical Bitcoin coins on dark surfaces, blockchain visualization (real-looking nodes, not cartoony), "
+    "deep purple + electric magenta + neon cyan accent palette, vaporwave-meets-financial-noir, "
+    "rain-slick reflective surfaces with neon city lights bleeding through windows, "
+    "selective sharp focus on hero subject, controlled volumetric lighting, "
+    "shot on ARRI with anamorphic flare, premium tech-meets-finance editorial grade, "
+    "8k ultra HD, premium crypto-documentary cinematic quality, "
+)
+CRYPTO_NEGATIVE_PROMPT = (
+    "lambo flex, mansion brag, crypto bro stereotypes, money rain, fake gold chains, "
+    "cartoon Bitcoin character, anthropomorphized coin mascots, "
+    "fake sci-fi holographic crypto UI, magical glowing currency symbols floating, "
+    "cartoon, anime, low poly, plastic toy, chibi, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
+DILEMMA_IMAGE_PROMPT_PREFIX = (
+    "Cinematic high-tension moral-dilemma cinematography, "
+    "single hero subject framed at center or two-thirds composition, intense focused expression, "
+    "dramatic split-frame visual language showing branching outcome scenes, "
+    "cold blue/teal grade with red accent flashes on stakes-elements, "
+    "2.35:1 letterbox cinematic widescreen feel, anamorphic lens compression, "
+    "atmospheric haze and dust particles in air, motivated practical lighting from one strong source, "
+    "shot on ARRI Alexa with anamorphic prime lens, prestige drama film grade, "
+    "8k ultra HD, premium feature-film cinematic quality, "
+)
+DILEMMA_NEGATIVE_PROMPT = (
+    "comedic, cartoonish, slapstick, low-stakes, mundane, "
+    "fake stylized choice icons floating, magical glowing decision trees, "
+    "cartoon, anime, low poly, plastic, chibi, cute, "
+    "blurry, low quality, watermark, text artifacts, deformed, "
+    "bad anatomy, jpeg artifacts, pixelated, ugly, "
+    "bright cheerful lighting, flat lighting, sterile studio background, "
+    "no text, no words, no letters, no readable text, no captions, no titles"
+)
+
 TEMPLATE_PROMPT_PREFIXES = {
     "skeleton": SKELETON_IMAGE_PROMPT_PREFIX,
     "history": HISTORY_IMAGE_PROMPT_PREFIX,
@@ -346,6 +489,13 @@ TEMPLATE_PROMPT_PREFIXES = {
     "scary": SCARY_IMAGE_PROMPT_PREFIX,
     "motivation": MOTIVATION_IMAGE_PROMPT_PREFIX,
     "whatif": WHATIF_IMAGE_PROMPT_PREFIX,
+    # Phase 3 additions (kept templates per Casey 2026-04-15)
+    "daytrading": DAYTRADING_IMAGE_PROMPT_PREFIX,
+    "business": BUSINESS_IMAGE_PROMPT_PREFIX,
+    "finance": FINANCE_IMAGE_PROMPT_PREFIX,
+    "tech": TECH_IMAGE_PROMPT_PREFIX,
+    "crypto": CRYPTO_IMAGE_PROMPT_PREFIX,
+    "dilemma": DILEMMA_IMAGE_PROMPT_PREFIX,
 }
 
 TEMPLATE_NEGATIVE_PROMPTS = {
@@ -365,6 +515,13 @@ TEMPLATE_NEGATIVE_PROMPTS = {
     "scary": SCARY_NEGATIVE_PROMPT,
     "motivation": MOTIVATION_NEGATIVE_PROMPT,
     "whatif": WHATIF_NEGATIVE_PROMPT,
+    # Phase 3 additions
+    "daytrading": DAYTRADING_NEGATIVE_PROMPT,
+    "business": BUSINESS_NEGATIVE_PROMPT,
+    "finance": FINANCE_NEGATIVE_PROMPT,
+    "tech": TECH_NEGATIVE_PROMPT,
+    "crypto": CRYPTO_NEGATIVE_PROMPT,
+    "dilemma": DILEMMA_NEGATIVE_PROMPT,
 }
 
 NEGATIVE_PROMPT = (
