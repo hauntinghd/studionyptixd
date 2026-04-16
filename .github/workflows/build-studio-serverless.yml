@@ -47,3 +47,13 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Make GHCR package public (RunPod needs unauthenticated pulls)
+        run: |
+          curl -sf -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/user/packages/container/studio-backend" \
+            -d '{"visibility":"public"}' \
+          && echo "Package set to public" \
+          || echo "::warning::Could not set package visibility (may need admin:packages scope). RunPod will need registry auth if package stays private."
