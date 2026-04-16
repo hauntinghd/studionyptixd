@@ -36,11 +36,10 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir runpod>=1.7.0
 
-# Copy all top-level Python modules (backend is ~30 files)
+# Copy all top-level Python modules (backend is ~30 files including routes.py)
 COPY *.py ./
 COPY client_secrets.json ./
 COPY ops ./ops
-COPY routes ./routes
 
 # Frontend static assets
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
