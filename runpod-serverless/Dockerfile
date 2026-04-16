@@ -56,5 +56,9 @@ RUN sed -i 's/\r$//' ./ops/run_render_service.sh \
 # Scratch dirs
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
+# Pre-compile ALL Python bytecode so the first runtime import doesn't
+# spend 60+ seconds compiling 22K lines on a cold serverless CPU.
+RUN python -m compileall -q /app/ 2>/dev/null || true
+
 # Runpod serverless invokes handler.py as module
 CMD ["python", "-u", "handler.py"]

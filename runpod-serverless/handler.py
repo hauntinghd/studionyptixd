@@ -53,17 +53,35 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
 #  Warm-load FastAPI app ONCE per worker
 # ════════════════════════════════════════════════════════════
 
-logger.info("Loading Studio FastAPI backend...")
+# ════════════════════════════════════════════════════════════
+#  Lazy-load backend on FIRST REQUEST, not at module init.
+#
+#  Why: RunPod kills workers that don't call runpod.serverless.start()
+#  within ~60s. The Studio backend (22K lines + 24 modules) takes 60-90s
+#  to compile bytecode on a cold serverless CPU, which exceeds the init
+#  timeout. By deferring the import to the first handler() call, we let
+#  runpod.serverless.start() register immediately, then absorb the slow
+#  first-request penalty without getting killed.
+# ════════════════════════════════════════════════════════════
 _client = None
 _boot_error = ""
-try:
-    from backend import app  # type: ignore
-    from fastapi.testclient import TestClient
-    _client = TestClient(app)
-    logger.info("Backend loaded, TestClient ready")
-except Exception as e:
-    _boot_error = f"{e}\n{traceback.format_exc()}"
-    logger.error(f"Backend failed to load (will return error on requests): {_boot_error}")
+_boot_attempted = False
+
+
+def _ensure_backend():
+    global _client, _boot_error, _boot_attempted
+    if _boot_attempted:
+        return
+    _boot_attempted = True
+    logger.info("Loading Studio FastAPI backend (lazy, first request)...")
+    try:
+        from backend import app  # type: ignore
+        from fastapi.testclient import TestClient
+        _client = TestClient(app)
+        logger.info("Backend loaded, TestClient ready")
+    except Exception as e:
+        _boot_error = f"{e}\n{traceback.format_exc()}"
+        logger.error(f"Backend failed to load: {_boot_error}")
 
 
 # ════════════════════════════════════════════════════════════
@@ -135,6 +153,7 @@ def _encode_response(response) -> dict:
 
 def handler(event: dict) -> dict:
     """Entry point invoked by RunPod for each queued request."""
+    _ensure_backend()
     if _client is None:
         return {
             "status_code": 503,
