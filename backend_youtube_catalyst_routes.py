@@ -40,6 +40,7 @@ def build_youtube_catalyst_app_router(
     catalyst_hub_clear_reference_video_analysis_for_user,
     catalyst_hub_save_instructions_for_user,
     catalyst_hub_launch_longform_for_user,
+    catalyst_hub_longform_suggestions_for_user,
     list_connected_youtube_channels_for_user,
     select_connected_youtube_channel_for_user,
     sync_connected_youtube_channel_for_user,
@@ -194,6 +195,19 @@ def build_youtube_catalyst_app_router(
             animation_enabled=bool_from_any((req or {}).animation_enabled, True),
             sfx_enabled=bool_from_any((req or {}).sfx_enabled, True),
             auto_pipeline=bool_from_any((req or {}).auto_pipeline, True),
+            topic=str(getattr(req, "topic", "") or "").strip(),
+            input_title=str(getattr(req, "input_title", "") or "").strip(),
+            input_description=str(getattr(req, "input_description", "") or "").strip(),
+        )
+
+    async def _catalyst_hub_longform_suggestions(
+        body: dict,
+        user: dict = Depends(require_auth),
+    ):
+        return await catalyst_hub_longform_suggestions_for_user(
+            user=user,
+            channel_id=str((body or {}).get("channel_id", "") or "").strip(),
+            workspace_id=str((body or {}).get("workspace_id", "documentary") or "documentary").strip().lower(),
         )
 
     async def _list_connected_youtube_channels(
@@ -376,6 +390,7 @@ def build_youtube_catalyst_app_router(
         catalyst_hub_reference_video_clear_endpoint=_catalyst_hub_clear_reference_video_analysis,
         catalyst_hub_save_instructions_endpoint=_catalyst_hub_save_instructions,
         catalyst_hub_launch_endpoint=_catalyst_hub_launch_longform,
+        catalyst_hub_longform_suggestions_endpoint=_catalyst_hub_longform_suggestions,
         list_youtube_channels_endpoint=_list_connected_youtube_channels,
         select_youtube_channel_endpoint=_select_connected_youtube_channel,
         sync_youtube_channel_endpoint=_sync_connected_youtube_channel,

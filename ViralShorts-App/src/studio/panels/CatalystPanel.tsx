@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Target, Youtube } from 'lucide-react';
+import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
 import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
 
 type CatalystChannel = {
@@ -335,6 +335,10 @@ export default function CatalystPanel() {
     const [referenceAnalyticsImages, setReferenceAnalyticsImages] = useState<File[]>([]);
     const [saving, setSaving] = useState(false);
     const [launching, setLaunching] = useState(false);
+    // Long-Form Suggestions state
+    const [longformSuggestions, setLongformSuggestions] = useState<any[]>([]);
+    const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+    const [approvingSuggestionIdx, setApprovingSuggestionIdx] = useState<number | null>(null);
     const [autoTickRunning, setAutoTickRunning] = useState(false);
     const [velocityData, setVelocityData] = useState<{ velocity_vph?: number; is_decaying?: boolean; title?: string } | null>(null);
     const [autoTickResult, setAutoTickResult] = useState('');
@@ -692,6 +696,67 @@ export default function CatalystPanel() {
             setError(String(e?.message || e || 'Failed to launch Catalyst long-form run'));
         } finally {
             setLaunching(false);
+        }
+    };
+
+    const handleFetchLongformSuggestions = async () => {
+        const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+        if (!session || !activeChannelId) return;
+        setLoadingSuggestions(true);
+        setLongformSuggestions([]);
+        setError('');
+        try {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/longform-suggestions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ channel_id: activeChannelId, workspace_id: selectedWorkspaceId }),
+            });
+            if (!res.ok) throw new Error(String(data?.detail || 'Failed to generate suggestions'));
+            setLongformSuggestions(data?.suggestions || []);
+        } catch (e: any) {
+            setError(String(e?.message || 'Failed to generate suggestions'));
+        } finally {
+            setLoadingSuggestions(false);
+        }
+    };
+
+    const handleApproveSuggestion = async (idx: number) => {
+        const suggestion = longformSuggestions[idx];
+        if (!suggestion || !session) return;
+        const activeChannelId = String(selectedChannelIdRef.current || '').trim();
+        setApprovingSuggestionIdx(idx);
+        setError('');
+        try {
+            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/launch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    channel_id: activeChannelId,
+                    workspace_id: selectedWorkspaceId,
+                    topic: suggestion.topic || '',
+                    input_title: suggestion.title || '',
+                    input_description: suggestion.description || '',
+                    language: 'en',
+                    animation_enabled: true,
+                    sfx_enabled: true,
+                    auto_pipeline: true,
+                    include_public_benchmarks: true,
+                    refresh_outcomes: false,
+                }),
+            });
+            if (!res.ok) throw new Error(String(data?.detail || 'Failed to launch'));
+            const sessionId = String(data?.session?.session_id || '').trim();
+            if (sessionId) {
+                try { sessionStorage.setItem(pendingLongformLaunchKey, sessionId); } catch {}
+                const nextUrl = new URL(window.location.href);
+                nextUrl.searchParams.set('page', 'dashboard');
+                nextUrl.searchParams.set('tab', 'longform');
+                window.location.href = nextUrl.toString();
+            }
+        } catch (e: any) {
+            setError(String(e?.message || 'Failed to approve suggestion'));
+        } finally {
+            setApprovingSuggestionIdx(null);
         }
     };
 
@@ -1256,6 +1321,70 @@ export default function CatalystPanel() {
                             </span>
                         </div>
                     </div>
+
+                    {/* ─── Long-Form Video Ideas ─── */}
+                    {canLaunchLongform && (
+                    <div className="rounded-3xl border border-emerald-500/20 bg-emerald-500/[0.04] p-6 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-emerald-300">
+                                <BrainCircuit className="h-4 w-4" />
+                                Long-Form Video Ideas
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => void handleFetchLongformSuggestions()}
+                                disabled={loadingSuggestions || !resolvedChannelId}
+                                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                            >
+                                {loadingSuggestions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                                {loadingSuggestions ? 'Thinking...' : 'Generate Ideas'}
+                            </button>
+                        </div>
+                        <p className="text-xs text-gray-400">
+                            Catalyst analyzes your channel's performance data, learned patterns, and series clusters to suggest the 5 strongest next videos. Zero YouTube quota — reads cached intelligence.
+                        </p>
+                        {longformSuggestions.length > 0 && (
+                            <div className="space-y-3">
+                                {longformSuggestions.map((s: any, idx: number) => (
+                                    <div key={idx} className="rounded-2xl border border-white/[0.08] bg-black/20 p-4 space-y-2">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                                                        s.performance_tier === 'high' ? 'bg-emerald-500/20 text-emerald-300'
+                                                        : s.performance_tier === 'experimental' ? 'bg-violet-500/20 text-violet-300'
+                                                        : 'bg-sky-500/20 text-sky-300'
+                                                    }`}>{s.performance_tier || 'medium'}</span>
+                                                    {s.source_series && (
+                                                        <span className="rounded-full bg-white/[0.06] px-2.5 py-0.5 text-[10px] text-gray-400">{s.source_series}</span>
+                                                    )}
+                                                </div>
+                                                <p className="mt-1.5 text-sm font-semibold text-white">{s.title}</p>
+                                                <p className="mt-1 text-xs text-gray-400 line-clamp-2">{s.description}</p>
+                                                {s.rationale && (
+                                                    <p className="mt-2 text-[11px] text-emerald-200/70 italic">{s.rationale}</p>
+                                                )}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => void handleApproveSuggestion(idx)}
+                                                disabled={approvingSuggestionIdx !== null || launching}
+                                                className="shrink-0 rounded-xl bg-cyan-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50 whitespace-nowrap"
+                                            >
+                                                {approvingSuggestionIdx === idx ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Approve & Create'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {busyLongformSessionId && (
+                            <div className="mt-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] px-4 py-3 text-xs text-cyan-200">
+                                Long-form session <span className="font-mono font-bold">{busyLongformSessionId}</span> is currently running.
+                            </div>
+                        )}
+                    </div>
+                    )}
 
                     {/* ─── Auto Pilot ─── */}
                     <div className="rounded-3xl border border-amber-500/20 bg-amber-500/[0.04] p-6">

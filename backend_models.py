@@ -244,6 +244,11 @@ class CatalystHubLaunchRequest(BaseModel):
     auto_pipeline: bool = True
     include_public_benchmarks: bool = True
     refresh_outcomes: bool = True
+    # Pre-filled from Catalyst suggestions UI — when both topic + input_title are non-empty,
+    # the launch endpoint skips internal seed derivation and uses these directly.
+    topic: str = ""
+    input_title: str = ""
+    input_description: str = ""
 
 
 class CatalystHubReferenceVideoAnalysisRequest(BaseModel):

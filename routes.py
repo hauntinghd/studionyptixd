@@ -356,6 +356,7 @@ def build_youtube_catalyst_router(
     catalyst_hub_reference_video_clear_endpoint,
     catalyst_hub_save_instructions_endpoint,
     catalyst_hub_launch_endpoint,
+    catalyst_hub_longform_suggestions_endpoint=None,
     list_youtube_channels_endpoint,
     select_youtube_channel_endpoint,
     sync_youtube_channel_endpoint,
@@ -379,6 +380,8 @@ def build_youtube_catalyst_router(
     router.add_api_route("/api/catalyst/hub/reference-video-analysis/clear", catalyst_hub_reference_video_clear_endpoint, methods=["POST"])
     router.add_api_route("/api/catalyst/hub/instructions", catalyst_hub_save_instructions_endpoint, methods=["POST"])
     router.add_api_route("/api/catalyst/hub/launch", catalyst_hub_launch_endpoint, methods=["POST"])
+    if catalyst_hub_longform_suggestions_endpoint:
+        router.add_api_route("/api/catalyst/hub/longform-suggestions", catalyst_hub_longform_suggestions_endpoint, methods=["POST"])
     router.add_api_route("/api/youtube/channels", list_youtube_channels_endpoint, methods=["GET"])
     router.add_api_route("/api/youtube/channels/select", select_youtube_channel_endpoint, methods=["POST"])
     router.add_api_route("/api/youtube/channels/{channel_id}/sync", sync_youtube_channel_endpoint, methods=["POST"])

@@ -3758,10 +3758,38 @@ async def _youtube_public_api_get(path: str, *, params: dict | None = None, time
     raise RuntimeError(last_error or "YouTube API key request failed")
 
 
+# TTL cache for search.list results — each call costs 100 API units. Cache for 6 hours
+# so the same niche trend query doesn't burn quota repeatedly in one day.
+_search_cache: dict[str, tuple[float, list]] = {}
+_SEARCH_CACHE_TTL_SEC = 6 * 3600  # 6 hours
+_youtube_quota_used_today: dict[str, int] = {"units": 0, "reset_date": ""}
+
+
+def _youtube_quota_track(units: int) -> None:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _youtube_quota_used_today.get("reset_date") != today:
+        _youtube_quota_used_today["units"] = 0
+        _youtube_quota_used_today["reset_date"] = today
+    _youtube_quota_used_today["units"] += units
+
+
+def youtube_quota_used_today() -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _youtube_quota_used_today.get("reset_date") != today:
+        return 0
+    return int(_youtube_quota_used_today.get("units", 0) or 0)
+
+
 async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -> list[str]:
     search_query = re.sub(r"\s+", " ", str(query or "").strip())
     if not search_query:
         return []
+    cache_key = f"trend:{search_query}:{max_results}"
+    cached = _search_cache.get(cache_key)
+    if cached:
+        cached_at, cached_result = cached
+        if time.time() - cached_at < _SEARCH_CACHE_TTL_SEC:
+            return list(cached_result)
     published_after = datetime.now(timezone.utc) - timedelta(days=45)
     try:
         payload, _active_key = await _youtube_public_api_get(
@@ -3776,20 +3804,27 @@ async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -
             },
             timeout_sec=20,
         )
+        _youtube_quota_track(100)  # search.list = 100 units
     except Exception:
-        return []
+        return list((cached or (0, []))[1])  # return stale cache on error
     titles: list[str] = []
     for item in list(payload.get("items") or []):
         title = _clip_text(str(((item or {}).get("snippet") or {}).get("title", "") or "").strip(), 120)
         if title:
             titles.append(title)
-    return _dedupe_preserve_order(titles, max_items=max_results, max_chars=120)
+    result = _dedupe_preserve_order(titles, max_items=max_results, max_chars=120)
+    _search_cache[cache_key] = (time.time(), result)
+    return result
 
 
 async def _youtube_fetch_public_reference_shorts(query: str, max_results: int = 8) -> list[dict]:
     search_query = re.sub(r"\s+", " ", str(query or "").strip())
     if not search_query:
         return []
+    cache_key = f"ref_shorts:{search_query}:{max_results}"
+    cached = _search_cache.get(cache_key)
+    if cached and (time.time() - cached[0] < _SEARCH_CACHE_TTL_SEC):
+        return list(cached[1])
     published_after = datetime.now(timezone.utc) - timedelta(days=120)
     try:
         payload, _active_key = await _youtube_public_api_get(
@@ -3804,8 +3839,9 @@ async def _youtube_fetch_public_reference_shorts(query: str, max_results: int = 
             },
             timeout_sec=25,
         )
+        _youtube_quota_track(100)  # search.list = 100 units
     except Exception:
-        return []
+        return list((cached or (0, []))[1])
     raw_items = [dict(item or {}) for item in list(payload.get("items") or []) if isinstance(item, dict)]
     video_ids = [str(((item.get("id") or {}).get("videoId")) or "").strip() for item in raw_items]
     video_ids = [video_id for video_id in video_ids if video_id]
@@ -3855,7 +3891,9 @@ async def _youtube_fetch_public_reference_shorts(query: str, max_results: int = 
             str(row.get("published_at", "") or ""),
         )
     )
-    return rows[: max(3, min(int(max_results or 8), 10))]
+    result = rows[: max(3, min(int(max_results or 8), 10))]
+    _search_cache[cache_key] = (time.time(), result)
+    return result
 
 
 async def _youtube_fetch_public_video_bundle_api_key(source_url: str) -> dict:
@@ -3964,6 +4002,10 @@ async def _youtube_fetch_public_channel_search_api_key(channel_id: str, order: s
     clean_channel_id = str(channel_id or "").strip()
     if not clean_channel_id:
         return []
+    cache_key = f"ch_search:{clean_channel_id}:{order}:{max_results}"
+    cached = _search_cache.get(cache_key)
+    if cached and (time.time() - cached[0] < _SEARCH_CACHE_TTL_SEC):
+        return list(cached[1])
     remaining = max(1, min(int(max_results or 12), 250))
     page_token = ""
     video_ids: list[str] = []
@@ -3992,7 +4034,12 @@ async def _youtube_fetch_public_channel_search_api_key(channel_id: str, order: s
         page_token = str(payload.get("nextPageToken", "") or "").strip()
         if not page_token or remaining <= 0:
             break
-    return await _youtube_fetch_public_videos_api_key(video_ids)
+    # Track quota: each page of search.list costs 100 units; we may have paged multiple times
+    pages_used = max(1, (len(video_ids) + 49) // 50)
+    _youtube_quota_track(100 * pages_used)
+    result = await _youtube_fetch_public_videos_api_key(video_ids)
+    _search_cache[cache_key] = (time.time(), result)
+    return result
 
 
 def _youtube_channel_videos_page_url(channel_url: str, channel_id: str) -> str:

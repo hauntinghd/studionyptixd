@@ -6191,6 +6191,8 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
     elif model_id == "seedream45":
         payload["image_size"] = image_size
         payload["output_format"] = "png"
+    elif model_id == "ernie_image":
+        payload["image_size"] = image_size
     elif model_id in {"recraft_v4", "recraft_v4_pro"}:
         payload["style"] = "realistic_image"
     elif model_id == "nano_banana_pro":
@@ -8458,9 +8460,9 @@ async def generate_scene_image(
         if primary_backup and primary_backup != "grok_imagine":
             fallback_candidates.append(primary_backup)
         if template == "skeleton":
-            fallback_candidates.extend(["imagen4_fast", "seedream45", "imagen4_ultra", "recraft_v4", "flux_2_pro"])
+            fallback_candidates.extend(["ernie_image", "imagen4_fast", "seedream45", "recraft_v4", "flux_2_pro"])
         else:
-            fallback_candidates.extend(["imagen4_fast", "recraft_v4", "seedream45", "imagen4_ultra", "flux_2_pro"])
+            fallback_candidates.extend(["ernie_image", "imagen4_fast", "recraft_v4", "seedream45", "flux_2_pro"])
         seen_candidates: set[str] = set()
         for candidate in fallback_candidates:
             candidate_id = _normalize_creative_image_model_id(candidate, template=template)
@@ -11795,23 +11797,24 @@ async def run_generation_pipeline(
                     "no extra limbs, no melted face, no warped skull."
                 ).strip()
                 aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
-                # Call Imagen4 Preview directly via FAL API (not /fast, not Flux Schnell)
+                # Call ERNIE-Image directly via FAL API (replaced Imagen4 — 3x cheaper, better cinematic quality)
+                _img_size = {"width": 720, "height": 1280} if aspect == "9:16" else {"width": 1280, "height": 720}
                 async with httpx.AsyncClient(timeout=60) as _img_client:
                     _img_resp = await _img_client.post(
-                        "https://fal.run/fal-ai/imagen4/preview",
+                        "https://fal.run/fal-ai/ernie-image",
                         headers={"Authorization": "Key " + FAL_AI_KEY, "Content-Type": "application/json"},
-                        json={"prompt": full_prompt, "num_images": 1, "aspect_ratio": aspect, "output_format": "png"},
+                        json={"prompt": full_prompt, "num_images": 1, "image_size": _img_size},
                     )
                     if _img_resp.status_code not in (200, 201):
-                        raise RuntimeError(f"Imagen4 Preview failed: {_img_resp.status_code}")
+                        raise RuntimeError(f"ERNIE-Image failed: {_img_resp.status_code}")
                     _img_url = _img_resp.json().get("images", [{}])[0].get("url", "")
                     if not _img_url:
-                        raise RuntimeError("Imagen4 Preview returned no image URL")
+                        raise RuntimeError("ERNIE-Image returned no image URL")
                     _img_data = await _img_client.get(_img_url)
                     with open(img_path, "wb") as _f:
                         _f.write(_img_data.content)
-                img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "imagen4_preview"}
-                log.info(f"[{job_id}] Skeleton scene {i+1} generated via Imagen4 Preview (direct API)")
+                img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "ernie_image"}
+                log.info(f"[{job_id}] Skeleton scene {i+1} generated via ERNIE-Image (direct API)")
             else:
                 full_prompt = _build_scene_prompt_with_reference(
                     template=template,
@@ -12974,11 +12977,11 @@ async def _longform_generate_scene_image(
 
 def _longform_thumbnail_model_candidates(format_preset: str = "", channel_context: dict | None = None) -> list[str]:
     if _is_empire_magnates_channel(channel_context):
-        ordered = ["seedream45", "imagen4_fast", "recraft_v4_pro", "recraft_v4", "imagen4_ultra", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4_pro", "recraft_v4", "grok_imagine"]
     elif str(format_preset or "").strip().lower() == "documentary":
-        ordered = ["seedream45", "imagen4_fast", "recraft_v4", "imagen4_ultra", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine"]
     else:
-        ordered = ["seedream45", "imagen4_fast", "recraft_v4", "imagen4_ultra", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine"]
     deduped: list[str] = []
     for candidate in ordered:
         normalized = _normalize_creative_image_model_id(candidate)
@@ -21203,7 +21206,7 @@ def _rank_title_variants(variants: list[str], channel_memory: dict) -> list[dict
 
 
 def _thumbnail_fal_model_candidates() -> list[str]:
-    ordered = ["seedream45", "imagen4_fast", "recraft_v4", "grok_imagine", "imagen4_ultra"]
+    ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine"]
     deduped: list[str] = []
     for candidate in ordered:
         profile = dict(CREATIVE_IMAGE_MODEL_MAP.get(candidate) or {})

@@ -1900,6 +1900,10 @@ async def _catalyst_hub_launch_longform_for_user(
     animation_enabled: bool = True,
     sfx_enabled: bool = True,
     auto_pipeline: bool = True,
+    # Pre-filled suggestion fields — when non-empty, skip seed derivation LLM call
+    topic: str = "",
+    input_title: str = "",
+    input_description: str = "",
 ) -> dict:
     if not _is_admin_user(user):
         raise HTTPException(403, "Catalyst hub is owner-only")
@@ -1960,17 +1964,24 @@ async def _catalyst_hub_launch_longform_for_user(
         max_items=8,
         max_chars=80,
     )
-    seed = await _derive_longform_seed_from_catalyst_hub(
-        workspace_id=workspace_id,
-        channel_context=channel_context,
-        memory_public=memory_public,
-        playbook=playbook,
-        reference_video_analysis=reference_video_analysis,
-        mission=mission_text,
-        directive=directive_text,
-        guardrails=guardrails_list,
-        target_niches=target_niches_list,
-    )
+    # If pre-filled suggestion fields provided (from Catalyst suggestions UI), skip LLM seed call
+    prefilled_topic = _clip_text(str(topic or "").strip(), 300)
+    prefilled_title = _clip_text(str(input_title or "").strip(), 150)
+    prefilled_description = _clip_text(str(input_description or "").strip(), 2000)
+    if prefilled_topic and prefilled_title:
+        seed = {"topic": prefilled_topic, "title": prefilled_title, "description": prefilled_description}
+    else:
+        seed = await _derive_longform_seed_from_catalyst_hub(
+            workspace_id=workspace_id,
+            channel_context=channel_context,
+            memory_public=memory_public,
+            playbook=playbook,
+            reference_video_analysis=reference_video_analysis,
+            mission=mission_text,
+            directive=directive_text,
+            guardrails=guardrails_list,
+            target_niches=target_niches_list,
+        )
     strategy_lines = [
         f"Catalyst hub launch workspace: {_catalyst_hub_workspace_label(workspace_id)}",
         ("Main goal: " + mission_text) if mission_text else "",
@@ -2463,6 +2474,119 @@ async def _derive_longform_seed_from_catalyst_hub(
         "title": title,
         "description": description,
     }
+
+
+async def _catalyst_hub_longform_suggestions_for_user(
+    *,
+    user: dict,
+    channel_id: str = "",
+    workspace_id: str = "documentary",
+) -> dict:
+    """
+    Generate 5 ranked long-form video suggestions based on Catalyst's learned channel
+    intelligence. Uses the same context as the launch-seed function but asks for multiple
+    diverse ideas with rationale. Zero YouTube API quota — reads cached data + one LLM call.
+    """
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Catalyst hub is owner-only")
+    if not _longform_owner_beta_enabled(user):
+        raise HTTPException(403, "Long-form owner beta is restricted")
+    channel_id = str(channel_id or "").strip()
+    workspace_id = str(workspace_id or "documentary").strip().lower()
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    if workspace_id not in set(CATALYST_HUB_LONGFORM_WORKSPACES):
+        raise HTTPException(400, f"workspace_id must be one of: {', '.join(CATALYST_HUB_LONGFORM_WORKSPACES)}")
+    try:
+        hub_payload = await _build_catalyst_hub_payload(
+            user=user,
+            channel_id=channel_id,
+            include_public_benchmarks=True,
+            refresh_outcomes=False,  # Don't burn YouTube quota — read cached data
+        )
+    except Exception as e:
+        log.exception("Catalyst longform suggestions: failed to load hub payload")
+        raise HTTPException(500, _clip_text(f"Failed to load channel memory: {e}", 220))
+    workspace_snapshot = dict((dict(hub_payload.get("workspace_snapshots") or {})).get(workspace_id) or {})
+    memory_public = dict(workspace_snapshot.get("memory_public") or {})
+    playbook = dict(workspace_snapshot.get("playbook") or {})
+    channel_context = await _youtube_selected_channel_context(user, preferred_channel_id=channel_id)
+    if not channel_context:
+        raise HTTPException(400, "Connect and sync the YouTube channel first")
+    reference_video_analysis = dict(workspace_snapshot.get("reference_video_analysis") or {})
+    reference_payload = dict(reference_video_analysis.get("analysis") or {})
+    # Build context for the LLM — same data as _derive_longform_seed_from_catalyst_hub
+    channel_summary = _clip_text(str(channel_context.get("summary", "") or "").strip(), 900)
+    recent_titles = [str(v).strip() for v in list(channel_context.get("recent_upload_titles") or []) if str(v).strip()][:20]
+    top_titles = [str(v).strip() for v in list(channel_context.get("top_video_titles") or []) if str(v).strip()][:15]
+    packaging_learnings = [str(v).strip() for v in list(channel_context.get("packaging_learnings") or []) if str(v).strip()][:6]
+    retention_learnings = [str(v).strip() for v in list(channel_context.get("retention_learnings") or []) if str(v).strip()][:6]
+    channel_audit = dict(channel_context.get("channel_audit") or {})
+    audit_candidates = [str(v).strip() for v in list(channel_audit.get("next_video_candidates") or []) if str(v).strip()][:8]
+    audit_next_moves = [str(v).strip() for v in list(channel_audit.get("next_moves") or []) if str(v).strip()][:6]
+    series_anchor = _clip_text(str(memory_public.get("series_anchor") or memory_public.get("selected_cluster_label") or "").strip(), 140)
+    best_moves = [str(v).strip() for v in list(memory_public.get("next_video_moves") or []) if str(v).strip()][:6]
+    wins = [str(v).strip() for v in list(memory_public.get("wins_to_keep") or []) if str(v).strip()][:6]
+    mistakes = [str(v).strip() for v in list(memory_public.get("mistakes_to_avoid") or []) if str(v).strip()][:4]
+    niches = [str(v).strip() for v in list(memory_public.get("operator_target_niches") or []) if str(v).strip()][:8]
+    playbook_summary = _clip_text(str(playbook.get("summary", "") or "").strip(), 400)
+    ref_summary = _clip_text(str(reference_payload.get("summary", "") or "").strip(), 400)
+    ref_candidates = [str(v).strip() for v in list(reference_payload.get("candidate_titles") or []) if str(v).strip()][:6]
+    system_prompt = (
+        "You are a YouTube content strategist for an automated AI video engine. "
+        "Based on the channel's performance data, learned patterns, and audience intelligence, "
+        "generate exactly 5 ranked video ideas that maximize the probability of high retention and CTR. "
+        "Each idea must target a DIFFERENT angle or sub-niche — no two suggestions should be closely related. "
+        "Return strict JSON: {\"suggestions\": [{\"topic\": \"...\", \"title\": \"...\", \"description\": \"...\", "
+        "\"source_series\": \"...\", \"rationale\": \"...\", \"performance_tier\": \"high|medium|experimental\"}]}. "
+        "Rules: titles must be clickable YouTube titles under 110 characters. "
+        "rationale must explain which specific channel signals (retention data, series patterns, audit insights) drove this pick. "
+        "source_series is the series cluster or niche this relates to. "
+        "performance_tier: 'high' = matches proven winning patterns, 'medium' = solid but less data, 'experimental' = new angle worth testing. "
+        "Rank best-first. Do NOT repeat or closely paraphrase existing channel titles."
+    )
+    context_lines = [
+        f"Channel summary: {channel_summary}" if channel_summary else "",
+        f"Series anchor: {series_anchor}" if series_anchor else "",
+        f"Target niches: {', '.join(niches)}" if niches else "",
+        f"Top performing titles: {' | '.join(top_titles[:10])}" if top_titles else "",
+        f"Recent uploads: {' | '.join(recent_titles[:10])}" if recent_titles else "",
+        f"Packaging learnings: {'; '.join(packaging_learnings)}" if packaging_learnings else "",
+        f"Retention learnings: {'; '.join(retention_learnings)}" if retention_learnings else "",
+        f"Channel audit next moves: {'; '.join(audit_next_moves)}" if audit_next_moves else "",
+        f"Audit candidate titles: {' | '.join(audit_candidates)}" if audit_candidates else "",
+        f"Catalyst best moves: {'; '.join(best_moves)}" if best_moves else "",
+        f"Proven wins: {'; '.join(wins)}" if wins else "",
+        f"Mistakes to avoid: {'; '.join(mistakes)}" if mistakes else "",
+        f"Playbook summary: {playbook_summary}" if playbook_summary else "",
+        f"Reference analysis summary: {ref_summary}" if ref_summary else "",
+        f"Reference candidate titles: {' | '.join(ref_candidates)}" if ref_candidates else "",
+    ]
+    user_prompt = "\n".join(line for line in context_lines if line)
+    try:
+        raw = await _xai_json_completion(system_prompt, user_prompt, temperature=0.5, timeout_sec=60)
+    except Exception as e:
+        log.error(f"Catalyst longform suggestions LLM call failed: {e}")
+        raise HTTPException(500, "Failed to generate suggestions — try again")
+    suggestions = list(raw.get("suggestions") or [])[:5]
+    # Sanitize
+    cleaned: list[dict] = []
+    for s in suggestions:
+        if not isinstance(s, dict):
+            continue
+        topic = _clip_text(str(s.get("topic", "") or "").strip(), 300)
+        title = _clip_text(str(s.get("title", "") or "").strip(), 150)
+        if not topic or not title:
+            continue
+        cleaned.append({
+            "topic": topic,
+            "title": title,
+            "description": _clip_text(str(s.get("description", "") or "").strip(), 2000),
+            "source_series": _clip_text(str(s.get("source_series", "") or "").strip(), 100),
+            "rationale": _clip_text(str(s.get("rationale", "") or "").strip(), 500),
+            "performance_tier": str(s.get("performance_tier", "medium") or "medium").strip().lower(),
+        })
+    return {"ok": True, "workspace_id": workspace_id, "suggestions": cleaned}
 
 
 def _heuristic_catalyst_reference_video_analysis(
