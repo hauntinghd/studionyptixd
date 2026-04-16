@@ -12,5 +12,7 @@ pydub
 numpy
 opencv-python-headless
 yt-dlp==2026.03.17
-faster-whisper
+# faster-whisper removed: 500MB+ (ctranslate2/onnxruntime) causes segfault on
+# python:3.11-slim without CUDA. Import is guarded in backend.py (try/except).
+# Only needed for local STT, not the serverless API pipeline.
 edge-tts
