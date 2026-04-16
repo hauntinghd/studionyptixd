@@ -14,7 +14,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: crypticsciencee/studio-backend
+  IMAGE_NAME: ${{ github.repository_owner }}/studio-backend
 
 jobs:
   build-and-push:
