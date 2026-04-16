@@ -2,9 +2,10 @@ name = "studio-runpod-proxy"
 main = "worker-proxy.js"
 compatibility_date = "2026-04-01"
 
-# Bind the custom domain
+# Custom Domain — single-level subdomain covered by free Universal SSL wildcard
+# (*.nyptidindustries.com). CF auto-creates the DNS record + issues the cert.
 routes = [
-  { pattern = "api.studio.nyptidindustries.com/*", zone_name = "nyptidindustries.com" }
+  { pattern = "api-studio.nyptidindustries.com", custom_domain = true }
 ]
 
 # Set via `wrangler secret put RUNPOD_API_KEY` and `wrangler secret put RUNPOD_ENDPOINT_ID`

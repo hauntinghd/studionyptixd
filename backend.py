@@ -2321,18 +2321,18 @@ def _api_public_url() -> str:
         return configured
     site = str(SITE_URL or "").strip().rstrip("/")
     if not site:
-        return "https://api.nyptidindustries.com"
+        return "https://api-studio.nyptidindustries.com"
     match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
     if not match:
-        return "https://api.nyptidindustries.com"
+        return "https://api-studio.nyptidindustries.com"
     scheme, host, suffix = match.groups()
     host_l = host.lower()
     for apex in ("nyptidindustries.com", "niptidindustries.com"):
-        if host_l == f"api.{apex}":
+        if host_l in {f"api.{apex}", f"api-studio.{apex}"}:
             return f"{scheme}{host}{suffix}"
         if host_l in {apex, f"studio.{apex}", f"billing.{apex}"} or host_l.endswith("." + apex):
-            return f"{scheme}api.{apex}{suffix}"
-    return "https://api.nyptidindustries.com"
+            return f"{scheme}api-studio.{apex}{suffix}"
+    return "https://api-studio.nyptidindustries.com"
 
 
 def _paypal_enabled() -> bool:

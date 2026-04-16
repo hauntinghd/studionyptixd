@@ -15,7 +15,7 @@ export const isBillingHost = billingHostAliases.has(hostLower) || hostLower.star
 export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
 export const BILLING_SITE_URL = STUDIO_SITE_URL;
 export const INVOICER_API_BASE_URL = "https://invoicer.nyptidindustries.com";
-export const PROD_API_BASE_URL = "https://api.nyptidindustries.com";
+export const PROD_API_BASE_URL = "https://api-studio.nyptidindustries.com";
 const resolveSafeApiBase = (rawBase: string): string => {
     const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
     if (!cleaned) return "";

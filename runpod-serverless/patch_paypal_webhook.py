@@ -18,7 +18,7 @@ import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".env"
-NEW_URL = "https://api.studio.nyptidindustries.com/api/paypal/webhook"
+NEW_URL = "https://api-studio.nyptidindustries.com/api/paypal/webhook"
 
 
 def load_env() -> dict[str, str]:
