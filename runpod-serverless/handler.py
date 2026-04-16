@@ -54,14 +54,16 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
 # ════════════════════════════════════════════════════════════
 
 logger.info("Loading Studio FastAPI backend...")
+_client = None
+_boot_error = ""
 try:
     from backend import app  # type: ignore
     from fastapi.testclient import TestClient
     _client = TestClient(app)
-    logger.info("✓ Backend loaded, TestClient ready")
+    logger.info("Backend loaded, TestClient ready")
 except Exception as e:
-    logger.error(f"FATAL: failed to import backend: {e}\n{traceback.format_exc()}")
-    raise
+    _boot_error = f"{e}\n{traceback.format_exc()}"
+    logger.error(f"Backend failed to load (will return error on requests): {_boot_error}")
 
 
 # ════════════════════════════════════════════════════════════
@@ -133,6 +135,12 @@ def _encode_response(response) -> dict:
 
 def handler(event: dict) -> dict:
     """Entry point invoked by RunPod for each queued request."""
+    if _client is None:
+        return {
+            "status_code": 503,
+            "headers": {"content-type": "application/json"},
+            "body": {"error": "backend_boot_failed", "detail": _boot_error[:2000]},
+        }
     try:
         req = event.get("input") or {}
         method = (req.get("method") or "GET").upper()
