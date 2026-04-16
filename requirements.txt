@@ -9,6 +9,8 @@ paramiko
 redis
 pillow
 pydub
+numpy
+opencv-python-headless
 yt-dlp==2026.03.17
 faster-whisper
 edge-tts
