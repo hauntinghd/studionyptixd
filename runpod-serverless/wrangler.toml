@@ -1,0 +1,14 @@
+name = "studio-runpod-proxy"
+main = "worker-proxy.js"
+compatibility_date = "2026-04-01"
+
+# Bind the custom domain
+routes = [
+  { pattern = "api.studio.nyptidindustries.com/*", zone_name = "nyptidindustries.com" }
+]
+
+# Set via `wrangler secret put RUNPOD_API_KEY` and `wrangler secret put RUNPOD_ENDPOINT_ID`
+# DO NOT put secrets here.
+
+[observability]
+enabled = true
