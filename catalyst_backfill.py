@@ -65,6 +65,13 @@ DEFAULT_REGIONS = [r.strip().upper() for r in os.getenv("CATALYST_BACKFILL_REGIO
 # draining the daily cap.
 DEFAULT_TICK_BUDGET_UNITS = int(os.getenv("CATALYST_BACKFILL_TICK_BUDGET", "500"))
 
+# Auto-scheduled tick interval. When CATALYST_BACKFILL_AUTO_ENABLED is truthy,
+# start_auto_loop() runs a tick every N seconds. 6h is a sensible default —
+# trending shifts on that order and 4 ticks/day × 1 unit/region/tick = trivial
+# against the 10k cap.
+AUTO_TICK_INTERVAL_SEC = int(os.getenv("CATALYST_BACKFILL_AUTO_INTERVAL_SEC", str(6 * 3600)))
+AUTO_ENABLED = str(os.getenv("CATALYST_BACKFILL_AUTO_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
 _TEMP_DIR = Path(os.getenv("TEMP_DIR") or (Path(__file__).resolve().parent / "temp_assets"))
 _CORPUS_FILE = _TEMP_DIR / "catalyst_reference_corpus.json"
 
@@ -337,6 +344,63 @@ async def corpus_stats() -> dict:
             "max_per_niche": CORPUS_MAX_PER_NICHE,
             "min_views_threshold": CORPUS_MIN_VIEWS,
         }
+
+
+# ─── Auto-scheduled loop ───────────────────────────────────────────────────
+# Off by default. Enable via env: CATALYST_BACKFILL_AUTO_ENABLED=1.
+# Each loop iteration fires one tick, then sleeps AUTO_TICK_INTERVAL_SEC.
+# Safe on serverless: only one loop per worker, cancelled cleanly on shutdown,
+# and the tick itself is quota-budget-capped.
+
+_auto_loop_task: asyncio.Task | None = None
+
+
+async def _auto_loop_runner() -> None:
+    log.info("Catalyst backfill auto-loop starting (interval=%ds)", AUTO_TICK_INTERVAL_SEC)
+    # Stagger the first run a bit so a cold boot doesn't immediately fire a tick
+    # before the handler is even warm.
+    try:
+        await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            summary = await tick()
+            log.info("Catalyst auto-tick done: classified=%d quota_spent=%d",
+                     summary.get("classified", 0), summary.get("quota_spent", 0))
+        except Exception as e:
+            log.warning("Catalyst auto-tick failed: %s", str(e)[:300])
+        try:
+            await asyncio.sleep(max(60, AUTO_TICK_INTERVAL_SEC))
+        except asyncio.CancelledError:
+            return
+
+
+def start_auto_loop() -> None:
+    """Start the periodic backfill loop if enabled via env flag.
+
+    Safe to call multiple times — subsequent calls are no-ops while the task is alive.
+    Intended to be invoked from the FastAPI startup hook.
+    """
+    global _auto_loop_task
+    if not AUTO_ENABLED:
+        log.info("Catalyst backfill auto-loop disabled (CATALYST_BACKFILL_AUTO_ENABLED=0)")
+        return
+    if _auto_loop_task is not None and not _auto_loop_task.done():
+        return
+    try:
+        _auto_loop_task = asyncio.create_task(_auto_loop_runner())
+    except RuntimeError:
+        # No running event loop — caller should invoke from async context.
+        log.warning("start_auto_loop() called outside a running event loop — skipping")
+
+
+def stop_auto_loop() -> None:
+    """Stop the periodic backfill loop. Intended for FastAPI shutdown hook."""
+    global _auto_loop_task
+    if _auto_loop_task is not None and not _auto_loop_task.done():
+        _auto_loop_task.cancel()
+    _auto_loop_task = None
 
 
 async def top_videos_for_niche(niche_key: str, limit: int = 20) -> list[dict]:

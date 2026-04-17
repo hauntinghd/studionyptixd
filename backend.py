@@ -20434,6 +20434,29 @@ async def start_catalyst_monitor_loop():
     asyncio.create_task(_start_catalyst_monitor())
 
 
+@app.on_event("startup")
+async def start_catalyst_backfill_auto_loop():
+    """Start the periodic Catalyst reference-corpus scraper.
+
+    No-op unless CATALYST_BACKFILL_AUTO_ENABLED is set. When enabled, ticks every
+    CATALYST_BACKFILL_AUTO_INTERVAL_SEC (default 6h) at ~1 quota unit per region.
+    """
+    try:
+        import catalyst_backfill as _cb
+        _cb.start_auto_loop()
+    except Exception as e:
+        log.warning("Failed to start Catalyst backfill auto-loop: %s", e)
+
+
+@app.on_event("shutdown")
+async def stop_catalyst_backfill_auto_loop():
+    try:
+        import catalyst_backfill as _cb
+        _cb.stop_auto_loop()
+    except Exception:
+        pass
+
+
 # â"€â"€â"€ Thumbnail System â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
