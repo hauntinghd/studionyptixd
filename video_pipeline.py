@@ -68,7 +68,7 @@ def configure_video_pipeline_runtime_hooks(
         _fal_openrouter_json_completion = fal_openrouter_json_completion
 
 
-DEFAULT_CREATIVE_IMAGE_MODEL_ID = "studio_default"
+DEFAULT_CREATIVE_IMAGE_MODEL_ID = "ernie_image"
 DEFAULT_CREATIVE_VIDEO_MODEL_ID = "kling21_standard"
 LONGFORM_ALLOWED_TEMPLATES = {"story", "skeleton"}
 LONGFORM_WHISPER_MODES = {"off", "subtle", "cinematic"}
@@ -126,20 +126,11 @@ def _dedupe_preserve_order(values: list[str], max_items: int = 250, max_chars: i
     return out
 
 CREATIVE_IMAGE_MODEL_PROFILES = [
-    {
-        "id": "studio_default",
-        "label": "Studio Default",
-        "provider": "nyptid_hybrid",
-        "tier": "basic",
-        "summary": "Best continuity for NYPTID templates. Uses Studio's tuned hybrid lane automatically.",
-        "speed": "Balanced",
-        "credit_cost_per_image": 0,
-        "estimated_unit_usd": 0.02,
-        "billing_unit": "image",
-        "fal_endpoint_id": "",
-        "enabled": True,
-        "supports_reference_conditioning": True,
-    },
+    # studio_default (legacy hybrid lane routing to Grok Imagine) was removed 2026-04-17.
+    # It defaulted every auto-mode user to Grok, which produced off-brand images for
+    # Day Trading / Business / Finance / Tech / Crypto / Scary / History / Dilemma.
+    # New default is ernie_image (3x cheaper, better cinematic quality, matches the
+    # Skeleton short-form direct path at backend.py:11805).
     {
         "id": "grok_imagine",
         "label": "Grok Imagine",
@@ -283,18 +274,50 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
 ]
 CREATIVE_IMAGE_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_IMAGE_MODEL_PROFILES}
 
+# AC (animation credit) multiplier policy — verified 2026-04-17 against live fal.ai pricing.
+# 1 AC = Kling 2.1 Standard 5s @ 720p no-audio = $0.28 FAL cost, charged to customer at
+# ~3x markup via ANIMATION_MARKUP_MULTIPLIER. Multipliers below are rounded-up
+# ceil(real_5s_usd / 0.28) so customer AC cost tracks Casey's FAL spend, not vibes.
+# Pixverse C1 / V6 cost MORE at 1080p + audio — if FORCE_720P_ONLY is ever relaxed,
+# revisit these numbers.
 CREATIVE_VIDEO_MODEL_PROFILES = [
     {
         "id": "kling21_standard",
         "label": "Kling 2.1 Standard",
         "provider": "fal",
         "tier": "basic",
-        "summary": "Default animation lane for Studio renders.",
+        "summary": "Default animation lane. $0.28 per 5s clip at 720p no-audio. Baseline AC cost.",
         "speed": "Balanced",
         "credit_multiplier": 1,
-        "estimated_unit_usd": 0.056,
+        "estimated_unit_usd": 0.056,  # fal.ai: $0.056/s, flat $0.28 for 5s
         "billing_unit": "second",
         "fal_endpoint_id": "fal-ai/kling-video/v2.1/standard/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "pixverse_v6",
+        "label": "PixVerse V6",
+        "provider": "fal",
+        "tier": "basic",
+        "summary": "Latest PixVerse model. Cheaper than Kling Std at 720p while keeping strong motion. Best AC value.",
+        "speed": "Balanced",
+        "credit_multiplier": 1,  # $0.045/s @ 720p no-audio → $0.225/5s → 0.80x Kling Std (cheaper!)
+        "estimated_unit_usd": 0.045,  # fal.ai: 720p no-audio = $0.045/s
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/pixverse/v6/image-to-video",
+        "enabled": bool(FAL_AI_KEY),
+    },
+    {
+        "id": "pixverse_c1",
+        "label": "PixVerse C1 (Film Grade)",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Film-grade hyper-realistic video. Comparable to Kling Std cost at 720p, premium quality.",
+        "speed": "Slow",
+        "credit_multiplier": 1,  # $0.050/s @ 720p no-audio → $0.25/5s → 0.89x Kling Std
+        "estimated_unit_usd": 0.050,  # fal.ai: 720p no-audio = $0.050/s (1080p would be $0.095/s → 2 AC)
+        "billing_unit": "second",
+        "fal_endpoint_id": "fal-ai/pixverse/c1/image-to-video",
         "enabled": bool(FAL_AI_KEY),
     },
     {
@@ -302,10 +325,10 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "label": "Kling 2.1 Pro",
         "provider": "fal",
         "tier": "premium",
-        "summary": "Sharper motion and stronger camera handling than the standard lane.",
+        "summary": "Sharper motion and stronger camera handling than the standard lane. 1.75x AC cost.",
         "speed": "Balanced",
-        "credit_multiplier": 4,
-        "estimated_unit_usd": 0.098,
+        "credit_multiplier": 2,  # $0.098/s → $0.49/5s → 1.75x Kling Std
+        "estimated_unit_usd": 0.098,  # fal.ai: $0.098/s, flat $0.49 for 5s
         "billing_unit": "second",
         "fal_endpoint_id": "fal-ai/kling-video/v2.1/pro/image-to-video",
         "enabled": bool(FAL_AI_KEY),
@@ -315,10 +338,10 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "label": "Veo 3 Fast",
         "provider": "fal",
         "tier": "premium",
-        "summary": "Premium cinematic motion with heavier wallet burn.",
+        "summary": "Google Veo 3 cinematic motion. Similar cost to Kling Pro, different aesthetic.",
         "speed": "Slow",
-        "credit_multiplier": 4,
-        "estimated_unit_usd": 0.10,
+        "credit_multiplier": 2,  # $0.10/s audio-off → $0.50/5s → 1.79x Kling Std ($0.15/s with audio → 2.68x)
+        "estimated_unit_usd": 0.10,  # fal.ai: $0.10/s audio-off, $0.15/s with audio
         "billing_unit": "second",
         "fal_endpoint_id": "fal-ai/veo3/fast/image-to-video",
         "enabled": bool(FAL_AI_KEY),
@@ -328,38 +351,12 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "label": "Kling 2.1 Master",
         "provider": "fal",
         "tier": "elite",
-        "summary": "Highest-cost Kling lane for top-end shot quality.",
+        "summary": "Highest-cost Kling lane for hero scenes only. 5x AC cost — use sparingly.",
         "speed": "Slow",
-        "credit_multiplier": 5,
-        "estimated_unit_usd": 0.28,
+        "credit_multiplier": 5,  # $0.28/s → $1.40/5s → 5.00x Kling Std
+        "estimated_unit_usd": 0.28,  # fal.ai: $0.28/s, flat $1.40 for 5s
         "billing_unit": "second",
         "fal_endpoint_id": "fal-ai/kling-video/v2.1/master/image-to-video",
-        "enabled": bool(FAL_AI_KEY),
-    },
-    {
-        "id": "pixverse_c1",
-        "label": "PixVerse C1 (Film Grade)",
-        "provider": "fal",
-        "tier": "elite",
-        "summary": "Film-grade hyper-realistic video. Use for hero scenes (opening, climax, chapter intros).",
-        "speed": "Slow",
-        "credit_multiplier": 6,
-        "estimated_unit_usd": 0.09,
-        "billing_unit": "second",
-        "fal_endpoint_id": "fal-ai/pixverse/c1/image-to-video",
-        "enabled": bool(FAL_AI_KEY),
-    },
-    {
-        "id": "pixverse_v6",
-        "label": "PixVerse V6",
-        "provider": "fal",
-        "tier": "premium",
-        "summary": "Latest PixVerse model. Strong motion, good quality-to-cost ratio.",
-        "speed": "Balanced",
-        "credit_multiplier": 3,
-        "estimated_unit_usd": 0.07,
-        "billing_unit": "second",
-        "fal_endpoint_id": "fal-ai/pixverse/v6/image-to-video",
         "enabled": bool(FAL_AI_KEY),
     },
 ]

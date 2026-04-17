@@ -7541,7 +7541,11 @@ async def generate_scene_image(
             )
             explicit_image_model_requested = False
             explicit_image_model_id = DEFAULT_CREATIVE_IMAGE_MODEL_ID
-    if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
+    # Always honor an explicit user pick. Previously this branch skipped when the
+    # explicit pick matched DEFAULT, which silently routed all default-picker users
+    # through the Grok-first auto chain (poor image quality on non-Skeleton templates).
+    # With DEFAULT = ernie_image, we want "user picked ernie" to actually call ernie.
+    if explicit_image_model_requested:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
         if explicit_image_model_id == "grok_imagine":
@@ -19777,12 +19781,39 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
         result["subscription_id"] = subscription_id
         return result
 
-    # Capture completed — informational only; we already granted access on /api/paypal/return.
-    # We log this as a second confirmation that funds did land (helps audit mismatches).
+    # Capture completed — under the happy path we already granted access on
+    # /api/paypal/return (the browser redirect after PayPal approval). But if the
+    # customer closed the tab BEFORE returning, funds land on PayPal's side and we
+    # never run the capture-and-apply helper. The webhook is our safety net.
+    # Both _capture_paypal_{topup,subscription}_order short-circuit on
+    # credited/activated, so it's safe to re-run from here idempotently.
     if event_type == "PAYMENT.CAPTURE.COMPLETED":
         capture_id = str(resource.get("id", "") or "")
         order_id = _paypal_find_order_by_capture_id(capture_id)
         log.info(f"PayPal webhook: capture.completed capture_id={capture_id} order_id={order_id or '<unlinked>'}")
+        if order_id:
+            async with _paypal_orders_lock:
+                order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+            kind = str(order_meta.get("kind", "topup") or "topup").strip().lower()
+            already_applied = bool(order_meta.get("credited") or order_meta.get("activated"))
+            if not already_applied:
+                log.warning(
+                    f"PayPal webhook safety-net firing: order_id={order_id} kind={kind} "
+                    "was never captured via /api/paypal/return — applying grant from webhook"
+                )
+                try:
+                    if kind in {"subscription", "monthly"}:
+                        await _capture_paypal_subscription_order(order_id)
+                    else:
+                        await _capture_paypal_topup_order(order_id)
+                    result["action"] = "capture_safety_net_applied"
+                except Exception as e:
+                    log.error(f"PayPal webhook safety-net failed for {order_id}: {e}")
+                    result["action"] = "capture_safety_net_error"
+                    result["error"] = str(e)[:200]
+                result["order_id"] = order_id
+                result["capture_id"] = capture_id
+                return result
         result["action"] = "capture_confirmed"
         result["order_id"] = order_id
         result["capture_id"] = capture_id

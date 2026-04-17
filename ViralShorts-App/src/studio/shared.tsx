@@ -446,6 +446,46 @@ export type PlanLimitMap = Record<string, PlanLimit>;
 export type PlanFeatureMap = Record<string, string[]>;
 export type PlanPriceMap = Record<string, number>;
 export type LaneAccessMap = Record<string, boolean>;
+
+// Public-plan fallbacks. Kept in sync with backend_catalog.py PLAN_LIMITS/PLAN_FEATURES
+// and backend_settings.py PLAN_PRICE_USD/TOPUP_PACK_SPECS. Used as initial state so
+// Billing/Dashboard render correct prices/limits even while /api/config is loading or
+// temporarily unreachable (e.g. serverless cold-start on RunPod).
+export const PUBLIC_PLAN_LIMITS_FALLBACK: PlanLimitMap = {
+    free:    { videos_per_month: 20,  animated_renders_per_month: 2,  non_animated_ops_per_month: 120,  max_duration_sec: 90,   max_resolution: "720p", can_clone: false, priority: false, demo_access: false },
+    starter: { videos_per_month: 90,  animated_renders_per_month: 10, non_animated_ops_per_month: 400,  max_duration_sec: 600,  max_resolution: "720p", can_clone: false, priority: false, demo_access: false },
+    creator: { videos_per_month: 140, animated_renders_per_month: 20, non_animated_ops_per_month: 800,  max_duration_sec: 900,  max_resolution: "720p", can_clone: false, priority: true,  demo_access: false },
+    pro:     { videos_per_month: 220, animated_renders_per_month: 40, non_animated_ops_per_month: 1500, max_duration_sec: 1200, max_resolution: "720p", can_clone: false, priority: true,  demo_access: false },
+};
+export const PUBLIC_PLAN_PRICES_FALLBACK: PlanPriceMap = {
+    free: 0,
+    starter: 14,
+    creator: 24,
+    pro: 39,
+};
+export const PUBLIC_PLAN_FEATURES_FALLBACK: PlanFeatureMap = {
+    free:    ['catalyst_core', 'create_lane', 'free_trial_credits'],
+    starter: ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits'],
+    creator: ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits', 'priority_queue'],
+    pro:     ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits', 'priority_queue', 'operator_headroom'],
+};
+export const PUBLIC_TOPUP_PACKS_FALLBACK: TopupPack[] = [
+    { price_id: 'ac_trial',    pack: 'trial',    credits: 1,    price_usd: 0.60 },
+    { price_id: 'ac_starter',  pack: 'starter',  credits: 3,    price_usd: 1.80 },
+    { price_id: 'ac_mini',     pack: 'mini',     credits: 5,    price_usd: 3.00 },
+    { price_id: 'ac_lite',     pack: 'lite',     credits: 10,   price_usd: 6.00 },
+    { price_id: 'ac_boost',    pack: 'boost',    credits: 15,   price_usd: 9.00 },
+    { price_id: 'ac_basic',    pack: 'basic',    credits: 25,   price_usd: 15.00 },
+    { price_id: 'ac_runner',   pack: 'runner',   credits: 40,   price_usd: 24.00 },
+    { price_id: 'ac_creator',  pack: 'creator',  credits: 50,   price_usd: 30.00 },
+    { price_id: 'ac_operator', pack: 'operator', credits: 75,   price_usd: 45.00 },
+    { price_id: 'ac_growth',   pack: 'growth',   credits: 100,  price_usd: 60.00 },
+    { price_id: 'ac_power',    pack: 'power',    credits: 150,  price_usd: 90.00 },
+    { price_id: 'ac_scale',    pack: 'scale',    credits: 250,  price_usd: 150.00 },
+    { price_id: 'ac_studio',   pack: 'studio',   credits: 500,  price_usd: 300.00 },
+    { price_id: 'ac_agency',   pack: 'agency',   credits: 1000, price_usd: 600.00 },
+];
+
 export interface AuthContextType {
     session: Session | null;
     supabase: SupabaseClient | null;
@@ -507,8 +547,8 @@ export const AuthContext = createContext<AuthContextType>({
     backendOffline: false,
     nextRenewalUnix: 0, nextRenewalSource: '',
     billingAnchorUnix: 0,
-    monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: [],
-    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: {}, publicPlanFeatures: {}, publicPlanPrices: {}, studioLaneAccess: {}, defaultMembershipPlanId: 'starter',
+    monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: PUBLIC_TOPUP_PACKS_FALLBACK,
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: PUBLIC_PLAN_LIMITS_FALLBACK, publicPlanFeatures: PUBLIC_PLAN_FEATURES_FALLBACK, publicPlanPrices: PUBLIC_PLAN_PRICES_FALLBACK, studioLaneAccess: {}, defaultMembershipPlanId: 'starter',
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     longformOwnerBeta: false,
     waitlistOnlyMode: false,
@@ -538,13 +578,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [topupCreditsRemaining, setTopupCreditsRemaining] = useState(0);
     const [creditsTotalRemaining, setCreditsTotalRemaining] = useState(0);
     const [requiresTopup, setRequiresTopup] = useState(false);
-    const [topupPacks, setTopupPacks] = useState<TopupPack[]>([]);
+    const [topupPacks, setTopupPacks] = useState<TopupPack[]>(PUBLIC_TOPUP_PACKS_FALLBACK);
     const [demoAccess, setDemoAccess] = useState(false);
     const [demoPriceId, setDemoPriceId] = useState('');
     const [demoComingSoon, setDemoComingSoon] = useState(true);
-    const [publicPlanLimits, setPublicPlanLimits] = useState<PlanLimitMap>({});
-    const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>({});
-    const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>({});
+    const [publicPlanLimits, setPublicPlanLimits] = useState<PlanLimitMap>(PUBLIC_PLAN_LIMITS_FALLBACK);
+    const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>(PUBLIC_PLAN_FEATURES_FALLBACK);
+    const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>(PUBLIC_PLAN_PRICES_FALLBACK);
     const [studioLaneAccess, setStudioLaneAccess] = useState<LaneAccessMap>({});
     const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('starter');
     const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
@@ -747,9 +787,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 if (cancelled) return;
                 configLoaded = true;
                 if (cfg && typeof cfg === 'object') {
-                    if (cfg.plans && typeof cfg.plans === 'object') setPublicPlanLimits(cfg.plans as PlanLimitMap);
-                    if (cfg.plan_features && typeof cfg.plan_features === 'object') setPublicPlanFeatures(cfg.plan_features as PlanFeatureMap);
-                    if (cfg.plan_prices_usd && typeof cfg.plan_prices_usd === 'object') setPublicPlanPrices(cfg.plan_prices_usd as PlanPriceMap);
+                    // Only overwrite the fallback if the backend returned a non-empty value.
+                    // If the backend is unreachable/slow/misconfigured, keep showing the bundled fallback prices + limits.
+                    if (cfg.plans && typeof cfg.plans === 'object' && Object.keys(cfg.plans).length > 0) setPublicPlanLimits(cfg.plans as PlanLimitMap);
+                    if (cfg.plan_features && typeof cfg.plan_features === 'object' && Object.keys(cfg.plan_features).length > 0) setPublicPlanFeatures(cfg.plan_features as PlanFeatureMap);
+                    if (cfg.plan_prices_usd && typeof cfg.plan_prices_usd === 'object' && Object.keys(cfg.plan_prices_usd).length > 0) setPublicPlanPrices(cfg.plan_prices_usd as PlanPriceMap);
                     if (cfg.billing_model && typeof cfg.billing_model === 'object') {
                         const incomingDefaultMembershipPlanId = String((cfg.billing_model as any).default_membership_plan_id || '').trim().toLowerCase();
                         if (incomingDefaultMembershipPlanId) {
@@ -761,7 +803,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 }
                 setMaintenanceBannerEnabled(Boolean(cfg.maintenance_banner_enabled));
                 setMaintenanceBannerMessage((cfg.maintenance_banner_message || "").trim());
-                if (Array.isArray(cfg.topup_packs)) {
+                if (Array.isArray(cfg.topup_packs) && cfg.topup_packs.length > 0) {
                     const packs = cfg.topup_packs
                         .filter((p: any) => p && typeof p.price_id === 'string')
                         .map((p: any) => ({
@@ -771,7 +813,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                             price_usd: Number(p.price_usd || 0),
                         }))
                         .sort((a: TopupPack, b: TopupPack) => a.credits - b.credits);
-                    setTopupPacks(packs);
+                    if (packs.length > 0) setTopupPacks(packs);
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);

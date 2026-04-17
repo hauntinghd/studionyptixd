@@ -155,8 +155,8 @@ const soundReferenceOptions = [
     { id: 'social_hook', label: 'Social Hook', desc: 'Fast short-form pacing with crisp emphasis hits.' },
 ];
 const fallbackImageModelCatalog: CreativeModelProfile[] = [
-    { id: 'studio_default', label: 'Studio Default', provider: 'nyptid_hybrid', tier: 'basic', summary: "NYPTID's tuned hybrid lane for the best continuity.", speed: 'Balanced', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
-    { id: 'grok_imagine', label: 'Grok Imagine', provider: 'fal', tier: 'basic', summary: 'Fast default image lane through fal.ai.', speed: 'Fast', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
+    { id: 'ernie_image', label: 'ERNIE-Image', provider: 'fal', tier: 'basic', summary: "Baidu's cinematic image model. Best thumbnail + scene quality at lowest cost. Studio default.", speed: 'Fast', enabled: true, estimated_unit_usd: 0.01, billing_unit: 'image', credit_cost_per_image: 0 },
+    { id: 'grok_imagine', label: 'Grok Imagine', provider: 'fal', tier: 'basic', summary: 'Fast image lane through xAI. Use when you want the Grok aesthetic.', speed: 'Fast', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
     { id: 'imagen4_fast', label: 'Imagen 4 Fast', provider: 'fal', tier: 'basic', summary: "Google's faster image lane for quick scene passes.", speed: 'Very Fast', enabled: true, estimated_unit_usd: 0.02, billing_unit: 'image', credit_cost_per_image: 0 },
     { id: 'imagen4_ultra', label: 'Imagen 4 Ultra', provider: 'fal', tier: 'premium', summary: "Google's highest-quality text-to-image lane.", speed: 'Medium', enabled: true, estimated_unit_usd: 0.06, billing_unit: 'image', credit_cost_per_image: 4 },
     { id: 'recraft_v4', label: 'Recraft V4', provider: 'fal', tier: 'premium', summary: 'Design-first image generation with cleaner composition and ad polish.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.04, billing_unit: 'image', credit_cost_per_image: 4 },
@@ -204,7 +204,7 @@ export default function CreatePanel() {
     const [artStyle, setArtStyle] = useState('auto');
     const [imageModelCatalog, setImageModelCatalog] = useState<CreativeModelProfile[]>(fallbackImageModelCatalog);
     const [videoModelCatalog, setVideoModelCatalog] = useState<CreativeModelProfile[]>(fallbackVideoModelCatalog);
-    const [imageModelId, setImageModelId] = useState('studio_default');
+    const [imageModelId, setImageModelId] = useState('ernie_image');
     const [videoModelId, setVideoModelId] = useState('kling21_standard');
     const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
     const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
@@ -2400,10 +2400,7 @@ export default function CreatePanel() {
                         type="button"
                         onClick={() => {
                             if (animationCreditPromptMode === 'image') {
-                                const basicImageLane = (selectedTemplate === 'skeleton'
-                                    ? imageModelCatalog.find((model) => model.id === 'grok_imagine')
-                                    : undefined)
-                                    || imageModelCatalog.find((model) => model.id === 'studio_default')
+                                const basicImageLane = imageModelCatalog.find((model) => model.id === 'ernie_image')
                                     || imageModelCatalog.find((model) => model.tier === 'basic')
                                     || fallbackImageModelCatalog[0];
                                 setImageModelId(basicImageLane.id);
