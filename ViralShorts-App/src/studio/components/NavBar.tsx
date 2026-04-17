@@ -27,26 +27,40 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         return () => window.removeEventListener('mousedown', onPointerDown);
     }, []);
 
-    const handleBrandClick = () => {
-        if (billingHost) {
-            window.location.href = session ? `${BILLING_SITE_URL}?view=checkout` : BILLING_SITE_URL;
-            return;
-        }
-        if (session) {
-            onNavigate('dashboard');
-            return;
-        }
-        onNavigate('landing');
-    };
-
-    const buildTopupUrl = () => {
-        const base = BILLING_SITE_URL || STUDIO_SITE_URL;
+    // Build hrefs that work with middle-click / cmd-click / ctrl-click to open in a new tab.
+    // The onClick handler only intercepts plain left-click (no modifiers) for SPA routing.
+    const buildPageHref = (page: string, extraParams?: Record<string, string>, hash?: string): string => {
+        const base = billingHost ? STUDIO_SITE_URL : (typeof window === 'undefined' ? '/' : window.location.origin);
         const url = new URL(base);
-        url.searchParams.set('page', 'billing');
-        url.searchParams.set('section', 'topups');
-        url.hash = 'topup-packs';
+        url.searchParams.set('page', page);
+        if (extraParams) {
+            for (const [k, v] of Object.entries(extraParams)) url.searchParams.set(k, v);
+        }
+        if (hash) url.hash = hash;
+        // Same-origin anchors can use path+search+hash only; cross-origin needs full URL.
+        if (typeof window !== 'undefined' && url.origin === window.location.origin) {
+            return `${url.pathname}${url.search}${url.hash}`;
+        }
         return url.toString();
     };
+
+    const brandHref = (() => {
+        if (billingHost) {
+            return session ? `${BILLING_SITE_URL}?view=checkout` : BILLING_SITE_URL;
+        }
+        return session ? buildPageHref('dashboard') : buildPageHref('landing');
+    })();
+    const topupHref = buildPageHref('billing', { section: 'topups' }, 'topup-packs');
+    const subscriptionHref = buildPageHref('subscription');
+    const dashboardHref = buildPageHref('dashboard');
+    const accountHref = buildPageHref('account');
+    const settingsHref = buildPageHref('settings');
+    const billingPageHref = buildPageHref('billing');
+
+    // Intercept only plain left-click — let the browser handle middle-click, ctrl-click,
+    // cmd-click, shift-click (those are "open in new tab / new window" gestures).
+    const isPlainLeftClick = (e: React.MouseEvent) =>
+        e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 
     const navigateToUrl = (targetUrl: string) => {
         const target = new URL(targetUrl, window.location.origin);
@@ -66,19 +80,35 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         window.location.assign(target.toString());
     };
 
-    const handleTopupClick = () => {
-        navigateToUrl(buildTopupUrl());
+    const handleBrandClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
+        if (billingHost) {
+            window.location.href = brandHref;
+            return;
+        }
+        onNavigate(session ? 'dashboard' : 'landing');
     };
 
-    const handleSubscriptionClick = () => {
+    const handleTopupClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
+        navigateToUrl(topupHref);
+    };
+
+    const handleSubscriptionClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
         if (billingHost) {
-            window.location.href = `${BILLING_SITE_URL}?page=subscription`;
+            window.location.href = subscriptionHref;
             return;
         }
         onNavigate('subscription');
     };
 
-    const handleDashboardClick = () => {
+    const handleDashboardClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
         if (billingHost) {
             window.location.href = STUDIO_SITE_URL;
             return;
@@ -86,20 +116,35 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         onNavigate('dashboard');
     };
 
-    const handleAccountClick = () => {
+    const handleAccountClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
         if (billingHost) {
-            window.location.href = `${STUDIO_SITE_URL}?page=account`;
+            window.location.href = accountHref;
             return;
         }
         onNavigate('account');
     };
 
-    const handleSettingsClick = () => {
+    const handleSettingsClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
         if (billingHost) {
-            window.location.href = `${STUDIO_SITE_URL}?page=settings`;
+            window.location.href = settingsHref;
             return;
         }
         onNavigate('settings');
+    };
+
+    const handleBillingMenuClick = (e: React.MouseEvent) => {
+        if (!isPlainLeftClick(e)) return;
+        e.preventDefault();
+        setMenuOpen(false);
+        if (billingHost) {
+            window.location.href = `${BILLING_SITE_URL}?page=billing`;
+            return;
+        }
+        onNavigate('billing');
     };
 
     const handleLogout = async () => {
@@ -118,10 +163,10 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/[0.06] bg-[#09090b]/88 backdrop-blur-xl">
             <div className="h-16 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-4 min-w-0">
-                    <button onClick={handleBrandClick} className="flex items-center gap-2 font-bold text-white min-w-0">
+                    <a href={brandHref} onClick={handleBrandClick} className="flex items-center gap-2 font-bold text-white min-w-0">
                         <Logo size={24} />
                         <span className="truncate">NYPTID Studio</span>
-                    </button>
+                    </a>
                 </div>
 
                 {!session ? (
@@ -167,9 +212,9 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                                 <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">Credit Wallet</p>
                                 <p className="text-sm font-semibold text-cyan-100">{Number(topupCreditsRemaining || 0)}</p>
                             </div>
-                            <button type="button" onClick={handleTopupClick} className="rounded-lg bg-cyan-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-400">
+                            <a href={topupHref} onClick={handleTopupClick} className="rounded-lg bg-cyan-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-400">
                                 Top Up
-                            </button>
+                            </a>
                         </div>
 
                         <div className="hidden xl:flex items-center gap-2 rounded-xl border border-violet-500/20 bg-violet-500/10 px-3 py-2">
@@ -177,18 +222,18 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                                 <p className="text-[10px] uppercase tracking-[0.18em] text-violet-200/70">Included Credits</p>
                                 <p className="text-sm font-semibold text-violet-100">{Number(monthlyCreditsRemaining || 0)}</p>
                             </div>
-                            <button type="button" onClick={handleTopupClick} className="rounded-lg bg-violet-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400">
+                            <a href={topupHref} onClick={handleTopupClick} className="rounded-lg bg-violet-500/80 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400">
                                 Top Up
-                            </button>
+                            </a>
                         </div>
 
-                        <button
-                            type="button"
+                        <a
+                            href={subscriptionHref}
                             onClick={handleSubscriptionClick}
                             className="hidden lg:inline-flex rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
                         >
                             {membershipActive ? 'Membership' : 'Start Membership'}
-                        </button>
+                        </a>
 
                         <button type="button" className="hidden md:inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-gray-300">
                             English
@@ -223,22 +268,22 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                                         {isAdmin && <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300">Admin</p>}
                                     </div>
                                     <div className="my-2 border-t border-white/[0.06]" />
-                                    <button type="button" onClick={() => { setMenuOpen(false); handleDashboardClick(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                    <a href={dashboardHref} onClick={(e) => { setMenuOpen(false); handleDashboardClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <User className="w-4 h-4 text-cyan-300" />
                                         Dashboard
-                                    </button>
-                                    <button type="button" onClick={() => { setMenuOpen(false); handleAccountClick(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                    </a>
+                                    <a href={accountHref} onClick={(e) => { setMenuOpen(false); handleAccountClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <User className="w-4 h-4 text-violet-300" />
                                         Account
-                                    </button>
-                                    <button type="button" onClick={() => { setMenuOpen(false); handleSettingsClick(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                    </a>
+                                    <a href={settingsHref} onClick={(e) => { setMenuOpen(false); handleSettingsClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <Settings className="w-4 h-4 text-amber-300" />
                                         Settings
-                                    </button>
-                                    <button type="button" onClick={() => { setMenuOpen(false); billingHost ? window.location.href = `${BILLING_SITE_URL}?page=billing` : onNavigate('billing'); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                    </a>
+                                    <a href={billingPageHref} onClick={handleBillingMenuClick} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <WalletCards className="w-4 h-4 text-cyan-300" />
                                         Billing
-                                    </button>
+                                    </a>
                                     <div className="my-2 border-t border-white/[0.06]" />
                                     <button type="button" onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-red-300 transition hover:bg-red-500/10">
                                         <LogOut className="w-4 h-4" />

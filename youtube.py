@@ -20,6 +20,9 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse, Response
 
+import youtube_cache
+import youtube_quota
+
 from backend_settings import (
     ALGROW_API_BASE_URL,
     ALGROW_API_KEY,
@@ -2853,20 +2856,106 @@ def _youtube_helper_page_url(state_token: str) -> str:
     return f"/api/oauth/google/youtube/installed?state={quote(str(state_token or '').strip(), safe='')}"
 
 
-async def _youtube_api_get(access_token: str, path: str, *, params: dict | None = None, analytics: bool = False) -> dict:
+def _method_from_api_path(path: str, *, analytics: bool = False) -> str:
+    """Derive the Google-API method name from a URL path, for quota cost lookup.
+
+    `/search`      -> "search.list"
+    `/videos`      -> "videos.list"
+    `/channels`    -> "channels.list"
+    Analytics API calls return "analytics.query" (separate quota pool, cost=0 to us).
+    """
+    if analytics:
+        return "analytics.query"
+    raw = str(path or "").strip().lstrip("/")
+    if not raw:
+        return "unknown"
+    head = raw.split("/", 1)[0].split("?", 1)[0]
+    # Default to `.list` suffix — that's the 99% case for GET requests.
+    return f"{head}.list" if head else "unknown"
+
+
+async def _youtube_api_get(
+    access_token: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    analytics: bool = False,
+    quota_kind: str = "interactive",
+    quota_note: str = "",
+    cache_kind: str = "",
+    cache_bypass: bool = False,
+) -> dict:
+    """Auth-based YouTube API GET with persistent cache + quota reservation.
+
+    Cache-first: look up by (token-scoped path + params) before calling Google.
+    Quota-reserve: if the cache missed, reserve units before hitting the API.
+    Stale-fallback: if quota is exhausted, serve stale cached data rather than
+    error out — callers downstream prefer slightly-old data to broken UI.
+
+    Args:
+        cache_kind: Override cache kind (e.g. youtube_cache.CacheKind.VIDEO_STATS
+                    when fetching part=statistics — shorter TTL).
+        cache_bypass: Skip the cache entirely (for fresh reads when correctness matters).
+    """
     base = YOUTUBE_ANALYTICS_API_BASE if analytics else YOUTUBE_DATA_API_BASE
     url = path if path.startswith("http") else f"{base}{path}"
-    async with httpx.AsyncClient(timeout=45) as client:
-        resp = await client.get(
-            url,
-            params=params or {},
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    method = _method_from_api_path(path, analytics=analytics)
+
+    # Analytics API has a separate quota pool (per-owner Analytics cap, not the
+    # 10k/day Data API pool), so we skip both the reserve and the cache for it
+    # to avoid stale analytics data.
+    if analytics:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.get(url, params=params or {}, headers={"Authorization": f"Bearer {access_token}"})
+        if resp.status_code != 200:
+            raise RuntimeError(_youtube_format_api_failure(resp.status_code, resp.text, using_api_key=False))
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("YouTube API returned an invalid payload")
+        return payload
+
+    # Build cache key scoped by token hash so different users don't share entries.
+    # `mine=true` calls return per-user data; other calls are user-agnostic but the
+    # extra key-scoping cost is trivial vs the correctness guarantee.
+    token_fp = hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:8]
+    cache_key = youtube_cache.make_key(method, _path=path, _token=token_fp, **(params or {}))
+    resolved_kind = cache_kind or youtube_cache.kind_for_method(method)
+
+    if not cache_bypass:
+        cached = await youtube_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    cost = youtube_quota.cost_for(method)
+    if not await youtube_quota.reserve(cost, method, kind=quota_kind, note=quota_note or url):
+        # Quota blown for the day — last-ditch serve stale.
+        stale = await youtube_cache.get(cache_key, allow_stale=True)
+        if stale is not None:
+            log.warning("YouTube quota exhausted — serving stale cache for method=%s", method)
+            return stale
+        raise RuntimeError(f"YouTube quota exceeded (method={method}, cost={cost}) — refusing to call {url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.get(
+                url,
+                params=params or {},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except Exception:
+        # Network/connect failure before the API actually saw the request — refund.
+        await youtube_quota.refund(cost, method, reason="httpx_error_pre_api")
+        # Serve stale on network failure too, if we have it.
+        stale = await youtube_cache.get(cache_key, allow_stale=True)
+        if stale is not None:
+            return stale
+        raise
     if resp.status_code != 200:
         raise RuntimeError(_youtube_format_api_failure(resp.status_code, resp.text, using_api_key=False))
     payload = resp.json()
     if not isinstance(payload, dict):
         raise RuntimeError("YouTube API returned an invalid payload")
+    await youtube_cache.set(cache_key, payload, kind=resolved_kind)
     return payload
 
 
@@ -3733,28 +3822,72 @@ def _youtube_public_api_key_candidates() -> list[str]:
     return keys
 
 
-async def _youtube_public_api_get(path: str, *, params: dict | None = None, timeout_sec: int = 30) -> tuple[dict, str]:
+async def _youtube_public_api_get(
+    path: str,
+    *,
+    params: dict | None = None,
+    timeout_sec: int = 30,
+    quota_kind: str = "interactive",
+    quota_note: str = "",
+    cache_kind: str = "",
+    cache_bypass: bool = False,
+) -> tuple[dict, str]:
+    """API-key YouTube Data API GET with persistent cache + quota reservation.
+
+    Public-key calls don't depend on user identity, so the cache is keyed by
+    method + params only — maximally shared across workers + users. Same
+    cache-first / reserve / stale-fallback flow as the auth helper.
+    """
     keys = _youtube_public_api_key_candidates()
     if not keys:
         raise RuntimeError("YouTube API key not configured")
     url = path if str(path or "").startswith("http") else f"{YOUTUBE_DATA_API_BASE}{path}"
+    method = _method_from_api_path(path, analytics=False)
+
+    cache_key = youtube_cache.make_key(method, _path=path, **(params or {}))
+    resolved_kind = cache_kind or youtube_cache.kind_for_method(method)
+
+    if not cache_bypass:
+        cached_payload = await youtube_cache.get(cache_key)
+        if cached_payload is not None:
+            return cached_payload, "(cache)"
+
+    cost = youtube_quota.cost_for(method)
+    if not await youtube_quota.reserve(cost, method, kind=quota_kind, note=quota_note or url):
+        stale_payload = await youtube_cache.get(cache_key, allow_stale=True)
+        if stale_payload is not None:
+            log.warning("YouTube quota exhausted — serving stale cache for method=%s", method)
+            return stale_payload, "(stale-cache)"
+        raise RuntimeError(f"YouTube quota exceeded (method={method}, cost={cost}) — refusing to call {url}")
+
     last_error: str = ""
+    attempted_any = False
     async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
         for key in keys:
             query = dict(params or {})
             query["key"] = key
             try:
                 resp = await client.get(url, params=query)
+                attempted_any = True
             except Exception as exc:
                 last_error = str(exc)
                 continue
             if resp.status_code == 200:
                 payload = resp.json()
                 if isinstance(payload, dict):
+                    await youtube_cache.set(cache_key, payload, kind=resolved_kind)
                     return payload, key
                 last_error = "YouTube API returned an invalid payload"
                 continue
             last_error = _youtube_format_api_failure(resp.status_code, resp.text, using_api_key=True)
+    # All keys failed to even send — refund (nothing actually reached Google).
+    if not attempted_any:
+        await youtube_quota.refund(cost, method, reason="no_key_reached_api")
+    # Last-ditch stale serve before raising.
+    stale_payload = await youtube_cache.get(cache_key, allow_stale=True)
+    if stale_payload is not None:
+        log.warning("YouTube API failed for method=%s — serving stale cache. last_error=%s", method, last_error[:160])
+        return stale_payload, "(stale-cache)"
     raise RuntimeError(last_error or "YouTube API key request failed")
 
 
@@ -3762,22 +3895,34 @@ async def _youtube_public_api_get(path: str, *, params: dict | None = None, time
 # so the same niche trend query doesn't burn quota repeatedly in one day.
 _search_cache: dict[str, tuple[float, list]] = {}
 _SEARCH_CACHE_TTL_SEC = 6 * 3600  # 6 hours
-_youtube_quota_used_today: dict[str, int] = {"units": 0, "reset_date": ""}
 
 
-def _youtube_quota_track(units: int) -> None:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if _youtube_quota_used_today.get("reset_date") != today:
-        _youtube_quota_used_today["units"] = 0
-        _youtube_quota_used_today["reset_date"] = today
-    _youtube_quota_used_today["units"] += units
+# Legacy tracker shim. Retained for backwards compat — any caller that imported
+# `youtube_quota_used_today` or called `_youtube_quota_track` still works, but
+# the real source of truth is the persistent `youtube_quota` module.
+# `_youtube_quota_track` is now a no-op because both generic API helpers
+# reserve quota before the call. Direct-httpx callers should call
+# `youtube_quota.reserve(...)` themselves.
+def _youtube_quota_track(units: int) -> None:  # noqa: ARG001 - intentional no-op
+    # Kept for backwards compat. Do not call — reserve() in the helpers handles it.
+    return None
 
 
 def youtube_quota_used_today() -> int:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if _youtube_quota_used_today.get("reset_date") != today:
+    """Return units spent today. Sync wrapper around async youtube_quota.spent_today()."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside an async context — best-effort read from the in-module cache.
+            youtube_quota._load_if_needed()  # type: ignore[attr-defined]
+            bucket = youtube_quota._cache.get(datetime.now(timezone.utc).strftime("%Y-%m-%d"), {})  # type: ignore[attr-defined]
+            return int(bucket.get("total", 0) or 0)
+    except Exception:
+        pass
+    try:
+        return asyncio.run(youtube_quota.spent_today())
+    except Exception:
         return 0
-    return int(_youtube_quota_used_today.get("units", 0) or 0)
 
 
 async def _youtube_fetch_public_trend_titles(query: str, max_results: int = 6) -> list[str]:
@@ -4976,95 +5121,99 @@ async def youtube_get_latest_video_velocity(
 
     Returns {"video_id", "title", "views", "hours_since_upload", "velocity_vph", "is_decaying"}.
     """
-    async with httpx.AsyncClient(timeout=20) as client:
-        # Get latest video from channel
-        search_resp = await client.get(
-            f"{YOUTUBE_DATA_API_BASE}/search",
-            params={
-                "part": "snippet",
-                "channelId": channel_id,
-                "order": "date",
-                "maxResults": "1",
-                "type": "video",
-            },
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        search_resp.raise_for_status()
-        items = search_resp.json().get("items", [])
-        if not items:
-            return {"video_id": "", "velocity_vph": 0, "is_decaying": True, "error": "no_videos"}
+    # Route through _youtube_api_get so quota is reserved + tracked per method.
+    # search.list = 100 units, videos.list = 1 unit. Kind=background because this
+    # is called from scheduled channel-audit loops, not user-initiated flows.
+    search_payload = await _youtube_api_get(
+        access_token,
+        "/search",
+        params={
+            "part": "snippet",
+            "channelId": channel_id,
+            "order": "date",
+            "maxResults": "1",
+            "type": "video",
+        },
+        quota_kind="background",
+        quota_note=f"velocity_latest:{channel_id}",
+    )
+    items = list(search_payload.get("items") or [])
+    if not items:
+        return {"video_id": "", "velocity_vph": 0, "is_decaying": True, "error": "no_videos"}
 
-        video_id = items[0]["id"].get("videoId", "")
-        title = items[0]["snippet"].get("title", "")
-        published = items[0]["snippet"].get("publishedAt", "")
+    video_id = str(((items[0] or {}).get("id") or {}).get("videoId", "") or "")
+    title = str(((items[0] or {}).get("snippet") or {}).get("title", "") or "")
+    published = str(((items[0] or {}).get("snippet") or {}).get("publishedAt", "") or "")
 
-        # Get view count
-        stats_resp = await client.get(
-            f"{YOUTUBE_DATA_API_BASE}/videos",
-            params={"part": "statistics", "id": video_id},
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        stats_resp.raise_for_status()
-        stats_items = stats_resp.json().get("items", [])
-        views = int(stats_items[0]["statistics"].get("viewCount", 0)) if stats_items else 0
+    stats_payload = await _youtube_api_get(
+        access_token,
+        "/videos",
+        params={"part": "statistics", "id": video_id},
+        quota_kind="background",
+        quota_note=f"velocity_stats:{video_id}",
+    )
+    stats_items = list(stats_payload.get("items") or [])
+    views = int((stats_items[0].get("statistics", {}) or {}).get("viewCount", 0) or 0) if stats_items else 0
 
-        # Calculate velocity
-        try:
-            pub_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
-            hours = max(1, (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600)
-        except Exception:
-            hours = 24
+    # Calculate velocity
+    try:
+        pub_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        hours = max(1, (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600)
+    except Exception:
+        hours = 24
 
-        velocity = round(views / hours, 2)
-        # Decay threshold: <50 views/hour after first 24 hours
-        is_decaying = hours >= 24 and velocity < 50
+    velocity = round(views / hours, 2)
+    # Decay threshold: <50 views/hour after first 24 hours
+    is_decaying = hours >= 24 and velocity < 50
 
-        return {
-            "video_id": video_id,
-            "title": title,
-            "views": views,
-            "hours_since_upload": round(hours, 1),
-            "velocity_vph": velocity,
-            "is_decaying": is_decaying,
-        }
+    return {
+        "video_id": video_id,
+        "title": title,
+        "views": views,
+        "hours_since_upload": round(hours, 1),
+        "velocity_vph": velocity,
+        "is_decaying": is_decaying,
+    }
 
 
 async def youtube_fetch_niche_trending_signals(
     niche_keywords: list[str],
     max_results: int = 10,
 ) -> list[dict]:
-    """Fetch trending videos for niche keywords from YouTube public API. No auth needed."""
+    """Fetch trending videos for niche keywords from YouTube public API. No auth needed.
+
+    Routes through `_youtube_public_api_get` so the 100-unit search.list cost is
+    reserved against the daily quota. Kind=background — this is scheduled trend
+    polling, not a user-initiated lookup.
+    """
     if not niche_keywords:
         return []
     trending: list[dict] = []
     try:
         query = " | ".join(niche_keywords[:3])
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{YOUTUBE_DATA_API_BASE}/search",
-                params={
-                    "part": "snippet",
-                    "q": query,
-                    "order": "date",
-                    "maxResults": str(max_results),
-                    "type": "video",
-                    "publishedAfter": (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "relevanceLanguage": "en",
-                    "key": _youtube_public_api_key_candidates()[0] if _youtube_public_api_key_candidates() else "",
-                },
-            )
-            if resp.status_code != 200:
-                log.warning("YouTube trending search failed: %s", resp.status_code)
-                return []
-            items = resp.json().get("items", [])
-            for item in items:
-                snippet = item.get("snippet", {})
-                trending.append({
-                    "title": str(snippet.get("title", "") or ""),
-                    "channel": str(snippet.get("channelTitle", "") or ""),
-                    "published": str(snippet.get("publishedAt", "") or ""),
-                    "description": str(snippet.get("description", "") or "")[:200],
-                })
+        payload, _active_key = await _youtube_public_api_get(
+            "/search",
+            params={
+                "part": "snippet",
+                "q": query,
+                "order": "date",
+                "maxResults": str(max_results),
+                "type": "video",
+                "publishedAfter": (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "relevanceLanguage": "en",
+            },
+            timeout_sec=15,
+            quota_kind="background",
+            quota_note=f"trending_niche:{query[:40]}",
+        )
+        for item in list(payload.get("items") or []):
+            snippet = (item or {}).get("snippet") or {}
+            trending.append({
+                "title": str(snippet.get("title", "") or ""),
+                "channel": str(snippet.get("channelTitle", "") or ""),
+                "published": str(snippet.get("publishedAt", "") or ""),
+                "description": str(snippet.get("description", "") or "")[:200],
+            })
     except Exception as e:
         log.warning("YouTube trending signals fetch failed: %s", str(e)[:200])
     return trending

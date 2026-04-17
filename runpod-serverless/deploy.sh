@@ -196,11 +196,17 @@ body = {
             'gpuIds': 'CPU3C,CPU5C',
             'networkVolumeId': vid,
             'locations': '',
-            'idleTimeout': 5,
+            # idleTimeout: how long a warm worker sticks around after a request completes.
+            # 5s was killing warm workers between requests and forcing 60-90s cold boots
+            # for every caller. 60s holds warm pool together under burst.
+            'idleTimeout': 60,
             'scalerType': 'QUEUE_DELAY',
             'scalerValue': 4,
-            'workersMin': 0,
-            'workersMax': 3,
+            # Keep 1 worker warm 24/7 so the first request doesn't eat a cold boot.
+            # At ~$0.0004/s CPU that's ~$34/mo for guaranteed hot-lane latency — cheaper
+            # than Render.com and much better UX than 0-worker cold starts.
+            'workersMin': 1,
+            'workersMax': 10,
             'flashboot': True,
         }
     }

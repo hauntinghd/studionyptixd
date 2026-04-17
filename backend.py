@@ -589,6 +589,7 @@ from backend_models import (
     LongFormSceneAssignmentRequest,
     CatalystOutcomeIngestRequest,
     CatalystAutoOutcomeHarvestRequest,
+    CatalystBackfillTickRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -7541,7 +7542,11 @@ async def generate_scene_image(
             )
             explicit_image_model_requested = False
             explicit_image_model_id = DEFAULT_CREATIVE_IMAGE_MODEL_ID
-    if explicit_image_model_requested and explicit_image_model_id != DEFAULT_CREATIVE_IMAGE_MODEL_ID:
+    # Always honor an explicit user pick. Previously this branch skipped when the
+    # explicit pick matched DEFAULT, which silently routed all default-picker users
+    # through the Grok-first auto chain (poor image quality on non-Skeleton templates).
+    # With DEFAULT = ernie_image, we want "user picked ernie" to actually call ernie.
+    if explicit_image_model_requested:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
         if explicit_image_model_id == "grok_imagine":
@@ -19777,12 +19782,39 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
         result["subscription_id"] = subscription_id
         return result
 
-    # Capture completed — informational only; we already granted access on /api/paypal/return.
-    # We log this as a second confirmation that funds did land (helps audit mismatches).
+    # Capture completed — under the happy path we already granted access on
+    # /api/paypal/return (the browser redirect after PayPal approval). But if the
+    # customer closed the tab BEFORE returning, funds land on PayPal's side and we
+    # never run the capture-and-apply helper. The webhook is our safety net.
+    # Both _capture_paypal_{topup,subscription}_order short-circuit on
+    # credited/activated, so it's safe to re-run from here idempotently.
     if event_type == "PAYMENT.CAPTURE.COMPLETED":
         capture_id = str(resource.get("id", "") or "")
         order_id = _paypal_find_order_by_capture_id(capture_id)
         log.info(f"PayPal webhook: capture.completed capture_id={capture_id} order_id={order_id or '<unlinked>'}")
+        if order_id:
+            async with _paypal_orders_lock:
+                order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+            kind = str(order_meta.get("kind", "topup") or "topup").strip().lower()
+            already_applied = bool(order_meta.get("credited") or order_meta.get("activated"))
+            if not already_applied:
+                log.warning(
+                    f"PayPal webhook safety-net firing: order_id={order_id} kind={kind} "
+                    "was never captured via /api/paypal/return — applying grant from webhook"
+                )
+                try:
+                    if kind in {"subscription", "monthly"}:
+                        await _capture_paypal_subscription_order(order_id)
+                    else:
+                        await _capture_paypal_topup_order(order_id)
+                    result["action"] = "capture_safety_net_applied"
+                except Exception as e:
+                    log.error(f"PayPal webhook safety-net failed for {order_id}: {e}")
+                    result["action"] = "capture_safety_net_error"
+                    result["error"] = str(e)[:200]
+                result["order_id"] = order_id
+                result["capture_id"] = capture_id
+                return result
         result["action"] = "capture_confirmed"
         result["order_id"] = order_id
         result["capture_id"] = capture_id
@@ -20251,6 +20283,49 @@ async def _get_all_feedback(user: dict = Depends(require_auth)):
     return {"feedback": [], "total": 0, "avg_rating": 0}
 
 
+async def _get_admin_youtube_quota(user: dict = Depends(require_auth)):
+    """Return today's YouTube Data API v3 quota spend + 7-day history + cache health.
+
+    Admin-only. Used to watch Catalyst's scraping budget against the 10k/day cap
+    and verify the persistent cache is absorbing repeated queries.
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import youtube_cache as _yc
+    import youtube_quota as _yq
+    return {
+        "quota_today": await _yq.breakdown(),
+        "quota_history_7d": await _yq.history(days=7),
+        "cache": await _yc.stats(),
+    }
+
+
+async def _admin_catalyst_backfill_tick(req: CatalystBackfillTickRequest | None = None, user: dict = Depends(require_auth)):
+    """Run one Catalyst reference-corpus backfill tick. Admin-only.
+
+    Fetches trending videos (1 quota unit per region via batched /videos.list),
+    classifies them into Catalyst niches, and appends to the persistent corpus
+    under TEMP_DIR/catalyst_reference_corpus.json. Body is optional:
+        {"budget_units": 500, "regions": ["US","GB"]}
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import catalyst_backfill as _cb
+    payload = req or CatalystBackfillTickRequest()
+    return await _cb.tick(
+        budget_units=payload.budget_units,
+        regions=payload.regions,
+    )
+
+
+async def _get_admin_catalyst_corpus(user: dict = Depends(require_auth)):
+    """Snapshot of the Catalyst reference corpus. Admin-only."""
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import catalyst_backfill as _cb
+    return await _cb.corpus_stats()
+
+
 async def _get_admin_kpi(user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
@@ -20295,6 +20370,9 @@ app.include_router(
         submit_feedback_endpoint=_submit_feedback,
         get_all_feedback_endpoint=_get_all_feedback,
         get_admin_kpi_endpoint=_get_admin_kpi,
+        get_admin_youtube_quota_endpoint=_get_admin_youtube_quota,
+        admin_catalyst_backfill_tick_endpoint=_admin_catalyst_backfill_tick,
+        get_admin_catalyst_corpus_endpoint=_get_admin_catalyst_corpus,
     )
 )
 
@@ -20354,6 +20432,29 @@ async def seed_profiles():
 @app.on_event("startup")
 async def start_catalyst_monitor_loop():
     asyncio.create_task(_start_catalyst_monitor())
+
+
+@app.on_event("startup")
+async def start_catalyst_backfill_auto_loop():
+    """Start the periodic Catalyst reference-corpus scraper.
+
+    No-op unless CATALYST_BACKFILL_AUTO_ENABLED is set. When enabled, ticks every
+    CATALYST_BACKFILL_AUTO_INTERVAL_SEC (default 6h) at ~1 quota unit per region.
+    """
+    try:
+        import catalyst_backfill as _cb
+        _cb.start_auto_loop()
+    except Exception as e:
+        log.warning("Failed to start Catalyst backfill auto-loop: %s", e)
+
+
+@app.on_event("shutdown")
+async def stop_catalyst_backfill_auto_loop():
+    try:
+        import catalyst_backfill as _cb
+        _cb.stop_auto_loop()
+    except Exception:
+        pass
 
 
 # â"€â"€â"€ Thumbnail System â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
