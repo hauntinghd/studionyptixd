@@ -589,6 +589,7 @@ from backend_models import (
     LongFormSceneAssignmentRequest,
     CatalystOutcomeIngestRequest,
     CatalystAutoOutcomeHarvestRequest,
+    CatalystBackfillTickRequest,
 )
 from backend_demo import (
     DEMO_DIR,
@@ -20299,6 +20300,32 @@ async def _get_admin_youtube_quota(user: dict = Depends(require_auth)):
     }
 
 
+async def _admin_catalyst_backfill_tick(req: CatalystBackfillTickRequest | None = None, user: dict = Depends(require_auth)):
+    """Run one Catalyst reference-corpus backfill tick. Admin-only.
+
+    Fetches trending videos (1 quota unit per region via batched /videos.list),
+    classifies them into Catalyst niches, and appends to the persistent corpus
+    under TEMP_DIR/catalyst_reference_corpus.json. Body is optional:
+        {"budget_units": 500, "regions": ["US","GB"]}
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import catalyst_backfill as _cb
+    payload = req or CatalystBackfillTickRequest()
+    return await _cb.tick(
+        budget_units=payload.budget_units,
+        regions=payload.regions,
+    )
+
+
+async def _get_admin_catalyst_corpus(user: dict = Depends(require_auth)):
+    """Snapshot of the Catalyst reference corpus. Admin-only."""
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import catalyst_backfill as _cb
+    return await _cb.corpus_stats()
+
+
 async def _get_admin_kpi(user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
@@ -20344,6 +20371,8 @@ app.include_router(
         get_all_feedback_endpoint=_get_all_feedback,
         get_admin_kpi_endpoint=_get_admin_kpi,
         get_admin_youtube_quota_endpoint=_get_admin_youtube_quota,
+        admin_catalyst_backfill_tick_endpoint=_admin_catalyst_backfill_tick,
+        get_admin_catalyst_corpus_endpoint=_get_admin_catalyst_corpus,
     )
 )
 

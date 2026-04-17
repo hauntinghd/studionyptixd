@@ -261,3 +261,8 @@ class CatalystHubReferenceVideoAnalysisRequest(BaseModel):
 class CatalystHubReferenceVideoClearRequest(BaseModel):
     channel_id: str = ""
     workspace_id: str = ""
+
+
+class CatalystBackfillTickRequest(BaseModel):
+    budget_units: int | None = None
+    regions: list[str] | None = None
