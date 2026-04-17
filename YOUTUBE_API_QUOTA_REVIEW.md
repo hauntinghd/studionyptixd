@@ -157,14 +157,19 @@ Assumptions for a **single** active creator:
 
 ### 5.2  Platform-wide consumption
 
-Target: **3,000 active creators per day** within 12 months of quota grant.
+The 990,000 units/day cap is sized to support the product's projected scale over the 12-month quota grant period, not today's instantaneous usage. The cap determines the **ceiling**, not the operating floor — we don't expect to hit 990k units on any given day until well into that period.
 
-- 3,000 × 265 units = **795,000 units/day** for creator-initiated flows.
-- Public reference-corpus ingestion (§3.4): 4 ticks/day × 10 regions × 1 unit = **40 units/day** (negligible).
-- Owner-operated R&D/QA + monitoring: **~10,000 units/day** budgeted.
-- Unexpected bursts / retry storms / growth headroom: **~185,000 units/day** buffer.
+At the per-creator profile above (~265 units/day), the cap mathematically supports:
 
-**Total:** ≈990,000 units/day.
+| Activity | Daily units |
+|---|---|
+| Creator-initiated flows at projected scale (active creators × ~265 units) | up to ~795,000 |
+| Public reference-corpus ingestion (§3.4 — 4 ticks/day × up to 10 regions × 1 unit) | ~40 |
+| Owner-operated R&D, QA, monitoring, and admin sessions | ~10,000 |
+| Growth headroom, retry-on-failure margin, burst absorption | ~185,000 |
+| **Ceiling** | **≈990,000** |
+
+**Why a single-step request to this ceiling instead of graduated requests:** the platform is actively onboarding creators, and a per-month quota-review cycle would introduce repeated multi-day service gaps for end users each time the cap was approached. Requesting headroom once, with the enforcement mechanisms in §5.3 as the real operating brake, is both operationally safer and lower burden for your review team.
 
 ### 5.3  Hard controls enforcing the budget
 
