@@ -1,7 +1,7 @@
 # YouTube API Services — Implementation Document
 
 **Product:** NYPTID Studio (Catalyst subsystem)
-**Operator:** NYPTID Industries / Casey Setter
+**Operator:** NYPTID Industries / Casey
 **GCP Project:** (per your records)
 **Quota requested:** 990,000 units/day on YouTube Data API v3
 **Document purpose:** Respond to the YouTube API Services compliance review request (email thread dated April 16 and April 17, 2026) by describing the complete end-to-end process by which our API client retrieves, analyzes, and presents metadata from users' connected YouTube channels.
@@ -234,7 +234,7 @@ If the review team requires additional artifacts:
 
 ## Contact
 
-- **Technical:** Casey Setter · `atlassetter@nyptidindustries.com`
+- **Technical:** Casey · `atlassetter@nyptidindustries.com`
 - **Product:** `omatic657@gmail.com`
 - **Project:** NYPTID Studio / Catalyst
 - **API Client domain:** `api-studio.nyptidindustries.com`
