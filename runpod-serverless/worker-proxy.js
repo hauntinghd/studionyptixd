@@ -22,16 +22,62 @@ const ASYNC_PATHS = [
   "/api/longform/",      // multi-minute processing
 ];
 
+// Allowed origins — must be exact matches because we also send Allow-Credentials.
+// Wildcard + credentials is forbidden by the CORS spec. Add any other frontend
+// origin that needs direct API access here.
+const ALLOWED_ORIGINS = new Set([
+  "https://studio.nyptidindustries.com",
+  "https://billing.nyptidindustries.com",
+  "https://invoicer.nyptidindustries.com",
+  "http://localhost:8080",
+  "http://localhost:5173",
+  "http://127.0.0.1:8080",
+  "http://127.0.0.1:5173",
+]);
+
+function corsHeadersFor(request) {
+  // Echo the requested origin back when it's in the allowlist; otherwise fall back
+  // to the canonical studio origin so responses still carry CORS headers (useful
+  // for error pages viewed directly in a browser).
+  const origin = request.headers.get("Origin") || "";
+  const allowOrigin = ALLOWED_ORIGINS.has(origin)
+    ? origin
+    : "https://studio.nyptidindustries.com";
+  const reqHeaders = request.headers.get("Access-Control-Request-Headers") || "authorization,content-type";
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": reqHeaders,
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+  };
+}
+
+function jsonResponse(obj, { status = 200, cors = {} } = {}) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json", ...cors },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const cors = corsHeadersFor(request);
+
+    // Preflight — the browser fires OPTIONS before any fetch with an Authorization
+    // header (non-simple request). We MUST respond with 2xx + CORS headers or the
+    // real request never goes out.
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: cors });
+    }
+
     const url = new URL(request.url);
     const apiKey = env.RUNPOD_API_KEY;
     const endpointId = env.RUNPOD_ENDPOINT_ID;
 
     if (!apiKey || !endpointId) {
-      return new Response(JSON.stringify({ error: "RunPod not configured" }), {
-        status: 500, headers: { "content-type": "application/json" },
-      });
+      return jsonResponse({ error: "RunPod not configured" }, { status: 500, cors });
     }
 
     // ───────────────────────────────────────────────────────────
@@ -45,7 +91,7 @@ export default {
       );
       return new Response(await statusResp.text(), {
         status: statusResp.status,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...cors },
       });
     }
 
@@ -96,30 +142,52 @@ export default {
     // ───────────────────────────────────────────────────────────
     // Forward to RunPod
     // ───────────────────────────────────────────────────────────
-    const rpResp = await fetch(
-      `https://api.runpod.ai/v2/${endpointId}/${runpodPath}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
+    let rpResp;
+    try {
+      rpResp = await fetch(
+        `https://api.runpod.ai/v2/${endpointId}/${runpodPath}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(runpodPayload),
         },
-        body: JSON.stringify(runpodPayload),
-      },
-    );
+      );
+    } catch (fetchErr) {
+      return jsonResponse(
+        { error: "runpod_fetch_failed", detail: String(fetchErr).slice(0, 300) },
+        { status: 502, cors },
+      );
+    }
 
-    const rpData = await rpResp.json();
+    let rpData;
+    try {
+      rpData = await rpResp.json();
+    } catch (parseErr) {
+      return jsonResponse(
+        { error: "runpod_response_not_json", status: rpResp.status },
+        { status: 502, cors },
+      );
+    }
+
+    // Propagate RunPod-level errors (429 queue-full, 401 auth, etc.) with CORS
+    // headers so the frontend can actually read the status + message.
+    if (!rpResp.ok) {
+      return jsonResponse(rpData, { status: rpResp.status, cors });
+    }
 
     // Async → return job_id for polling
     if (runpodPath === "run") {
-      return new Response(JSON.stringify({
-        job_id: rpData.id,
-        status: rpData.status || "IN_QUEUE",
-        poll_url: `/status/${rpData.id}`,
-      }), {
-        status: 202,
-        headers: { "content-type": "application/json" },
-      });
+      return jsonResponse(
+        {
+          job_id: rpData.id,
+          status: rpData.status || "IN_QUEUE",
+          poll_url: `/status/${rpData.id}`,
+        },
+        { status: 202, cors },
+      );
     }
 
     // Sync → unwrap RunPod output into native HTTP response
@@ -130,6 +198,12 @@ export default {
     for (const [k, v] of Object.entries(outHeaders)) {
       // Strip hop-by-hop headers
       if (["content-length", "transfer-encoding", "connection"].indexOf(k.toLowerCase()) !== -1) continue;
+      respHeaders.set(k, v);
+    }
+    // Always layer our CORS headers AFTER copying backend headers so they win.
+    // FastAPI's CORSMiddleware also sets these, but when the backend never
+    // responded (502) we still need them here.
+    for (const [k, v] of Object.entries(cors)) {
       respHeaders.set(k, v);
     }
 
