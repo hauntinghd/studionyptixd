@@ -20282,6 +20282,23 @@ async def _get_all_feedback(user: dict = Depends(require_auth)):
     return {"feedback": [], "total": 0, "avg_rating": 0}
 
 
+async def _get_admin_youtube_quota(user: dict = Depends(require_auth)):
+    """Return today's YouTube Data API v3 quota spend + 7-day history + cache health.
+
+    Admin-only. Used to watch Catalyst's scraping budget against the 10k/day cap
+    and verify the persistent cache is absorbing repeated queries.
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import youtube_cache as _yc
+    import youtube_quota as _yq
+    return {
+        "quota_today": await _yq.breakdown(),
+        "quota_history_7d": await _yq.history(days=7),
+        "cache": await _yc.stats(),
+    }
+
+
 async def _get_admin_kpi(user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
@@ -20326,6 +20343,7 @@ app.include_router(
         submit_feedback_endpoint=_submit_feedback,
         get_all_feedback_endpoint=_get_all_feedback,
         get_admin_kpi_endpoint=_get_admin_kpi,
+        get_admin_youtube_quota_endpoint=_get_admin_youtube_quota,
     )
 )
 
