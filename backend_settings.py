@@ -360,7 +360,13 @@ TEMPLATE_ADAPTER_ROUTING = _parse_template_adapter_routing()
 IMAGE_LOCAL_PROVIDER_RETRIES = max(1, min(5, int(os.getenv("IMAGE_LOCAL_PROVIDER_RETRIES", "3"))))
 IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC = max(0, int(os.getenv("IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC", "90")))
 IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE = os.getenv("IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE", "1").lower() in ("1", "true", "yes", "on")
-SKELETON_REQUIRE_WAN22 = os.getenv("SKELETON_REQUIRE_WAN22", "1").lower() in ("1", "true", "yes", "on")
+# Default 0 because Studio's prod (RunPod serverless) has no local WAN22 lane. The flag
+# existed for the pre-RunPod era when skeleton was locked to a local ComfyUI WAN22
+# worker. Leaving the default at 1 silently dropped skeleton gen (raises at
+# backend.py:7843) AND lit up the "Hosted fallback mode active" admin banner on every
+# deploy that forgot to thread SKELETON_REQUIRE_WAN22 through the RunPod template env.
+# Local-dev setups that DO have a WAN22 lane can still opt in via SKELETON_REQUIRE_WAN22=1.
+SKELETON_REQUIRE_WAN22 = os.getenv("SKELETON_REQUIRE_WAN22", "0").lower() in ("1", "true", "yes", "on")
 SKELETON_SDXL_LORA_ENABLED = os.getenv("SKELETON_SDXL_LORA_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 IMAGE_LOCAL_MIN_FILE_BYTES = max(1024, int(os.getenv("IMAGE_LOCAL_MIN_FILE_BYTES", "8192")))
 IMAGE_QUALITY_BESTOF_ENABLED = os.getenv("IMAGE_QUALITY_BESTOF_ENABLED", "1").lower() in ("1", "true", "yes", "on")
