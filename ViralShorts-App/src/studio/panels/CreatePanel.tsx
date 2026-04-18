@@ -164,18 +164,30 @@ const fallbackImageModelCatalog: CreativeModelProfile[] = [
     { id: 'nano_banana_pro', label: 'Nano Banana Pro', provider: 'fal', tier: 'elite', summary: 'Premium reasoning-based image generation with strong composition.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.15, billing_unit: 'image', credit_cost_per_image: 5 },
     { id: 'recraft_v4_pro', label: 'Recraft V4 Pro', provider: 'fal', tier: 'elite', summary: 'Designer-grade generation for top-end ad and thumbnail style work.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.25, billing_unit: 'image', credit_cost_per_image: 5 },
 ];
+// Fallback catalog — used only if /api/config hasn't loaded yet. Keep ids, tiers,
+// and credit_multipliers in sync with CREATIVE_VIDEO_MODEL_PROFILES in video_pipeline.py
+// so the first-paint AC cost shown to the user matches what the backend will actually
+// charge on enqueue.
 const fallbackVideoModelCatalog: CreativeModelProfile[] = [
+    { id: 'pixverse_v6', label: 'PixVerse V6', provider: 'fal', tier: 'basic', summary: 'Latest PixVerse lane. Cheaper than Kling Std at 720p, strong motion.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.045, billing_unit: 'second', credit_multiplier: 1 },
+    { id: 'pixverse_c1', label: 'PixVerse C1 (Film Grade)', provider: 'fal', tier: 'premium', summary: 'Film-grade hyper-realistic PixVerse lane at 720p.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.050, billing_unit: 'second', credit_multiplier: 1 },
     { id: 'kling21_standard', label: 'Kling 2.1 Standard', provider: 'fal', tier: 'basic', summary: 'Default animation lane for Studio renders.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.056, billing_unit: 'second', credit_multiplier: 1 },
-    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 4 },
-    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 4 },
+    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 2 },
+    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 2 },
     { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Highest-cost Kling lane for top-end shot quality.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
 ];
 
-export default function CreatePanel() {
+interface CreatePanelProps {
+    /** Niche id from the Dashboard niche gallery — pre-selects the template when
+     * the user clicks a niche tile to enter the Create workspace. */
+    initialTemplate?: string;
+}
+
+export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) {
     const { session, role, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
-    const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
+    const [selectedTemplate, setSelectedTemplate] = useState(initialTemplate || 'skeleton');
     const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
     const [jobId, setJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<any>(null);
@@ -203,7 +215,10 @@ export default function CreatePanel() {
     const [artStyle, setArtStyle] = useState('auto');
     const [imageModelCatalog, setImageModelCatalog] = useState<CreativeModelProfile[]>(fallbackImageModelCatalog);
     const [videoModelCatalog, setVideoModelCatalog] = useState<CreativeModelProfile[]>(fallbackVideoModelCatalog);
-    const [imageModelId, setImageModelId] = useState('ernie_image');
+    // Grok Imagine is the recommended skeleton lane (reference-image style lock for
+    // consistent ivory-bones look). Other niches default to ernie_image. Users can
+    // swap lanes from the picker — this is just the starting point.
+    const [imageModelId, setImageModelId] = useState(initialTemplate === 'skeleton' ? 'grok_imagine' : 'ernie_image');
     const [videoModelId, setVideoModelId] = useState('kling21_standard');
     const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
     const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
@@ -278,22 +293,17 @@ export default function CreatePanel() {
         () => videoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog[0],
         [videoModelCatalog, videoModelId]
     );
-    const skeletonSceneModelLocked = selectedTemplate === 'skeleton';
-    const sceneImageModelOptions = useMemo(() => {
-        const enabledModels = imageModelCatalog.filter((model) => model.enabled !== false);
-        if (!skeletonSceneModelLocked) return enabledModels;
-        const lockedModels = enabledModels.filter((model) => model.id === 'grok_imagine');
-        if (lockedModels.length > 0) return lockedModels;
-        const fallbackGrok = fallbackImageModelCatalog.find((model) => model.id === 'grok_imagine');
-        return fallbackGrok ? [fallbackGrok] : enabledModels;
-    }, [imageModelCatalog, skeletonSceneModelLocked]);
-
-    useEffect(() => {
-        if (!skeletonSceneModelLocked) return;
-        if (imageModelId !== 'grok_imagine') {
-            setImageModelId('grok_imagine');
-        }
-    }, [skeletonSceneModelLocked, imageModelId]);
+    // Skeleton used to hard-lock the image picker to Grok Imagine. Casey wants
+    // owner/advanced users to be able to swap to other lanes (Imagen 4 Ultra /
+    // Recraft Pro / Nano Banana Pro) for A/B testing. We keep Grok Imagine as
+    // the default for skeleton (via CreatePanel's useState initializer), surface
+    // it as "recommended" in the picker copy, but stop filtering the modal and
+    // stop overwriting the user's pick.
+    const skeletonSceneModelRecommended = selectedTemplate === 'skeleton';
+    const sceneImageModelOptions = useMemo(
+        () => imageModelCatalog.filter((model) => model.enabled !== false),
+        [imageModelCatalog]
+    );
 
     useEffect(() => {
         (async () => {
@@ -2302,8 +2312,8 @@ export default function CreatePanel() {
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Image Generation Model</p>
                         <h3 className="mt-2 text-2xl font-bold text-white">Choose the image lane for this workspace</h3>
                         <p className="mt-2 text-sm text-gray-400">
-                            {skeletonSceneModelLocked
-                                ? 'Skeleton scene generation is locked to Grok Imagine via fal.ai. Seedream stays thumbnail-only.'
+                            {skeletonSceneModelRecommended
+                                ? 'Skeleton AI defaults to Grok Imagine (reference-image style lock). You can swap lanes — Grok stays the recommended pick for consistent skeleton visuals.'
                                 : 'Basic lanes stay in the normal Studio burn. Premium and elite lanes consume Catalyst credits first from included credits, then from the credit wallet.'}
                         </p>
                     </div>
@@ -2402,7 +2412,18 @@ export default function CreatePanel() {
                 </div>
                 <div onWheelCapture={handleModelPickerWheel} className="mt-6 max-h-[58vh] overflow-y-auto overscroll-contain pr-1">
                     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                        {videoModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                        {videoModelCatalog
+                            .filter((model) => model.enabled !== false)
+                            .slice()
+                            .sort((a, b) => {
+                                const am = Number(a.credit_multiplier ?? 1);
+                                const bm = Number(b.credit_multiplier ?? 1);
+                                if (am !== bm) return am - bm;
+                                const au = Number(a.estimated_unit_usd ?? 0);
+                                const bu = Number(b.estimated_unit_usd ?? 0);
+                                return au - bu;
+                            })
+                            .map((model) => {
                             const active = selectedVideoModel.id === model.id;
                             return (
                                 <button
@@ -2832,8 +2853,8 @@ export default function CreatePanel() {
                                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Generation Model</p>
                                     <h3 className="mt-2 text-lg font-semibold text-white">{selectedImageModel.label}</h3>
                                     <p className="mt-2 text-sm text-gray-400">
-                                        {skeletonSceneModelLocked
-                                            ? 'Skeleton AI short scenes are locked to Grok Imagine via fal.ai. Seedream is reserved for thumbnail work.'
+                                        {skeletonSceneModelRecommended && selectedImageModel.id === 'grok_imagine'
+                                            ? 'Grok Imagine is the recommended Skeleton AI lane — its reference-image style lock keeps the ivory bones / amber-shell look consistent across scenes.'
                                             : selectedImageModel.summary}
                                     </p>
                                 </div>
@@ -2852,17 +2873,15 @@ export default function CreatePanel() {
                                 <span>{selectedImageModel.speed}</span>
                             </div>
                             <p className="mt-4 text-xs text-gray-500">
-                                {skeletonSceneModelLocked
-                                    ? 'Skeleton scenes stay on Grok Imagine. Other image lanes are not used for Skeleton scene generation.'
+                                {skeletonSceneModelRecommended
+                                    ? 'Grok Imagine is the Skeleton AI default. Other lanes work too — swap any time for a different aesthetic.'
                                     : 'Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.'}
                             </p>
                         </button>
                         <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
                             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Catalyst Spend Snapshot</p>
                             <p className="mt-2 text-lg font-semibold text-white">
-                                {skeletonSceneModelLocked
-                                    ? 'Skeleton scene lane is locked to Grok Imagine via fal.ai'
-                                    : selectedImageCreditCost > 0
+                                {selectedImageCreditCost > 0
                                     ? `${selectedImageCreditCost} credits per image on ${selectedImageModel.label}`
                                     : `${selectedImageModel.label} stays on the basic image lane`}
                             </p>
@@ -4108,11 +4127,14 @@ export default function CreatePanel() {
                     <button
                         type="button"
                         onClick={() => setImageModelPickerOpen(true)}
-                        disabled={loading || scriptLoading || skeletonSceneModelLocked}
+                        disabled={loading || scriptLoading}
                         className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04] disabled:opacity-50"
                     >
                         <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Model</p>
-                        <p className="mt-1.5 text-sm font-semibold text-white">{skeletonSceneModelLocked ? 'Grok Imagine (Skeleton locked)' : selectedImageModel.label}</p>
+                        <p className="mt-1.5 text-sm font-semibold text-white">
+                            {selectedImageModel.label}
+                            {skeletonSceneModelRecommended && selectedImageModel.id === 'grok_imagine' ? ' (Skeleton default)' : ''}
+                        </p>
                         <p className="mt-1 text-xs text-gray-400">{formatModelSpendLabel(selectedImageModel, 'image')} · Click to change</p>
                     </button>
                     <button

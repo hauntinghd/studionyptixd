@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
@@ -35,9 +35,9 @@ const OWNER_ALL_ACCESS = {
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
+        loading,
         role,
         ownerOverride,
-        backendOffline,
         topupCreditsRemaining,
         requiresTopup,
         monthlyCreditsRemaining,
@@ -47,6 +47,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const laneAccess = ownerOverride ? OWNER_ALL_ACCESS : studioLaneAccess;
     const [tab, setTab] = useState<DashboardTab>('create');
     const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+    const [selectedNiche, setSelectedNiche] = useState<string | null>(null);
     const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
     const walletCredits = Number(topupCreditsRemaining || 0);
     const includedCredits = Number(monthlyCreditsRemaining || 0);
@@ -63,8 +64,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [isAdmin, laneAccess]);
 
     useEffect(() => {
+        // Wait for the AuthContext to finish its initial Supabase session bootstrap
+        // before deciding to redirect. Without this gate, a logged-in user hitting
+        // refresh gets bounced to the auth page because `session` is null for the
+        // first tick while getSession() reads localStorage.
+        if (loading) return;
         if (!session) onNavigate('auth');
-    }, [session, onNavigate]);
+    }, [session, loading, onNavigate]);
 
     useEffect(() => {
         if (typeof window === 'undefined') return;
@@ -161,8 +167,17 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (tab === 'thumbnails' && laneAccess.thumbnails) return <ThumbnailPanel />;
         if (tab === 'demo' && ownerOverride) return <DemoPanel />;
         if (tab === 'autoclipper' && ownerOverride) return <AutoClipperPanel />;
-        return <CreatePanel />;
+        return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
+
+    // Only show the Create workspace once the user has picked a niche. Otherwise
+    // the niche gallery is the landing view — a passive CreatePanel below it was
+    // cluttering the first-run experience.
+    const panelVisible = tab !== 'create' || createImmersive;
+    const exitCreateWorkspace = () => {
+        setCreateWorkspaceOpen(false);
+        setSelectedNiche(null);
+    };
 
     return (
         <div className="min-h-screen">
@@ -270,17 +285,26 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         )}
 
                         {tab === 'create' && !createImmersive && (
-                            <NicheGallery onPick={() => setCreateWorkspaceOpen(true)} />
+                            <NicheGallery onPick={(nicheId) => {
+                                setSelectedNiche(nicheId);
+                                setCreateWorkspaceOpen(true);
+                            }} />
                         )}
 
-                        {backendOffline && !createImmersive && isAdmin && (
-                            <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                                <div className="mb-1 font-semibold">Hosted fallback mode active (admin-only notice)</div>
-                                <div>Local GPU lanes are offline. Hosted fallback is carrying the session. Users are not shown this banner.</div>
+                        {tab === 'create' && createImmersive && (
+                            <div className="flex items-center justify-between">
+                                <button
+                                    type="button"
+                                    onClick={exitCreateWorkspace}
+                                    className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm font-semibold text-gray-300 transition hover:border-violet-500/40 hover:bg-violet-500/10 hover:text-white"
+                                >
+                                    <ArrowLeft className="h-4 w-4" />
+                                    Back to Dashboard
+                                </button>
                             </div>
                         )}
 
-                        {panel}
+                        {panelVisible && panel}
                     </main>
                 </div>
             </div>
@@ -289,13 +313,19 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 }
 
 function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
-    const niches: { id: string; title: string; desc: string; badge?: string }[] = [
-        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', badge: 'Most Popular' },
-        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', badge: 'Trending' },
-        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', badge: 'New' },
-        { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', badge: 'Trending' },
-        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', badge: 'Trending' },
-        { id: 'business', title: 'Business', desc: 'Bloomberg-grade documentary' },
+    // Keep in sync with CreatePanel.tsx `templates` array (same ids, titles, icons).
+    // All 9 live niches appear here so the gallery matches the Switch-Niche modal
+    // inside the Create workspace.
+    const niches: { id: string; title: string; desc: string; icon: string; badge?: string }[] = [
+        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', icon: '💀', badge: 'Most Popular' },
+        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', icon: '📈', badge: 'Trending' },
+        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', icon: '⚖️', badge: 'New' },
+        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
+        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
+        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
+        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
+        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', icon: '👻', badge: 'Trending' },
+        { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', icon: '⚔️', badge: 'Trending' },
     ];
     return (
         <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
@@ -320,7 +350,10 @@ function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
                             />
                             <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
                             <div className="absolute inset-x-0 bottom-0 p-4">
-                                <h3 className="text-base font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.title}</h3>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.icon}</span>
+                                    <h3 className="text-base font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.title}</h3>
+                                </div>
                                 <p className="mt-1 text-xs text-gray-300 drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.desc}</p>
                             </div>
                             {n.badge && (
