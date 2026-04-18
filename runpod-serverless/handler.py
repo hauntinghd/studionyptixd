@@ -77,8 +77,15 @@ def _ensure_backend():
     try:
         from backend import app  # type: ignore
         from fastapi.testclient import TestClient
-        _client = TestClient(app)
-        logger.info("Backend loaded, TestClient ready")
+        # follow_redirects=False is CRITICAL. The default (True) causes TestClient
+        # to swallow 302 responses from handlers like OAuth redirect flows — it
+        # internally follows the Location header and returns the final response
+        # instead of the 302. For OAuth start endpoints that redirect the browser
+        # to Google's consent screen, this means the browser receives the Studio
+        # SPA HTML (fetched internally via the redirect's fallthrough to the
+        # landing page) instead of the 302 — breaking every redirect-based flow.
+        _client = TestClient(app, follow_redirects=False)
+        logger.info("Backend loaded, TestClient ready (redirect-passthrough)")
     except Exception as e:
         _boot_error = f"{e}\n{traceback.format_exc()}"
         logger.error(f"Backend failed to load: {_boot_error}")
