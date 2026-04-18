@@ -782,6 +782,47 @@ app.add_middleware(
 )
 
 
+# Error telemetry: every unhandled exception fires a Discord webhook alert.
+# Dedup'd in-memory for 60s per (kind, error-signature) so one bug × 1000 users
+# doesn't produce 1000 alerts. See studio_alerts.py.
+import studio_alerts as _studio_alerts
+
+
+@app.middleware("http")
+async def _studio_error_reporter(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except HTTPException:
+        # HTTPExceptions are user-visible intended errors (401, 403, 400, etc.) —
+        # they already produce clean responses. Don't alert on these.
+        raise
+    except Exception as e:  # noqa: BLE001 — we want to catch literally everything
+        path = request.url.path or "?"
+        method = request.method or "?"
+        user_hint = ""
+        try:
+            auth = str(request.headers.get("authorization", "") or request.headers.get("x-access-token", ""))
+            if auth.lower().startswith("bearer "):
+                # Decode the JWT "sub" claim without verifying — only for logging.
+                import base64 as _b64, json as _json
+                parts = auth.split(" ", 1)[1].split(".")
+                if len(parts) >= 2:
+                    pad = "=" * (-len(parts[1]) % 4)
+                    user_hint = str(_json.loads(_b64.urlsafe_b64decode(parts[1] + pad)).get("email", ""))
+        except Exception:
+            user_hint = ""
+        _studio_alerts.send_exception(
+            e,
+            source=f"{method} {path}",
+            context={
+                "endpoint": f"{method} {path}",
+                "user": user_hint or "(anonymous)",
+                "query": dict(request.query_params) or "-",
+            },
+        )
+        raise  # re-raise so FastAPI returns the 500 response to the caller
+
+
 @app.middleware("http")
 async def _disable_html_cache(request: Request, call_next):
     """Prevent stale frontend shell and asset caching so new bundles load immediately."""
@@ -4657,6 +4698,16 @@ async def _fal_openrouter_json_completion(
             if attempt >= 2:
                 break
             await asyncio.sleep((attempt + 1) * 2)
+    # All 3 attempts exhausted — alert so we catch content-filter / upstream outages.
+    if last_error is not None:
+        try:
+            _studio_alerts.send_exception(
+                last_error,
+                source="_fal_openrouter_json_completion (3 attempts)",
+                context={"model": model},
+            )
+        except Exception:
+            pass
     raise last_error if last_error is not None else RuntimeError("FAL OpenRouter JSON completion failed")
 
 
@@ -13445,6 +13496,15 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                 await _queue_next_longform_chapter_if_ready(session_id)
         except Exception as e:
             log.error(f"[longform:{session_id}] chapter generation failed: {e}", exc_info=True)
+            _studio_alerts.send_exception(
+                e,
+                source="longform chapter draft",
+                context={
+                    "session_id": session_id,
+                    "chapter_index": chapter_index,
+                    "chapter_count": chapter_count,
+                },
+            )
             async with _longform_sessions_lock:
                 live = _longform_sessions.get(session_id)
                 if isinstance(live, dict):
