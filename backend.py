@@ -13441,8 +13441,34 @@ async def _generate_longform_chapter_for_session(session_id: str, chapter_index:
                     edit_blueprint=edit_blueprint,
                     chapter_blueprint=chapter_blueprint,
                 )
-                chapter["last_error"] = ""
-                log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used: {e}")
+                # Phase 1.5: surface the actual error in the chapter record so the
+                # frontend can show the user WHY a fallback was used. Before this
+                # patch the error was overwritten to "" and the user saw a silent
+                # generic fallback chapter with no explanation.
+                import fal_gate as _fg
+                if isinstance(e, _fg.FalFailed):
+                    chapter["last_error"] = (
+                        "Your prompt was flagged by the AI provider's content "
+                        "filter. Edit the topic or description to remove explicit "
+                        "references to crime / regulatory evasion / named events "
+                        "(e.g. 'Panama Papers', 'sanctions evasion', 'tax fraud') "
+                        "and regenerate this chapter. A template fallback was used "
+                        "so the pipeline could continue."
+                    )
+                    chapter["error_kind"] = "content_policy"
+                elif isinstance(e, _fg.FalBusy):
+                    chapter["last_error"] = (
+                        "The AI provider is overloaded right now and returned "
+                        "busy after 3 retries. A template fallback was used for "
+                        "this chapter; click Regenerate in a minute to retry with "
+                        "a fresh generation."
+                    )
+                    chapter["error_kind"] = "upstream_busy"
+                else:
+                    err_text = str(e)[:240] or type(e).__name__
+                    chapter["last_error"] = f"Chapter generation fell back to a template after: {err_text}"
+                    chapter["error_kind"] = "generic_llm_failure"
+                log.warning(f"[longform:{session_id}] chapter {chapter_index + 1}/{chapter_count} fallback used ({chapter.get('error_kind')}): {e}")
 
             chapter = await _longform_attach_scene_previews(
                 session_id=session_id,
@@ -16773,6 +16799,32 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         )
         err_text = str(e or "").strip()
         err_l = err_text.lower()
+        # Phase 1.5: map content-policy rejections from fal to a clean 400.
+        # Before: user saw a 500 with stack trace when their prompt got flagged.
+        # Now: user sees "Your prompt was flagged" and knows to edit + retry.
+        import fal_gate as _fg
+        if isinstance(e, _fg.FalFailed) and "content" in err_l:
+            raise HTTPException(
+                400,
+                "Your prompt was flagged by the image provider's content filter. "
+                "Edit the scene prompt to remove explicit references to crime, "
+                "violence, named real-world events, or identifiable real people "
+                "and retry. The AC charge has been refunded."
+            ) from e
+        if "content_policy_violation" in err_l or "content checker" in err_l or "content_policy" in err_l:
+            raise HTTPException(
+                400,
+                "Your prompt was flagged by the image provider's content filter. "
+                "Edit it to remove explicit references to crime, violence, named "
+                "real-world events, or identifiable real people and retry. The AC "
+                "charge has been refunded."
+            ) from e
+        if isinstance(e, _fg.FalBusy):
+            raise HTTPException(
+                503,
+                "Image provider is temporarily at capacity — please retry in 30 seconds. "
+                "The AC charge has been refunded."
+            ) from e
         if "hidream is the only configured image provider" in err_l:
             raise HTTPException(503, err_text) from e
         if template == "skeleton" and "hidream" in err_l and ("timed out" in err_l or "timeout" in err_l):
