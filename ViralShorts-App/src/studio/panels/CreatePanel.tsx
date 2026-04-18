@@ -215,7 +215,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [artStyle, setArtStyle] = useState('auto');
     const [imageModelCatalog, setImageModelCatalog] = useState<CreativeModelProfile[]>(fallbackImageModelCatalog);
     const [videoModelCatalog, setVideoModelCatalog] = useState<CreativeModelProfile[]>(fallbackVideoModelCatalog);
-    const [imageModelId, setImageModelId] = useState('ernie_image');
+    // Grok Imagine is the recommended skeleton lane (reference-image style lock for
+    // consistent ivory-bones look). Other niches default to ernie_image. Users can
+    // swap lanes from the picker — this is just the starting point.
+    const [imageModelId, setImageModelId] = useState(initialTemplate === 'skeleton' ? 'grok_imagine' : 'ernie_image');
     const [videoModelId, setVideoModelId] = useState('kling21_standard');
     const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
     const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
@@ -290,22 +293,17 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         () => videoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog.find((model) => model.id === videoModelId) || fallbackVideoModelCatalog[0],
         [videoModelCatalog, videoModelId]
     );
-    const skeletonSceneModelLocked = selectedTemplate === 'skeleton';
-    const sceneImageModelOptions = useMemo(() => {
-        const enabledModels = imageModelCatalog.filter((model) => model.enabled !== false);
-        if (!skeletonSceneModelLocked) return enabledModels;
-        const lockedModels = enabledModels.filter((model) => model.id === 'grok_imagine');
-        if (lockedModels.length > 0) return lockedModels;
-        const fallbackGrok = fallbackImageModelCatalog.find((model) => model.id === 'grok_imagine');
-        return fallbackGrok ? [fallbackGrok] : enabledModels;
-    }, [imageModelCatalog, skeletonSceneModelLocked]);
-
-    useEffect(() => {
-        if (!skeletonSceneModelLocked) return;
-        if (imageModelId !== 'grok_imagine') {
-            setImageModelId('grok_imagine');
-        }
-    }, [skeletonSceneModelLocked, imageModelId]);
+    // Skeleton used to hard-lock the image picker to Grok Imagine. Casey wants
+    // owner/advanced users to be able to swap to other lanes (Imagen 4 Ultra /
+    // Recraft Pro / Nano Banana Pro) for A/B testing. We keep Grok Imagine as
+    // the default for skeleton (via CreatePanel's useState initializer), surface
+    // it as "recommended" in the picker copy, but stop filtering the modal and
+    // stop overwriting the user's pick.
+    const skeletonSceneModelRecommended = selectedTemplate === 'skeleton';
+    const sceneImageModelOptions = useMemo(
+        () => imageModelCatalog.filter((model) => model.enabled !== false),
+        [imageModelCatalog]
+    );
 
     useEffect(() => {
         (async () => {
@@ -2314,8 +2312,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Image Generation Model</p>
                         <h3 className="mt-2 text-2xl font-bold text-white">Choose the image lane for this workspace</h3>
                         <p className="mt-2 text-sm text-gray-400">
-                            {skeletonSceneModelLocked
-                                ? 'Skeleton scene generation is locked to Grok Imagine via fal.ai. Seedream stays thumbnail-only.'
+                            {skeletonSceneModelRecommended
+                                ? 'Skeleton AI defaults to Grok Imagine (reference-image style lock). You can swap lanes — Grok stays the recommended pick for consistent skeleton visuals.'
                                 : 'Basic lanes stay in the normal Studio burn. Premium and elite lanes consume Catalyst credits first from included credits, then from the credit wallet.'}
                         </p>
                     </div>
@@ -2855,8 +2853,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Generation Model</p>
                                     <h3 className="mt-2 text-lg font-semibold text-white">{selectedImageModel.label}</h3>
                                     <p className="mt-2 text-sm text-gray-400">
-                                        {skeletonSceneModelLocked
-                                            ? 'Skeleton AI short scenes are locked to Grok Imagine via fal.ai. Seedream is reserved for thumbnail work.'
+                                        {skeletonSceneModelRecommended && selectedImageModel.id === 'grok_imagine'
+                                            ? 'Grok Imagine is the recommended Skeleton AI lane — its reference-image style lock keeps the ivory bones / amber-shell look consistent across scenes.'
                                             : selectedImageModel.summary}
                                     </p>
                                 </div>
@@ -2875,17 +2873,15 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                 <span>{selectedImageModel.speed}</span>
                             </div>
                             <p className="mt-4 text-xs text-gray-500">
-                                {skeletonSceneModelLocked
-                                    ? 'Skeleton scenes stay on Grok Imagine. Other image lanes are not used for Skeleton scene generation.'
+                                {skeletonSceneModelRecommended
+                                    ? 'Grok Imagine is the Skeleton AI default. Other lanes work too — swap any time for a different aesthetic.'
                                     : 'Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.'}
                             </p>
                         </button>
                         <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
                             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Catalyst Spend Snapshot</p>
                             <p className="mt-2 text-lg font-semibold text-white">
-                                {skeletonSceneModelLocked
-                                    ? 'Skeleton scene lane is locked to Grok Imagine via fal.ai'
-                                    : selectedImageCreditCost > 0
+                                {selectedImageCreditCost > 0
                                     ? `${selectedImageCreditCost} credits per image on ${selectedImageModel.label}`
                                     : `${selectedImageModel.label} stays on the basic image lane`}
                             </p>
@@ -4131,11 +4127,14 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     <button
                         type="button"
                         onClick={() => setImageModelPickerOpen(true)}
-                        disabled={loading || scriptLoading || skeletonSceneModelLocked}
+                        disabled={loading || scriptLoading}
                         className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04] disabled:opacity-50"
                     >
                         <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Model</p>
-                        <p className="mt-1.5 text-sm font-semibold text-white">{skeletonSceneModelLocked ? 'Grok Imagine (Skeleton locked)' : selectedImageModel.label}</p>
+                        <p className="mt-1.5 text-sm font-semibold text-white">
+                            {selectedImageModel.label}
+                            {skeletonSceneModelRecommended && selectedImageModel.id === 'grok_imagine' ? ' (Skeleton default)' : ''}
+                        </p>
                         <p className="mt-1 text-xs text-gray-400">{formatModelSpendLabel(selectedImageModel, 'image')} · Click to change</p>
                     </button>
                     <button

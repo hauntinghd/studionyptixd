@@ -35,6 +35,7 @@ const OWNER_ALL_ACCESS = {
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
         session,
+        loading,
         role,
         ownerOverride,
         topupCreditsRemaining,
@@ -63,8 +64,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [isAdmin, laneAccess]);
 
     useEffect(() => {
+        // Wait for the AuthContext to finish its initial Supabase session bootstrap
+        // before deciding to redirect. Without this gate, a logged-in user hitting
+        // refresh gets bounced to the auth page because `session` is null for the
+        // first tick while getSession() reads localStorage.
+        if (loading) return;
         if (!session) onNavigate('auth');
-    }, [session, onNavigate]);
+    }, [session, loading, onNavigate]);
 
     useEffect(() => {
         if (typeof window === 'undefined') return;
@@ -307,13 +313,19 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 }
 
 function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
-    const niches: { id: string; title: string; desc: string; badge?: string }[] = [
-        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', badge: 'Most Popular' },
-        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', badge: 'Trending' },
-        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', badge: 'New' },
-        { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', badge: 'Trending' },
-        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', badge: 'Trending' },
-        { id: 'business', title: 'Business', desc: 'Bloomberg-grade documentary' },
+    // Keep in sync with CreatePanel.tsx `templates` array (same ids, titles, icons).
+    // All 9 live niches appear here so the gallery matches the Switch-Niche modal
+    // inside the Create workspace.
+    const niches: { id: string; title: string; desc: string; icon: string; badge?: string }[] = [
+        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', icon: '💀', badge: 'Most Popular' },
+        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', icon: '📈', badge: 'Trending' },
+        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', icon: '⚖️', badge: 'New' },
+        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
+        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
+        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
+        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
+        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', icon: '👻', badge: 'Trending' },
+        { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', icon: '⚔️', badge: 'Trending' },
     ];
     return (
         <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
@@ -338,7 +350,10 @@ function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
                             />
                             <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
                             <div className="absolute inset-x-0 bottom-0 p-4">
-                                <h3 className="text-base font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.title}</h3>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.icon}</span>
+                                    <h3 className="text-base font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.title}</h3>
+                                </div>
                                 <p className="mt-1 text-xs text-gray-300 drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.desc}</p>
                             </div>
                             {n.badge && (

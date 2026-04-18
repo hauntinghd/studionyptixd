@@ -388,10 +388,12 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
 
 
 def _normalize_scene_image_model_id(value: str | None, template: str = "") -> str:
-    normalized = _normalize_creative_image_model_id(value, template=template)
-    if str(template or "").strip().lower() == "skeleton":
-        return "imagen4_preview"
-    return normalized
+    # Prior revisions force-overrode skeleton scene image gen to "imagen4_preview",
+    # conflicting with the frontend which defaulted to Grok Imagine AND preventing
+    # owner/advanced users from testing other lanes (Recraft Pro, Nano Banana Pro,
+    # ERNIE) on skeleton renders. Now we trust the caller's pick and only fall
+    # back to the global defaults via _normalize_creative_image_model_id.
+    return _normalize_creative_image_model_id(value, template=template)
 
 
 def _normalize_creative_video_model_id(value: str | None) -> str:
