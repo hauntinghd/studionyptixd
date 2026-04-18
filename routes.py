@@ -373,6 +373,7 @@ def build_youtube_catalyst_router(
     catalyst_auto_tick_endpoint=None,
     catalyst_auto_pilot_endpoint=None,
     catalyst_upload_endpoint=None,
+    short_upload_endpoint=None,
     catalyst_velocity_endpoint=None,
 ):
     router = APIRouter()
@@ -401,6 +402,8 @@ def build_youtube_catalyst_router(
         router.add_api_route("/api/catalyst/hub/auto-pilot", catalyst_auto_pilot_endpoint, methods=["POST"])
     if catalyst_upload_endpoint:
         router.add_api_route("/api/catalyst/hub/upload", catalyst_upload_endpoint, methods=["POST"])
+    if short_upload_endpoint:
+        router.add_api_route("/api/short/upload-to-youtube", short_upload_endpoint, methods=["POST"])
     if catalyst_velocity_endpoint:
         router.add_api_route("/api/catalyst/hub/velocity", catalyst_velocity_endpoint, methods=["GET"])
     return router

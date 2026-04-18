@@ -18297,6 +18297,52 @@ async def _youtube_upload_video_for_user(*, user: dict, session_id: str, channel
     return result
 
 
+async def _youtube_upload_short_for_user(*, user: dict, job_id: str, channel_id: str, privacy: str = "private") -> dict:
+    """Upload a completed short-form job's rendered MP4 to YouTube.
+
+    Parallel to _youtube_upload_video_for_user (which reads _longform_sessions) but
+    for the short-form pipeline which tracks state in the `jobs` dict. Used by the
+    render-complete "Upload to YouTube" button in CreatePanel.
+    """
+    if not job_id:
+        raise HTTPException(400, "job_id required")
+    if not channel_id:
+        raise HTTPException(400, "channel_id required")
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job {job_id} not found")
+    if str(job.get("user_id", "") or "") != str(user.get("id", "") or ""):
+        raise HTTPException(403, "This job belongs to another user")
+    if str(job.get("status", "")) != "complete":
+        raise HTTPException(400, "Render has not completed yet — try again when status is complete")
+    output_file = str(job.get("output_file", "") or "")
+    if not output_file:
+        raise HTTPException(400, "Job has no output file")
+    video_path = OUTPUT_DIR / output_file
+    if not video_path.exists() or video_path.stat().st_size == 0:
+        raise HTTPException(404, "Rendered video file not found on disk — it may have been cleaned up")
+    token_result = await _youtube_connected_channel_access_token(user, channel_id)
+    access_token = token_result[0] if isinstance(token_result, (tuple, list)) else str(token_result or "")
+    if not access_token:
+        raise HTTPException(401, "YouTube not connected or token expired. Reconnect your channel.")
+    meta = dict(job.get("metadata", {}) or {})
+    title = str(meta.get("title") or job.get("topic") or "Untitled Short")[:100]
+    description = str(meta.get("description") or "")[:5000]
+    tags = list(meta.get("tags", []) or [])[:30]
+    allowed_privacy = {"private", "unlisted", "public"}
+    safe_privacy = privacy if privacy in allowed_privacy else "private"
+    result = await youtube_upload_video(
+        access_token=access_token,
+        video_path=str(video_path),
+        title=title,
+        description=description,
+        tags=tags,
+        privacy=safe_privacy,
+    )
+    log.info("YouTube upload complete for short job %s: %s", job_id, result.get("video_url", ""))
+    return result
+
+
 async def _youtube_get_velocity_for_user(*, user: dict, channel_id: str) -> dict:
     """Get latest video's view velocity for decay detection."""
     if not channel_id:
@@ -18337,6 +18383,7 @@ app.include_router(
         longform_owner_beta_enabled=_longform_owner_beta_enabled,
         harvest_catalyst_outcomes_for_channel=_harvest_catalyst_outcomes_for_channel,
         youtube_upload_video_for_user=_youtube_upload_video_for_user,
+        youtube_upload_short_for_user=_youtube_upload_short_for_user,
         youtube_get_velocity_for_user=_youtube_get_velocity_for_user,
     )
 )

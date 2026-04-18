@@ -256,9 +256,9 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <WalletCards className="h-4 w-4" />
                             Billing
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white">Free plan, 3 monthly plans, and top-up packs</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white">One price. Every short ships.</h1>
                         <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            Studio now sells one clean short-form offer: Free, Starter, Creator, Pro, plus wallet top-ups for heavier animation usage.
+                            Start free with two animated shorts. Upgrade when you're ready to post every day — no babysitting the renderer, no mystery errors, and any failed render refunds your credits automatically.
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
@@ -276,10 +276,10 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr),minmax(320px,0.75fr)]">
                     <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                         <div className="mb-5">
-                            <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Public Plans</p>
-                            <h2 className="mt-2 text-2xl font-bold text-white">Choose the plan that fits your run rate</h2>
+                            <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Plans</p>
+                            <h2 className="mt-2 text-2xl font-bold text-white">Pick the plan that matches your posting cadence</h2>
                             <p className="mt-2 text-sm text-gray-400">
-                                Free gives two short-form animated renders. Paid plans add more monthly credits and unlock Chat Story. Clone, Thumbnails, and Long Form stay out of the public billing promise while they are still being worked on.
+                                Every render goes through the same reliability stack: content-filter errors surface with edit-prompt guidance, and failed renders automatically refund your credits. Pick the plan based on how many shorts you want to ship this month.
                             </p>
                         </div>
                         <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
@@ -399,7 +399,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     <div className="mb-5">
                         <h2 className="text-lg font-semibold text-white">Top-up packs</h2>
                         <p className="mt-1 text-sm text-gray-400">
-                            Use wallet packs for pay-as-you-go short-form usage, or combine them with a monthly plan for hybrid usage.
+                            Pay-as-you-go credits for bursty weeks. Stack on any plan — your monthly credits burn first, then top-up credits kick in.
                         </p>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
