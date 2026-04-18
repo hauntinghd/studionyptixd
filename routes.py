@@ -294,6 +294,7 @@ def build_billing_router(
     get_admin_youtube_quota_endpoint,
     admin_catalyst_backfill_tick_endpoint,
     get_admin_catalyst_corpus_endpoint,
+    get_admin_youtube_video_retention_endpoint,
 ):
     router = APIRouter()
     router.add_api_route("/api/checkout", create_checkout_endpoint, methods=["POST"])
@@ -312,6 +313,7 @@ def build_billing_router(
     router.add_api_route("/api/admin/youtube-quota", get_admin_youtube_quota_endpoint, methods=["GET"])
     router.add_api_route("/api/admin/catalyst/backfill-tick", admin_catalyst_backfill_tick_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/catalyst/corpus", get_admin_catalyst_corpus_endpoint, methods=["GET"])
+    router.add_api_route("/api/admin/youtube/video-retention", get_admin_youtube_video_retention_endpoint, methods=["GET"])
     return router
 
 

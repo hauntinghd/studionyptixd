@@ -20326,6 +20326,75 @@ async def _get_admin_catalyst_corpus(user: dict = Depends(require_auth)):
     return await _cb.corpus_stats()
 
 
+async def _get_admin_youtube_video_retention(
+    video_id: str,
+    channel_id: str = "",
+    days: int = 365,
+    user: dict = Depends(require_auth),
+):
+    """Pull audience retention curve + traffic source breakdown for a specific video.
+
+    Admin-only. Uses the caller's own YouTube OAuth token; only owned channels
+    return data. `video_id` is required. `channel_id` defaults to the caller's
+    default connected channel. `days` bounds the Analytics date range (<= 365).
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    vid = str(video_id or "").strip()
+    if not vid:
+        raise HTTPException(400, "video_id required")
+    user_id = str(user.get("id", "") or "").strip()
+    if not user_id:
+        raise HTTPException(401, "User not identified")
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        channels = dict(bucket.get("channels") or {})
+        cid = str(channel_id or "").strip() or str(bucket.get("default_channel_id", "") or "").strip()
+        if not cid and channels:
+            cid = next(iter(channels.keys()))
+        record = dict(channels.get(cid) or {})
+    if not record:
+        raise HTTPException(404, "No connected YouTube channel found for this user")
+    access_token, refreshed = await _youtube_ensure_access_token(record)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=max(1, min(365, int(days or 365))))
+    common_ids = f"channel=={cid}"
+    common_filter = f"video=={vid}"
+    date_params = {"startDate": start_date.isoformat(), "endDate": end_date.isoformat()}
+    curve = await _youtube_api_get(
+        access_token, "/reports", analytics=True,
+        params={"ids": common_ids, **date_params, "filters": common_filter,
+                "dimensions": "elapsedVideoTimeRatio",
+                "metrics": "audienceWatchRatio,relativeRetentionPerformance",
+                "maxResults": 100},
+    )
+    traffic = await _youtube_api_get(
+        access_token, "/reports", analytics=True,
+        params={"ids": common_ids, **date_params, "filters": common_filter,
+                "dimensions": "insightTrafficSourceType",
+                "metrics": "views,estimatedMinutesWatched,averageViewDuration",
+                "maxResults": 25},
+    )
+    summary = await _youtube_fetch_video_analytics(access_token, cid, vid)
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        bucket = _youtube_bucket_for_user(user_id)
+        bucket_channels = dict(bucket.get("channels") or {})
+        if cid in bucket_channels:
+            bucket_channels[cid] = refreshed
+            bucket["channels"] = bucket_channels
+            _save_youtube_connections()
+    return {
+        "video_id": vid,
+        "channel_id": cid,
+        "date_range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+        "summary": summary,
+        "retention_curve": curve,
+        "traffic_sources": traffic,
+    }
+
+
 async def _get_admin_kpi(user: dict = Depends(require_auth)):
     if user.get("email") not in ADMIN_EMAILS:
         raise HTTPException(403, "Admin access required")
@@ -20373,6 +20442,7 @@ app.include_router(
         get_admin_youtube_quota_endpoint=_get_admin_youtube_quota,
         admin_catalyst_backfill_tick_endpoint=_admin_catalyst_backfill_tick,
         get_admin_catalyst_corpus_endpoint=_get_admin_catalyst_corpus,
+        get_admin_youtube_video_retention_endpoint=_get_admin_youtube_video_retention,
     )
 )
 
