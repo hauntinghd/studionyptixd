@@ -2427,55 +2427,19 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             else "Create a viral short that stays tightly anchored to this exact topic.\n\n"
                  f"TOPIC:\n{topic_text}"
         )
-        # --- Try FAL OpenRouter (Claude Sonnet 4.6) first ---
+        # Studio is all-fal now. Both helpers below route through fal.ai's
+        # any-llm router internally (_fal_openrouter_json_completion is a thin
+        # alias, _xai_json_completion is too). The prior `fal -> direct XAI`
+        # fallback chain was hanging jobs at 5% because:
+        #   (a) the fal URL was wrong (fal-ai/openrouter/router returns 404)
+        #   (b) direct XAI was quota-exhausted + retried for 150s silently
+        # If fal any-llm fails now, let it raise — the outer 150s timeout +
+        # skeleton local fallback in backend.py:11850 will handle it fast.
         if _fal_openrouter_json_completion is not None:
-            try:
-                result = await _fal_openrouter_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
-                log.info("Script generation succeeded via FAL OpenRouter (Claude Sonnet 4.6)")
-                return result
-            except Exception as fal_exc:
-                log.warning("FAL OpenRouter script gen failed, falling back to Grok: %s", str(fal_exc)[:200])
-        # --- Fallback to Grok (xAI) ---
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(
-                        "https://api.x.ai/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {XAI_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": "grok-3-mini-fast",
-                            "messages": [
-                                {"role": "system", "content": prompt_text},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            "temperature": temp,
-                        },
-                    )
-                if resp.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                    wait_seconds = (attempt + 1) * 2
-                    log.warning(
-                        f"Script generation upstream returned {resp.status_code}; retrying in {wait_seconds}s "
-                        f"(attempt {attempt + 1}/3, template={template}, script_to_short={script_to_short_mode})"
-                    )
-                    await asyncio.sleep(wait_seconds)
-                    continue
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                if start == -1 or end == 0:
-                    raise ValueError("No JSON found in Grok response")
-                return json.loads(content[start:end])
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(attempt + 1)
-                    continue
-        raise last_error if last_error is not None else RuntimeError("Script generation failed")
+            return await _fal_openrouter_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
+        if _xai_json_completion is not None:
+            return await _xai_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
+        raise RuntimeError("Script generation hook not configured (no fal any-llm path available)")
 
     def _score_story_script_quality(data: dict) -> tuple[int, list[str]]:
         scenes = data.get("scenes", [])
