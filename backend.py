@@ -19543,12 +19543,20 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
     order_id = str(order_id or "").strip()
     if not order_id:
         raise HTTPException(400, "Missing PayPal order id")
+    # Phase 3 BUG #1 fix: do the idempotency check INSIDE the lock so two
+    # concurrent callers (e.g. /api/paypal/return + PAYMENT.CAPTURE.COMPLETED
+    # webhook firing within the same request lifetime) don't both call the
+    # PayPal capture API. Previously the first check was outside the lock →
+    # both callers hit PayPal. Only wasted an API call (the inside-lock
+    # recheck prevented double-crediting), but PayPal's duplicate-capture
+    # behavior isn't guaranteed idempotent and this could surface as an
+    # error on the slower caller.
     async with _paypal_orders_lock:
         order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+        if order_meta and order_meta.get("credited"):
+            return order_meta
     if not order_meta:
         raise HTTPException(404, "PayPal order was not found")
-    if order_meta.get("credited"):
-        return order_meta
     _, capture_id = await _capture_paypal_order_api(order_id)
     async with _paypal_orders_lock:
         latest = dict(_paypal_orders.get(order_id, {}) or {})
@@ -19638,6 +19646,34 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
         _save_paypal_orders()
     if user_id:
         await _supabase_set_user_plan(user_id, plan)
+        # Phase 3 BUG #2 fix: reset monthly AC usage on subscription
+        # activation. Before this patch, a user upgrading from a lower tier
+        # (or reactivating after a cancellation) kept their old
+        # monthly_usage count — so a Pro activation on day 25 of the month
+        # that had already burned 35 renders left only 5 of the 40 in the
+        # new allotment. Users expected a fresh counter; they got locked
+        # out. Now: clear the animated + non-animated monthly buckets for
+        # the current month_key so the new plan's full allotment is
+        # available immediately.
+        try:
+            from billing import _wallet_for_user, _month_key, _save_topup_wallets
+            wallet = _wallet_for_user(user_id)
+            mk = _month_key()
+            wallet.setdefault("monthly_usage", {})[mk] = 0
+            wallet.setdefault("monthly_usage_non_animated", {})[mk] = 0
+            wallet["updated_at"] = time.time()
+            _save_topup_wallets()
+        except Exception as reset_err:
+            log.warning(f"Monthly AC reset on subscription activation failed for {user_id[:12]}: {reset_err}")
+            try:
+                _studio_alerts.send_alert(
+                    "warn",
+                    "Subscription activated but monthly AC reset failed",
+                    f"user={user_id[:12]} plan={plan} order={order_id}. Manual fix required: zero the current-month counter in topup_wallets for this user.",
+                    context={"user_id": user_id[:12], "plan": plan, "error": str(reset_err)[:200]},
+                )
+            except Exception:
+                pass
     await _append_landing_notification(
         event_type="subscription",
         plan=plan,
@@ -20015,11 +20051,32 @@ async def _paypal_webhook(request: Request):
         log.warning(f"PayPal webhook missing event id: type={event_type}")
         return {"status": "ok", "action": "no_id"}
     # Dedup: if we've already processed this event id, ack 200 without re-dispatching.
+    # Phase 3 BUG #3 fix: check BOTH local (in-memory/disk) AND Supabase. Local
+    # dedup is wiped on every RunPod worker cycle, which happens multiple times
+    # per day during active development. Without the Supabase layer, any PayPal
+    # retry (up to 25 per event over 3 days) that landed on a fresh worker
+    # could re-apply the same event — double-credit / double-cancel.
+    import paypal_webhook_store as _pp_store
+    already_processed = False
     async with _paypal_webhook_events_lock:
         if event_id in _paypal_webhook_events:
-            log.info(f"PayPal webhook dedup: event {event_id} already processed")
-            return {"status": "ok", "action": "duplicate"}
-        # Reserve the slot before dispatching so that concurrent retries see it.
+            already_processed = True
+    if not already_processed and _pp_store.configured():
+        if await _pp_store.has_processed(event_id):
+            already_processed = True
+            # Warm the local cache so subsequent retries on this worker short-circuit.
+            async with _paypal_webhook_events_lock:
+                _paypal_webhook_events[event_id] = {
+                    "received_at": time.time(),
+                    "event_type": event_type,
+                    "status": "processed_via_supabase",
+                }
+                _save_paypal_webhook_events()
+    if already_processed:
+        log.info(f"PayPal webhook dedup: event {event_id} already processed")
+        return {"status": "ok", "action": "duplicate"}
+    # Reserve the slot before dispatching so that concurrent retries on this worker see it.
+    async with _paypal_webhook_events_lock:
         _paypal_webhook_events[event_id] = {
             "received_at": time.time(),
             "event_type": event_type,
@@ -20044,6 +20101,16 @@ async def _paypal_webhook(request: Request):
         rec["action"] = str(outcome.get("action", "") or "")
         rec["processed_at"] = time.time()
         _paypal_webhook_events[event_id] = rec
+    # Phase 3 BUG #3 fix: mirror to Supabase so the dedup survives worker cycles.
+    # Never block the PayPal ack on this — retries are Supabase's concern.
+    try:
+        await _pp_store.mark_processed(
+            event_id,
+            event_type=event_type,
+            payload_excerpt={"action": str(outcome.get("action", "") or "")[:120]},
+        )
+    except Exception:
+        pass
         _save_paypal_webhook_events()
     return {"status": "ok", "event_id": event_id, "outcome": outcome}
 
