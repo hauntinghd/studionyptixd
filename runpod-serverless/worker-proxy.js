@@ -190,6 +190,66 @@ export default {
       );
     }
 
+    // ───────────────────────────────────────────────────────────
+    // Sync-timeout handling: when the backend worker is cold-booting or
+    // throttled, RunPod's /runsync returns `{id, status: "IN_QUEUE"}` without
+    // an `output` field instead of the real response. If we pass that to the
+    // browser, the user sees a confusing JSON blob with no actual result —
+    // which is what was happening on OAuth redirects. Poll the status endpoint
+    // ourselves up to POLL_MAX_MS, return the real response when complete,
+    // and fall back to a clean 504 + CORS if we hit the budget.
+    //
+    // Total elapsed from user's first request: ~30s (runsync) + POLL_MAX_MS.
+    // Kept under Cloudflare's 100s CPU budget and typical browser request timeout.
+    // ───────────────────────────────────────────────────────────
+    if (runpodPath === "runsync" && rpData && rpData.id && !rpData.output) {
+      const jobId = rpData.id;
+      const POLL_MAX_MS = 60_000;    // up to 60s of extra polling
+      const POLL_INTERVAL_MS = 2000; // 2s between polls
+      const deadline = Date.now() + POLL_MAX_MS;
+
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        let statusResp;
+        try {
+          statusResp = await fetch(
+            `https://api.runpod.ai/v2/${endpointId}/status/${jobId}`,
+            { headers: { Authorization: `Bearer ${apiKey}` } },
+          );
+        } catch {
+          continue; // transient network error — try again next interval
+        }
+        if (!statusResp.ok) continue;
+        let statusData;
+        try { statusData = await statusResp.json(); } catch { continue; }
+        const s = String(statusData.status || "").toUpperCase();
+        if (s === "COMPLETED") {
+          rpData = statusData; // swap in the finished payload and fall through
+          break;
+        }
+        if (s === "FAILED" || s === "CANCELLED" || s === "TIMED_OUT") {
+          return jsonResponse(
+            { error: "backend_job_failed", status: s, detail: statusData.error || null },
+            { status: 502, cors },
+          );
+        }
+        // Still IN_QUEUE or IN_PROGRESS — keep polling
+      }
+
+      // Deadline hit without completion — return a proper 504 with CORS so
+      // the browser can surface a meaningful error instead of a raw job-id blob.
+      if (!rpData.output) {
+        return jsonResponse(
+          {
+            error: "backend_cold_or_throttled",
+            detail: "RunPod worker did not complete the request in time. This usually means the worker is cold-booting or the account is low on balance. Retry in a moment.",
+            job_id: jobId,
+          },
+          { status: 504, cors },
+        );
+      }
+    }
+
     // Sync → unwrap RunPod output into native HTTP response
     const output = rpData.output || {};
     const outStatus = output.status_code || 502;
