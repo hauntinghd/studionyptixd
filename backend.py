@@ -13591,11 +13591,20 @@ async def _queue_next_longform_chapter_if_ready(session_id: str) -> None:
             )
             return
 
+    # NOTE: these were asyncio.create_task(...) originally. Under RunPod serverless,
+    # TestClient runs each HTTP request in a fresh event loop that is torn down the
+    # moment the response is returned — so a fire-and-forget task dies before it can
+    # even acquire the draft semaphore, leaving chapters silently stuck in
+    # "draft_generating" forever. Awaiting inline keeps the generation inside the
+    # POST request lifecycle so the TestClient loop stays alive until work completes.
+    # Tradeoff: the HTTP response takes ~2-4 min per chapter (or ~30 min for a full
+    # auto_pipeline run). The CF Worker's poll-on-IN_QUEUE behaviour (commit 87f4694a)
+    # already accommodates this via RunPod /runsync queueing.
     if should_auto_finalize:
-        asyncio.create_task(_auto_finalize_longform_session(session_id))
+        await _auto_finalize_longform_session(session_id)
         return
     if next_idx is not None:
-        asyncio.create_task(_generate_longform_chapter_for_session(session_id, next_idx))
+        await _generate_longform_chapter_for_session(session_id, next_idx)
 
 
 async def _run_longform_pipeline(job_id: str, session_id: str):
@@ -15727,7 +15736,9 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
         _save_longform_sessions()
 
     _job_diag_init(job_id, "longform")
-    asyncio.create_task(_run_longform_pipeline_isolated(job_id, session_id))
+    # Same RunPod serverless fix as _queue_next_longform_chapter_if_ready:
+    # await inline so the render task survives past the HTTP response boundary.
+    await _run_longform_pipeline_isolated(job_id, session_id)
     return job_id
 
 
