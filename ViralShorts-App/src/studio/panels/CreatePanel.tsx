@@ -147,7 +147,6 @@ function SceneImageLoadingCard({ template }: { template: string }) {
 
 const finaleCaptionFonts = ['Komika Axis', 'Montserrat Bold', 'Anton', 'Bebas Neue', 'Satoshi', 'Oswald', 'Archivo Black', 'League Spartan', 'Teko', 'Playfair Display'];
 const finaleMusicOptions = ['No Background Music', 'Dark Ambient', 'Cinematic Tension', 'Upbeat Energy', 'Auto (Match Template)'];
-const backgroundMusicComingSoon = false;
 const soundReferenceOptions = [
     { id: 'none', label: 'No Sound Reference', desc: 'Clean default timing and effects.' },
     { id: 'cinematic_impacts', label: 'Cinematic Impacts', desc: 'Trailer-style hits and transitions.' },
