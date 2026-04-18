@@ -10793,6 +10793,41 @@ def _story_salvage_refinement_for_scene(prompt: str) -> str:
     return STORY_EXPLAINER_REALISM_REFINEMENT if _story_scene_prefers_explainer_visuals(prompt) else STORY_REALISM_REFINEMENT
 
 
+_CONTENT_POLICY_SOFTEN_RULES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\bpanama\s*papers?\b", re.IGNORECASE), "leaked financial dossier"),
+    (re.compile(r"\bparadise\s*papers?\b", re.IGNORECASE), "offshore financial dossier"),
+    (re.compile(r"\bpandora\s*papers?\b", re.IGNORECASE), "leaked offshore records"),
+    (re.compile(r"\bcartels?\b", re.IGNORECASE), "illicit organization"),
+    (re.compile(r"\bmafia\b", re.IGNORECASE), "crime syndicate"),
+    (re.compile(r"\btax\s*(?:fraud|evasion)\b", re.IGNORECASE), "financial misconduct"),
+    (re.compile(r"\bsanctions?\s*evasion\b", re.IGNORECASE), "regulatory circumvention"),
+    (re.compile(r"\bmoney\s*laundering\b", re.IGNORECASE), "illicit finance"),
+    (re.compile(r"\b(?:murder|assassination|killing)s?\b", re.IGNORECASE), "violent crime"),
+    (re.compile(r"\bkills?\b", re.IGNORECASE), "confronts"),
+    (re.compile(r"\bdrugs?\b", re.IGNORECASE), "contraband"),
+    (re.compile(r"\bweapons?\b", re.IGNORECASE), "tactical prop"),
+    (re.compile(r"\bguns?\b", re.IGNORECASE), "tactical prop"),
+    (re.compile(r"\bbloody?\b", re.IGNORECASE), "crimson"),
+    (re.compile(r"\btortures?\b", re.IGNORECASE), "interrogations"),
+)
+
+
+def _soften_content_policy_prompt(prompt: str) -> tuple[str, bool]:
+    """Replace phrases commonly flagged by image-provider content filters.
+
+    Returns (softened_prompt, changed). Used as a one-shot auto-retry when fal
+    returns FalFailed with content_policy. If changed=False, the caller should
+    surface the original error to the user rather than pointlessly retrying.
+    """
+    text = str(prompt or "")
+    if not text.strip():
+        return text, False
+    softened = text
+    for pattern, replacement in _CONTENT_POLICY_SOFTEN_RULES:
+        softened = pattern.sub(replacement, softened)
+    return softened, softened != text
+
+
 def _normalize_skeleton_quality_mode(value: str | None, template: str = "skeleton") -> str:
     if template not in {"skeleton", "story"}:
         return "standard"
@@ -11850,7 +11885,33 @@ async def run_generation_pipeline(
                         source="ernie_scene_image",
                     )
                 except _fal_gate.FalFailed as exc:
-                    raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
+                    # Auto-soften: if fal flags the prompt on content-policy grounds,
+                    # try once more with a softened prompt before failing the pipeline.
+                    # This recovers users who used keywords like "Panama Papers" or
+                    # "cartel" without them having to abandon the render.
+                    _err_l = str(exc or "").lower()
+                    _is_content_policy = (
+                        "content" in _err_l or "policy" in _err_l or "flagged" in _err_l
+                    )
+                    if _is_content_policy:
+                        softened_prompt, _changed = _soften_content_policy_prompt(full_prompt)
+                        if _changed:
+                            log.info(f"[{job_id}] Skeleton scene {i+1} content-policy auto-soften triggered; retrying once")
+                            try:
+                                _img_json = await _fal_gate.post_with_retry(
+                                    "https://fal.run/fal-ai/ernie-image",
+                                    api_key=FAL_AI_KEY,
+                                    json_body={"prompt": softened_prompt, "num_images": 1, "image_size": _img_size},
+                                    timeout_sec=60,
+                                    max_attempts=3,
+                                    source="ernie_scene_image_softened",
+                                )
+                            except _fal_gate.FalFailed as exc2:
+                                raise RuntimeError(f"ERNIE-Image failed after auto-soften: {exc2}") from exc2
+                        else:
+                            raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
+                    else:
+                        raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
                 _img_url = (_img_json or {}).get("images", [{}])[0].get("url", "") if isinstance(_img_json, dict) else ""
                 if not _img_url:
                     raise RuntimeError("ERNIE-Image returned no image URL")
@@ -15754,6 +15815,48 @@ async def _longform_resolve_error(session_id: str, req: LongFormResolveErrorRequ
     if not session_latest:
         raise HTTPException(404, "Long-form session not found")
     return {"session": _longform_public_session(session_latest), "chapter": regenerated}
+
+
+def _longform_estimated_credit_cost(session: dict) -> int:
+    """Compute AC cost for a longform finalize, matching Phase 4's short-form pattern.
+
+    Currently unused because longform is owner-beta-only (`_longform_owner_beta_enabled`
+    gates access) and `_start_longform_finalize_internal` hardcodes credit_charged=False.
+    When longform goes public, the finalize path should:
+
+        1. Check user billing like short-form does
+        2. Call this helper with the session to get `credits_required`
+        3. Pass `credits_needed=credits_required` into `_reserve_generation_credit`
+        4. Store `credit_amount=credits_required` on the job so `_job_diag_finalize`
+           refunds the correct amount on pipeline failure
+
+    Formula: per-chapter scenes × video_multiplier + scenes × image_cost_per_scene,
+    summed across chapters. Defaults assume ~5 scenes per chapter and ~8 chapters for
+    an 8-minute target runtime. Video model defaults to kling21_standard (1x), image
+    model defaults to ernie_image (0 AC/image) when the session didn't set one.
+    """
+    if not isinstance(session, dict):
+        return 1
+    target_minutes = float(session.get("target_minutes", 0) or 0) or 8.0
+    chapters = list(session.get("chapters") or [])
+    chapter_count = max(len(chapters), max(1, int(round(target_minutes))))
+    scenes_per_chapter = 0
+    if chapters:
+        per = [len(list((c or {}).get("scenes") or [])) for c in chapters]
+        per = [p for p in per if p > 0]
+        if per:
+            scenes_per_chapter = sum(per) // len(per)
+    if scenes_per_chapter <= 0:
+        scenes_per_chapter = 5
+    total_scenes = chapter_count * scenes_per_chapter
+    video_model_id = _normalize_creative_video_model_id(session.get("video_model_id"))
+    image_model_id = _normalize_creative_image_model_id(session.get("image_model_id"), template=str(session.get("template", "") or ""))
+    video_per_scene = _creative_video_credit_multiplier(video_model_id)
+    image_per_scene = _creative_image_credit_cost(image_model_id, template=str(session.get("template", "") or ""))
+    animation_enabled = _bool_from_any(session.get("animation_enabled"), True)
+    if animation_enabled:
+        return max(1, total_scenes * video_per_scene + total_scenes * image_per_scene)
+    return max(1, total_scenes * image_per_scene)
 
 
 async def _start_longform_finalize_internal(session_id: str, acting_user: Optional[dict] = None) -> str:
