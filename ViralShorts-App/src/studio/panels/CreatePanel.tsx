@@ -164,18 +164,30 @@ const fallbackImageModelCatalog: CreativeModelProfile[] = [
     { id: 'nano_banana_pro', label: 'Nano Banana Pro', provider: 'fal', tier: 'elite', summary: 'Premium reasoning-based image generation with strong composition.', speed: 'Medium', enabled: true, estimated_unit_usd: 0.15, billing_unit: 'image', credit_cost_per_image: 5 },
     { id: 'recraft_v4_pro', label: 'Recraft V4 Pro', provider: 'fal', tier: 'elite', summary: 'Designer-grade generation for top-end ad and thumbnail style work.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.25, billing_unit: 'image', credit_cost_per_image: 5 },
 ];
+// Fallback catalog — used only if /api/config hasn't loaded yet. Keep ids, tiers,
+// and credit_multipliers in sync with CREATIVE_VIDEO_MODEL_PROFILES in video_pipeline.py
+// so the first-paint AC cost shown to the user matches what the backend will actually
+// charge on enqueue.
 const fallbackVideoModelCatalog: CreativeModelProfile[] = [
+    { id: 'pixverse_v6', label: 'PixVerse V6', provider: 'fal', tier: 'basic', summary: 'Latest PixVerse lane. Cheaper than Kling Std at 720p, strong motion.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.045, billing_unit: 'second', credit_multiplier: 1 },
+    { id: 'pixverse_c1', label: 'PixVerse C1 (Film Grade)', provider: 'fal', tier: 'premium', summary: 'Film-grade hyper-realistic PixVerse lane at 720p.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.050, billing_unit: 'second', credit_multiplier: 1 },
     { id: 'kling21_standard', label: 'Kling 2.1 Standard', provider: 'fal', tier: 'basic', summary: 'Default animation lane for Studio renders.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.056, billing_unit: 'second', credit_multiplier: 1 },
-    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 4 },
-    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 4 },
+    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 2 },
+    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 2 },
     { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Highest-cost Kling lane for top-end shot quality.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
 ];
 
-export default function CreatePanel() {
+interface CreatePanelProps {
+    /** Niche id from the Dashboard niche gallery — pre-selects the template when
+     * the user clicks a niche tile to enter the Create workspace. */
+    initialTemplate?: string;
+}
+
+export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) {
     const { session, role, creditsTotalRemaining, requiresTopup, checkout, checkoutTopup, topupPacks } = useContext(AuthContext);
     const isAdmin = role === 'admin';
     const [prompt, setPrompt] = useState("");
-    const [selectedTemplate, setSelectedTemplate] = useState('skeleton');
+    const [selectedTemplate, setSelectedTemplate] = useState(initialTemplate || 'skeleton');
     const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
     const [jobId, setJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<any>(null);
@@ -2402,7 +2414,18 @@ export default function CreatePanel() {
                 </div>
                 <div onWheelCapture={handleModelPickerWheel} className="mt-6 max-h-[58vh] overflow-y-auto overscroll-contain pr-1">
                     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                        {videoModelCatalog.filter((model) => model.enabled !== false).map((model) => {
+                        {videoModelCatalog
+                            .filter((model) => model.enabled !== false)
+                            .slice()
+                            .sort((a, b) => {
+                                const am = Number(a.credit_multiplier ?? 1);
+                                const bm = Number(b.credit_multiplier ?? 1);
+                                if (am !== bm) return am - bm;
+                                const au = Number(a.estimated_unit_usd ?? 0);
+                                const bu = Number(b.estimated_unit_usd ?? 0);
+                                return au - bu;
+                            })
+                            .map((model) => {
                             const active = selectedVideoModel.id === model.id;
                             return (
                                 <button
