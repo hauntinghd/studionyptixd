@@ -248,7 +248,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         <p className="mt-3 max-w-3xl text-sm text-gray-400">
                                             {ownerOverride
                                                 ? 'Owner preview — every Studio lane is open on this account.'
-                                                : 'Pick a niche and start creating. Skeleton AI, Chat Story, Fruit Story, and more are live today.'}
+                                                : 'Pick a niche and start creating. Nine live niches: Skeleton AI, Day Trading, Moral Dilemma, Business, Finance, Tech, Crypto, Scary Stories, Historical Epic.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">
@@ -269,6 +269,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                             </section>
                         )}
 
+                        {tab === 'create' && !createImmersive && (
+                            <NicheGallery onPick={() => setCreateWorkspaceOpen(true)} />
+                        )}
+
                         {backendOffline && !createImmersive && isAdmin && (
                             <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
                                 <div className="mb-1 font-semibold">Hosted fallback mode active (admin-only notice)</div>
@@ -281,6 +285,54 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             </div>
         </div>
+    );
+}
+
+function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
+    const niches: { id: string; title: string; desc: string; badge?: string }[] = [
+        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', badge: 'Most Popular' },
+        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', badge: 'Trending' },
+        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', badge: 'New' },
+        { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', badge: 'Trending' },
+        { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', badge: 'Trending' },
+        { id: 'business', title: 'Business', desc: 'Bloomberg-grade documentary' },
+    ];
+    return (
+        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
+            <div className="mb-5 flex items-baseline justify-between">
+                <h2 className="text-lg font-bold text-white">🔥 Currently trending niches</h2>
+                <span className="text-xs uppercase tracking-[0.18em] text-gray-500">Click any tile to start</span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {niches.map((n) => (
+                    <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => onPick(n.id)}
+                        className="group relative overflow-hidden rounded-2xl border border-white/[0.08] bg-zinc-900 text-left transition hover:border-violet-500/40 hover:shadow-lg hover:shadow-violet-900/30"
+                    >
+                        <div className="relative aspect-[16/10]">
+                            <img
+                                src={`/niche_thumbs/${n.id}.jpg`}
+                                alt={n.title}
+                                loading="lazy"
+                                className="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
+                            <div className="absolute inset-x-0 bottom-0 p-4">
+                                <h3 className="text-base font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.title}</h3>
+                                <p className="mt-1 text-xs text-gray-300 drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{n.desc}</p>
+                            </div>
+                            {n.badge && (
+                                <span className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white backdrop-blur-sm">
+                                    {n.badge}
+                                </span>
+                            )}
+                        </div>
+                    </button>
+                ))}
+            </div>
+        </section>
     );
 }
 

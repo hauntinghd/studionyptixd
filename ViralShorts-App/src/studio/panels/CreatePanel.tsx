@@ -2154,18 +2154,6 @@ export default function CreatePanel() {
         </div>
     );
 
-    const nicheThumbnailClasses: Record<string, string> = {
-        skeleton: 'bg-gradient-to-br from-amber-600/70 via-orange-700/50 to-zinc-900',
-        daytrading: 'bg-gradient-to-br from-emerald-500/70 via-green-700/50 to-zinc-900',
-        dilemma: 'bg-gradient-to-br from-rose-500/70 via-red-800/50 to-zinc-900',
-        business: 'bg-gradient-to-br from-sky-500/70 via-indigo-700/50 to-zinc-900',
-        finance: 'bg-gradient-to-br from-cyan-500/70 via-blue-800/50 to-zinc-900',
-        tech: 'bg-gradient-to-br from-violet-500/70 via-purple-800/50 to-zinc-900',
-        crypto: 'bg-gradient-to-br from-yellow-500/70 via-amber-700/50 to-zinc-900',
-        scary: 'bg-gradient-to-br from-slate-500/70 via-red-900/50 to-zinc-900',
-        history: 'bg-gradient-to-br from-amber-600/70 via-stone-700/50 to-zinc-900',
-    };
-
     const templateChooserModal = templateChooserOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
             <div className="w-full max-w-5xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
@@ -2187,29 +2175,39 @@ export default function CreatePanel() {
                 <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                     {liveWorkspaceTemplates.map((template) => {
                         const active = selectedTemplate === template.id;
-                        const gradient = nicheThumbnailClasses[template.id] || 'bg-gradient-to-br from-violet-600/60 via-indigo-700/40 to-zinc-900';
                         return (
                             <button
                                 key={template.id}
                                 type="button"
                                 onClick={() => handleTemplateSelection(template.id)}
-                                className={`group overflow-hidden rounded-[24px] border text-left transition ${
+                                className={`group relative overflow-hidden rounded-[24px] border text-left transition ${
                                     active
                                         ? 'border-violet-500 shadow-lg shadow-violet-900/30'
                                         : 'border-white/[0.08] hover:border-violet-500/40'
                                 }`}
                             >
-                                <div className={`relative flex h-28 items-center justify-center ${gradient}`}>
-                                    <span className="text-5xl drop-shadow-[0_2px_8px_rgba(0,0,0,0.4)]">{template.icon}</span>
+                                <div className="relative aspect-[16/10] overflow-hidden bg-zinc-900">
+                                    <img
+                                        src={`/niche_thumbs/${template.id}.jpg`}
+                                        alt={template.title}
+                                        loading="lazy"
+                                        className="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105"
+                                    />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
+                                    <div className="absolute inset-x-0 bottom-0 p-4">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-2xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.icon}</span>
+                                            <h4 className="text-lg font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.title}</h4>
+                                        </div>
+                                    </div>
                                     {active ? (
-                                        <span className="absolute right-3 top-3 rounded-full border border-emerald-400/40 bg-emerald-500/20 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 backdrop-blur-sm">
+                                        <span className="absolute right-3 top-3 rounded-full border border-emerald-400/40 bg-emerald-500/30 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 backdrop-blur-sm">
                                             Active
                                         </span>
                                     ) : null}
                                 </div>
-                                <div className="bg-white/[0.02] p-5 group-hover:bg-violet-500/[0.04]">
-                                    <h4 className="text-lg font-semibold text-white">{template.title}</h4>
-                                    <p className="mt-2 text-sm leading-relaxed text-gray-400">{template.desc}</p>
+                                <div className="bg-white/[0.02] p-4 group-hover:bg-violet-500/[0.04]">
+                                    <p className="text-sm leading-relaxed text-gray-400">{template.desc}</p>
                                 </div>
                             </button>
                         );

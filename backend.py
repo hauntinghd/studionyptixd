@@ -10236,6 +10236,49 @@ async def _composite_video_on_runpod(
         )
 
 
+async def _apply_free_tier_watermark(video_path: str) -> bool:
+    """Overlay 'Powered by Studio' watermark on free-tier renders (in-place).
+
+    Free users get a discreet bottom-right watermark — drives organic growth
+    when users post Studio-rendered shorts. Paying users get clean output.
+    Returns True on success, False on failure (caller should keep original).
+    """
+    src = Path(video_path)
+    if not src.exists() or src.stat().st_size == 0:
+        return False
+    tmp_out = src.with_suffix(".wm" + src.suffix)
+    # Drawtext params:
+    #  - "Powered by NYPTID Studio" — slightly more brand-y than just "Studio"
+    #  - Bottom-right with safe-area inset for both 16:9 and 9:16
+    #  - White at 70% opacity on a 50%-opaque black pill
+    #  - Font size scales with video height (h/40 ≈ 27px for 1080p, 48px for 1920p tall)
+    drawtext = (
+        "drawtext=text='Powered by NYPTID Studio'"
+        ":fontcolor=white@0.78:fontsize=h/38:font=Arial"
+        ":x=w-tw-30:y=h-th-30"
+        ":box=1:boxcolor=black@0.5:boxborderw=10"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(src),
+        "-vf", drawtext,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        str(tmp_out),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr_bytes = await proc.communicate()
+    if proc.returncode != 0 or not tmp_out.exists() or tmp_out.stat().st_size == 0:
+        log.warning(f"Free-tier watermark failed for {video_path}: {stderr_bytes.decode()[-200:]}")
+        tmp_out.unlink(missing_ok=True)
+        return False
+    src.unlink(missing_ok=True)
+    tmp_out.rename(src)
+    return True
+
+
 async def composite_video(
     scenes: list,
     scene_assets: list,
@@ -12140,6 +12183,16 @@ async def run_generation_pipeline(
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
+
+        # Free-tier watermark — drives organic growth when free users post Studio shorts.
+        # Paying users get clean output. Best-effort: if the watermark pass fails, the
+        # original clean render still goes through (composite_video already produced it).
+        _job_plan = str(jobs.get(job_id, {}).get("plan", "") or "").strip().lower()
+        if _job_plan == "free":
+            try:
+                await _apply_free_tier_watermark(output_path)
+            except Exception as wm_exc:
+                log.warning(f"[{job_id}] Watermark step failed (non-fatal): {wm_exc}")
 
         try:
             await _persist_catalyst_short_learning_for_render(
@@ -17701,6 +17754,16 @@ async def _run_creative_pipeline(
             job_id=job_id,
             minimum_scene_duration=5.0,
         )
+
+        # Free-tier watermark — drives organic growth when free users post Studio shorts.
+        # Paying users get clean output. Best-effort: if the watermark pass fails, the
+        # original clean render still goes through (composite_video already produced it).
+        _job_plan = str(jobs.get(job_id, {}).get("plan", "") or "").strip().lower()
+        if _job_plan == "free":
+            try:
+                await _apply_free_tier_watermark(output_path)
+            except Exception as wm_exc:
+                log.warning(f"[{job_id}] Watermark step failed (non-fatal): {wm_exc}")
 
         try:
             await _persist_catalyst_short_learning_for_render(
