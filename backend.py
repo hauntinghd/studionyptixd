@@ -16922,6 +16922,12 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
     session["art_style"] = art_style
     session["cinematic_boost"] = cinematic_boost
     session["image_model_id"] = image_model_id
+    # Phase 1.4: track which scene indices have already been debited via
+    # preview, so _creative_finalize only charges the missing ones.
+    _paid_scene_indices = set(session.get("image_previews_debited_scenes") or [])
+    _paid_scene_indices.add(int(req.scene_index))
+    session["image_previews_debited_scenes"] = sorted(_paid_scene_indices)
+    session["image_previews_debited"] = len(_paid_scene_indices)
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk()
     await _update_project_by_session(user.get("id", ""), req.session_id, {
@@ -17074,7 +17080,22 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes when Runway is unavailable.")
 
     usage_kind = "animated" if animation_enabled else "non_animated"
-    credits_required = max(1, len(session.get("scenes", [])) * _creative_video_credit_multiplier(video_model_id)) if animation_enabled else 1
+    # Phase 1.4 BUG #1 fix: include image model cost in the finalize debit.
+    # Previously, users picking a premium image model (e.g. recraft_v4_pro @ 5 AC
+    # or nano_banana_pro @ 5 AC) paid only the video clip AC — the image cost was
+    # silently absorbed. In auto-mode (no per-scene preview), that meant free
+    # premium images. Now: charge (scenes × video_multiplier) + (unpaid_scenes ×
+    # image_cost_per_scene), where unpaid_scenes = total - count of previews
+    # already debited via _creative_scene_image (tracked in session).
+    _scene_count = len(session.get("scenes", []))
+    _video_per_scene = _creative_video_credit_multiplier(video_model_id)
+    _image_per_scene = _creative_image_credit_cost(image_model_id, template=session.get("template", ""))
+    _previews_paid = int(session.get("image_previews_debited", 0) or 0)
+    _images_to_charge = max(0, _scene_count - _previews_paid)
+    if animation_enabled:
+        credits_required = max(1, _scene_count * _video_per_scene + _images_to_charge * _image_per_scene)
+    else:
+        credits_required = max(1, _images_to_charge * _image_per_scene)
     can_render, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
@@ -17509,6 +17530,37 @@ async def _run_creative_pipeline(
 
     except Exception as e:
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
+        # Phase 1.4 BUG #2 fix: refund AC on pipeline failure. Previously the
+        # finalize debit happened at enqueue time, and if the render crashed
+        # mid-pipeline the user lost their AC with no refund. Users would
+        # chargeback via PayPal, which is the class of Korpi.AI ticket we're
+        # specifically trying not to have.
+        try:
+            _job = jobs.get(job_id) or {}
+            if _job.get("credit_charged") and not _job.get("credit_refunded"):
+                _source = str(_job.get("credit_source", "") or "")
+                if _source in {"monthly", "topup"}:
+                    await _refund_generation_credit(
+                        str(_job.get("user_id", "") or ""),
+                        _source,
+                        month_key=str(_job.get("credit_month_key", "") or ""),
+                        credits=int(_job.get("credit_amount", 1) or 1),
+                    )
+                    _job["credit_refunded"] = True
+                    jobs[job_id] = _job
+                    _studio_alerts.send_alert(
+                        "warn",
+                        "AC refunded on creative pipeline failure",
+                        f"Refunded {_job.get('credit_amount', 1)} AC to {_job.get('user_id', '?')[:12]} after render error: {str(e)[:200]}",
+                        context={"job_id": job_id, "credit_source": _source},
+                    )
+        except Exception as refund_err:
+            log.error(f"[{job_id}] AC refund on pipeline failure ALSO failed: {refund_err}", exc_info=True)
+            _studio_alerts.send_exception(
+                refund_err,
+                source="creative pipeline refund fallback",
+                context={"job_id": job_id, "original_error": str(e)[:200]},
+            )
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
         _job_diag_finalize(job_id)
