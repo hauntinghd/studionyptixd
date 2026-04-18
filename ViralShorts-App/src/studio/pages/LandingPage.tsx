@@ -1,5 +1,5 @@
 import { useContext, useState } from 'react';
-import { ArrowRight, CheckCircle2, Copy, Film, Image, Rocket, ScissorsLineDashed, Sparkles, Workflow, Wrench } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Rocket, Sparkles, Workflow, Wrench } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
@@ -35,88 +35,37 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const liveLanes = [
         {
-            title: 'AI Stories',
-            desc: 'Cinematic story shorts inside the Create workspace.',
-            icon: <Sparkles className="h-5 w-5" />,
-        },
-        {
-            title: 'Motivation',
-            desc: 'Short-form motivational videos with stronger pacing and narration.',
-            icon: <Workflow className="h-5 w-5" />,
-        },
-        {
             title: 'Skeleton AI',
-            desc: '3D comparison shorts with the locked skeleton visual identity.',
+            desc: '3D skeleton comparison shorts with a locked visual identity across every scene.',
             icon: <Wrench className="h-5 w-5" />,
         },
         {
             title: 'Day Trading',
-            desc: 'Trading and investing shorts with Catalyst channel context.',
+            desc: 'Trading and investing shorts with a fast ElevenLabs voice and hook-forward pacing.',
             icon: <Rocket className="h-5 w-5" />,
         },
         {
-            title: 'Chat Story',
-            desc: 'Premium text-message shorts unlocked on the paid monthly plans.',
+            title: 'Moral Dilemma',
+            desc: 'Cinematic impossible-choice shorts with forced binary-choice CTAs that drive comments.',
+            icon: <Sparkles className="h-5 w-5" />,
+        },
+        {
+            title: 'Scary Stories',
+            desc: 'Horror and true-crime shorts in a David Fincher color palette.',
+            icon: <Workflow className="h-5 w-5" />,
+        },
+        {
+            title: 'Historical Epic',
+            desc: 'Ridley-Scott-scale historical shorts, period-accurate, cinematic color grading.',
+            icon: <Rocket className="h-5 w-5" />,
+        },
+        {
+            title: 'Business / Finance / Tech / Crypto',
+            desc: 'Four Bloomberg-grade niches sharing the same premium short-form documentary style.',
             icon: <Workflow className="h-5 w-5" />,
         },
     ];
 
-    const roadmapLanes = [
-        {
-            title: 'Thumbnails',
-            desc: 'Still being sharpened as an operator-beta lane. Not part of the public short-form billing promise yet.',
-            icon: <Image className="h-5 w-5" />,
-        },
-        {
-            title: 'Clone',
-            desc: 'Structure-cloning is still being refined, so it stays off the public plan promise for now.',
-            icon: <Copy className="h-5 w-5" />,
-        },
-        {
-            title: 'Long Form',
-            desc: 'Machine-learning and editing work is still underway, so Long Form stays in the private operator lane for now.',
-            icon: <Film className="h-5 w-5" />,
-        },
-        {
-            title: 'AutoClipper',
-            desc: 'Visible in Studio now, but still held back until clipping quality, scoring, and packaging beat the lazy "coming soon" bar.',
-            icon: <ScissorsLineDashed className="h-5 w-5" />,
-        },
-        {
-            title: 'Catalyst',
-            desc: 'The shared engine behind thumbnails, cloning, long-form generation, and future automation layers.',
-            icon: <Workflow className="h-5 w-5" />,
-        },
-        {
-            title: 'Operator Tools',
-            desc: 'Internal demo and analytics lanes stay private so the public offer remains tight and credible.',
-            icon: <Wrench className="h-5 w-5" />,
-        },
-    ];
-    const marketingDoctrine = [
-        'Be active in the Daily Marketing Channel.',
-        'Analyze and Improve. Evaluate each marketing piece to understand what works and what doesn’t. Think about how you could improve it.',
-        'Small, daily improvements in your marketing skills can lead to significant progress over time due to compounding.',
-        'Just like in boxing or other martial arts, consistent practice and real-world application are crucial for mastering marketing.',
-        'Engage with the daily challenges to continuously hone your skills. Missing a day occasionally is okay, but don’t make it a habit.',
-        'Regardless of your field or business, understanding and practicing marketing is fundamental to success.',
-        'Treat the daily marketing challenges seriously and make it a part of your routine to see substantial benefits in your marketing abilities.',
-        'Mastering marketing has enabled Arno to start and scale companies and avoid manual labor by understanding how to attract clients and improve businesses.',
-        'It is a long-lasting skill. Marketing has been around for millennia and will continue to be valuable in the future.',
-        'Anyone can learn it. It doesn’t require special skills, abilities, or connections. Pay attention, focus, and you can succeed.',
-        'High ROI (Return On Investment). Direct response marketing offers the highest and most reliable return on investment, outperforming traditional investments.',
-        'Learning marketing helps you see opportunities and gaps that others miss, making life easier.',
-        'You don’t need to be the world’s best marketer; being better than most is enough to succeed.',
-        'It is a fast skill to learn. With ten days of dedicated study, you can acquire valuable marketing skills.',
-        'Be ready for a significant change as you learn and apply these marketing skills.',
-    ];
-    const marketingDoctrineDisplay = marketingDoctrine.map((point) =>
-        point
-            .split('â€™').join("'")
-            .split('â€œ').join('"')
-            .split('â€\u009d').join('"')
-            .split('â€"').join(' - '),
-    );
 
     return (
         <>
@@ -132,10 +81,10 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 AI Content Creation Engine
                             </div>
                             <h1 className="mt-6 text-5xl font-extrabold leading-[1.02] tracking-tight text-white md:text-7xl">
-                                Create YouTube videos that outperform human editors.
+                                Ship a short every day. Without breaking.
                             </h1>
                             <p className="mt-6 max-w-3xl text-lg leading-relaxed text-gray-400">
-                                NYPTID Studio generates shorts, long-form documentaries, and full video packages with AI. Catalyst learns from every video you publish and gets smarter over time. Connect your YouTube channel and let the engine optimize your content automatically.
+                                Pick a niche, type a topic, hit Generate. Studio writes the script, renders the scenes, narrates it, bakes in captions, and hands you an MP4 — or publishes straight to your connected YouTube channel in one click. Nine live niches, two free renders to try it.
                             </p>
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
@@ -166,9 +115,9 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                 )}
                             </div>
                             <div className="mt-10 grid gap-6 sm:grid-cols-3">
-                                <StatCard label="Live Templates" value="7" />
+                                <StatCard label="Live Niches" value="9" />
                                 <StatCard label="Free Renders" value="2" />
-                                <StatCard label="Auth" value="Email + Google" />
+                                <StatCard label="1-Click Publish" value="YouTube" />
                             </div>
                         </div>
 
@@ -176,16 +125,16 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <div className="flex items-center gap-3">
                                 <Logo size={30} />
                                 <div>
-                                    <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Catalyst</p>
-                                    <h2 className="text-xl font-bold text-white">One engine, multiple lanes</h2>
+                                    <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">What you get</p>
+                                    <h2 className="text-xl font-bold text-white">Everything a short needs</h2>
                                 </div>
                             </div>
                             <div className="mt-6 space-y-3">
-                                {[ 
-                                    'Create scripts, scenes, and renders without leaving Studio',
-                                    'Use membership and wallet credits together instead of juggling separate subscriptions',
-                                    'Keep Chat Story inside the same short-form account model',
-                                    'Expand into the heavier lanes later without changing the billing structure',
+                                {[
+                                    'Script, voice-over, scene images, animation, music, and captions in one pass',
+                                    'One-click publish direct to your connected YouTube channel',
+                                    'Failed renders auto-refund your credits — no tickets, no chargebacks',
+                                    'Nine niches live: Skeleton AI, Day Trading, Moral Dilemma, Business, Finance, Tech, Crypto, Scary, History',
                                 ].map((item) => (
                                     <div key={item} className="flex items-start gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm text-gray-300">
                                         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
@@ -202,9 +151,9 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 <div className="mx-auto max-w-6xl px-6">
                     <div className="mb-10 text-center">
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">Live Now</p>
-                        <h2 className="mt-3 text-4xl font-bold text-white">Public launch surface</h2>
+                        <h2 className="mt-3 text-4xl font-bold text-white">Nine live short-form niches</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            The public offer is intentionally tight: one Create workspace with five live short-form templates. Product Demo stays internal. Analytics stays owner-only. Clone, Thumbnails, Long Form, and AutoClipper remain visible in the vision but are not part of the public billing promise yet.
+                            Every niche ships the same way: script, scenes, voice, music, captions, and the final MP4 — plus a one-click publish to YouTube. If a render fails, your credits refund automatically.
                         </p>
                     </div>
                     <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
@@ -251,44 +200,6 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             </section>
 
-            <section className="border-t border-white/[0.06] py-20">
-                <div className="mx-auto max-w-6xl px-6">
-                    <div className="mb-10 text-center">
-                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-300">Growth Doctrine</p>
-                        <h2 className="mt-3 text-4xl font-bold text-white">The operating principles behind Catalyst</h2>
-                        <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            These lesson points now sit inside the Studio positioning and Long Form workflow so the product stays aligned with direct-response, measurable YouTube growth instead of generic creator fluff.
-                        </p>
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {marketingDoctrineDisplay.map((point) => (
-                            <div key={point} className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 text-sm leading-relaxed text-gray-300">
-                                {point}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </section>
-
-            <section className="border-t border-white/[0.06] py-20">
-                <div className="mx-auto max-w-6xl px-6">
-                    <div className="mb-10 text-center">
-                        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-300">Roadmap</p>
-                        <h2 className="mt-3 text-4xl font-bold text-white">What stays private or coming soon</h2>
-                    </div>
-                    <div className="grid gap-5 md:grid-cols-3">
-                        {roadmapLanes.map((lane) => (
-                            <div key={lane.title} className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-300">
-                                    {lane.icon}
-                                </div>
-                                <h3 className="mt-5 text-xl font-bold text-white">{lane.title}</h3>
-                                <p className="mt-2 text-sm leading-relaxed text-gray-400">{lane.desc}</p>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </section>
 
             <section className="border-t border-white/[0.06] py-24">
                 <div className="mx-auto max-w-4xl px-6 text-center">
