@@ -3357,8 +3357,8 @@ export default function CreatePanel() {
             <div className="w-full max-w-none pb-10 space-y-6">
                 {renderWorkspaceChrome({
                     subtitle: createSubTab === 'projects'
-                        ? 'Open saved drafts or finished renders. Switch back to Create any time to open the template picker.'
-                        : 'Create is the only live workflow in the rail right now. Use it to open AI Stories, Motivation, Skeleton AI, or Chat Story without sacrificing workspace width.',
+                        ? 'Open saved drafts or finished renders. Switch to Create any time to start a new video.'
+                        : 'Pick a niche to start. Every template below is live and production-ready.',
                 })}
                 <div className="space-y-5 min-w-0">
 
@@ -3419,12 +3419,9 @@ export default function CreatePanel() {
                     <div className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-5">
                         <div className="flex flex-wrap items-start justify-between gap-4">
                             <div>
-                                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-violet-300">Template Workspace</p>
-                                <h2 className="mt-2 text-2xl font-bold text-white">{currentTemplateMeta.title}</h2>
+                                <h2 className="text-2xl font-bold text-white">{currentTemplateMeta.title}</h2>
                                 <p className="mt-2 text-sm text-gray-400">
-                                    {selectedTemplate === 'chatstory'
-                                        ? 'Chat Story runs in a dedicated fullscreen-style editor on the same Catalyst render path as the rest of Studio.'
-                                        : 'Auto, Creative Control, and Script to Short are all live build paths for the sellable short-form templates.'}
+                                    {currentTemplateMeta.desc || 'Fill out the quick form and hit Generate — Studio handles script, images, voice, and render.'}
                                 </p>
                             </div>
                             <div className="flex flex-wrap gap-2">
@@ -3433,17 +3430,8 @@ export default function CreatePanel() {
                                     onClick={openTemplateChooser}
                                     className="rounded-xl border border-white/[0.08] bg-black/20 px-4 py-2 text-sm font-semibold text-white transition hover:border-violet-500/40 hover:bg-violet-500/10"
                                 >
-                                    Choose Template
+                                    Switch Niche
                                 </button>
-                                {selectedTemplate === 'chatstory' ? (
-                                    <span className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-violet-200">
-                                        Catalyst Lane
-                                    </span>
-                                ) : (
-                                    <span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">
-                                        Live Template
-                                    </span>
-                                )}
                             </div>
                         </div>
                     </div>

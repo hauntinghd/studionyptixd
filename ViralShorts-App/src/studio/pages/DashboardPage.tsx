@@ -247,8 +247,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         <h1 className="mt-3 text-4xl font-bold text-white">{greeting}, {session.user.email?.split('@')[0] || 'creator'}</h1>
                                         <p className="mt-3 max-w-3xl text-sm text-gray-400">
                                             {ownerOverride
-                                                ? 'Owner preview is active on this account. Every Studio lane is open here while public accounts only see the launch surface.'
-                                                : 'Public Studio is short-form first right now. Create is live, Chat Story stays on paid monthly plans, and Clone, Thumbnails, and Long Form stay marked coming soon while they are still being worked on.'}
+                                                ? 'Owner preview — every Studio lane is open on this account.'
+                                                : 'Pick a niche and start creating. Skeleton AI, Chat Story, Fruit Story, and more are live today.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">
@@ -269,10 +269,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                             </section>
                         )}
 
-                        {backendOffline && !createImmersive && (
+                        {backendOffline && !createImmersive && isAdmin && (
                             <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                                <div className="mb-1 font-semibold">Hosted fallback mode active</div>
-                                <div>Studio is still available. Local GPU lanes are offline, so the current session is leaning on the hosted fallback stack.</div>
+                                <div className="mb-1 font-semibold">Hosted fallback mode active (admin-only notice)</div>
+                                <div>Local GPU lanes are offline. Hosted fallback is carrying the session. Users are not shown this banner.</div>
                             </div>
                         )}
 
