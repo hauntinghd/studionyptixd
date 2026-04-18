@@ -12102,10 +12102,48 @@ async def run_generation_pipeline(
     except Exception as e:
         log.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
         _job_set_stage(job_id, "error")
-        jobs[job_id]["error"] = str(e)
+        import fal_gate as _fg
+        err_text = str(e or "").strip()
+        err_l = err_text.lower()
+        is_content_policy = (
+            isinstance(e, _fg.FalFailed) and "content" in err_l
+        ) or "content_policy_violation" in err_l or "content checker" in err_l or "content_policy" in err_l
+        if is_content_policy:
+            friendly_error = (
+                "Your prompt was flagged by the AI provider's content filter. "
+                "Edit the topic to remove explicit references to crime, violence, "
+                "named real-world events, or identifiable real people and retry. "
+                "Your Catalyst credits have been refunded."
+            )
+            error_kind = "content_policy"
+        elif isinstance(e, _fg.FalBusy):
+            friendly_error = (
+                "The AI provider is temporarily at capacity — please retry in 30 seconds. "
+                "Your Catalyst credits have been refunded."
+            )
+            error_kind = "upstream_busy"
+        else:
+            truncated = err_text[:240] if err_text else type(e).__name__
+            friendly_error = (
+                f"Render failed: {truncated}. Your Catalyst credits have been refunded — click Back to Editor to try again."
+            )
+            error_kind = "generic_render_failure"
+        jobs[job_id]["error"] = friendly_error
+        jobs[job_id]["error_kind"] = error_kind
+        jobs[job_id]["error_raw"] = err_text[:480]
+        _studio_alerts.send_exception(
+            e,
+            source="run_generation_pipeline",
+            context={
+                "job_id": job_id,
+                "template": str(jobs[job_id].get("template", "") or ""),
+                "error_kind": error_kind,
+                "user_id": str(jobs[job_id].get("user_id", "") or ""),
+            },
+        )
         _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
-        await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
+        await _update_project_by_job(job_id, {"status": "error", "error": friendly_error})
 
 
 # â"€â"€â"€ API Endpoints â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -18376,6 +18414,21 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         and not _is_template_default_reference(req.template, reference_image_url)
     ):
         raise HTTPException(400, "Reference image quality too low for Strict lock. Upload a higher-resolution image or use Inspired lock.")
+    # Resolve the user's selected image/video models so auto-mode debits match Creative mode.
+    # Before: auto-mode hardcoded credit_amount=1 and ignored req.image_model_id/video_model_id,
+    # so a user picking Recraft V4 Pro (5 AC/image) + Kling 2.1 Pro paid 1 AC per full short.
+    # All 9 shorts templates target 10-12 scenes; 10 is the safe conservative estimate so we
+    # don't overcharge if the script lands short.
+    resolved_image_model_id = _normalize_creative_image_model_id(req.image_model_id, template=req.template)
+    resolved_video_model_id = _normalize_creative_video_model_id(req.video_model_id)
+    _auto_estimated_scene_count = 10
+    _auto_video_per_scene = _creative_video_credit_multiplier(resolved_video_model_id)
+    _auto_image_per_scene = _creative_image_credit_cost(resolved_image_model_id, template=req.template)
+    if animation_enabled:
+        credits_required = max(1, _auto_estimated_scene_count * _auto_video_per_scene + _auto_estimated_scene_count * _auto_image_per_scene)
+    else:
+        credits_required = max(1, _auto_estimated_scene_count * _auto_image_per_scene)
+
     user_plan = "starter"
     plan_limits = PLAN_LIMITS["starter"]
     is_admin = False
@@ -18390,13 +18443,17 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
             billing_active,
             is_admin=is_admin,
             usage_kind=usage_kind,
+            credits_needed=credits_required,
         )
         if not can_render:
             if usage_kind == "non_animated":
                 raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
+            available_credits = int(credit_state.get("credits_total_remaining", 0) or 0)
+            required_credits = int(credit_state.get("credits_needed", credits_required) or credits_required)
+            video_profile = _creative_video_model_profile(resolved_video_model_id)
             raise HTTPException(
                 402,
-                "No animated render credits left this month. Buy an animated top-up pack to continue.",
+                f"{video_profile.get('label', 'Selected video model')} needs {required_credits} Catalyst credits for this render, but only {available_credits} are available. Buy more credits or switch to slideshow.",
             )
     else:
         credit_source = ""
@@ -18439,10 +18496,12 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         "reference_lock_mode": reference_lock_mode,
         "reference_dna": reference_dna,
         "reference_quality": reference_quality,
+        "image_model_id": resolved_image_model_id,
+        "video_model_id": resolved_video_model_id,
         "credit_charged": bool(user),
         "credit_source": credit_source,
-        "credit_amount": 1,
-        "credit_cost": 1 if animation_enabled else 0,
+        "credit_amount": credits_required,
+        "credit_cost": credits_required if animation_enabled else 0,
         "billing_source": "owner_override" if is_admin else (credit_source or "workspace_access"),
         "credit_month_key": credit_state.get("month_key", _month_key()),
         "credit_refunded": False,
