@@ -4649,66 +4649,49 @@ async def _fal_openrouter_json_completion(
     timeout_sec: int = 120,
     model: str = "anthropic/claude-sonnet-4.6",
 ) -> dict:
-    """Call LLM via FAL OpenRouter (Claude Sonnet 4.6 primary). Same FAL_AI_KEY."""
+    """Call LLM via FAL OpenRouter (Claude Sonnet 4.6 primary). Same FAL_AI_KEY.
+
+    Routed through fal_gate: concurrency-capped, retry-on-429 / concurrent-limit,
+    content-policy raises FalFailed (terminal, do not silently retry).
+    """
     if not FAL_AI_KEY:
         raise RuntimeError("FAL_AI_KEY not configured for OpenRouter")
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=timeout_sec) as client:
-                resp = await client.post(
-                    "https://fal.run/fal-ai/openrouter/router",
-                    headers={
-                        "Authorization": "Key " + FAL_AI_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": max(0.2, float(temperature) - (attempt * 0.05)),
-                    },
-                )
-                if resp.status_code in {429, 500, 502, 503, 504}:
-                    raise httpx.HTTPStatusError(
-                        f"Retryable FAL OpenRouter status {resp.status_code}",
-                        request=resp.request,
-                        response=resp,
-                    )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if not content:
-                    content = str(data.get("output", "") or data.get("result", "") or "")
-                if not content:
-                    raise ValueError("FAL OpenRouter returned empty content")
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start == -1 or end <= 0:
-                raise ValueError("No JSON found in FAL OpenRouter response")
-            return json.loads(content[start:end])
-        except Exception as exc:
-            last_error = exc
-            log.warning(
-                "FAL OpenRouter attempt %d/%d failed (%s): %s",
-                attempt + 1, 3, model, str(exc)[:200],
-            )
-            if attempt >= 2:
-                break
-            await asyncio.sleep((attempt + 1) * 2)
-    # All 3 attempts exhausted — alert so we catch content-filter / upstream outages.
-    if last_error is not None:
-        try:
-            _studio_alerts.send_exception(
-                last_error,
-                source="_fal_openrouter_json_completion (3 attempts)",
-                context={"model": model},
-            )
-        except Exception:
-            pass
-    raise last_error if last_error is not None else RuntimeError("FAL OpenRouter JSON completion failed")
+    import fal_gate
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": max(0.2, float(temperature)),
+    }
+    try:
+        data = await fal_gate.post_with_retry(
+            "https://fal.run/fal-ai/openrouter/router",
+            api_key=FAL_AI_KEY,
+            json_body=body,
+            timeout_sec=timeout_sec,
+            max_attempts=3,
+            source="openrouter_json_completion",
+        )
+    except fal_gate.FalFailed as exc:
+        _studio_alerts.send_exception(exc, source="_fal_openrouter_json_completion", context={"model": model})
+        raise
+    except fal_gate.FalBusy as exc:
+        _studio_alerts.send_exception(exc, source="_fal_openrouter_json_completion (busy)", context={"model": model})
+        raise
+    if not isinstance(data, dict):
+        raise ValueError("FAL OpenRouter returned non-JSON response")
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        content = str(data.get("output", "") or data.get("result", "") or "")
+    if not content:
+        raise ValueError("FAL OpenRouter returned empty content")
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON found in FAL OpenRouter response")
+    return json.loads(content[start:end])
 
 
 async def _xai_json_completion_multimodal(
@@ -11854,20 +11837,25 @@ async def run_generation_pipeline(
                     "no extra limbs, no melted face, no warped skull."
                 ).strip()
                 aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
-                # Call ERNIE-Image directly via FAL API (replaced Imagen4 — 3x cheaper, better cinematic quality)
+                # Call ERNIE-Image via fal_gate (concurrency-capped + retries on 429 / concurrent-limit).
                 _img_size = {"width": 720, "height": 1280} if aspect == "9:16" else {"width": 1280, "height": 720}
-                async with httpx.AsyncClient(timeout=60) as _img_client:
-                    _img_resp = await _img_client.post(
+                import fal_gate as _fal_gate
+                try:
+                    _img_json = await _fal_gate.post_with_retry(
                         "https://fal.run/fal-ai/ernie-image",
-                        headers={"Authorization": "Key " + FAL_AI_KEY, "Content-Type": "application/json"},
-                        json={"prompt": full_prompt, "num_images": 1, "image_size": _img_size},
+                        api_key=FAL_AI_KEY,
+                        json_body={"prompt": full_prompt, "num_images": 1, "image_size": _img_size},
+                        timeout_sec=60,
+                        max_attempts=5,
+                        source="ernie_scene_image",
                     )
-                    if _img_resp.status_code not in (200, 201):
-                        raise RuntimeError(f"ERNIE-Image failed: {_img_resp.status_code}")
-                    _img_url = _img_resp.json().get("images", [{}])[0].get("url", "")
-                    if not _img_url:
-                        raise RuntimeError("ERNIE-Image returned no image URL")
-                    _img_data = await _img_client.get(_img_url)
+                except _fal_gate.FalFailed as exc:
+                    raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
+                _img_url = (_img_json or {}).get("images", [{}])[0].get("url", "") if isinstance(_img_json, dict) else ""
+                if not _img_url:
+                    raise RuntimeError("ERNIE-Image returned no image URL")
+                async with httpx.AsyncClient(timeout=60) as _dl_client:
+                    _img_data = await _dl_client.get(_img_url)
                     with open(img_path, "wb") as _f:
                         _f.write(_img_data.content)
                 img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "ernie_image"}
