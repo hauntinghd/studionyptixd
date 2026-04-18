@@ -300,13 +300,65 @@ def _youtube_title_keywords(title: str, max_items: int = 6) -> list[str]:
     return out
 
 
+_youtube_connections_hydrated_from_supabase = False
+
+
 def _load_youtube_connections() -> None:
-    global _youtube_connections
+    """Rebuild the in-memory `_youtube_connections` dict.
+
+    Priority:
+      1. Supabase (if configured) — authoritative store, survives worker cycles
+      2. Disk file — per-worker hot cache; may be empty on cold boot
+      3. Empty dict — first run
+
+    Disk is ALSO kept in sync for perf; hot reads don't need to hit Supabase
+    every request, just on first load per worker.
+    """
+    global _youtube_connections, _youtube_connections_hydrated_from_supabase
+    try:
+        import youtube_connections_store as _yc_store
+        if _yc_store.configured() and not _youtube_connections_hydrated_from_supabase:
+            hydrated = _yc_store.hydrate()
+            if hydrated:
+                _youtube_connections = hydrated
+                _youtube_connections_hydrated_from_supabase = True
+                # Warm the disk cache so subsequent reads in this worker are fast.
+                try:
+                    YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    YOUTUBE_CONNECTIONS_FILE.write_text(
+                        json.dumps(_youtube_connections, ensure_ascii=True, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+                return
+            # Supabase returned empty → either no rows yet or network error.
+            # Fall through to disk so we don't wipe cached state on transient failure.
+    except Exception:
+        pass
     try:
         if YOUTUBE_CONNECTIONS_FILE.exists():
             data = json.loads(YOUTUBE_CONNECTIONS_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 _youtube_connections = data
+                # First-deploy migration: Supabase empty + disk has data → push to Supabase.
+                # Prevents forcing a reconnect on the deploy that first introduces Supabase.
+                try:
+                    import youtube_connections_store as _yc_store
+                    if _yc_store.configured() and not _youtube_connections_hydrated_from_supabase and data:
+                        for uid, bucket in data.items():
+                            if not isinstance(bucket, dict):
+                                continue
+                            default_ch = str(bucket.get("default_channel_id", "") or "")
+                            channels = bucket.get("channels") or {}
+                            if not isinstance(channels, dict):
+                                continue
+                            for ch_id, rec in channels.items():
+                                if isinstance(rec, dict):
+                                    _yc_store.upsert(str(uid), str(ch_id), rec, is_default=(ch_id == default_ch))
+                        _youtube_connections_hydrated_from_supabase = True
+                except Exception:
+                    pass
                 return
     except Exception:
         pass
@@ -314,6 +366,11 @@ def _load_youtube_connections() -> None:
 
 
 def _save_youtube_connections() -> None:
+    """Persist `_youtube_connections`.
+
+    Always writes disk (hot cache). Additionally upserts to Supabase if
+    configured — Supabase becomes authoritative and survives worker cycles.
+    """
     try:
         YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         YOUTUBE_CONNECTIONS_FILE.write_text(
@@ -321,6 +378,32 @@ def _save_youtube_connections() -> None:
             encoding="utf-8",
         )
     except Exception:
+        pass
+    try:
+        import youtube_connections_store as _yc_store
+        if not _yc_store.configured():
+            return
+        for user_id, bucket in (_youtube_connections or {}).items():
+            if not isinstance(bucket, dict):
+                continue
+            default_channel = str(bucket.get("default_channel_id", "") or "")
+            channels = bucket.get("channels") or {}
+            if not isinstance(channels, dict):
+                continue
+            for channel_id, record in channels.items():
+                if not isinstance(record, dict):
+                    continue
+                _yc_store.upsert(
+                    str(user_id),
+                    str(channel_id),
+                    record,
+                    is_default=(channel_id == default_channel),
+                )
+            if default_channel:
+                _yc_store.clear_default_except(str(user_id), default_channel)
+    except Exception:
+        # Never let Supabase failures break the request path — disk is a valid
+        # fallback that the next deploy's Supabase hydrate will re-source from.
         pass
 
 
