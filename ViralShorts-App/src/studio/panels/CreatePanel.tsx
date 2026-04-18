@@ -638,20 +638,6 @@ export default function CreatePanel() {
                         )}
                     </select>
                 </div>
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Background Music</label>
-                    <select
-                        value={backgroundMusic}
-                        onChange={(e) => setBackgroundMusic(e.target.value)}
-                        disabled={backgroundMusicComingSoon}
-                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
-                    >
-                        {finaleMusicOptions.map((track) => (
-                            <option key={track} value={track}>{track}</option>
-                        ))}
-                    </select>
-                    <p className="mt-2 text-[11px] text-amber-300">Background music is coming soon. Voice, captions, and slideshow timing are the live finale controls for now.</p>
-                </div>
             </div>
             {voiceProvider === 'custom' ? (
                 <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
@@ -3499,7 +3485,7 @@ export default function CreatePanel() {
                                 <Sparkles className="mx-auto h-8 w-8 text-violet-300" />
                                 <h3 className="mt-3 text-lg font-bold text-white">Ship your first short</h3>
                                 <p className="mt-2 text-sm text-gray-400 max-w-md mx-auto">
-                                    Pick a niche, type a topic, hit Generate. Studio handles script, voice, scenes, music, captions, and the final MP4 in one pass.
+                                    Pick a niche, type a topic, hit Generate. Studio handles script, voice, scenes, captions, and the final MP4 in one pass.
                                 </p>
                                 <button
                                     onClick={() => setCreateSubTab('builder')}
@@ -4115,10 +4101,34 @@ export default function CreatePanel() {
                     </div>
                 )}
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-                    Finale is where voice, captions, and music get locked. Generate scenes first, then use the scene editor to tune prompts before final render.
+                    Finale is where voice and captions get locked. Generate scenes first, then use the scene editor to tune prompts before final render.
                 </div>
                 </>
                 )}
+
+                {/* MODEL PICKERS (auto + creative + script_to_short — always visible above Generate) */}
+                <div className="grid gap-3 sm:grid-cols-2 pt-2">
+                    <button
+                        type="button"
+                        onClick={() => setImageModelPickerOpen(true)}
+                        disabled={loading || scriptLoading || skeletonSceneModelLocked}
+                        className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04] disabled:opacity-50"
+                    >
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Model</p>
+                        <p className="mt-1.5 text-sm font-semibold text-white">{skeletonSceneModelLocked ? 'Grok Imagine (Skeleton locked)' : selectedImageModel.label}</p>
+                        <p className="mt-1 text-xs text-gray-400">{formatModelSpendLabel(selectedImageModel, 'image')} · Click to change</p>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setVideoModelPickerOpen(true)}
+                        disabled={loading || scriptLoading || !effectiveAnimationEnabled}
+                        className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04] disabled:opacity-50"
+                    >
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image-to-Video Model</p>
+                        <p className="mt-1.5 text-sm font-semibold text-white">{effectiveAnimationEnabled ? selectedVideoModel.label : 'Slideshow (no animation)'}</p>
+                        <p className="mt-1 text-xs text-gray-400">{effectiveAnimationEnabled ? `${formatModelSpendLabel(selectedVideoModel, 'video')} · Click to change` : 'Enable animation to pick a video model'}</p>
+                    </button>
+                </div>
 
                 {/* GENERATE BUTTON */}
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-4">

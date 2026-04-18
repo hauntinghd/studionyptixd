@@ -6259,18 +6259,26 @@ async def _generate_image_fal_selected_model(
     if str(profile.get("id", "") or "") == "grok_imagine" and reference_image_url:
         payload["image_url"] = reference_image_url
 
-    headers = {
-        "Authorization": "Key " + FAL_AI_KEY,
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(_fal_image_model_url(endpoint_id), headers=headers, json=payload)
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(
-                f"{profile.get('label', model_id)} via fal.ai failed ({resp.status_code}): {resp.text[:300]}"
-            )
-        data = resp.json()
-    images = data.get("images", []) if isinstance(data, dict) else []
+    # Route through fal_gate so the 20-concurrent-limit on fal is respected
+    # across ALL call sites. Before this migration, raw httpx.post calls here
+    # could starve the gate'd ERNIE/openrouter calls under burst load.
+    import fal_gate as _fg_img
+    try:
+        data = await _fg_img.post_with_retry(
+            _fal_image_model_url(endpoint_id),
+            api_key=FAL_AI_KEY,
+            json_body=payload,
+            timeout_sec=180,
+            max_attempts=5,
+            source=f"fal_image_{model_id}",
+        )
+    except _fg_img.FalFailed as _fe:
+        raise RuntimeError(f"{profile.get('label', model_id)} via fal.ai failed: {_fe}") from _fe
+    except _fg_img.FalBusy as _fb:
+        raise RuntimeError(f"{profile.get('label', model_id)} busy after retries: {_fb}") from _fb
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{profile.get('label', model_id)} returned non-JSON response")
+    images = data.get("images", [])
     if not images:
         raise RuntimeError(f"{profile.get('label', model_id)} returned no images")
     first = images[0] or {}
@@ -6334,11 +6342,20 @@ async def _generate_image_fal_flux_schnell(
         "output_format": "png",
         "enable_safety_checker": True,
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(FAL_FLUX_SCHNELL_URL, headers=headers, json=payload)
-        if resp.status_code not in (200, 201):
-            raise RuntimeError("FLUX schnell via fal.ai failed (" + str(resp.status_code) + "): " + resp.text[:300])
-        data = resp.json()
+    import fal_gate as _fg_flux
+    try:
+        data = await _fg_flux.post_with_retry(
+            FAL_FLUX_SCHNELL_URL,
+            api_key=FAL_AI_KEY,
+            json_body=payload,
+            timeout_sec=60,
+            max_attempts=5,
+            source="flux_schnell",
+        )
+    except _fg_flux.FalFailed as _fe:
+        raise RuntimeError(f"FLUX schnell via fal.ai failed: {_fe}") from _fe
+    except _fg_flux.FalBusy as _fb:
+        raise RuntimeError(f"FLUX schnell busy after retries: {_fb}") from _fb
     images = data.get("images", []) if isinstance(data, dict) else []
     if not images:
         raise RuntimeError("FLUX schnell returned no images")
@@ -6652,11 +6669,22 @@ async def generate_image_grok(
                     f"{'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}"
                 )
 
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(GROK_IMAGINE_URL, headers=headers, json=payload)
-                if resp.status_code not in (200, 201):
-                    raise RuntimeError("Grok Imagine via fal.ai failed (" + str(resp.status_code) + "): " + resp.text[:300])
-                data = resp.json()
+            import fal_gate as _fg_grok
+            try:
+                data = await _fg_grok.post_with_retry(
+                    GROK_IMAGINE_URL,
+                    api_key=FAL_AI_KEY,
+                    json_body=payload,
+                    timeout_sec=60,
+                    max_attempts=5,
+                    source="grok_imagine",
+                )
+            except _fg_grok.FalFailed as _fe:
+                raise RuntimeError(f"Grok Imagine via fal.ai failed: {_fe}") from _fe
+            except _fg_grok.FalBusy as _fb:
+                raise RuntimeError(f"Grok Imagine busy after retries: {_fb}") from _fb
+            if not isinstance(data, dict):
+                raise RuntimeError("Grok Imagine returned non-JSON response")
 
             images = data.get("images", [])
             if not images:
@@ -8959,11 +8987,22 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
         "cfg_scale": 0.5,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(FAL_SUBMIT_URL, headers=headers, json=payload)
-        if resp.status_code not in (200, 201):
-            raise RuntimeError("Kling submit failed (" + str(resp.status_code) + "): " + resp.text[:300])
-        submit_data = resp.json()
+    import fal_gate as _fg_kling
+    try:
+        submit_data = await _fg_kling.post_with_retry(
+            FAL_SUBMIT_URL,
+            api_key=FAL_AI_KEY,
+            json_body=payload,
+            timeout_sec=30,
+            max_attempts=5,
+            source="kling_submit",
+        )
+    except _fg_kling.FalFailed as _fe:
+        raise RuntimeError(f"Kling submit failed: {_fe}") from _fe
+    except _fg_kling.FalBusy as _fb:
+        raise RuntimeError(f"Kling busy after retries: {_fb}") from _fb
+    if not isinstance(submit_data, dict):
+        raise RuntimeError("Kling returned non-JSON response")
 
     request_id = submit_data.get("request_id")
     if not request_id:
@@ -20643,6 +20682,84 @@ async def _admin_cancel_subscription(body: dict, user: dict = Depends(require_au
         raise HTTPException(500, f"Failed to cancel subscription(s): {e}")
 
 
+async def _admin_refund_credits(body: dict, user: dict = Depends(require_auth)):
+    """Manually credit AC back to a user's wallet (chargeback / support refund).
+
+    Body: {"email": str, "credits": int, "source": "monthly"|"topup"|"auto", "reason": str (optional)}
+    - source="auto" tries topup first, falls back to monthly usage decrement.
+    - Fires a Discord alert + writes to the usage ledger for audit trail.
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    target_email = str((body or {}).get("email", "") or "").strip().lower()
+    if not target_email:
+        raise HTTPException(400, "email required")
+    try:
+        credits = int((body or {}).get("credits", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "credits must be an integer")
+    if credits <= 0 or credits > 10000:
+        raise HTTPException(400, "credits must be between 1 and 10000")
+    source_raw = str((body or {}).get("source", "auto") or "auto").strip().lower()
+    if source_raw not in {"monthly", "topup", "auto"}:
+        raise HTTPException(400, "source must be one of: monthly, topup, auto")
+    reason = str((body or {}).get("reason", "") or "").strip()[:400]
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL:
+        raise HTTPException(500, "Supabase not configured")
+    # Look up target user by email.
+    target_id = ""
+    async with httpx.AsyncClient(timeout=15) as client:
+        users_resp = await client.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+            headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+        )
+        if users_resp.status_code == 200:
+            users_data = users_resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+            for u in user_list:
+                if str(u.get("email", "") or "").lower() == target_email:
+                    target_id = str(u.get("id", "") or "")
+                    break
+    if not target_id:
+        raise HTTPException(404, f"No Supabase user found for {target_email}")
+    applied_source = source_raw
+    if source_raw == "auto":
+        # Prefer topup refunds for chargeback protection (PayPal-traced purchases).
+        applied_source = "topup"
+    try:
+        await _refund_generation_credit(
+            target_id,
+            applied_source,
+            month_key=_month_key(),
+            credits=credits,
+        )
+    except Exception as refund_exc:
+        log.error(f"Admin refund failed for {target_email}: {refund_exc}")
+        raise HTTPException(500, f"Refund failed: {refund_exc}") from refund_exc
+    _append_usage_ledger({
+        "type": "admin_refund",
+        "target_user_id": target_id,
+        "target_email": target_email,
+        "credits": credits,
+        "source": applied_source,
+        "reason": reason,
+        "admin_email": str(user.get("email", "") or ""),
+        "ts": time.time(),
+    })
+    try:
+        _studio_alerts.send_alert(
+            "info",
+            "Admin refund issued",
+            f"{credits} AC refunded to {target_email} (source={applied_source})",
+            context={"reason": reason, "admin": str(user.get("email", "") or "")},
+        )
+    except Exception:
+        pass
+    log.info(f"Admin refund: {credits} AC to {target_email} (source={applied_source}) by {user.get('email', '?')}")
+    return {"ok": True, "email": target_email, "credits": credits, "source": applied_source}
+
+
 # â"€â"€â"€ User Feedback Collection â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
@@ -20875,6 +20992,7 @@ app.include_router(
         stripe_webhook_endpoint=_stripe_webhook,
         admin_set_plan_endpoint=_admin_set_plan,
         admin_cancel_subscription_endpoint=_admin_cancel_subscription,
+        admin_refund_credits_endpoint=_admin_refund_credits,
         submit_feedback_endpoint=_submit_feedback,
         get_all_feedback_endpoint=_get_all_feedback,
         get_admin_kpi_endpoint=_get_admin_kpi,
