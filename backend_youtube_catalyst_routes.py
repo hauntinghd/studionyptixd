@@ -52,6 +52,7 @@ def build_youtube_catalyst_app_router(
     longform_owner_beta_enabled,
     harvest_catalyst_outcomes_for_channel,
     youtube_upload_video_for_user=None,
+    youtube_upload_short_for_user=None,
     youtube_get_velocity_for_user=None,
 ):
     async def _start_google_youtube_oauth(
@@ -282,6 +283,25 @@ def build_youtube_catalyst_app_router(
             privacy=str(privacy).strip() or "private",
         )
 
+    async def _short_upload_video(
+        request: Request,
+        job_id: str = Form(""),
+        channel_id: str = Form(""),
+        privacy: str = Form("private"),
+    ):
+        """Upload a completed short-form job's rendered MP4 to YouTube."""
+        user = await get_current_user_from_request(request)
+        if not user:
+            raise HTTPException(401, "Auth required")
+        if not youtube_upload_short_for_user:
+            raise HTTPException(501, "YouTube upload not configured")
+        return await youtube_upload_short_for_user(
+            user=user,
+            job_id=str(job_id).strip(),
+            channel_id=str(channel_id).strip(),
+            privacy=str(privacy).strip() or "private",
+        )
+
     async def _catalyst_velocity(
         request: Request,
         channel_id: str = "",
@@ -399,5 +419,6 @@ def build_youtube_catalyst_app_router(
         catalyst_auto_tick_endpoint=_catalyst_auto_tick,
         catalyst_auto_pilot_endpoint=_catalyst_auto_pilot_toggle,
         catalyst_upload_endpoint=_catalyst_upload_video if youtube_upload_video_for_user else None,
+        short_upload_endpoint=_short_upload_video if youtube_upload_short_for_user else None,
         catalyst_velocity_endpoint=_catalyst_velocity if youtube_get_velocity_for_user else None,
     )

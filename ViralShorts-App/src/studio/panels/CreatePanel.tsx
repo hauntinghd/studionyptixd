@@ -254,6 +254,10 @@ export default function CreatePanel() {
     const [animationCreditPromptMode, setAnimationCreditPromptMode] = useState<'video' | 'image'>('video');
     const [animationCreditPromptError, setAnimationCreditPromptError] = useState<string | null>(null);
     const [renderMonitorDismissed, setRenderMonitorDismissed] = useState(false);
+    const [ytUploading, setYtUploading] = useState(false);
+    const [ytUploadError, setYtUploadError] = useState<string | null>(null);
+    const [ytUploadResult, setYtUploadResult] = useState<{ video_id: string; video_url: string } | null>(null);
+    const [ytPrivacy, setYtPrivacy] = useState<'private' | 'unlisted' | 'public'>('private');
     // Remix Script state — pull captions from a TikTok/YouTube/IG URL and drop into the textarea.
     const [remixUrl, setRemixUrl] = useState('');
     const [remixLoading, setRemixLoading] = useState(false);
@@ -1291,6 +1295,8 @@ export default function CreatePanel() {
         setGenerateError(null);
         setJobStatus(null);
         setJobId(null);
+        setYtUploadResult(null);
+        setYtUploadError(null);
         try {
             let referenceImageDataUrl = "";
             if (creativeReferenceImage) {
@@ -1922,7 +1928,99 @@ export default function CreatePanel() {
         setJobStatus(null);
         setLoading(false);
         setFinalizeError(null);
+        setYtUploading(false);
+        setYtUploadError(null);
+        setYtUploadResult(null);
         try { localStorage.removeItem(persistKey); } catch { /* ignore */ }
+    };
+
+    const handleUploadToYouTube = async () => {
+        const targetJobId = String(jobStatus?.job_id || jobId || '').trim();
+        if (!targetJobId || !session) return;
+        const channelId = String(youtubeChannelId || '').trim();
+        if (!channelId) {
+            setYtUploadError('Connect a YouTube channel first (use the channel picker at the top of the Create tab).');
+            return;
+        }
+        setYtUploading(true);
+        setYtUploadError(null);
+        setYtUploadResult(null);
+        try {
+            const form = new FormData();
+            form.append('job_id', targetJobId);
+            form.append('channel_id', channelId);
+            form.append('privacy', ytPrivacy);
+            const res = await fetch(`${GENERATION_API}/api/short/upload-to-youtube`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${session.access_token}` },
+                body: form,
+            });
+            const { data, raw } = await readJsonResponse<any>(res);
+            if (!res.ok) {
+                throw new Error(extractResponseErrorMessage(data, raw, 'YouTube upload failed'));
+            }
+            const videoId = String(data?.video_id || '').trim();
+            const videoUrl = String(data?.video_url || (videoId ? `https://youtu.be/${videoId}` : '')).trim();
+            if (!videoId || !videoUrl) {
+                throw new Error('Upload completed but YouTube did not return a video URL.');
+            }
+            setYtUploadResult({ video_id: videoId, video_url: videoUrl });
+        } catch (e: any) {
+            setYtUploadError(String(e?.message || 'YouTube upload failed'));
+        } finally {
+            setYtUploading(false);
+        }
+    };
+
+    const renderYouTubeUploadBlock = () => {
+        const connectedLabel = youtubeChannels.find((c) => c.channel_id === youtubeChannelId)?.title || '';
+        return (
+            <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <p className="text-[11px] uppercase tracking-wider text-rose-300 font-semibold">Publish</p>
+                        <p className="mt-1 text-sm font-semibold text-white">Upload to YouTube</p>
+                        {connectedLabel ? (
+                            <p className="text-xs text-gray-500 mt-0.5">Channel: {connectedLabel}</p>
+                        ) : (
+                            <p className="text-xs text-amber-300 mt-0.5">No channel connected — connect above to enable publishing.</p>
+                        )}
+                    </div>
+                    <select
+                        value={ytPrivacy}
+                        onChange={(e) => setYtPrivacy(e.target.value as 'private' | 'unlisted' | 'public')}
+                        disabled={ytUploading || !!ytUploadResult}
+                        className="rounded-lg border border-white/[0.08] bg-black/30 px-3 py-1.5 text-xs text-gray-200 disabled:opacity-50"
+                    >
+                        <option value="private">Private</option>
+                        <option value="unlisted">Unlisted</option>
+                        <option value="public">Public</option>
+                    </select>
+                </div>
+                {ytUploadResult ? (
+                    <a
+                        href={ytUploadResult.video_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center justify-center gap-2 w-full py-3 bg-rose-600 hover:bg-rose-500 text-white font-semibold rounded-xl transition"
+                    >
+                        Published · Open on YouTube →
+                    </a>
+                ) : (
+                    <button
+                        type="button"
+                        onClick={handleUploadToYouTube}
+                        disabled={ytUploading || !youtubeChannelId}
+                        className="flex items-center justify-center gap-2 w-full py-3 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-bold rounded-xl transition"
+                    >
+                        {ytUploading ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading to YouTube...</> : 'Upload to YouTube'}
+                    </button>
+                )}
+                {ytUploadError && (
+                    <p className="text-xs text-rose-300">{ytUploadError}</p>
+                )}
+            </div>
+        );
     };
 
     const openTemplateChooser = () => {
@@ -3327,6 +3425,7 @@ export default function CreatePanel() {
                                         className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all">
                                         <Download className="w-5 h-5" /> Download MP4
                                     </a>
+                                    {renderYouTubeUploadBlock()}
                                     <button onClick={handleResetCreative}
                                         className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
                                         Create Another
@@ -3380,40 +3479,58 @@ export default function CreatePanel() {
                             </div>
                         )}
                         {projectsLoading && <p className="text-sm text-gray-500">Loading projects...</p>}
-                        {!projectsLoading && (
+                        {!projectsLoading && projectDrafts.length === 0 && projectRenders.length === 0 && (
+                            <div className="rounded-2xl border border-violet-500/20 bg-violet-500/[0.04] p-6 text-center">
+                                <Sparkles className="mx-auto h-8 w-8 text-violet-300" />
+                                <h3 className="mt-3 text-lg font-bold text-white">Ship your first short</h3>
+                                <p className="mt-2 text-sm text-gray-400 max-w-md mx-auto">
+                                    Pick a niche, type a topic, hit Generate. Studio handles script, voice, scenes, music, captions, and the final MP4 in one pass.
+                                </p>
+                                <button
+                                    onClick={() => setCreateSubTab('builder')}
+                                    className="mt-5 inline-flex items-center gap-2 rounded-xl bg-violet-600 hover:bg-violet-500 px-5 py-2.5 text-sm font-semibold text-white transition"
+                                >
+                                    Start your first short
+                                    <ArrowRight className="h-4 w-4" />
+                                </button>
+                            </div>
+                        )}
+                        {!projectsLoading && (projectDrafts.length > 0 || projectRenders.length > 0) && (
                             <>
-                                <div className="space-y-3">
-                                    <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Drafts</h3>
-                                    {projectDrafts.length === 0 && <p className="text-sm text-gray-500">No drafts yet.</p>}
-                                    {projectDrafts.map((p) => (
-                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
-                                            <div>
-                                                <p className="text-sm font-semibold text-white">{p.topic || 'Untitled'}</p>
-                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.mode} • {p.status} • {p.scene_count || 0} scenes</p>
+                                {projectDrafts.length > 0 && (
+                                    <div className="space-y-3">
+                                        <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Drafts</h3>
+                                        {projectDrafts.map((p) => (
+                                            <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                                <div>
+                                                    <p className="text-sm font-semibold text-white">{p.topic || 'Untitled'}</p>
+                                                    <p className="text-xs text-gray-500 mt-1">{p.template} • {p.mode} • {p.status} • {p.scene_count || 0} scenes</p>
+                                                </div>
+                                                <button onClick={() => openDraftProject(p.project_id)} className="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white">
+                                                    Open
+                                                </button>
                                             </div>
-                                            <button onClick={() => openDraftProject(p.project_id)} className="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-semibold text-white">
-                                                Open
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                                <div className="space-y-3">
-                                    <h3 className="text-sm font-semibold text-emerald-300 uppercase tracking-wider">Renders</h3>
-                                    {projectRenders.length === 0 && <p className="text-sm text-gray-500">No renders yet.</p>}
-                                    {projectRenders.map((p) => (
-                                        <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
-                                            <div>
-                                                <p className="text-sm font-semibold text-white">{p.title || p.topic || 'Untitled Render'}</p>
-                                                <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
+                                        ))}
+                                    </div>
+                                )}
+                                {projectRenders.length > 0 && (
+                                    <div className="space-y-3">
+                                        <h3 className="text-sm font-semibold text-emerald-300 uppercase tracking-wider">Renders</h3>
+                                        {projectRenders.map((p) => (
+                                            <div key={p.project_id} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 flex items-center justify-between gap-4">
+                                                <div>
+                                                    <p className="text-sm font-semibold text-white">{p.title || p.topic || 'Untitled Render'}</p>
+                                                    <p className="text-xs text-gray-500 mt-1">{p.template} • {p.status} • {p.resolution || '720p'}</p>
+                                                </div>
+                                                {p.output_file ? (
+                                                    <a href={`${GENERATION_API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
+                                                ) : (
+                                                    <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
+                                                )}
                                             </div>
-                                            {p.output_file ? (
-                                                <a href={`${GENERATION_API}/api/download/${p.output_file}`} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white">Download</a>
-                                            ) : (
-                                                <span className="text-xs text-red-400">{p.error || 'No output file'}</span>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
+                                        ))}
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>
@@ -4165,6 +4282,7 @@ export default function CreatePanel() {
                                         <Download className="w-5 h-5" />
                                         Download MP4
                                     </a>
+                                    {renderYouTubeUploadBlock()}
                                     {jobStatus.resolution === '720p' && Array.isArray(jobStatus.scene_images) && jobStatus.scene_images.length > 0 && (
                                         <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4 space-y-3">
                                             <p className="text-xs uppercase tracking-wider text-gray-400 font-semibold">
@@ -4196,7 +4314,7 @@ export default function CreatePanel() {
                                             </div>
                                         </div>
                                     )}
-                                    <button onClick={() => { setJobStatus(null); setJobId(null); }}
+                                    <button onClick={() => { setJobStatus(null); setJobId(null); setYtUploadResult(null); setYtUploadError(null); }}
                                         className="w-full py-3 bg-white/5 hover:bg-white/10 text-gray-300 font-medium rounded-xl transition-all">
                                         Create Another
                                     </button>
