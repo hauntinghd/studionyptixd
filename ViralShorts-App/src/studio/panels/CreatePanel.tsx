@@ -3296,11 +3296,17 @@ export default function CreatePanel() {
                     }`}>
                         {jobStatus.status === 'error' ? (
                             <div className="p-8 text-center">
-                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
-                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <p className="text-red-400 font-bold text-lg mb-2">
+                                    {jobStatus.error_kind === 'content_policy' ? 'Prompt Flagged by Content Filter' :
+                                     jobStatus.error_kind === 'upstream_busy' ? 'AI Provider at Capacity' :
+                                     'Generation Failed'}
+                                </p>
+                                <p className="text-gray-400 text-sm max-w-xl mx-auto">{jobStatus.error}</p>
                                 <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); setCreativeStep('edit'); }}
-                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
-                                    Back to Editor
+                                    className="mt-4 px-6 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-sm font-semibold transition">
+                                    {jobStatus.error_kind === 'content_policy' ? 'Edit Prompt' :
+                                     jobStatus.error_kind === 'upstream_busy' ? 'Retry' :
+                                     'Back to Editor'}
                                 </button>
                             </div>
                         ) : jobStatus.status === 'complete' ? (
@@ -4124,11 +4130,17 @@ export default function CreatePanel() {
                     }`}>
                         {jobStatus.status === 'error' ? (
                             <div className="p-8 text-center">
-                                <p className="text-red-400 font-bold text-lg mb-2">Generation Failed</p>
-                                <p className="text-gray-500 text-sm">{jobStatus.error}</p>
+                                <p className="text-red-400 font-bold text-lg mb-2">
+                                    {jobStatus.error_kind === 'content_policy' ? 'Prompt Flagged by Content Filter' :
+                                     jobStatus.error_kind === 'upstream_busy' ? 'AI Provider at Capacity' :
+                                     'Generation Failed'}
+                                </p>
+                                <p className="text-gray-400 text-sm max-w-xl mx-auto">{jobStatus.error}</p>
                                 <button onClick={() => { setJobStatus(null); setJobId(null); setLoading(false); }}
-                                    className="mt-4 px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm transition">
-                                    Try Again
+                                    className="mt-4 px-6 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-sm font-semibold transition">
+                                    {jobStatus.error_kind === 'content_policy' ? 'Edit Prompt' :
+                                     jobStatus.error_kind === 'upstream_busy' ? 'Retry' :
+                                     'Try Again'}
                                 </button>
                             </div>
                         ) : jobStatus.status === 'complete' ? (
