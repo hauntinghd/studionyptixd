@@ -4630,6 +4630,13 @@ async def _fal_any_llm_json_completion(
         "prompt": user_prompt,
         "temperature": max(0.2, float(temperature)),
     }
+    sys_len = len(system_prompt or "")
+    user_len = len(user_prompt or "")
+    log.info(
+        f"[fal_any_llm] START model={model} sys_chars={sys_len} user_chars={user_len} "
+        f"timeout={timeout_sec}s"
+    )
+    t0 = time.time()
     try:
         data = await fal_gate.post_with_retry(
             "https://fal.run/fal-ai/any-llm",
@@ -4640,22 +4647,35 @@ async def _fal_any_llm_json_completion(
             source="any_llm_json_completion",
         )
     except fal_gate.FalFailed as exc:
+        dur = time.time() - t0
+        log.error(f"[fal_any_llm] FAILED after {dur:.1f}s model={model}: {str(exc)[:200]}")
         _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion", context={"model": model})
         raise
     except fal_gate.FalBusy as exc:
+        dur = time.time() - t0
+        log.error(f"[fal_any_llm] BUSY after {dur:.1f}s model={model}: {str(exc)[:200]}")
         _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion (busy)", context={"model": model})
         raise
+    except Exception as exc:
+        dur = time.time() - t0
+        log.error(f"[fal_any_llm] UNEXPECTED {type(exc).__name__} after {dur:.1f}s model={model}: {str(exc)[:200]}")
+        raise
+    dur = time.time() - t0
     if not isinstance(data, dict):
+        log.error(f"[fal_any_llm] bad-shape response after {dur:.1f}s model={model}")
         raise ValueError("fal any-llm returned non-JSON response")
     output_err = data.get("error")
     if output_err:
+        log.error(f"[fal_any_llm] upstream-error after {dur:.1f}s model={model}: {str(output_err)[:200]}")
         raise RuntimeError(f"fal any-llm upstream error: {output_err}")
     content = str(data.get("output") or data.get("result") or "")
     if not content:
         # Accept legacy OpenAI-shaped payloads just in case fal changes format.
         content = str(((data.get("choices") or [{}])[0] or {}).get("message", {}).get("content", "") or "")
     if not content:
+        log.error(f"[fal_any_llm] empty-content after {dur:.1f}s model={model} data_keys={list(data.keys())}")
         raise ValueError("fal any-llm returned empty content")
+    log.info(f"[fal_any_llm] OK after {dur:.1f}s model={model} content_chars={len(content)}")
     # Claude via any-llm often wraps JSON in ```json fences; strip and find the
     # outer object.
     text = content.strip()
@@ -4665,8 +4685,13 @@ async def _fal_any_llm_json_completion(
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end <= 0:
+        log.error(f"[fal_any_llm] no-json after {dur:.1f}s model={model} content_preview={content[:200]!r}")
         raise ValueError("No JSON object found in fal any-llm response")
-    return json.loads(text[start:end])
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError as jde:
+        log.error(f"[fal_any_llm] json-parse-error after {dur:.1f}s model={model}: {jde} preview={text[start:min(start+300, end)]!r}")
+        raise
 
 
 # Legacy names kept for the runtime-hook wiring in video_pipeline /
@@ -18658,8 +18683,12 @@ def _user_has_paid_access(user: dict | None) -> bool:
 
 
 async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTasks, request: Request = None):
-    if not XAI_API_KEY:
-        raise HTTPException(500, "XAI_API_KEY not configured")
+    # All hot-path LLM + image generation runs through fal.ai now. Gate on the
+    # actual credential we need. XAI_API_KEY is still in env because Catalyst
+    # admin analysis hits `_xai_json_completion_multimodal` direct — non-hot,
+    # not required for this endpoint.
+    if not FAL_AI_KEY:
+        raise HTTPException(500, "FAL_AI_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
     if user and not _user_has_paid_access(user):
@@ -21904,29 +21933,15 @@ async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
     if style_preset_hint:
         user_msg += f"\n\nPREFERRED STYLE DIRECTION: {style_preset_hint}"
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "grok-3-mini-fast",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                "temperature": 0.7,
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON in thumbnail AI response")
-        return json.loads(content[start:end])
+    # Thumbnail prompt gen runs through the same fal any-llm path as script gen
+    # so we don't need XAI credits for any text-completion work. Using the
+    # dedicated helper keeps logging, timeouts, and response parsing unified.
+    return await _fal_any_llm_json_completion(
+        system_prompt,
+        user_msg,
+        temperature=0.7,
+        timeout_sec=60,
+    )
 
 
 async def _check_lora_exists() -> bool:
