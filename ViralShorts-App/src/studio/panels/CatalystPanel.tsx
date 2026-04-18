@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, BrainCircuit, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
+import { AlertTriangle, Bot, BrainCircuit, Download, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
 import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
 
 type CatalystChannel = {
@@ -518,6 +518,50 @@ export default function CatalystPanel() {
         return String(match?.[1] || '').trim();
     }, [error]);
 
+    // Phase 2.1: inline long-form progress + download, no more redirect to /longform tab.
+    // `activeLongform` tracks the session the user just kicked off from Catalyst so we
+    // can poll status and render a progress card right here.
+    const [activeLongform, setActiveLongform] = useState<{
+        session_id: string;
+        status: any;
+        job_status: any;
+        error: string;
+    } | null>(null);
+
+    useEffect(() => {
+        const sid = activeLongform?.session_id;
+        if (!sid) return;
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/longform/session/${sid}/status`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setActiveLongform((prev) => (prev ? { ...prev, error: String(data?.detail || `HTTP ${res.status}`) } : prev));
+                    return;
+                }
+                const s = data?.session || data;
+                // When rendering has a job_id, also fetch job status so we can surface output_file for download.
+                let jobData: any = null;
+                const jobId = String(s?.job_id || '').trim();
+                if (jobId) {
+                    try {
+                        const jr = await fetchJsonWithAuthRetry<any>(`${API}/api/job/${jobId}`);
+                        if (jr.res.ok) jobData = jr.data;
+                    } catch { /* non-fatal */ }
+                }
+                setActiveLongform((prev) => (prev ? { ...prev, status: s, job_status: jobData, error: '' } : prev));
+            } catch (e: any) {
+                if (!cancelled) {
+                    setActiveLongform((prev) => (prev ? { ...prev, error: String(e?.message || 'poll failed') } : prev));
+                }
+            }
+        };
+        void poll();
+        const id = window.setInterval(poll, 5000);
+        return () => { cancelled = true; window.clearInterval(id); };
+    }, [activeLongform?.session_id]);
+
     const orderedWorkspaceIds = useMemo(
         () => WORKSPACE_ORDER.filter((workspaceId) => workspaceSnapshots[workspaceId]).concat(
             Object.keys(workspaceSnapshots).filter((workspaceId) => !WORKSPACE_ORDER.includes(workspaceId))
@@ -747,11 +791,10 @@ export default function CatalystPanel() {
             if (!res.ok) throw new Error(String(data?.detail || 'Failed to launch'));
             const sessionId = String(data?.session?.session_id || '').trim();
             if (sessionId) {
+                // Phase 2.1: stay in Catalyst; show inline progress + download.
+                // Still persist to sessionStorage so a hard reload can resume.
                 try { sessionStorage.setItem(pendingLongformLaunchKey, sessionId); } catch {}
-                const nextUrl = new URL(window.location.href);
-                nextUrl.searchParams.set('page', 'dashboard');
-                nextUrl.searchParams.set('tab', 'longform');
-                window.location.href = nextUrl.toString();
+                setActiveLongform({ session_id: sessionId, status: data?.session || null, job_status: null, error: '' });
             }
         } catch (e: any) {
             setError(String(e?.message || 'Failed to approve suggestion'));
@@ -759,6 +802,17 @@ export default function CatalystPanel() {
             setApprovingSuggestionIdx(null);
         }
     };
+
+    // Phase 2.1: on component mount, if sessionStorage has a pending launch id, resume tracking it.
+    useEffect(() => {
+        try {
+            const sid = sessionStorage.getItem(pendingLongformLaunchKey);
+            if (sid && !activeLongform) {
+                setActiveLongform({ session_id: String(sid), status: null, job_status: null, error: '' });
+            }
+        } catch { /* noop */ }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pendingLongformLaunchKey]);
 
     const handleCheckVelocity = async () => {
         const cid = String(selectedChannelIdRef.current || '').trim();
@@ -1384,6 +1438,105 @@ export default function CatalystPanel() {
                             </div>
                         )}
                     </div>
+                    )}
+
+                    {/* ─── Phase 2.1: inline long-form progress (replaces redirect to /longform tab) ─── */}
+                    {activeLongform && (
+                        (() => {
+                            const s = activeLongform.status || {};
+                            const chapters: any[] = Array.isArray(s.chapters) ? s.chapters : [];
+                            const dp = s.draft_progress || {};
+                            const stage: string = String(dp.stage || s.status || 'bootstrapping');
+                            const approved = Number(s.review_state?.approved_chapters || dp.approved_chapters || 0);
+                            const total = Number(s.review_state?.total_chapters || chapters.length || 0);
+                            const paused = s.paused_error || null;
+                            const js = activeLongform.job_status || {};
+                            const outputFile = String(js?.output_file || js?.package?.output_file || '');
+                            const outputUrl = outputFile ? `${API}/api/download/${outputFile}` : '';
+                            const isDone = stage === 'rendered' || String(s.status || '') === 'rendered' || Boolean(outputFile);
+                            const isError = stage === 'error' || stage === 'bootstrap_error' || Boolean(paused);
+                            const stageLabel = (() => {
+                                if (isDone) return 'RENDERED';
+                                if (isError) return 'ERROR';
+                                if (stage.startsWith('generating_chapter')) {
+                                    const m = stage.match(/chapter_(\d+)/);
+                                    return m ? `Drafting chapter ${m[1]} of ${total || '?'}` : 'Drafting chapters';
+                                }
+                                if (stage === 'rendering' || String(s.status || '') === 'rendering') return 'Rendering final MP4';
+                                if (stage === 'draft_review') return 'Draft ready — reviewing';
+                                if (stage === 'auto_pipeline_progress') return 'Auto pipeline in progress';
+                                if (stage === 'awaiting_render_capacity') return 'Waiting for a render slot';
+                                return stage || 'Bootstrapping';
+                            })();
+                            return (
+                                <div className={`rounded-3xl border p-6 space-y-4 ${
+                                    isDone ? 'border-emerald-500/30 bg-emerald-500/[0.05]' :
+                                    isError ? 'border-rose-500/30 bg-rose-500/[0.05]' :
+                                    'border-cyan-500/20 bg-cyan-500/[0.04]'
+                                }`}>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="flex items-center gap-2 text-sm font-semibold">
+                                            {isDone ? <Sparkles className="h-4 w-4 text-emerald-300" /> :
+                                             isError ? <AlertTriangle className="h-4 w-4 text-rose-300" /> :
+                                             <Loader2 className="h-4 w-4 text-cyan-300 animate-spin" />}
+                                            <span className={isDone ? 'text-emerald-300' : isError ? 'text-rose-300' : 'text-cyan-300'}>
+                                                {isDone ? 'Long-form video ready' : isError ? 'Long-form pipeline paused on error' : stageLabel}
+                                            </span>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                try { sessionStorage.removeItem(pendingLongformLaunchKey); } catch {}
+                                                setActiveLongform(null);
+                                            }}
+                                            className="text-[10px] uppercase tracking-wider text-gray-400 hover:text-white"
+                                        >
+                                            Dismiss
+                                        </button>
+                                    </div>
+                                    <div className="text-[11px] text-gray-400">
+                                        session: <span className="font-mono text-gray-200">{activeLongform.session_id}</span> · chapters approved {approved}/{total}
+                                    </div>
+                                    {total > 0 && (
+                                        <div className="space-y-1.5">
+                                            {chapters.map((ch: any, i: number) => {
+                                                const st = String(ch.status || '');
+                                                const colorCls = st === 'approved' || st === 'rendered' ? 'bg-emerald-500/60' :
+                                                    st === 'draft_generating' || st === 'draft_generating_images' || st === 'rendering' ? 'bg-cyan-500/60 animate-pulse' :
+                                                    st === 'error' ? 'bg-rose-500/60' :
+                                                    'bg-white/10';
+                                                return (
+                                                    <div key={i} className="flex items-center gap-2 text-[11px]">
+                                                        <div className={`h-1.5 w-full rounded-full ${colorCls}`} />
+                                                        <span className="w-20 shrink-0 text-right text-gray-400">ch {i + 1}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                    {isError && (paused?.error || chapters.find((c: any) => c.last_error)?.last_error) && (
+                                        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/[0.08] px-4 py-3 text-xs text-rose-100">
+                                            {String(paused?.error || chapters.find((c: any) => c.last_error)?.last_error || 'Unknown error')}
+                                        </div>
+                                    )}
+                                    {isDone && outputUrl && (
+                                        <a
+                                            href={outputUrl}
+                                            download
+                                            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500"
+                                        >
+                                            <Download className="h-3.5 w-3.5" />
+                                            Download MP4
+                                        </a>
+                                    )}
+                                    {!isDone && !isError && (
+                                        <div className="text-[11px] text-gray-500">
+                                            Polling every 5s. You can leave this tab open — the pipeline runs server-side even if you close the browser. When it finishes, a download link appears here.
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()
                     )}
 
                     {/* ─── Auto Pilot ─── */}
