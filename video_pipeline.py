@@ -70,6 +70,11 @@ def configure_video_pipeline_runtime_hooks(
 
 DEFAULT_CREATIVE_IMAGE_MODEL_ID = "ernie_image"
 DEFAULT_CREATIVE_VIDEO_MODEL_ID = "kling21_standard"
+# Long-form is owner-beta / testing-only. Premium defaults so test renders match the
+# Lume / Empire-Magnates quality bar — Kling Pro motion + 1080p — before Casey judges
+# "is this viral-quality." Does NOT affect short-form public pricing.
+DEFAULT_LONGFORM_VIDEO_MODEL_ID = "kling21_pro"
+DEFAULT_LONGFORM_RESOLUTION = "1080p_landscape"
 LONGFORM_ALLOWED_TEMPLATES = {"story", "skeleton"}
 LONGFORM_WHISPER_MODES = {"off", "subtle", "cinematic"}
 LONGFORM_HORROR_VISUAL_DIRECTIVE = (

@@ -192,6 +192,8 @@ from backend_settings import (
 from video_pipeline import (
     DEFAULT_CREATIVE_IMAGE_MODEL_ID,
     DEFAULT_CREATIVE_VIDEO_MODEL_ID,
+    DEFAULT_LONGFORM_VIDEO_MODEL_ID,
+    DEFAULT_LONGFORM_RESOLUTION,
     CREATIVE_IMAGE_MODEL_PROFILES,
     CREATIVE_IMAGE_MODEL_MAP,
     CREATIVE_VIDEO_MODEL_PROFILES,
@@ -9067,6 +9069,58 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
     return output_clip_path
 
 
+async def _animate_with_creative_video_model(
+    video_model_id: str,
+    image_path: str,
+    prompt: str,
+    output_clip_path: str,
+    duration: str,
+    aspect_ratio: str,
+    image_cdn_url: str = None,
+) -> str:
+    """Dispatch an I2V animate call to the right fal endpoint based on video_model_id.
+
+    Long-form sets session['video_model_id'] (default kling21_pro) at create time;
+    short-form has its own dispatcher in animate_scene(). This keeps the long-form
+    render loop out of animate_image_kling's hardcoded Kling-Standard endpoint.
+    """
+    normalized = _normalize_creative_video_model_id(video_model_id)
+    if normalized == "kling21_standard":
+        return await animate_image_kling(
+            image_path,
+            prompt,
+            output_clip_path,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            image_cdn_url=image_cdn_url,
+        )
+    profile = _creative_video_model_profile(normalized)
+    endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
+    if not endpoint_id:
+        return await animate_image_kling(
+            image_path,
+            prompt,
+            output_clip_path,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            image_cdn_url=image_cdn_url,
+        )
+    try:
+        duration_sec = float(duration or 5.0)
+    except Exception:
+        duration_sec = 5.0
+    return await animate_image_fal_queue_model(
+        endpoint_id,
+        image_path,
+        prompt,
+        output_clip_path,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        image_cdn_url=image_cdn_url,
+        profile=profile,
+    )
+
+
 async def _download_url_to_file(url: str, output_path: str):
     """Download a file from a URL to a local path using streaming writes."""
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -14167,7 +14221,8 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                             scene_index=i,
                             total_scenes=len(scenes),
                         ) + " " + TEMPLATE_KLING_MOTION.get(template, "Cinematic motion.")
-                        out_clip = await animate_image_kling(
+                        out_clip = await _animate_with_creative_video_model(
+                            video_model_id=str(live_session.get("video_model_id", "") or ""),
                             image_path=img_path,
                             prompt=motion_prompt,
                             output_clip_path=clip_path,
@@ -14733,7 +14788,8 @@ async def _create_longform_session_internal(
         "character_references": [dict(item or {}) for item in list(existing_session.get("character_references") or []) if isinstance(item, dict)] if existing_session else [],
         "target_minutes": float(target_minutes),
         "language": language,
-        "resolution": "720p_landscape",
+        "resolution": DEFAULT_LONGFORM_RESOLUTION,
+        "video_model_id": DEFAULT_LONGFORM_VIDEO_MODEL_ID,
         "animation_enabled": _bool_from_any(animation_enabled, True),
         "sfx_enabled": _bool_from_any(sfx_enabled, True),
         "whisper_mode": whisper_mode,
@@ -14892,7 +14948,8 @@ def _create_longform_bootstrap_placeholder_session(
         "character_references": [],
         "target_minutes": float(target_minutes),
         "language": _normalize_longform_language(language),
-        "resolution": "720p_landscape",
+        "resolution": DEFAULT_LONGFORM_RESOLUTION,
+        "video_model_id": DEFAULT_LONGFORM_VIDEO_MODEL_ID,
         "animation_enabled": _bool_from_any(animation_enabled, True),
         "sfx_enabled": _bool_from_any(sfx_enabled, True),
         "whisper_mode": _normalize_longform_whisper_mode(whisper_mode),
