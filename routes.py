@@ -288,6 +288,7 @@ def build_billing_router(
     stripe_webhook_endpoint,
     admin_set_plan_endpoint,
     admin_cancel_subscription_endpoint,
+    admin_refund_credits_endpoint,
     submit_feedback_endpoint,
     get_all_feedback_endpoint,
     get_admin_kpi_endpoint,
@@ -307,6 +308,7 @@ def build_billing_router(
     router.add_api_route("/api/stripe-webhook", stripe_webhook_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/set-plan", admin_set_plan_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/cancel-subscription", admin_cancel_subscription_endpoint, methods=["POST"])
+    router.add_api_route("/api/admin/refund-credits", admin_refund_credits_endpoint, methods=["POST"])
     router.add_api_route("/api/feedback", submit_feedback_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/feedback", get_all_feedback_endpoint, methods=["GET"])
     router.add_api_route("/api/admin/kpi", get_admin_kpi_endpoint, methods=["GET"])

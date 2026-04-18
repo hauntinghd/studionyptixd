@@ -168,8 +168,117 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                         </div>
                         {isAdmin && <p className="mt-4 text-xs text-emerald-300">Admin preview account detected. Settings architecture is live without changing owner overrides.</p>}
                     </section>
+
+                    {isAdmin && <AdminRefundPanel />}
                 </div>
             </div>
         </>
+    );
+}
+
+function AdminRefundPanel() {
+    const { session } = useContext(AuthContext);
+    const [email, setEmail] = useState('');
+    const [credits, setCredits] = useState('');
+    const [reason, setReason] = useState('');
+    const [source, setSource] = useState<'auto' | 'topup' | 'monthly'>('auto');
+    const [busy, setBusy] = useState(false);
+    const [result, setResult] = useState<string>('');
+    const [errorMsg, setErrorMsg] = useState<string>('');
+
+    const submit = async () => {
+        if (!session) return;
+        setBusy(true);
+        setResult('');
+        setErrorMsg('');
+        try {
+            const res = await fetch(`${API}/api/admin/refund-credits`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ email: email.trim(), credits: Number(credits || 0), source, reason: reason.trim() }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((data as any)?.detail || `Refund failed (${res.status})`));
+            setResult(`Refunded ${(data as any)?.credits || credits} AC to ${(data as any)?.email || email} via ${(data as any)?.source || source}.`);
+            setCredits('');
+            setReason('');
+        } catch (e: any) {
+            setErrorMsg(String(e?.message || 'Refund failed'));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <section className="rounded-2xl border border-rose-500/20 bg-rose-500/[0.04] p-6">
+            <div className="flex items-center gap-3">
+                <WalletCards className="w-5 h-5 text-rose-300" />
+                <div>
+                    <h2 className="text-lg font-semibold text-white">Admin · Issue Refund</h2>
+                    <p className="mt-1 text-sm text-gray-400">Credit AC back to a user's wallet. Use for chargeback resolution or support refunds. Logged + Discord-alerted.</p>
+                </div>
+            </div>
+            <div className="mt-5 grid gap-3 md:grid-cols-2">
+                <div>
+                    <label className="text-xs uppercase tracking-wider text-gray-400">User Email</label>
+                    <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="user@example.com"
+                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
+                    />
+                </div>
+                <div>
+                    <label className="text-xs uppercase tracking-wider text-gray-400">Credits to Refund</label>
+                    <input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={credits}
+                        onChange={(e) => setCredits(e.target.value)}
+                        placeholder="e.g. 40"
+                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
+                    />
+                </div>
+                <div>
+                    <label className="text-xs uppercase tracking-wider text-gray-400">Source</label>
+                    <select
+                        value={source}
+                        onChange={(e) => setSource(e.target.value as 'auto' | 'topup' | 'monthly')}
+                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white"
+                    >
+                        <option value="auto">Auto (recommended — refunds to top-up wallet)</option>
+                        <option value="topup">Top-up wallet</option>
+                        <option value="monthly">Monthly included credits</option>
+                    </select>
+                </div>
+                <div>
+                    <label className="text-xs uppercase tracking-wider text-gray-400">Reason (optional)</label>
+                    <input
+                        type="text"
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        placeholder="e.g. broken render, content-filter false-flag, support credit"
+                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
+                    />
+                </div>
+            </div>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                <button
+                    type="button"
+                    onClick={() => void submit()}
+                    disabled={busy || !email.trim() || !credits || Number(credits) <= 0}
+                    className="rounded-xl bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-40"
+                >
+                    {busy ? 'Issuing refund…' : 'Issue Refund'}
+                </button>
+                {result && <p className="text-sm text-emerald-300">{result}</p>}
+                {errorMsg && <p className="text-sm text-rose-300">{errorMsg}</p>}
+            </div>
+        </section>
     );
 }

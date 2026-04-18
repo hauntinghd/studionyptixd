@@ -131,7 +131,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </div>
                             <div className="mt-6 space-y-3">
                                 {[
-                                    'Script, voice-over, scene images, animation, music, and captions in one pass',
+                                    'Script, voice-over, scene images, animation, and captions in one pass',
                                     'One-click publish direct to your connected YouTube channel',
                                     'Failed renders auto-refund your credits — no tickets, no chargebacks',
                                     'Nine niches live: Skeleton AI, Day Trading, Moral Dilemma, Business, Finance, Tech, Crypto, Scary, History',
@@ -153,7 +153,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">Live Now</p>
                         <h2 className="mt-3 text-4xl font-bold text-white">Nine live short-form niches</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            Every niche ships the same way: script, scenes, voice, music, captions, and the final MP4 — plus a one-click publish to YouTube. If a render fails, your credits refund automatically.
+                            Every niche ships the same way: script, scenes, voice, captions, and the final MP4 — plus a one-click publish to YouTube. If a render fails, your credits refund automatically.
                         </p>
                     </div>
                     <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
