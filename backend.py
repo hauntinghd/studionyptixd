@@ -4602,46 +4602,84 @@ from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 # â"€â"€â"€ ElevenLabs TTS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
+async def _fal_any_llm_json_completion(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    timeout_sec: int = 120,
+    model: str = "anthropic/claude-sonnet-4.5",
+) -> dict:
+    """Call an LLM via fal.ai's any-llm router and return a parsed JSON object.
+
+    This is the single LLM text-completion path for Studio. Everything in
+    Studio runs on fal now — no direct Anthropic / OpenAI / xAI API keys on
+    the hot path. The prior `_fal_openrouter_json_completion` pointed at
+    `fal.run/fal-ai/openrouter/router` which returns 404 ("Application
+    'openrouter' not found") — that's what was silently making script
+    generation fall through to the broken XAI fallback and hang at 5%.
+
+    Routed through fal_gate so concurrency + content-policy errors surface
+    as FalFailed (terminal — we do NOT silently retry content policy).
+    """
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    import fal_gate
+    body = {
+        "model": model,
+        "system_prompt": system_prompt,
+        "prompt": user_prompt,
+        "temperature": max(0.2, float(temperature)),
+    }
+    try:
+        data = await fal_gate.post_with_retry(
+            "https://fal.run/fal-ai/any-llm",
+            api_key=FAL_AI_KEY,
+            json_body=body,
+            timeout_sec=timeout_sec,
+            max_attempts=3,
+            source="any_llm_json_completion",
+        )
+    except fal_gate.FalFailed as exc:
+        _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion", context={"model": model})
+        raise
+    except fal_gate.FalBusy as exc:
+        _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion (busy)", context={"model": model})
+        raise
+    if not isinstance(data, dict):
+        raise ValueError("fal any-llm returned non-JSON response")
+    output_err = data.get("error")
+    if output_err:
+        raise RuntimeError(f"fal any-llm upstream error: {output_err}")
+    content = str(data.get("output") or data.get("result") or "")
+    if not content:
+        # Accept legacy OpenAI-shaped payloads just in case fal changes format.
+        content = str(((data.get("choices") or [{}])[0] or {}).get("message", {}).get("content", "") or "")
+    if not content:
+        raise ValueError("fal any-llm returned empty content")
+    # Claude via any-llm often wraps JSON in ```json fences; strip and find the
+    # outer object.
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON object found in fal any-llm response")
+    return json.loads(text[start:end])
+
+
+# Legacy names kept for the runtime-hook wiring in video_pipeline /
+# catalyst. Both now route through fal.ai's any-llm — XAI direct calls
+# would hit a team-quota-exhausted wall anyway, and Casey's explicit
+# direction is "fal.ai for everything".
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=timeout_sec) as client:
-                resp = await client.post(
-                    "https://api.x.ai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {XAI_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "grok-3-mini-fast",
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": max(0.2, float(temperature) - (attempt * 0.08)),
-                    },
-                )
-                if resp.status_code in {429, 500, 502, 503, 504}:
-                    raise httpx.HTTPStatusError(
-                        f"Retryable xAI status {resp.status_code}",
-                        request=resp.request,
-                        response=resp,
-                    )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start == -1 or end <= 0:
-                raise ValueError("No JSON found in xAI response")
-            return json.loads(content[start:end])
-        except Exception as exc:
-            last_error = exc
-            if attempt >= 2:
-                break
-            wait_seconds = (attempt + 1) * 2
-            await asyncio.sleep(wait_seconds)
-    raise last_error if last_error is not None else RuntimeError("xAI JSON completion failed")
+    return await _fal_any_llm_json_completion(
+        system_prompt,
+        user_prompt,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
+    )
 
 
 async def _fal_openrouter_json_completion(
@@ -4649,51 +4687,15 @@ async def _fal_openrouter_json_completion(
     user_prompt: str,
     temperature: float = 0.7,
     timeout_sec: int = 120,
-    model: str = "anthropic/claude-sonnet-4.6",
+    model: str = "anthropic/claude-sonnet-4.5",
 ) -> dict:
-    """Call LLM via FAL OpenRouter (Claude Sonnet 4.6 primary). Same FAL_AI_KEY.
-
-    Routed through fal_gate: concurrency-capped, retry-on-429 / concurrent-limit,
-    content-policy raises FalFailed (terminal, do not silently retry).
-    """
-    if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY not configured for OpenRouter")
-    import fal_gate
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": max(0.2, float(temperature)),
-    }
-    try:
-        data = await fal_gate.post_with_retry(
-            "https://fal.run/fal-ai/openrouter/router",
-            api_key=FAL_AI_KEY,
-            json_body=body,
-            timeout_sec=timeout_sec,
-            max_attempts=3,
-            source="openrouter_json_completion",
-        )
-    except fal_gate.FalFailed as exc:
-        _studio_alerts.send_exception(exc, source="_fal_openrouter_json_completion", context={"model": model})
-        raise
-    except fal_gate.FalBusy as exc:
-        _studio_alerts.send_exception(exc, source="_fal_openrouter_json_completion (busy)", context={"model": model})
-        raise
-    if not isinstance(data, dict):
-        raise ValueError("FAL OpenRouter returned non-JSON response")
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    if not content:
-        content = str(data.get("output", "") or data.get("result", "") or "")
-    if not content:
-        raise ValueError("FAL OpenRouter returned empty content")
-    start = content.find("{")
-    end = content.rfind("}") + 1
-    if start == -1 or end <= 0:
-        raise ValueError("No JSON found in FAL OpenRouter response")
-    return json.loads(content[start:end])
+    return await _fal_any_llm_json_completion(
+        system_prompt,
+        user_prompt,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
+        model=model,
+    )
 
 
 async def _xai_json_completion_multimodal(
