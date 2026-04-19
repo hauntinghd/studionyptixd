@@ -2928,6 +2928,22 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     )}
                 </div>
                 <FalQueueCard active={sceneBuildLoading || bulkImageGenRunning || loading} />
+                {workspaceStage === 'scenes' && sceneBuildError && (
+                    <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 flex items-start gap-3">
+                        <X className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5 cursor-pointer" onClick={() => setSceneBuildError(null)} />
+                        <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-red-200">Couldn't generate scene prompts</p>
+                            <p className="mt-0.5 text-[12px] leading-snug text-red-200/80">{sceneBuildError}</p>
+                            <button
+                                type="button"
+                                onClick={() => { setSceneBuildError(null); void handleGenerateScriptToShortScenes(); }}
+                                className="mt-2 inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-100 transition hover:border-red-400 hover:bg-red-500/20"
+                            >
+                                Retry
+                            </button>
+                        </div>
+                    </div>
+                )}
                 {workspaceStage === 'scenes' && (sceneBuildLoading || bulkImageGenRunning) && (
                     <div className="rounded-xl border border-violet-500/30 bg-violet-500/[0.06] p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
@@ -3782,7 +3798,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 onAnimate={() => {
                     setAnimateAllModalOpen(false);
                     captureApprovedSceneImages({ implicit: true });
-                    setWorkspaceStage('audio');
+                    // Keep user on Scenes during animation — matches Korpi's
+                    // scene-thumb + per-scene progress UX. handleFinalize
+                    // populates jobStatus which appears inline below the scene
+                    // grid (render card isn't stage-scoped). Advancing to
+                    // Audio mid-render would hide the scene grid they just
+                    // approved, making the wait feel longer.
                     void handleFinalize();
                 }}
             />
