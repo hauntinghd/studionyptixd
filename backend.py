@@ -100,8 +100,6 @@ from backend_settings import (
     SITE_URL,
     FAL_AI_KEY,
     FAL_IMAGE_BACKUP_MODEL,
-    XAI_IMAGE_MODEL,
-    XAI_VIDEO_MODEL,
     PIKZELS_THUMBNAIL_MODEL,
     PIKZELS_RECREATE_MODEL,
     PIKZELS_TITLE_MODEL,
@@ -113,9 +111,6 @@ from backend_settings import (
     KLING21_STANDARD_I2V_5S_USD,
     ANIMATION_MARKUP_MULTIPLIER,
     ANIMATION_CREDIT_UNIT_USD,
-    XAI_IMAGE_ASPECT_RATIO,
-    XAI_IMAGE_RESOLUTION,
-    USE_XAI_VIDEO,
     PRODUCT_DEMO_PUBLIC_ENABLED,
     WAITLIST_ONLY_MODE,
     WAITLIST_REQUIRE_STRIPE_PAYMENT,
@@ -4723,6 +4718,86 @@ async def _fal_openrouter_json_completion(
     )
 
 
+async def _fal_any_llm_vision_json_completion(
+    system_prompt: str,
+    user_prompt: str,
+    image_paths: list[str] | None = None,
+    temperature: float = 0.35,
+    timeout_sec: int = 120,
+    model: str = "anthropic/claude-sonnet-4.5",
+) -> dict:
+    """Vision-capable LLM completion via fal.ai's `any-llm/vision` router.
+
+    Collects images as base64 data URLs, sends them via the `image_urls` field
+    (plural, schema confirmed 2026-04-19), and returns parsed JSON. This is the
+    multimodal counterpart to `_fal_any_llm_json_completion` -- single path, no
+    direct Anthropic / OpenAI / xAI hits.
+    """
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured")
+    import fal_gate
+    image_urls: list[str] = []
+    for image_path in list(image_paths or [])[:24]:
+        data_url = _file_to_data_image_url(str(image_path), max_bytes=18 * 1024 * 1024)
+        if data_url:
+            image_urls.append(data_url)
+    body = {
+        "model": model,
+        "system_prompt": system_prompt,
+        "prompt": user_prompt,
+        "image_urls": image_urls,
+        "temperature": max(0.2, float(temperature)),
+    }
+    log.info(
+        f"[fal_any_llm_vision] START model={model} images={len(image_urls)} "
+        f"sys_chars={len(system_prompt or '')} user_chars={len(user_prompt or '')}"
+    )
+    t0 = time.time()
+    try:
+        data = await fal_gate.post_with_retry(
+            "https://fal.run/fal-ai/any-llm/vision",
+            api_key=FAL_AI_KEY,
+            json_body=body,
+            timeout_sec=timeout_sec,
+            max_attempts=3,
+            source="any_llm_vision_json_completion",
+        )
+    except fal_gate.FalFailed as exc:
+        dur = time.time() - t0
+        log.error(f"[fal_any_llm_vision] FAILED after {dur:.1f}s model={model}: {str(exc)[:200]}")
+        _studio_alerts.send_exception(exc, source="_fal_any_llm_vision_json_completion", context={"model": model, "images": len(image_urls)})
+        raise
+    except Exception as exc:
+        dur = time.time() - t0
+        log.error(f"[fal_any_llm_vision] UNEXPECTED {type(exc).__name__} after {dur:.1f}s model={model}: {str(exc)[:200]}")
+        raise
+    dur = time.time() - t0
+    if not isinstance(data, dict):
+        log.error(f"[fal_any_llm_vision] bad-shape response after {dur:.1f}s model={model}")
+        raise ValueError("fal any-llm/vision returned non-JSON response")
+    output_err = data.get("error")
+    if output_err:
+        log.error(f"[fal_any_llm_vision] upstream-error after {dur:.1f}s: {str(output_err)[:200]}")
+        raise RuntimeError(f"fal any-llm/vision upstream error: {output_err}")
+    content = str(data.get("output") or data.get("result") or "")
+    if not content:
+        content = str(((data.get("choices") or [{}])[0] or {}).get("message", {}).get("content", "") or "")
+    if not content:
+        raise ValueError("fal any-llm/vision returned empty content")
+    log.info(f"[fal_any_llm_vision] OK after {dur:.1f}s model={model} content_chars={len(content)}")
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end <= 0:
+        raise ValueError("No JSON object found in fal any-llm/vision response")
+    return json.loads(text[start:end])
+
+
+# Backwards-compat wrapper: keeps existing call sites working after the fal-first migration.
+# `model` is accepted but ignored (Claude Sonnet 4.5 is the fal vision default).
 async def _xai_json_completion_multimodal(
     system_prompt: str,
     user_prompt: str,
@@ -4731,43 +4806,13 @@ async def _xai_json_completion_multimodal(
     timeout_sec: int = 120,
     model: str = "grok-4",
 ) -> dict:
-    content_items: list[dict] = [{"type": "text", "text": user_prompt}]
-    for image_path in list(image_paths or [])[:24]:
-        data_url = _file_to_data_image_url(str(image_path), max_bytes=18 * 1024 * 1024)
-        if not data_url:
-            continue
-        content_items.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": data_url,
-                    "detail": "high",
-                },
-            }
-        )
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": content_items},
-                ],
-                "temperature": temperature,
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-    start = content.find("{")
-    end = content.rfind("}") + 1
-    if start == -1 or end <= 0:
-        raise ValueError("No JSON found in xAI multimodal response")
-    return json.loads(content[start:end])
+    return await _fal_any_llm_vision_json_completion(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        image_paths=image_paths,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
+    )
 
 
 FAL_IMAGE_UNDERSTAND_URL = "https://fal.run/fal-ai/bagel/understand"
@@ -6598,65 +6643,17 @@ async def _generate_image_xai_direct(
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
 ) -> dict:
-    """Generate image directly via xAI API. No fal.ai needed.
-    Returns {"local_path": str, "cdn_url": str}.
+    """Backwards-compat shim: delegates to fal `imagen4_fast` via `_generate_image_fal_selected_model`.
+    Kept under the legacy name so existing runtime-hook wiring + any external callers continue to work
+    after the 2026-04-19 fal-first migration.
     """
-    if not XAI_API_KEY:
-        raise RuntimeError("XAI_API_KEY not configured")
-
-    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-    aspect = "16:9" if str(resolution or "").strip().lower().endswith("_landscape") else XAI_IMAGE_ASPECT_RATIO
-    payload = {
-        "model": XAI_IMAGE_MODEL,
-        "prompt": prompt,
-        "n": 1,
-        "response_format": "url",
-        "aspect_ratio": aspect,
-        "resolution": XAI_IMAGE_RESOLUTION,
-    }
-    if reference_image_url:
-        payload["image_url"] = reference_image_url
-        log.info(f"xAI direct image conditioning enabled: {'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}")
-
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
-                if resp.status_code in (200, 201):
-                    data = resp.json().get("data", [])
-                    if data and data[0].get("url"):
-                        cdn_url = data[0]["url"]
-                        dl = await client.get(cdn_url, follow_redirects=True)
-                        if dl.status_code == 200:
-                            with open(output_path, "wb") as f:
-                                f.write(dl.content)
-                            log.info(f"xAI direct image saved: {output_path} ({Path(output_path).stat().st_size / 1024:.0f} KB)")
-                            gen_id = await _save_training_candidate(prompt, output_path, source="xai_direct")
-                            return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    wait = (attempt + 1) * 5
-                    log.warning(f"xAI image gen attempt {attempt+1} got {resp.status_code}, retrying in {wait}s...")
-                    await asyncio.sleep(wait)
-                    continue
-                # In strict mode, never silently drop identity lock.
-                if reference_image_url and resp.status_code in (400, 404, 422):
-                    if _normalize_reference_lock_mode(reference_lock_mode) == "strict":
-                        raise RuntimeError(
-                            f"xAI rejected strict reference image payload ({resp.status_code}); "
-                            "strict lock cannot continue without reference conditioning"
-                        )
-                    payload.pop("image_url", None)
-                    reference_image_url = ""
-                    log.warning("xAI image reference payload rejected; retrying without reference image")
-                    continue
-                raise RuntimeError(f"xAI image gen failed ({resp.status_code}): {resp.text[:200]}")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            log.warning(f"xAI image gen attempt {attempt+1} error: {e}")
-            await asyncio.sleep((attempt + 1) * 3)
-
-    raise RuntimeError("xAI direct image generation failed after retries")
+    return await _generate_image_fal_selected_model(
+        "imagen4_fast",
+        prompt,
+        output_path,
+        resolution=resolution,
+        reference_image_url=reference_image_url,
+    )
 
 
 async def generate_image_grok(
@@ -6734,11 +6731,11 @@ async def generate_image_grok(
             gen_id = await _save_training_candidate(prompt, output_path, source=f"fal_{fal_model}")
             return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
         except Exception as e:
-            log.warning(f"Fal remote image fallback failed ({fal_model}), falling back to direct xAI: {e}")
+            log.warning(f"Fal remote image path failed ({fal_model}): {e}; retrying via imagen4_fast")
 
-    if not XAI_API_KEY:
-        raise RuntimeError("No remote image fallback configured (Fal and xAI unavailable)")
-    log.info(f"Using direct xAI API image generation model={XAI_IMAGE_MODEL}")
+    # Secondary attempt through the fal-first shim (formerly routed to xAI; now imagen4_fast).
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY required for remote image generation")
     return await _generate_image_xai_direct(
         prompt,
         output_path,
@@ -9160,54 +9157,10 @@ async def _download_url_to_file(url: str, output_path: str):
                         f.write(chunk)
 
 
-async def animate_image_grok_video(image_path: str, prompt: str, output_clip_path: str, duration_sec: float = 5, aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
-    """Animate an image via xAI Grok Imagine Video and download resulting MP4."""
-    if not XAI_API_KEY:
-        raise RuntimeError("XAI_API_KEY not configured")
-    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
-    duration = max(1, min(int(round(float(duration_sec))), 15))
-    image_url = image_cdn_url or _file_to_data_image_url(image_path)
-    if not image_url:
-        raise RuntimeError("No source image URL for Grok video")
-
-    payload = {
-        "model": XAI_VIDEO_MODEL,
-        "prompt": prompt,
-        "duration": duration,
-        "aspect_ratio": aspect_ratio,
-        "resolution": "720p",
-        "image": {"url": image_url},
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        submit = await client.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload)
-        if submit.status_code not in (200, 201):
-            raise RuntimeError(f"Grok video submit failed ({submit.status_code}): {submit.text[:300]}")
-        submit_data = submit.json()
-    request_id = submit_data.get("request_id")
-    if not request_id:
-        raise RuntimeError("Grok video submit returned no request_id")
-
-    poll_url = f"https://api.x.ai/v1/videos/{request_id}"
-    max_wait = 900
-    elapsed = 0
-    while elapsed < max_wait:
-        await asyncio.sleep(4)
-        elapsed += 4
-        async with httpx.AsyncClient(timeout=30) as client:
-            status_resp = await client.get(poll_url, headers={"Authorization": f"Bearer {XAI_API_KEY}"})
-            if status_resp.status_code != 200:
-                continue
-            status_data = status_resp.json()
-        status = str(status_data.get("status", "")).lower()
-        if status == "done":
-            video_url = status_data.get("video", {}).get("url")
-            if not video_url:
-                raise RuntimeError("Grok video done status missing video URL")
-            await _download_url_to_file(video_url, output_clip_path)
-            return output_clip_path
-        if status == "expired":
-            raise RuntimeError("Grok video request expired")
-    raise TimeoutError("Grok video timed out")
+# animate_image_grok_video removed 2026-04-19 (fal-first migration).
+# Was dead code -- the xAI video endpoint had no active call sites, only a
+# status-endpoint readout of `grok_video_enabled`. fal pixverse/v6 + Kling 2.1
+# cover all live animation lanes.
 
 
 def _aspect_ratio_to_runway_ratio(aspect_ratio: str) -> str:
@@ -14559,8 +14512,8 @@ async def _create_longform_session_internal(
     auto_pipeline_requested: bool = False,
     session_id_override: str = "",
 ) -> dict:
-    if not XAI_API_KEY:
-        raise HTTPException(500, "XAI_API_KEY not configured")
+    if not FAL_AI_KEY:
+        raise HTTPException(500, "FAL_AI_KEY not configured")
 
     template = _normalize_longform_template(template)
     format_preset = str(format_preset or "explainer").strip().lower()
@@ -18012,21 +17965,14 @@ async def _health_payload():
     backend_commit, frontend_bundle = _read_deploy_meta()
     fal_video_enabled = bool(FAL_AI_KEY)
     runway_video_enabled = bool(RUNWAY_API_KEY)
-    grok_video_enabled = USE_XAI_VIDEO and bool(XAI_API_KEY)
     if runway_video_enabled and fal_video_enabled:
         video_engine = "Runway (primary) + FalAI Kling fallback"
-    elif runway_video_enabled and grok_video_enabled:
-        video_engine = "Runway (primary) + Grok fallback"
     elif fal_video_enabled:
         video_engine = "FalAI Kling 2.1"
     elif runway_video_enabled:
         video_engine = "Runway Image-to-Video"
-    elif grok_video_enabled:
-        video_engine = "Grok Imagine Video"
     elif wan_ready:
         video_engine = "Wan 2.2 (RunPod)"
-    elif FAL_AI_KEY:
-        video_engine = "Kling 2.1 Standard"
     else:
         video_engine = "Static"
     return {
@@ -22180,8 +22126,6 @@ async def _generate_thumbnail_image(
 
 
 async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
-    if not XAI_API_KEY:
-        raise HTTPException(500, "XAI_API_KEY not configured")
     if not FAL_AI_KEY and not PIKZELS_API_KEY:
         raise HTTPException(500, "Thumbnail image backend not configured (set FAL_AI_KEY or PIKZELS_API_KEY)")
     library_dir = _thumbnail_library_dir_for_user(user)
