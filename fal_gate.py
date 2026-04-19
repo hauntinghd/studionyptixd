@@ -47,12 +47,67 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-# Account-wide fal concurrent limit is 20. Cap ourselves at 16 so admin calls
-# and retries still have headroom.
+# fal.ai enforces a 20-concurrent-request ceiling PER API KEY. Cap ourselves
+# at 16 per key so admin/debug/retry calls still have headroom.
 _FAL_CONCURRENT_SOFT_CAP = int(os.getenv("FAL_CONCURRENT_SOFT_CAP", "16") or "16")
 _FAL_DEFAULT_TIMEOUT = float(os.getenv("FAL_DEFAULT_TIMEOUT", "120") or "120")
 
+# Legacy single-key gate (used as the per-key cap when the caller passes an
+# explicit key that hasn't been pooled yet — keeps backward compat for any
+# out-of-tree integrations).
 _gate: asyncio.Semaphore | None = None
+
+# Multi-key pool — one semaphore per API key, round-robin selection on new
+# calls when the caller doesn't pass an explicit api_key. Populated lazily
+# from env on first use so tests can mutate env between calls.
+_KEY_POOL: list[str] = []
+_KEY_GATES: dict[str, asyncio.Semaphore] = {}
+_KEY_CURSOR: int = 0
+_POOL_INITIALIZED: bool = False
+
+
+def _load_pool_from_env() -> list[str]:
+    """Gather FAL_AI_KEY + FAL_AI_KEY_2..FAL_AI_KEY_10 from env into a pool."""
+    pool: list[str] = []
+    primary = (os.getenv("FAL_AI_KEY") or os.getenv("FAL_KEY") or "").strip()
+    if primary:
+        pool.append(primary)
+    for i in range(2, 11):
+        extra = (os.getenv(f"FAL_AI_KEY_{i}") or os.getenv(f"FAL_KEY_{i}") or "").strip()
+        if extra and extra not in pool:
+            pool.append(extra)
+    return pool
+
+
+def _get_pool() -> list[str]:
+    global _KEY_POOL, _POOL_INITIALIZED
+    if not _POOL_INITIALIZED:
+        _KEY_POOL = _load_pool_from_env()
+        _POOL_INITIALIZED = True
+    return _KEY_POOL
+
+
+def _key_gate(key: str) -> asyncio.Semaphore:
+    gate = _KEY_GATES.get(key)
+    if gate is None:
+        gate = asyncio.Semaphore(_FAL_CONCURRENT_SOFT_CAP)
+        _KEY_GATES[key] = gate
+    return gate
+
+
+def _pick_pool_key() -> str:
+    """Round-robin select from the key pool. Raises if pool is empty."""
+    global _KEY_CURSOR
+    pool = _get_pool()
+    if not pool:
+        raise FalFailed("No fal API keys configured — set FAL_AI_KEY in env.")
+    idx = _KEY_CURSOR % len(pool)
+    _KEY_CURSOR = (_KEY_CURSOR + 1) % len(pool)
+    return pool[idx]
+
+
+def pool_size() -> int:
+    return len(_get_pool())
 
 
 class FalBusy(RuntimeError):
@@ -101,11 +156,19 @@ async def post_with_retry(
     Raises FalBusy on exhausted retries (retryable upstream).
     Raises FalFailed on terminal errors (content policy, auth, 400-class).
     """
+    # Key-pool mode: if the caller passes an empty api_key, round-robin
+    # through FAL_AI_KEY + FAL_AI_KEY_2..FAL_AI_KEY_10 from env. Otherwise
+    # use the explicit key the caller passed (back-compat).
     if not api_key:
-        raise FalFailed("FAL_AI_KEY not configured")
+        chosen_key = _pick_pool_key()
+    else:
+        chosen_key = api_key
+        # Seed the pool on first use so queue_depth/available_slots see this key.
+        if chosen_key not in _KEY_GATES:
+            _key_gate(chosen_key)
 
     timeout = timeout_sec if timeout_sec is not None else _FAL_DEFAULT_TIMEOUT
-    gate = _get_gate()
+    gate = _key_gate(chosen_key)
 
     # Measure wait time to alert on prolonged queue pressure.
     wait_start = time.time()
@@ -124,7 +187,7 @@ async def post_with_retry(
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     headers = {
-                        "Authorization": f"Key {api_key}",
+                        "Authorization": f"Key {chosen_key}",
                     }
                     if json_body is not None:
                         headers["Content-Type"] = "application/json"
@@ -192,26 +255,41 @@ async def post_with_retry(
 
 
 def queue_depth() -> int:
-    """Best-effort estimate of how many callers are currently waiting for a slot.
+    """Best-effort total count of callers waiting across all per-key gates.
 
-    Returns 0 if the gate hasn't been initialized yet.
+    Returns 0 if no gates have been initialized yet.
     """
-    g = _gate
-    if g is None:
-        return 0
-    # Python's Semaphore exposes an internal counter; this is informational only.
+    total = 0
     try:
-        # ._value is the remaining slots; waiters count is len(._waiters).
-        return len(getattr(g, "_waiters", []) or [])
+        for g in _KEY_GATES.values():
+            total += len(getattr(g, "_waiters", []) or [])
+        # Include legacy single-gate for any caller that still routes through it.
+        if _gate is not None:
+            total += len(getattr(_gate, "_waiters", []) or [])
     except Exception:
         return 0
+    return total
 
 
 def available_slots() -> int:
-    g = _gate
-    if g is None:
-        return _FAL_CONCURRENT_SOFT_CAP
+    """Total free slots summed across all per-key gates.
+
+    If the pool isn't initialized (no requests yet), returns the theoretical
+    total: pool_size * per-key cap, or the per-key cap as a fallback.
+    """
+    pool = _get_pool()
+    total = 0
     try:
-        return int(getattr(g, "_value", _FAL_CONCURRENT_SOFT_CAP))
+        # Per-key semaphores that have been created.
+        for g in _KEY_GATES.values():
+            total += int(getattr(g, "_value", _FAL_CONCURRENT_SOFT_CAP))
+        # Keys in the pool that haven't been used yet — their gates will be
+        # lazily created at full capacity.
+        unseen_keys = sum(1 for k in pool if k not in _KEY_GATES)
+        total += unseen_keys * _FAL_CONCURRENT_SOFT_CAP
     except Exception:
-        return 0
+        return _FAL_CONCURRENT_SOFT_CAP
+    # Fallback if nothing initialized at all.
+    if total == 0 and _gate is None:
+        return _FAL_CONCURRENT_SOFT_CAP * max(1, len(pool))
+    return total
