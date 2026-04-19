@@ -7,6 +7,7 @@ import {
     heatScoreColorClass,
     viralityBadge,
 } from '../lib/heatScore';
+import { GENERATION_API } from '../shared';
 
 type TabKey = 'idea_list' | 'custom_topic';
 
@@ -42,12 +43,17 @@ export default function GenerateScriptWithAIModal({
     // Bumped each Generate Ideas click so the hash-based virality tiers
     // rotate and the list feels freshly pulled.
     const [refreshKey, setRefreshKey] = useState(0);
+    // Live ideas pulled from /api/studio/shorts/ideas (public YouTube
+    // trend data through Catalyst infra). Empty array means fall back
+    // to the hardcoded presets.
+    const [liveIdeas, setLiveIdeas] = useState<string[]>([]);
 
     // Resetting ideas when the user changes style keeps the Generate Ideas
     // CTA discoverable for each style instead of silently reusing old output.
     useEffect(() => {
         setIdeasGenerated(false);
         setIdeasLoading(false);
+        setLiveIdeas([]);
     }, [selectedStyleId, template]);
 
     // Compute heat scores once per render — deterministic per-day anyway.
@@ -74,18 +80,28 @@ export default function GenerateScriptWithAIModal({
         onGenerate(topic);
     };
 
-    const handleGenerateIdeas = () => {
+    const handleGenerateIdeas = async () => {
         if (!selectedStyle || disabled) return;
         setIdeasLoading(true);
         setIdeasGenerated(false);
-        // Short delay so the skeletons register visually (feels like a
-        // fetch). Swap this timeout for a real Catalyst call later —
-        // function signature stays the same.
-        setTimeout(() => {
-            setRefreshKey((k) => k + 1);
-            setIdeasLoading(false);
-            setIdeasGenerated(true);
-        }, 650);
+        setLiveIdeas([]);
+        // Live trend query: combine niche + style label + "shorts" so
+        // YouTube returns niche-specific shorts that actually match the
+        // picked framing. Backend uses Catalyst's cached YouTube search.
+        const query = `${templateLabel} ${selectedStyle.label} shorts`.trim();
+        try {
+            const res = await fetch(`${GENERATION_API}/api/studio/shorts/ideas?q=${encodeURIComponent(query)}&max_results=8`);
+            if (res.ok) {
+                const data = await res.json();
+                const titles = Array.isArray(data?.ideas) ? data.ideas.filter((t: unknown): t is string => typeof t === 'string' && t.trim().length > 0) : [];
+                setLiveIdeas(titles);
+            }
+        } catch {
+            // Upstream failure → fall back to hardcoded presets silently
+        }
+        setRefreshKey((k) => k + 1);
+        setIdeasLoading(false);
+        setIdeasGenerated(true);
     };
 
     return (
@@ -199,7 +215,9 @@ export default function GenerateScriptWithAIModal({
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between">
                                         <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                                            {ideasGenerated ? 'Click an idea to spark the script' : 'Ideas'}
+                                            {ideasGenerated
+                                                ? (liveIdeas.length > 0 ? 'Live from YouTube Shorts · click to spark' : 'Curated picks · click to spark')
+                                                : 'Ideas'}
                                         </p>
                                         {ideasGenerated && !ideasLoading && (
                                             <button
@@ -223,7 +241,7 @@ export default function GenerateScriptWithAIModal({
                                         </div>
                                     ) : (
                                         <div className="space-y-2">
-                                            {selectedStyle.ideas.map((idea) => {
+                                            {(liveIdeas.length > 0 ? liveIdeas : selectedStyle.ideas).map((idea) => {
                                                 const tier = computeViralityTier(
                                                     template,
                                                     selectedStyle.id,
