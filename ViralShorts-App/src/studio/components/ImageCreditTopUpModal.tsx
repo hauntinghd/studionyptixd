@@ -27,9 +27,10 @@ interface Props {
 // credit prompt pattern but scoped to image-model credits. Usage-based
 // per Casey's 2026-04-19 direction — no subscription gate.
 //
-// Backend TODO (PR 5b): /api/billing/image-credits/checkout that
-// creates a Stripe checkout session for the selected pack and updates
-// `image_credits_available` on the user profile on webhook confirm.
+// Checkout flow: deep-links into the existing BillingPage at
+// /billing?pack=<id>&provider=paypal which runs the PayPal order flow
+// (BillingPage already has verifyPayPalOrder + paypalOrderId wiring).
+// Studio is PayPal-only for billing per Casey's direction.
 export default function ImageCreditTopUpModal({
     open,
     requiredCredits,
@@ -113,7 +114,7 @@ export default function ImageCreditTopUpModal({
                 </div>
 
                 <div className="border-t border-white/[0.06] px-5 py-3 text-[11px] text-gray-500">
-                    IGs never expire. Use them across any image model. Premium models cost more IGs per image — the pack scales to whatever you're rendering.
+                    IGs never expire. Use them across any image model — premium lanes cost more IGs per image. Checkout runs through PayPal.
                 </div>
             </div>
         </div>
