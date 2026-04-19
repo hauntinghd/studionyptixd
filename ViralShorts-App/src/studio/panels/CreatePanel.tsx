@@ -255,6 +255,11 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     // picking an idea in the Spark modal feels like a single continuous
     // "generating scene prompts → generating images" stream (Korpi-parity).
     const [autoRunImageBatchRequested, setAutoRunImageBatchRequested] = useState(false);
+    // PR: wait for script gen to finish before jumping to Scenes stage.
+    // Casey 2026-04-19: "It needs to wait to make the script, then it jumps
+    // to scene creation." Previously the Spark modal advanced workspaceStage
+    // immediately and user watched an empty scene list while the LLM wrote.
+    const [pendingSparkAdvance, setPendingSparkAdvance] = useState(false);
     const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
     const [workspaceStage, setWorkspaceStage] = useState<'script' | 'scenes' | 'audio'>('script');
     const [scenePromptEditorIndex, setScenePromptEditorIndex] = useState<number | null>(null);
@@ -1787,6 +1792,27 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         void handleGenerateSceneImageBatchRef.current();
     }, [autoRunImageBatchRequested, scriptScenesReady, sessionId, bulkImageGenRunning, sceneBuildLoading, creativeScenes.length]);
 
+    // Auto-advance from Script → Scenes once the script gen actually finishes
+    // (scenes + session both live). Keeps the user staring at the "writing
+    // the script..." card on the Script stage instead of an empty Scene grid.
+    useEffect(() => {
+        if (!pendingSparkAdvance) return;
+        if (sceneBuildLoading) return;
+        if (!scriptScenesReady) return;
+        if (!sessionId) return;
+        if (creativeScenes.length === 0) return;
+        setPendingSparkAdvance(false);
+        if (workspaceStage !== 'scenes') {
+            setWorkspaceStage('scenes');
+        }
+    }, [pendingSparkAdvance, sceneBuildLoading, scriptScenesReady, sessionId, creativeScenes.length, workspaceStage]);
+    // Abort the pending advance if gen failed (sceneBuildError surfaced).
+    useEffect(() => {
+        if (pendingSparkAdvance && sceneBuildError) {
+            setPendingSparkAdvance(false);
+        }
+    }, [pendingSparkAdvance, sceneBuildError]);
+
     const handleGenerateSceneImageBatch = async () => {
         if (!sessionId) return;
         const scenes = creativeScenesRef.current;
@@ -3157,9 +3183,20 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 )}
 
                 {workspaceStage === 'script' && sceneBuildLoading && (
-                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-4 flex items-center gap-3">
-                        <Loader2 className="w-4 h-4 text-cyan-300 animate-spin" />
-                        <p className="text-sm text-cyan-100">Generating scene prompts from your script... this can take 10-30 seconds.</p>
+                    <div className="rounded-xl border border-violet-500/30 bg-gradient-to-r from-violet-500/[0.08] to-cyan-500/[0.08] p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                                <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
+                                <span className="text-sm font-semibold text-white">Writing your script + scene prompts...</span>
+                            </div>
+                            <span className="text-xs tabular-nums text-violet-200">10–30s</span>
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.05]">
+                            <div className="h-full w-2/5 rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500" />
+                        </div>
+                        <p className="text-[11px] text-gray-400">
+                            Claude Sonnet 4.5 is drafting the full narration and per-scene visual prompts. As soon as it's done we'll jump to Scenes and kick off image generation automatically.
+                        </p>
                     </div>
                 )}
 
@@ -3780,7 +3817,15 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     if (creativeMode !== 'creative') {
                         setCreativeMode('creative');
                     }
-                    setWorkspaceStage('scenes');
+                    // Stay on Script stage. Auto-advance useEffect will flip
+                    // to Scenes once scriptScenesReady + sessionId + scenes
+                    // are all populated, then autoRunImageBatchRequested
+                    // fires the image batch.
+                    setSceneBuildError(null);
+                    if (workspaceStage !== 'script') {
+                        setWorkspaceStage('script');
+                    }
+                    setPendingSparkAdvance(true);
                     setAutoRunImageBatchRequested(true);
                     void handleGenerateScriptToShortScenes(topic);
                 }}
@@ -4793,7 +4838,15 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     if (creativeMode !== 'creative') {
                         setCreativeMode('creative');
                     }
-                    setWorkspaceStage('scenes');
+                    // Stay on Script stage. Auto-advance useEffect will flip
+                    // to Scenes once scriptScenesReady + sessionId + scenes
+                    // are all populated, then autoRunImageBatchRequested
+                    // fires the image batch.
+                    setSceneBuildError(null);
+                    if (workspaceStage !== 'script') {
+                        setWorkspaceStage('script');
+                    }
+                    setPendingSparkAdvance(true);
                     setAutoRunImageBatchRequested(true);
                     void handleGenerateScriptToShortScenes(topic);
                 }}
