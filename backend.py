@@ -18483,6 +18483,38 @@ app.include_router(
 )
 
 
+@app.get("/api/studio/queue/status", include_in_schema=False)
+async def _studio_queue_status():
+    """Public read-only fal.ai queue snapshot for the user-facing queue UI.
+    Used by the frontend to surface 'You're #N in line' during Reddit-promo-
+    class traffic. No auth: the numbers are non-sensitive and need to load
+    fast during queue saturation.
+    """
+    try:
+        import fal_gate
+        waiting = int(fal_gate.queue_depth())
+        slots_free = int(fal_gate.available_slots())
+    except Exception:
+        waiting = 0
+        slots_free = 16
+    cap = int(os.getenv("FAL_CONCURRENT_SOFT_CAP", "16") or "16")
+    in_flight = max(0, cap - slots_free)
+    # Rough ETA: each fal call averages 30s (image gen). Worst case scene prompt
+    # generation can go 60s+ but images dominate the traffic.
+    eta_sec = int(waiting * 4.0) if waiting > 0 else 0
+    # Saturation threshold — frontend shows the queue card when in_flight >= 12
+    # out of 16 (75% of cap) or whenever waiting > 0.
+    saturated = bool(waiting > 0 or in_flight >= 12)
+    return {
+        "in_flight": in_flight,
+        "waiting": waiting,
+        "cap": cap,
+        "slots_free": slots_free,
+        "eta_sec": eta_sec,
+        "saturated": saturated,
+    }
+
+
 async def _youtube_upload_video_for_user(*, user: dict, session_id: str, channel_id: str, privacy: str = "private") -> dict:
     """Upload a completed longform session video to YouTube."""
     if not session_id:
