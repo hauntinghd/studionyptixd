@@ -1,7 +1,12 @@
-import { useMemo, useState } from 'react';
-import { Flame, X, Zap } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Flame, Loader2, X, Zap } from 'lucide-react';
 import { getIdeaStylesForTemplate, type IdeaStyle } from '../lib/shortFormIdeaPresets';
-import { computeHeatScore, heatScoreColorClass } from '../lib/heatScore';
+import {
+    computeHeatScore,
+    computeViralityTier,
+    heatScoreColorClass,
+    viralityBadge,
+} from '../lib/heatScore';
 
 type TabKey = 'idea_list' | 'custom_topic';
 
@@ -14,10 +19,10 @@ interface Props {
     onGenerate: (topic: string) => void;   // parent hooks this into existing script-gen path
 }
 
-// "Spark Script" modal — Idea List + Custom Topic tabs. Each style card
-// carries a niche-emoji + "why this works" angle + a per-day heat score
-// pulled from `computeHeatScore()`. That trio (personality, framing,
-// heat) is what differentiates NYPTID from Korpi-style topic-only modals.
+// "Spark Script" modal. Idea List + Custom Topic (no Remix Script).
+// Two-step Idea List flow: pick a style → click "Generate Ideas" → see
+// a curated list tagged VIRAL / TRENDING / PREDICTED. Heat scores + niche
+// personality (emoji, angle) differentiate from Korpi-style topic dumps.
 export default function GenerateScriptWithAIModal({
     open,
     template,
@@ -31,7 +36,21 @@ export default function GenerateScriptWithAIModal({
     const [selectedStyleId, setSelectedStyleId] = useState<string>(styles[0]?.id ?? '');
     const [customTopic, setCustomTopic] = useState('');
 
-    // Compute heat scores once per render — they're deterministic per-day anyway.
+    // Two-step idea reveal: skeleton → Generate Ideas click → loading → list.
+    const [ideasLoading, setIdeasLoading] = useState(false);
+    const [ideasGenerated, setIdeasGenerated] = useState(false);
+    // Bumped each Generate Ideas click so the hash-based virality tiers
+    // rotate and the list feels freshly pulled.
+    const [refreshKey, setRefreshKey] = useState(0);
+
+    // Resetting ideas when the user changes style keeps the Generate Ideas
+    // CTA discoverable for each style instead of silently reusing old output.
+    useEffect(() => {
+        setIdeasGenerated(false);
+        setIdeasLoading(false);
+    }, [selectedStyleId, template]);
+
+    // Compute heat scores once per render — deterministic per-day anyway.
     const heatScores = useMemo<Record<string, number>>(() => {
         const map: Record<string, number> = {};
         for (const s of styles) {
@@ -53,6 +72,20 @@ export default function GenerateScriptWithAIModal({
         const topic = customTopic.trim();
         if (!topic || disabled) return;
         onGenerate(topic);
+    };
+
+    const handleGenerateIdeas = () => {
+        if (!selectedStyle || disabled) return;
+        setIdeasLoading(true);
+        setIdeasGenerated(false);
+        // Short delay so the skeletons register visually (feels like a
+        // fetch). Swap this timeout for a real Catalyst call later —
+        // function signature stays the same.
+        setTimeout(() => {
+            setRefreshKey((k) => k + 1);
+            setIdeasLoading(false);
+            setIdeasGenerated(true);
+        }, 650);
     };
 
     return (
@@ -77,7 +110,7 @@ export default function GenerateScriptWithAIModal({
                                 </span>
                             </h3>
                             <p className="mt-1 text-xs text-gray-400">
-                                Pick a trending angle or enter a custom topic. Heat scores refresh daily.
+                                Pick a style and spark a list of trending ideas, or enter your own topic.
                             </p>
                         </div>
                     </div>
@@ -121,6 +154,7 @@ export default function GenerateScriptWithAIModal({
                 <div className="p-5">
                     {tab === 'idea_list' ? (
                         <div className="space-y-4">
+                            {/* Idea Style picker */}
                             <div>
                                 <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Idea Style</p>
                                 {styles.length === 0 ? (
@@ -160,24 +194,62 @@ export default function GenerateScriptWithAIModal({
                                 )}
                             </div>
 
-                            {selectedStyle && selectedStyle.ideas.length > 0 && (
+                            {/* Ideas area — skeleton until Generate Ideas is clicked */}
+                            {selectedStyle && (
                                 <div className="space-y-2">
-                                    <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                                        Ideas — click one to spark a script
-                                    </p>
-                                    <div className="space-y-2">
-                                        {selectedStyle.ideas.map((idea) => (
+                                    <div className="flex items-center justify-between">
+                                        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+                                            {ideasGenerated ? 'Click an idea to spark the script' : 'Ideas'}
+                                        </p>
+                                        {ideasGenerated && !ideasLoading && (
                                             <button
-                                                key={idea}
                                                 type="button"
-                                                disabled={disabled}
-                                                onClick={() => handlePickIdea(idea)}
-                                                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-left text-sm text-white transition hover:border-violet-400 hover:bg-violet-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                                onClick={handleGenerateIdeas}
+                                                className="text-[11px] font-semibold uppercase tracking-wider text-violet-300 transition hover:text-violet-200"
                                             >
-                                                {idea}
+                                                Refresh
                                             </button>
-                                        ))}
+                                        )}
                                     </div>
+
+                                    {!ideasGenerated || ideasLoading ? (
+                                        <div className="space-y-2">
+                                            {[0, 1, 2].map((i) => (
+                                                <div
+                                                    key={i}
+                                                    className="h-[52px] w-full animate-pulse rounded-lg border border-white/[0.04] bg-white/[0.02]"
+                                                />
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {selectedStyle.ideas.map((idea) => {
+                                                const tier = computeViralityTier(
+                                                    template,
+                                                    selectedStyle.id,
+                                                    `${idea}#${refreshKey}`,
+                                                );
+                                                const badge = viralityBadge(tier);
+                                                return (
+                                                    <button
+                                                        key={idea}
+                                                        type="button"
+                                                        disabled={disabled}
+                                                        onClick={() => handlePickIdea(idea)}
+                                                        className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-left text-sm text-white transition hover:border-violet-400 hover:bg-violet-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <span
+                                                            className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${badge.className}`}
+                                                        >
+                                                            <span className={`h-1.5 w-1.5 rounded-full ${badge.dotClassName}`} />
+                                                            {badge.label}
+                                                        </span>
+                                                        <span className="flex-1">{idea}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -205,6 +277,35 @@ export default function GenerateScriptWithAIModal({
                         </div>
                     )}
                 </div>
+
+                {/* sticky Generate Ideas CTA footer (Idea List only) */}
+                {tab === 'idea_list' && selectedStyle && (
+                    <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] p-4">
+                        <p className="text-[11px] text-gray-500">
+                            {ideasGenerated
+                                ? 'Rotated daily · VIRAL · TRENDING · PREDICTED'
+                                : 'Click to spark a curated trend-scored idea list.'}
+                        </p>
+                        <button
+                            type="button"
+                            onClick={handleGenerateIdeas}
+                            disabled={disabled || ideasLoading}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-violet-900/30 transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {ideasLoading ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    Sparking...
+                                </>
+                            ) : (
+                                <>
+                                    <Zap className="h-4 w-4" />
+                                    {ideasGenerated ? 'Spark New Ideas' : 'Generate Ideas'}
+                                </>
+                            )}
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );
