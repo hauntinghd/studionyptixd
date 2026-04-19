@@ -2174,6 +2174,13 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         "Do not drift into adjacent themes, generic filler, or unrelated examples. "
         "Every scene must clearly visualize a concrete beat from the provided topic/script so the resulting prompts are directly renderable."
     )
+    system_prompt += (
+        "\n\nOUTPUT DISCIPLINE (MUST FOLLOW): Execute the prompt above verbatim. "
+        "Do not add sections, fields, commentary, preamble, or closing remarks beyond what the schema requires. "
+        "Do not paraphrase or summarize the instructions back to the user. "
+        "Do not skip or reorder any required fields. Match the specified scene count and structure exactly. "
+        "Output ONLY the JSON object described; no prose, no code-fence labels other than the JSON itself."
+    )
     if comparison_topic:
         system_prompt += (
             "\n\nCOMPARISON LOCK (MUST FOLLOW): The topic is a direct comparison. "
@@ -2485,7 +2492,10 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
         return (max(0, min(score, 100)), notes)
 
     try:
-        first = await _call_script_gen(system_prompt, temp=0.8)
+        # temp=0.5: dropped from 0.8 on 2026-04-19 per Casey -- "make it obey the prompt exactly."
+        # 0.8 was diluting the MUST-FOLLOW directives (topic lock, subject diversity, output discipline).
+        # 0.5 keeps some scene-to-scene variety while pinning the model to the template spec.
+        first = await _call_script_gen(system_prompt, temp=0.5)
     except Exception as e:
         status_code = getattr(getattr(e, "response", None), "status_code", None)
         if status_code in {429, 500, 502, 503, 504}:
