@@ -1,16 +1,27 @@
-import { useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Receipt, Sparkles, Wand2 } from 'lucide-react';
+import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
+import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Loader2, Monitor, PanelLeftOpen, Receipt, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
-import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
-import AutoClipperPanel from '../panels/AutoClipperPanel';
-import CatalystPanel from '../panels/CatalystPanel';
-import ClonePanel from '../panels/ClonePanel';
 import CreatePanel from '../panels/CreatePanel';
-import DemoPanel from '../panels/DemoPanel';
-import LongFormPanel from '../panels/LongFormPanel';
-import RefundsPanel from '../panels/RefundsPanel';
-import ThumbnailPanel from '../panels/ThumbnailPanel';
+
+// Heavy/rarely-clicked panels are code-split via React.lazy — each one ships
+// as its own chunk Vite serves on demand. Before this, the whole bundle
+// shipped every panel upfront (~900 KB gz 230 KB), making cold refreshes
+// feel slow. CreatePanel stays eager because it's the landing surface.
+const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
+const AutoClipperPanel = lazy(() => import('../panels/AutoClipperPanel'));
+const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
+const ClonePanel = lazy(() => import('../panels/ClonePanel'));
+const DemoPanel = lazy(() => import('../panels/DemoPanel'));
+const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
+const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
+const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
+
+const PanelFallback = () => (
+    <div className="flex h-[40vh] items-center justify-center gap-2 text-sm text-gray-500">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+    </div>
+);
 
 type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst' | 'refunds';
 
@@ -166,15 +177,18 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const createImmersive = tab === 'create' && createWorkspaceOpen;
     const sidebarVisible = !createImmersive || sidebarPeekOpen;
 
+    const lazyPanel = (node: React.ReactNode) => (
+        <Suspense fallback={<PanelFallback />}>{node}</Suspense>
+    );
     const panel = (() => {
-        if (tab === 'analytics' && isAdmin) return <AdminAnalyticsPanel />;
-        if (tab === 'catalyst' && isAdmin) return <CatalystPanel />;
-        if (tab === 'refunds' && isAdmin) return <RefundsPanel />;
-        if (tab === 'clone' && laneAccess.clone) return <ClonePanel />;
-        if (tab === 'longform' && laneAccess.longform) return <LongFormPanel />;
-        if (tab === 'thumbnails' && laneAccess.thumbnails) return <ThumbnailPanel />;
-        if (tab === 'demo' && ownerOverride) return <DemoPanel />;
-        if (tab === 'autoclipper' && ownerOverride) return <AutoClipperPanel />;
+        if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
+        if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
+        if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
+        if (tab === 'clone' && laneAccess.clone) return lazyPanel(<ClonePanel />);
+        if (tab === 'longform' && laneAccess.longform) return lazyPanel(<LongFormPanel />);
+        if (tab === 'thumbnails' && laneAccess.thumbnails) return lazyPanel(<ThumbnailPanel />);
+        if (tab === 'demo' && ownerOverride) return lazyPanel(<DemoPanel />);
+        if (tab === 'autoclipper' && ownerOverride) return lazyPanel(<AutoClipperPanel />);
         return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
 
