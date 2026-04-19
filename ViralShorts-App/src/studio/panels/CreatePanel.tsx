@@ -2,6 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState, type Whe
 import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
+import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
@@ -203,6 +204,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [scriptLoading, setScriptLoading] = useState(false);
     const [creativeTitle, setCreativeTitle] = useState("");
     const [creativeNarration, setCreativeNarration] = useState("");
+    const [aiScriptModalOpen, setAiScriptModalOpen] = useState(false);
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
@@ -2787,6 +2789,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     };
 
         return (
+            <>
             <div className="w-full max-w-none pb-10 space-y-6">
                 {renderWorkspaceChrome({
                     subtitle: activeStageCopy[workspaceStage].description,
@@ -2990,15 +2993,40 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
 
                 {workspaceStage === 'script' && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-2">
-                        <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Script / Narration (voiceover for the entire short)</label>
+                        <div className="flex items-center justify-between gap-3">
+                            <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold block">Narration Script</label>
+                            <div className="flex items-center gap-3">
+                                <span className="text-[11px] text-gray-500">
+                                    {creativeNarration.trim().length} | Duration ≈ {Math.max(0, Math.round(creativeNarration.trim().split(/\s+/).filter(Boolean).length * 0.4))}s
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => setAiScriptModalOpen(true)}
+                                    disabled={loading || scriptLoading}
+                                    className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-cyan-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Sparkles className="h-3.5 w-3.5" />
+                                    Generate w/ AI
+                                </button>
+                            </div>
+                        </div>
                         <textarea
                             value={creativeNarration}
                             onChange={(e) => setCreativeNarration(e.target.value)}
-                            rows={4}
-                            placeholder="Write the full voiceover script for your short here. This narration will play across all scenes..."
+                            rows={6}
+                            placeholder={`Enter your ${selectedTemplate} narration script...`}
                             className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y"
                         />
-                        <p className="text-xs text-gray-600">This script is for the entire video. The scenes below control what visuals appear.</p>
+                        <div className="flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setCreativeNarration('')}
+                                disabled={!creativeNarration || loading || scriptLoading}
+                                className="text-xs text-gray-400 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                                Clear
+                            </button>
+                        </div>
                     </div>
                 )}
 
@@ -4400,6 +4428,35 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 )}
                 </div>
             </div>
+            <GenerateScriptWithAIModal
+                open={aiScriptModalOpen}
+                template={selectedTemplate}
+                templateLabel={(() => {
+                    const t = selectedTemplate || '';
+                    if (t === 'skeleton') return 'Skeleton';
+                    if (t === 'daytrading') return 'Day Trading';
+                    if (t === 'dilemma') return 'Moral Dilemma';
+                    return t.charAt(0).toUpperCase() + t.slice(1);
+                })()}
+                disabled={loading || scriptLoading}
+                onClose={() => setAiScriptModalOpen(false)}
+                onGenerate={(topic) => {
+                    setAiScriptModalOpen(false);
+                    setPrompt(topic);
+                    // Drop a minimal narration-seed so the Script textarea isn't empty --
+                    // user can review / edit before hitting Next: Scenes. The real AI
+                    // script generation runs on the /api/creative/script call when the
+                    // user advances to the Scenes tab (existing flow). This keeps the
+                    // wizard fast: modal close is instant, no extra backend call here.
+                    if (!creativeNarration.trim()) {
+                        setCreativeNarration(topic);
+                    }
+                    if (creativeMode !== 'creative') {
+                        setCreativeMode('creative');
+                    }
+                }}
+            />
+            </>
     );
 }
 
