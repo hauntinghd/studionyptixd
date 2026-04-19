@@ -162,7 +162,7 @@ export default function GenerateScriptWithAIModal({
                                         No preset styles for this template yet. Use Custom Topic instead.
                                     </p>
                                 ) : (
-                                    <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                                         {styles.map((style) => {
                                             const active = style.id === selectedStyle?.id;
                                             const score = heatScores[style.id] ?? 0;
