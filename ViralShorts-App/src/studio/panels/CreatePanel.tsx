@@ -4,6 +4,7 @@ import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, 
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
 import AnimateAllModal, { type AnimateAllScene, type AnimateAllModel } from '../components/AnimateAllModal';
+import ImageCreditTopUpModal, { type IGPack } from '../components/ImageCreditTopUpModal';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
@@ -208,6 +209,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [aiScriptModalOpen, setAiScriptModalOpen] = useState(false);
     const [animateAllModalOpen, setAnimateAllModalOpen] = useState(false);
     const [animateAllMuteAudio, setAnimateAllMuteAudio] = useState(false);
+    const [igTopUpModalOpen, setIGTopUpModalOpen] = useState(false);
+    const [igRequiredCredits, setIGRequiredCredits] = useState(0);
     const [scriptAdvancedOpen, setScriptAdvancedOpen] = useState(false);
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
@@ -2904,6 +2907,21 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         )}
                     </div>
                 )}
+                {workspaceStage === 'scenes' && !sceneBuildLoading && (
+                    <div className="flex items-center justify-end">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setIGRequiredCredits(Math.max(1, creativeScenes.length));
+                                setIGTopUpModalOpen(true);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-400 transition hover:border-violet-400/40 hover:text-white"
+                        >
+                            <Image className="h-3 w-3" />
+                            Top up Image Credits
+                        </button>
+                    </div>
+                )}
                 {animationCreditsShort && (
                     <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
                         This render currently needs {animationCreditsRequired} Catalyst credit{animationCreditsRequired === 1 ? '' : 's'} on {selectedVideoModel.label}, but your account only has {animationCreditsAvailable}. Switch to slideshow, choose a basic video lane, or top up before final render.
@@ -3635,6 +3653,19 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     setAnimateAllModalOpen(false);
                     setWorkspaceStage('audio');
                     void handleFinalize();
+                }}
+            />
+            <ImageCreditTopUpModal
+                open={igTopUpModalOpen}
+                requiredCredits={igRequiredCredits}
+                availableCredits={animationCreditsAvailable}
+                onClose={() => setIGTopUpModalOpen(false)}
+                onSelectPack={(pack: IGPack) => {
+                    // Stub: navigate to billing page, flagging the target pack.
+                    // PR 5b wires this to /api/billing/image-credits/checkout
+                    // and redirects to the Stripe checkout session URL.
+                    setIGTopUpModalOpen(false);
+                    window.location.href = `/billing?ig_pack=${encodeURIComponent(pack.id)}`;
                 }}
             />
             </>
