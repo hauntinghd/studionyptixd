@@ -268,6 +268,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [customVoiceId, setCustomVoiceId] = useState(customVoiceLibrary[0].id);
     const [voicePitch, setVoicePitch] = useState(1);
     const [captionFont, setCaptionFont] = useState(finaleCaptionFonts[0]);
+    // PR #8 — voice pitch slider + user-uploaded BG music. Casey does NOT
+    // want a built-in music library (takedown risk on Shorts) — users upload
+    // their own.
+    const [storyVoicePitch, setStoryVoicePitch] = useState(1.0);
+    const [bgMusicFile, setBgMusicFile] = useState<File | null>(null);
+    const [bgMusicDataUrl, setBgMusicDataUrl] = useState<string>("");
     const [backgroundMusic, setBackgroundMusic] = useState(finaleMusicOptions[0]);
     const [soundReferencePreset, setSoundReferencePreset] = useState(soundReferenceOptions[0].id);
     const [youtubeChannels, setYoutubeChannels] = useState<ConnectedYouTubeChannel[]>([]);
@@ -3232,6 +3238,81 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 )}
 
                 {workspaceStage === 'audio' && renderCustomVoiceLibraryCard()}
+
+                {workspaceStage === 'audio' && templateSupportsVoiceControls && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-4">
+                        <p className="text-sm font-semibold text-white">Voice Pitch</p>
+                        <div className="flex items-center gap-3">
+                            <input
+                                type="range"
+                                min="0.7"
+                                max="1.3"
+                                step="0.05"
+                                value={storyVoicePitch}
+                                onChange={(e) => setStoryVoicePitch(Number(e.target.value))}
+                                className="flex-1 accent-violet-500"
+                            />
+                            <span className="w-12 text-right text-sm tabular-nums text-white">{storyVoicePitch.toFixed(2)}x</span>
+                        </div>
+                        <p className="text-[11px] text-gray-500">
+                            Lower pitch = deeper, upper pitch = brighter. 1.00x is the neutral ElevenLabs voice.
+                        </p>
+                    </div>
+                )}
+
+                {workspaceStage === 'audio' && (
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                        <div>
+                            <p className="text-sm font-semibold text-white">Background Music</p>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                                Upload your own track. Studio does not ship a built-in library — YouTube Shorts takedowns are too common.
+                            </p>
+                        </div>
+                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[11px] leading-snug text-amber-100">
+                            <span className="font-semibold">Warning:</span> Do not add background music if you plan to post on YouTube Shorts unless you own the rights — Content ID will strike or mute your video.
+                        </div>
+                        <label className="block">
+                            <span className="sr-only">Choose BG music file</span>
+                            <input
+                                type="file"
+                                accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/m4a"
+                                onChange={async (e) => {
+                                    const f = e.target.files?.[0] || null;
+                                    setBgMusicFile(f);
+                                    if (f) {
+                                        try {
+                                            const dataUrl = await fileToDataUrl(f);
+                                            setBgMusicDataUrl(dataUrl);
+                                        } catch {
+                                            setBgMusicDataUrl("");
+                                        }
+                                    } else {
+                                        setBgMusicDataUrl("");
+                                    }
+                                }}
+                                className="block w-full text-xs text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-violet-600 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-white hover:file:bg-violet-500"
+                            />
+                        </label>
+                        {bgMusicFile && (
+                            <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-xs text-gray-200">
+                                <div className="truncate">
+                                    <span className="font-semibold">{bgMusicFile.name}</span>
+                                    <span className="ml-2 text-gray-500">{(bgMusicFile.size / 1024).toFixed(0)} KB</span>
+                                </div>
+                                {bgMusicDataUrl && (
+                                    <audio src={bgMusicDataUrl} controls className="h-8 max-w-[220px]" />
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => { setBgMusicFile(null); setBgMusicDataUrl(""); }}
+                                    className="text-[11px] text-gray-400 transition hover:text-white"
+                                >
+                                    Remove
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {workspaceStage === 'audio' && templateSupportsVoiceControls && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-5">
