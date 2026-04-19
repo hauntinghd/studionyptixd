@@ -18650,22 +18650,46 @@ async def _admin_refund_update(refund_id: str, request: Request):
 
 
 @app.get("/api/studio/shorts/ideas", include_in_schema=False)
-async def _studio_shorts_ideas(q: str = "", max_results: int = 8):
+async def _studio_shorts_ideas(q: str = "", max_results: int = 8, seed: str = ""):
     """Live YouTube Shorts idea pull for the Spark modal.
     Uses Catalyst's existing public-YouTube plumbing (quota + cache) so
     we don't double-count against the 10k-unit daily budget.
+
+    Pulls a large candidate pool (up to 12) and samples `max_results`
+    items using the client-supplied `seed` so each Refresh click shows
+    a fresh rotation without re-hitting the YouTube search quota.
     Falls back to empty list on upstream failure — frontend drops back
     to its hardcoded preset ideas so the UX never shows a dead tab.
     """
     query = (q or "").strip()
     if not query:
         return {"ideas": []}
+    # Pull the max the upstream fetcher allows (12). The Spark UI usually
+    # wants 8 so we have a 4-candidate shuffle pool that gives meaningful
+    # variety between refreshes.
+    candidate_cap = 12
+    wanted = max(3, min(int(max_results or 8), candidate_cap))
     try:
-        titles = await _youtube_fetch_public_trend_titles(query, max_results=max(3, min(int(max_results or 8), 12)))
+        candidates = await _youtube_fetch_public_trend_titles(query, max_results=candidate_cap)
     except Exception as e:
         log.warning(f"/api/studio/shorts/ideas upstream failed for q={query!r}: {e}")
         return {"ideas": []}
-    return {"ideas": [str(t) for t in (titles or []) if t]}
+    candidates = [str(t).strip() for t in (candidates or []) if t]
+    candidates = [t for t in candidates if t]
+    if not candidates:
+        return {"ideas": []}
+    if len(candidates) <= wanted:
+        return {"ideas": candidates}
+    # Deterministic-per-seed shuffle so the same seed yields the same list
+    # (client can dedupe/compare) but seed rotation from the frontend gives
+    # every Refresh click a new mix.
+    import hashlib
+    seed_text = (seed or str(time.time())).encode("utf-8", errors="ignore")
+    digest = hashlib.sha256(seed_text + query.encode("utf-8", errors="ignore")).digest()
+    rng = random.Random(int.from_bytes(digest[:8], "big", signed=False))
+    shuffled = list(candidates)
+    rng.shuffle(shuffled)
+    return {"ideas": shuffled[:wanted]}
 
 
 @app.get("/api/studio/queue/status", include_in_schema=False)
