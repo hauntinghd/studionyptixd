@@ -3785,11 +3785,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 availableCredits={animationCreditsAvailable}
                 onClose={() => setIGTopUpModalOpen(false)}
                 onSelectPack={(pack: IGPack) => {
-                    // Stub: navigate to billing page, flagging the target pack.
-                    // PR 5b wires this to /api/billing/image-credits/checkout
-                    // and redirects to the Stripe checkout session URL.
+                    // Deep-links into the existing BillingPage (`?pack=...` is
+                    // the existing query param it reads for topup packs).
+                    // `#topup-packs` scrolls the user straight to the packs
+                    // section.
                     setIGTopUpModalOpen(false);
-                    window.location.href = `/billing?ig_pack=${encodeURIComponent(pack.id)}`;
+                    window.location.href = `/billing?pack=${encodeURIComponent(pack.id)}&section=topups#topup-packs`;
                 }}
             />
             </>
