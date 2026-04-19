@@ -1409,8 +1409,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         setCreativeStep('edit');
     };
 
-    const handleGenerateScriptToShortScenes = async () => {
-        const scriptText = (creativeMode === 'script_to_short'
+    const handleGenerateScriptToShortScenes = async (overrideTopic?: string) => {
+        const scriptText = (overrideTopic && overrideTopic.trim()) ? overrideTopic.trim() : (creativeMode === 'script_to_short'
             ? creativeNarration.trim()
             : (prompt.trim() || creativeNarration.trim())
         );
@@ -2962,7 +2962,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         </p>
                         <div className="mt-3 flex flex-wrap items-center gap-3">
                             <button
-                                onClick={handleGenerateScriptToShortScenes}
+                                onClick={() => handleGenerateScriptToShortScenes()}
                                 disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
                                 className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
                             >
@@ -3525,12 +3525,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 onGenerate={(topic) => {
                     setAiScriptModalOpen(false);
                     setPrompt(topic);
-                    if (!creativeNarration.trim()) {
-                        setCreativeNarration(topic);
-                    }
+                    setCreativeNarration(topic);
                     if (creativeMode !== 'creative') {
                         setCreativeMode('creative');
                     }
+                    setWorkspaceStage('scenes');
+                    void handleGenerateScriptToShortScenes(topic);
                 }}
             />
             </>
@@ -4500,17 +4500,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 onGenerate={(topic) => {
                     setAiScriptModalOpen(false);
                     setPrompt(topic);
-                    // Drop a minimal narration-seed so the Script textarea isn't empty --
-                    // user can review / edit before hitting Next: Scenes. The real AI
-                    // script generation runs on the /api/creative/script call when the
-                    // user advances to the Scenes tab (existing flow). This keeps the
-                    // wizard fast: modal close is instant, no extra backend call here.
-                    if (!creativeNarration.trim()) {
-                        setCreativeNarration(topic);
-                    }
+                    setCreativeNarration(topic);
                     if (creativeMode !== 'creative') {
                         setCreativeMode('creative');
                     }
+                    setWorkspaceStage('scenes');
+                    void handleGenerateScriptToShortScenes(topic);
                 }}
             />
             </>
