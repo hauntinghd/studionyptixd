@@ -602,6 +602,7 @@ from backend_state import (
     _projects_lock,
     _save_creative_sessions_to_disk,
     _get_creative_session,
+    _upsert_session_remote,
     _save_projects_store,
     _new_project_id,
 )
@@ -16573,9 +16574,17 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
             "created_at": time.time(),
         }
         try:
-            _save_creative_sessions_to_disk()
+            _save_creative_sessions_to_disk(remote_session_id=session_id)
         except Exception as e:
             log.warning(f"Creative script session persistence failed for {session_id}: {e}")
+        # Await the Supabase mirror in the CREATE path so subsequent
+        # scene-image calls landing on a different worker can find the
+        # session. Fire-and-forget task inside _save isn't sufficient here
+        # because the HTTP response returns before the task completes.
+        try:
+            await _upsert_session_remote(session_id, _creative_sessions.get(session_id, {}))
+        except Exception as e:
+            log.warning(f"Creative script supabase mirror failed for {session_id}: {e}")
     return {
         "session_id": session_id,
         "title": script_data.get("title", req.prompt),
@@ -16708,7 +16717,11 @@ async def _creative_create_session(body: dict, request: Request = None):
             "prompt_passthrough": True,
             "created_at": time.time(),
         }
-        _save_creative_sessions_to_disk()
+        _save_creative_sessions_to_disk(remote_session_id=session_id)
+    try:
+        await _upsert_session_remote(session_id, _creative_sessions.get(session_id, {}))
+    except Exception as e:
+        log.warning(f"Creative session supabase mirror failed for {session_id}: {e}")
     project_id = _new_project_id()
     await _create_or_update_project(project_id, {
         "user_id": user["id"],
@@ -16766,7 +16779,7 @@ async def _creative_reference_image(
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _get_creative_session(session_id)
+    session = await _get_creative_session(session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -16841,7 +16854,7 @@ async def _creative_session_status(session_id: str, request: Request = None):
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _get_creative_session(session_id)
+    session = await _get_creative_session(session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -16877,7 +16890,7 @@ async def _creative_session_scene_images(session_id: str, request: Request = Non
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _get_creative_session(session_id)
+    session = await _get_creative_session(session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -16917,7 +16930,7 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
-    session = _get_creative_session(req.session_id)
+    session = await _get_creative_session(req.session_id)
     if not session:
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
@@ -17294,7 +17307,7 @@ async def _creative_update_scene(session_id: str, scene_index: int, body: dict, 
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
-    session = _get_creative_session(session_id)
+    session = await _get_creative_session(session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
     if scene_index >= len(session["scenes"]):
@@ -17326,7 +17339,7 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
-    session = _get_creative_session(req.session_id)
+    session = await _get_creative_session(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
     _ensure_template_allowed(session.get("template", req.template), user)
