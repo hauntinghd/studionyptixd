@@ -217,18 +217,30 @@ async def enqueue_generation_job(
         except Exception as e:
             _log.warning(f"Redis enqueue failed; falling back to inprocess queue: {e}")
 
-    global _job_seq
-    if len(_queued_job_meta) >= JOB_MAX_QUEUE_DEPTH:
-        raise QueueFullError(f"Queue is full ({JOB_MAX_QUEUE_DEPTH}). Please retry shortly.")
-    await _ensure_job_workers()
+    # Inprocess path: under RunPod serverless + FastAPI TestClient each HTTP
+    # request runs on a FRESH event loop that is torn down the moment the
+    # response returns. asyncio workers spawned via _ensure_job_workers() die
+    # with that loop, but the `_job_workers_started` module-flag stays True, so
+    # subsequent requests enqueue jobs into a queue no worker is draining --
+    # which is the stuck-at-5% symptom. Longform hit the same bug and fixed it
+    # by awaiting the pipeline inline (see backend.py:13893 comment). Same fix
+    # here: run the pipeline on the current request's loop so it completes
+    # before the loop tears down. The Cloudflare Worker's poll-on-IN_QUEUE
+    # behavior already accommodates long /runsync requests via RunPod's queue.
     priority = _plan_queue_priority(plan)
-    _job_seq += 1
-    _queued_job_meta[job_id] = (priority, _job_seq)
     if _jobs_ref is not None and job_id in _jobs_ref:
         _jobs_ref[job_id]["queue_priority"] = priority
         _jobs_ref[job_id]["queue_mode"] = "inprocess"
-    _update_queue_positions()
-    await _get_job_queue().put((priority, _job_seq, job_id, coro_func, args))
+        _jobs_ref[job_id]["queue_position"] = 1
+        _jobs_ref[job_id]["queue_total"] = 1
+    try:
+        await coro_func(*args)
+    except Exception as e:
+        _log.error(f"[{job_id}] Inline pipeline error: {e}", exc_info=True)
+        if _jobs_ref is not None and job_id in _jobs_ref:
+            _jobs_ref[job_id]["status"] = "error"
+            _jobs_ref[job_id]["error"] = str(e)
+        raise
 
 
 async def dequeue_generation_job() -> dict[str, Any] | None:
