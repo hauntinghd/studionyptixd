@@ -18483,6 +18483,25 @@ app.include_router(
 )
 
 
+@app.get("/api/studio/shorts/ideas", include_in_schema=False)
+async def _studio_shorts_ideas(q: str = "", max_results: int = 8):
+    """Live YouTube Shorts idea pull for the Spark modal.
+    Uses Catalyst's existing public-YouTube plumbing (quota + cache) so
+    we don't double-count against the 10k-unit daily budget.
+    Falls back to empty list on upstream failure — frontend drops back
+    to its hardcoded preset ideas so the UX never shows a dead tab.
+    """
+    query = (q or "").strip()
+    if not query:
+        return {"ideas": []}
+    try:
+        titles = await _youtube_fetch_public_trend_titles(query, max_results=max(3, min(int(max_results or 8), 12)))
+    except Exception as e:
+        log.warning(f"/api/studio/shorts/ideas upstream failed for q={query!r}: {e}")
+        return {"ideas": []}
+    return {"ideas": [str(t) for t in (titles or []) if t]}
+
+
 @app.get("/api/studio/queue/status", include_in_schema=False)
 async def _studio_queue_status():
     """Public read-only fal.ai queue snapshot for the user-facing queue UI.
