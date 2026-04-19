@@ -860,10 +860,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
             if (typeof saved.trendHuntEnabled === 'boolean') {
                 setTrendHuntEnabled(saved.trendHuntEnabled);
             }
-            if (typeof saved.jobId === 'string' && saved.jobId) {
-                setJobId(saved.jobId);
-                setLoading(true);
-            }
+            // Intentionally NOT restoring saved.jobId / setLoading(true) here.
+            // Prior behavior auto-resumed in-flight job polling on page reload,
+            // which made stuck renders look like they "auto-started" when the
+            // user returned to the Create page. Render resumption should be an
+            // explicit user action (click Generate again); stuck jobs shouldn't
+            // silently hijack the next session.
         } catch {
             // ignore malformed saved state
         }
@@ -3675,7 +3677,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     </div>
                 )}
 
-                {session && (
+                {session && isAdmin && (
                     <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 space-y-3">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                             <div>
