@@ -181,7 +181,8 @@ const fallbackVideoModelCatalog: CreativeModelProfile[] = [
     { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Google Veo 3 lane. Premium cinematic motion + sound.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 2 },
     // --- Elite lane (most expensive — "world's most premium" per Casey) ---
     { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Top-end Kling lane. Highest fidelity at the highest cost.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
-    { id: 'sora2', label: 'Sora 2', provider: 'fal', tier: 'elite', summary: "OpenAI's top i2v lane. 8s @ 1080p with native audio. Most-premium animation available — coming soon.", speed: 'Slow', enabled: false, estimated_unit_usd: 0.40, billing_unit: 'second', credit_multiplier: 7 },
+    // Note: Sora 2 is NOT in this catalog per Casey 2026-04-19 — NYPTID
+    // Studio will not use Sora for image-to-video at any tier.
 ];
 
 interface CreatePanelProps {
