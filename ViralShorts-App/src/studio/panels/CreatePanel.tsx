@@ -2797,7 +2797,6 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     };
 
         return (
-            <>
             <div className="w-full max-w-none pb-10 space-y-6">
                 {renderWorkspaceChrome({
                     subtitle: activeStageCopy[workspaceStage].description,
@@ -3514,6 +3513,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     }
 
     return (
+            <>
             <div className="w-full max-w-none pb-10 space-y-6">
                 {renderWorkspaceChrome({
                     subtitle: createSubTab === 'projects'
