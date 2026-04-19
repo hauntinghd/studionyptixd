@@ -88,9 +88,13 @@ export default function GenerateScriptWithAIModal({
         // Live trend query: combine niche + style label + "shorts" so
         // YouTube returns niche-specific shorts that actually match the
         // picked framing. Backend uses Catalyst's cached YouTube search.
+        // Seed = monotonically-increasing refreshKey + fresh timestamp
+        // so every click of "Spark New Ideas" reshuffles the candidate
+        // pool and shows a different mix of trending titles.
         const query = `${templateLabel} ${selectedStyle.label} shorts`.trim();
+        const seed = `${refreshKey + 1}:${Date.now()}`;
         try {
-            const res = await fetch(`${GENERATION_API}/api/studio/shorts/ideas?q=${encodeURIComponent(query)}&max_results=8`);
+            const res = await fetch(`${GENERATION_API}/api/studio/shorts/ideas?q=${encodeURIComponent(query)}&max_results=8&seed=${encodeURIComponent(seed)}`);
             if (res.ok) {
                 const data = await res.json();
                 const titles = Array.isArray(data?.ideas) ? data.ideas.filter((t: unknown): t is string => typeof t === 'string' && t.trim().length > 0) : [];
