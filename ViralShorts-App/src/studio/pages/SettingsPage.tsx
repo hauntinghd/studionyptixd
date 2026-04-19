@@ -84,17 +84,17 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                                 </div>
                             </div>
                             <div className="flex gap-2">
-                                <button type="button" onClick={() => void loadYouTubeChannels()} disabled={!longformOwnerBeta || youtubeLoading} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06] disabled:opacity-60">
+                                <button type="button" onClick={() => void loadYouTubeChannels()} disabled={youtubeLoading} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06] disabled:opacity-60">
                                     {youtubeLoading ? 'Refreshing...' : 'Refresh'}
                                 </button>
-                                <button type="button" onClick={startYouTubeConnect} disabled={!longformOwnerBeta} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60">
+                                <button type="button" onClick={startYouTubeConnect} disabled={youtubeConnecting} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60">
                                     {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
                                 </button>
                             </div>
                         </div>
                         {!longformOwnerBeta ? (
                             <p className="mt-4 text-xs text-amber-300">
-                                Connected-channel deep analysis is owner beta right now. Public Studio users stay on the lighter manual Long Form workflow while Catalyst is being tuned.
+                                Deep Catalyst analysis features are owner beta right now, but you can still connect your channel so Catalyst can learn from private title, thumbnail, and analytics patterns once those features ship.
                             </p>
                         ) : null}
                         {youtubeError ? <p className="mt-4 text-sm text-red-400">{youtubeError}</p> : null}

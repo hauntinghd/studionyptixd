@@ -603,6 +603,8 @@ from backend_state import (
     _save_creative_sessions_to_disk,
     _get_creative_session,
     _upsert_session_remote,
+    _upsert_session_remote_with_verify,
+    _delete_session_remote,
     _save_projects_store,
     _new_project_id,
 )
@@ -16579,12 +16581,20 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
             log.warning(f"Creative script session persistence failed for {session_id}: {e}")
         # Await the Supabase mirror in the CREATE path so subsequent
         # scene-image calls landing on a different worker can find the
-        # session. Fire-and-forget task inside _save isn't sufficient here
-        # because the HTTP response returns before the task completes.
-        try:
-            await _upsert_session_remote(session_id, _creative_sessions.get(session_id, {}))
-        except Exception as e:
-            log.warning(f"Creative script supabase mirror failed for {session_id}: {e}")
+        # session. If persistence is enabled but the row can't be verified
+        # after retries we must fail loud — otherwise every scene-image
+        # call on a rotated worker will 404 silently (§15 open bug).
+        ok, err_detail = await _upsert_session_remote_with_verify(
+            session_id, _creative_sessions.get(session_id, {})
+        )
+        if not ok:
+            async with _creative_sessions_lock:
+                _creative_sessions.pop(session_id, None)
+            log.error(f"[session] CREATE script sid={session_id} abort reason={err_detail}")
+            raise HTTPException(
+                503,
+                "Session persistence is temporarily unavailable. Please retry in a moment.",
+            )
     return {
         "session_id": session_id,
         "title": script_data.get("title", req.prompt),
@@ -16718,10 +16728,17 @@ async def _creative_create_session(body: dict, request: Request = None):
             "created_at": time.time(),
         }
         _save_creative_sessions_to_disk(remote_session_id=session_id)
-    try:
-        await _upsert_session_remote(session_id, _creative_sessions.get(session_id, {}))
-    except Exception as e:
-        log.warning(f"Creative session supabase mirror failed for {session_id}: {e}")
+    ok, err_detail = await _upsert_session_remote_with_verify(
+        session_id, _creative_sessions.get(session_id, {})
+    )
+    if not ok:
+        async with _creative_sessions_lock:
+            _creative_sessions.pop(session_id, None)
+        log.error(f"[session] CREATE empty-session sid={session_id} abort reason={err_detail}")
+        raise HTTPException(
+            503,
+            "Session persistence is temporarily unavailable. Please retry in a moment.",
+        )
     project_id = _new_project_id()
     await _create_or_update_project(project_id, {
         "user_id": user["id"],
@@ -16823,7 +16840,7 @@ async def _creative_reference_image(
         # Keep legacy skeleton key in sync for downstream compatibility.
         session["skeleton_reference_image"] = public_url
     async with _creative_sessions_lock:
-        _save_creative_sessions_to_disk()
+        _save_creative_sessions_to_disk(remote_session_id=session_id)
     return {
         "ok": True,
         "reference_lock_mode": lock_mode,
@@ -17264,7 +17281,7 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
     session["image_previews_debited_scenes"] = sorted(_paid_scene_indices)
     session["image_previews_debited"] = len(_paid_scene_indices)
     async with _creative_sessions_lock:
-        _save_creative_sessions_to_disk()
+        _save_creative_sessions_to_disk(remote_session_id=req.session_id)
     await _update_project_by_session(user.get("id", ""), req.session_id, {
         "status": "draft",
         "scene_count": len(session["scenes"]),
@@ -17322,7 +17339,7 @@ async def _creative_update_scene(session_id: str, scene_index: int, body: dict, 
     if "duration_sec" in body:
         scene["duration_sec"] = body["duration_sec"]
     async with _creative_sessions_lock:
-        _save_creative_sessions_to_disk()
+        _save_creative_sessions_to_disk(remote_session_id=session_id)
     await _update_project_by_session(user.get("id", ""), session_id, {
         "status": "draft",
         "scene_count": len(session["scenes"]),
@@ -17398,7 +17415,7 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         session["story_animation_enabled"] = story_animation_enabled
         session["image_model_id"] = image_model_id
         session["video_model_id"] = video_model_id
-        _save_creative_sessions_to_disk()
+        _save_creative_sessions_to_disk(remote_session_id=req.session_id)
     if not session["scenes"]:
         raise HTTPException(400, "No scenes provided")
 
@@ -17872,6 +17889,10 @@ async def _run_creative_pipeline(
             async with _creative_sessions_lock:
                 _creative_sessions.pop(sid, None)
                 _save_creative_sessions_to_disk()
+            try:
+                await _delete_session_remote(sid)
+            except Exception as e:
+                log.warning(f"Supabase session delete failed for {sid}: {e}")
 
     except Exception as e:
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)

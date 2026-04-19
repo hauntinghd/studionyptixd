@@ -7,6 +7,7 @@ type CatalystChannel = {
     title: string;
     channel_handle?: string;
     last_sync_error?: string;
+    needs_reconnect?: boolean;
     last_outcome_sync_at?: number;
     last_outcome_sync_count?: number;
     last_outcome_sync_error?: string;
@@ -1690,13 +1691,35 @@ export default function CatalystPanel() {
                                     </div>
                                 ) : null}
                                 {channelSyncError && (
-                                    <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                                        {channelSyncError}
+                                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                                        <span className="flex-1">{channelSyncError}</span>
+                                        {selectedChannel?.needs_reconnect && (
+                                            <button
+                                                type="button"
+                                                onClick={() => { void startYouTubeConnect(); }}
+                                                disabled={youtubeConnecting}
+                                                className="inline-flex items-center gap-2 rounded-xl border border-red-400/50 bg-red-500/20 px-3 py-1.5 text-xs font-semibold text-red-50 transition hover:border-red-300 hover:bg-red-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {youtubeConnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Youtube className="h-3.5 w-3.5" />}
+                                                Reconnect
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                                 {channelOutcomeSyncError && (
-                                    <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                                        {channelOutcomeSyncError}
+                                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                                        <span className="flex-1">{channelOutcomeSyncError}</span>
+                                        {selectedChannel?.needs_reconnect && (
+                                            <button
+                                                type="button"
+                                                onClick={() => { void startYouTubeConnect(); }}
+                                                disabled={youtubeConnecting}
+                                                className="inline-flex items-center gap-2 rounded-xl border border-red-400/50 bg-red-500/20 px-3 py-1.5 text-xs font-semibold text-red-50 transition hover:border-red-300 hover:bg-red-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {youtubeConnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Youtube className="h-3.5 w-3.5" />}
+                                                Reconnect
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                                 {selectedChannel && (

@@ -4,12 +4,14 @@ import AuthPage from './studio/pages/AuthPage';
 import BillingPage from './studio/pages/BillingPage';
 import DashboardPage from './studio/pages/DashboardPage';
 import LandingPage from './studio/pages/LandingPage';
+import PrivacyPage from './studio/pages/PrivacyPage';
 import SettingsPage from './studio/pages/SettingsPage';
 import SubscriptionPage from './studio/pages/SubscriptionPage';
+import TermsPage from './studio/pages/TermsPage';
 import { AuthContext, AuthProvider, isBillingHost } from './studio/shared';
 import { trackStudioPageView } from './studio/lib/googleAds';
 
-type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription';
+type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'privacy' | 'terms';
 
 const hasPendingAuthRedirectArtifacts = (): boolean => {
     if (typeof window === 'undefined') return false;
@@ -31,6 +33,9 @@ function AppShell() {
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const resolvePageFromLocation = useCallback((): StudioPage | null => {
         if (typeof window === 'undefined') return null;
+        const pathname = String(window.location.pathname || '').replace(/\/+$/, '').toLowerCase();
+        if (pathname === '/privacy') return 'privacy';
+        if (pathname === '/terms') return 'terms';
         const search = new URLSearchParams(window.location.search);
         const urlPage = String(search.get('page') || '').trim().toLowerCase();
         if (urlPage === 'dashboard') return 'dashboard';
@@ -40,6 +45,8 @@ function AppShell() {
         if (urlPage === 'subscription') return 'subscription';
         if (urlPage === 'settings') return 'settings';
         if (urlPage === 'account') return 'account';
+        if (urlPage === 'privacy') return 'privacy';
+        if (urlPage === 'terms') return 'terms';
         return billingHost ? 'billing' : null;
     }, [billingHost]);
     const [page, setPage] = useState<StudioPage>(() => {
@@ -47,7 +54,11 @@ function AppShell() {
             const locationPage = resolvePageFromLocation();
             if (locationPage) return locationPage;
             const saved = localStorage.getItem('nyptid_page');
-            if (saved === 'landing' || saved === 'dashboard' || saved === 'auth' || saved === 'account' || saved === 'settings' || saved === 'billing' || saved === 'subscription') {
+            if (
+                saved === 'landing' || saved === 'dashboard' || saved === 'auth' || saved === 'account'
+                || saved === 'settings' || saved === 'billing' || saved === 'subscription'
+                || saved === 'privacy' || saved === 'terms'
+            ) {
                 return saved;
             }
         } catch {
@@ -104,6 +115,10 @@ function AppShell() {
 
     useEffect(() => {
         if (loading) return;
+        // Legal pages are always reachable — both when signed in (no forced-dashboard redirect)
+        // and when signed out (no forced-auth redirect). Google's OAuth verification flow
+        // needs these URLs to load for any visitor, logged in or not.
+        if (page === 'privacy' || page === 'terms') return;
         const authRedirectPending = hasPendingAuthRedirectArtifacts();
         if (billingHost) {
             if (!session && !authRedirectPending && (page === 'dashboard' || page === 'account' || page === 'settings')) {
@@ -149,6 +164,8 @@ function AppShell() {
             {page === 'settings' && <SettingsPage onNavigate={setPage} />}
             {page === 'billing' && <BillingPage onNavigate={setPage} />}
             {page === 'subscription' && <SubscriptionPage onNavigate={setPage} />}
+            {page === 'privacy' && <PrivacyPage />}
+            {page === 'terms' && <TermsPage />}
         </div>
     );
 }
