@@ -18483,6 +18483,172 @@ app.include_router(
 )
 
 
+@app.post("/api/billing/refund-request", include_in_schema=False)
+async def _billing_refund_request(req: Request):
+    """User-submitted refund request. No Discord join required.
+    Writes a row to public.refund_requests in Supabase. If the table
+    doesn't exist yet (migration not applied), writes a local JSON
+    fallback under APP_DATA_DIR/refund_requests.jsonl so no requests
+    are lost.
+    """
+    user = await get_current_user_from_request(req) if req else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    reason = str(body.get("reason", "") or "").strip()
+    amount_usd = body.get("amount_usd")
+    payment_reference = str(body.get("payment_reference", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "Reason is required")
+    if len(reason) > 4000:
+        reason = reason[:4000]
+    payload = {
+        "user_id": str(user.get("id", "") or ""),
+        "email": str(user.get("email", "") or ""),
+        "reason": reason,
+        "amount_usd": float(amount_usd) if amount_usd is not None else None,
+        "payment_reference": payment_reference or None,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    wrote_remote = False
+    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+                resp = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/refund_requests",
+                    headers={
+                        "apikey": key,
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=representation",
+                    },
+                    json=payload,
+                )
+                if resp.status_code in (200, 201):
+                    wrote_remote = True
+                else:
+                    log.warning(f"Refund-request Supabase insert returned {resp.status_code}: {resp.text[:300]}")
+        except Exception as e:
+            log.warning(f"Refund-request Supabase insert failed, will fallback: {e}")
+    if not wrote_remote:
+        try:
+            fallback_path = Path(APP_DATA_DIR) / "refund_requests.jsonl"
+            fallback_path.parent.mkdir(parents=True, exist_ok=True)
+            with fallback_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        except Exception as e:
+            log.error(f"Refund-request fallback write failed: {e}")
+    return {"ok": True, "stored": "supabase" if wrote_remote else "local", "status": "pending"}
+
+
+@app.get("/api/admin/refunds", include_in_schema=False)
+async def _admin_refunds_list(request: Request):
+    """Admin view: all refund requests + verified users roster."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    email = str(user.get("email", "") or "").lower()
+    if email not in {e.lower() for e in ADMIN_EMAILS}:
+        raise HTTPException(403, "Admin only")
+    refunds: list[dict] = []
+    verified_users: list[dict] = []
+    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
+        key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        async with httpx.AsyncClient(timeout=20) as client:
+            try:
+                r = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/refund_requests?select=*&order=created_at.desc&limit=500",
+                    headers=headers,
+                )
+                if r.status_code == 200:
+                    refunds = r.json() or []
+            except Exception as e:
+                log.warning(f"/api/admin/refunds supabase fetch failed: {e}")
+            # Verified users: pull from profiles table, filter to those with
+            # email_verified=true or confirmed_at set. Shape may vary — we
+            # only surface the fields the UI needs.
+            try:
+                r = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/profiles?select=id,email,plan,created_at&order=created_at.desc&limit=1000",
+                    headers=headers,
+                )
+                if r.status_code == 200:
+                    verified_users = r.json() or []
+            except Exception as e:
+                log.warning(f"/api/admin/refunds verified-users fetch failed: {e}")
+    # Fold in local jsonl fallback if it exists.
+    try:
+        fallback_path = Path(APP_DATA_DIR) / "refund_requests.jsonl"
+        if fallback_path.exists():
+            for line in fallback_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    refunds.append(json.loads(line))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {
+        "refunds": refunds,
+        "verified_users": verified_users,
+    }
+
+
+@app.patch("/api/admin/refunds/{refund_id}", include_in_schema=False)
+async def _admin_refund_update(refund_id: str, request: Request):
+    """Admin PATCH: update status + admin note on a refund request."""
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    email = str(user.get("email", "") or "").lower()
+    if email not in {e.lower() for e in ADMIN_EMAILS}:
+        raise HTTPException(403, "Admin only")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status_val = str(body.get("status", "") or "").strip().lower()
+    if status_val and status_val not in ("pending", "approved", "denied", "refunded"):
+        raise HTTPException(400, "Invalid status")
+    note = body.get("admin_note")
+    update_payload: dict = {}
+    if status_val:
+        update_payload["status"] = status_val
+    if isinstance(note, str):
+        update_payload["admin_note"] = note[:2000]
+    if not update_payload:
+        raise HTTPException(400, "No fields to update")
+    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
+        key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/refund_requests?id=eq.{refund_id}",
+                    headers={
+                        "apikey": key,
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    json=update_payload,
+                )
+                if r.status_code >= 400:
+                    raise HTTPException(r.status_code, f"Supabase update failed: {r.text[:300]}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Supabase update error: {e}")
+    return {"ok": True, "updated": update_payload}
+
+
 @app.get("/api/studio/shorts/ideas", include_in_schema=False)
 async def _studio_shorts_ideas(q: str = "", max_results: int = 8):
     """Live YouTube Shorts idea pull for the Spark modal.

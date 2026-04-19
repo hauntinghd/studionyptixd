@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Monitor, PanelLeftOpen, Receipt, Sparkles, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import AdminAnalyticsPanel from '../panels/AdminAnalyticsPanel';
@@ -9,9 +9,10 @@ import ClonePanel from '../panels/ClonePanel';
 import CreatePanel from '../panels/CreatePanel';
 import DemoPanel from '../panels/DemoPanel';
 import LongFormPanel from '../panels/LongFormPanel';
+import RefundsPanel from '../panels/RefundsPanel';
 import ThumbnailPanel from '../panels/ThumbnailPanel';
 
-type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst';
+type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst' | 'refunds';
 
 type SidebarItem = {
     id: DashboardTab;
@@ -30,6 +31,7 @@ const OWNER_ALL_ACCESS = {
     autoclipper: true,
     analytics: true,
     catalyst: true,
+    refunds: true,
 };
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -59,7 +61,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, []);
     const isTabUnlocked = useCallback((nextTab: DashboardTab) => {
         if (nextTab === 'create') return true;
-        if (nextTab === 'analytics' || nextTab === 'catalyst') return isAdmin;
+        if (nextTab === 'analytics' || nextTab === 'catalyst' || nextTab === 'refunds') return isAdmin;
         return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
     }, [isAdmin, laneAccess]);
 
@@ -77,7 +79,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         const params = new URLSearchParams(window.location.search);
         const requestedTab = String(params.get('tab') || params.get('focus') || '').trim().toLowerCase();
         if (!requestedTab) return;
-        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst']);
+        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst', 'refunds']);
         if (!allowedTabs.has(requestedTab as DashboardTab)) return;
         const nextTab = requestedTab as DashboardTab;
         const unlocked = isTabUnlocked(nextTab);
@@ -135,6 +137,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         label: 'Catalyst',
         icon: BrainCircuit,
         hidden: !isAdmin,
+    }, {
+        id: 'refunds',
+        label: 'Refunds',
+        icon: Receipt,
+        hidden: !isAdmin,
     }] as SidebarItem[]).filter((item) => !item.hidden);
 
     const openCreateWorkspace = () => {
@@ -162,6 +169,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const panel = (() => {
         if (tab === 'analytics' && isAdmin) return <AdminAnalyticsPanel />;
         if (tab === 'catalyst' && isAdmin) return <CatalystPanel />;
+        if (tab === 'refunds' && isAdmin) return <RefundsPanel />;
         if (tab === 'clone' && laneAccess.clone) return <ClonePanel />;
         if (tab === 'longform' && laneAccess.longform) return <LongFormPanel />;
         if (tab === 'thumbnails' && laneAccess.thumbnails) return <ThumbnailPanel />;

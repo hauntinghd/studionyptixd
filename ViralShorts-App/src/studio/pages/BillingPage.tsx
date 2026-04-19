@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, WalletCards } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
 
 type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
@@ -461,8 +461,139 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                         Monthly checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
                     </p>
                 )}
+                <RefundRequestCard />
             </div>
         </>
+    );
+}
+
+function RefundRequestCard() {
+    const { session } = useContext(AuthContext);
+    const [open, setOpen] = useState(false);
+    const [reason, setReason] = useState('');
+    const [amount, setAmount] = useState('');
+    const [paymentRef, setPaymentRef] = useState('');
+    const [submitting, setSubmitting] = useState(false);
+    const [submitted, setSubmitted] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const canSubmit = reason.trim().length > 10 && !submitting;
+
+    const submit = async () => {
+        if (!session || !canSubmit) return;
+        setSubmitting(true);
+        setError(null);
+        try {
+            const res = await fetch(`${GENERATION_API}/api/billing/refund-request`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    reason: reason.trim(),
+                    amount_usd: amount.trim() ? Number(amount) : null,
+                    payment_reference: paymentRef.trim() || null,
+                }),
+            });
+            if (!res.ok) {
+                const txt = await res.text().catch(() => '');
+                throw new Error(txt || `HTTP ${res.status}`);
+            }
+            setSubmitted(true);
+            setReason('');
+            setAmount('');
+            setPaymentRef('');
+        } catch (e: any) {
+            setError(e?.message || 'Could not submit refund request');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="mt-8 rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+            <div className="flex items-center justify-between gap-3">
+                <div>
+                    <h3 className="text-base font-semibold text-white">Need a refund?</h3>
+                    <p className="mt-1 text-[12px] text-gray-400">
+                        Submit a request directly here. No Discord join required — we'll review and respond by email.
+                    </p>
+                </div>
+                {!open && !submitted && (
+                    <button
+                        type="button"
+                        onClick={() => setOpen(true)}
+                        className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-semibold text-gray-200 transition hover:bg-white/[0.05]"
+                    >
+                        Request refund
+                    </button>
+                )}
+            </div>
+            {submitted && (
+                <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                    Got it — your refund request is in the admin queue. You'll get an email once it's been reviewed.
+                </div>
+            )}
+            {open && !submitted && (
+                <div className="mt-4 space-y-3">
+                    <label className="block">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Reason (required)</span>
+                        <textarea
+                            value={reason}
+                            onChange={(e) => setReason(e.target.value)}
+                            rows={4}
+                            placeholder="What happened, and what are you hoping we do?"
+                            className="mt-1 w-full resize-y rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
+                        />
+                    </label>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <label className="block">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Amount (USD, optional)</span>
+                            <input
+                                type="number"
+                                value={amount}
+                                onChange={(e) => setAmount(e.target.value)}
+                                step="0.01"
+                                min="0"
+                                placeholder="29.00"
+                                className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
+                            />
+                        </label>
+                        <label className="block">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">PayPal order / invoice id (optional)</span>
+                            <input
+                                type="text"
+                                value={paymentRef}
+                                onChange={(e) => setPaymentRef(e.target.value)}
+                                placeholder="8AB123456789"
+                                className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
+                            />
+                        </label>
+                    </div>
+                    {error && (
+                        <p className="text-[11px] text-red-300">{error}</p>
+                    )}
+                    <div className="flex items-center justify-end gap-2">
+                        <button
+                            type="button"
+                            onClick={() => { setOpen(false); setError(null); }}
+                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-400 transition hover:text-white"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void submit()}
+                            disabled={!canSubmit}
+                            className="rounded-lg bg-gradient-to-r from-violet-600 to-cyan-600 px-4 py-1.5 text-xs font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {submitting ? 'Submitting…' : 'Submit refund request'}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
     );
 }
 
