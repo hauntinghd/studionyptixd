@@ -1716,6 +1716,41 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         }
     };
 
+    // Fire-and-forget helper that captures user-approved scene images into
+    // the training_data table for fine-tuning NYPTID's own image model.
+    // Per Casey 2026-04-19: "The reason we're saving the data for it, if we
+    // can, is because we can use that to train our own image generation
+    // model, and we're gonna be doing that very, very, very soon."
+    //
+    // Called when the user advances past Scenes (Animate All click, or
+    // Audio/Finale advance) — implicit approval signal. Silently no-ops
+    // if the backend endpoint isn't available yet (PR 7b wires it up).
+    const captureApprovedSceneImages = (opts: { implicit: boolean }) => {
+        try {
+            const approved = creativeScenes
+                .filter((s) => !!s.imageData && !!s.visual_description.trim())
+                .map((s, idx) => ({
+                    scene_index: idx,
+                    prompt: s.visual_description.slice(0, 2000),
+                    template: selectedTemplate,
+                    image_model_id: imageModelId,
+                    approval_kind: opts.implicit ? 'implicit_advance' : 'explicit',
+                }));
+            if (approved.length === 0) return;
+            void fetch(`${GENERATION_API}/api/studio/training/scene-approved`, {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    approved_at_epoch: Math.floor(Date.now() / 1000),
+                    scenes: approved,
+                }),
+            }).catch(() => { /* silent — backend endpoint may not exist yet */ });
+        } catch {
+            // never block UX on capture
+        }
+    };
+
     // Fire bulk image gen automatically once script prompts land + session
     // is ready, if the user-facing flow requested it (e.g. via a Spark-modal
     // idea pick). Declared as a ref so the useEffect below sees the latest
@@ -3655,6 +3690,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 onClose={() => setAnimateAllModalOpen(false)}
                 onAnimate={() => {
                     setAnimateAllModalOpen(false);
+                    captureApprovedSceneImages({ implicit: true });
                     setWorkspaceStage('audio');
                     void handleFinalize();
                 }}
