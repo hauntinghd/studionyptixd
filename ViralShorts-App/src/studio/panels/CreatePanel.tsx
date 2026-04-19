@@ -5,6 +5,7 @@ import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } fro
 import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
 import AnimateAllModal, { type AnimateAllScene, type AnimateAllModel } from '../components/AnimateAllModal';
 import ImageCreditTopUpModal, { type IGPack } from '../components/ImageCreditTopUpModal';
+import FalQueueCard from '../components/FalQueueCard';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
@@ -2919,6 +2920,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         </div>
                     )}
                 </div>
+                <FalQueueCard active={sceneBuildLoading || bulkImageGenRunning || loading} />
                 {workspaceStage === 'scenes' && (sceneBuildLoading || bulkImageGenRunning) && (
                     <div className="rounded-xl border border-violet-500/30 bg-violet-500/[0.06] p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
