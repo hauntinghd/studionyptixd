@@ -1658,7 +1658,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         if (!scene.visual_description.trim()) return;
         const imageCreditCost = Math.max(0, Number(selectedImageModel.credit_cost_per_image || 0));
         if (!isAdmin && imageCreditCost > 0 && imageCreditCost > animationCreditsAvailable) {
-            openAnimationCreditPrompt(imageCreditCost, 'image');
+            setIGRequiredCredits(imageCreditCost);
+            setIGTopUpModalOpen(true);
             return;
         }
         const mintMode = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'].includes(selectedTemplate);
@@ -1788,7 +1789,13 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         if (!isAdmin && imageCreditCost > 0) {
             const requiredCredits = Math.max(1, targets.length * imageCreditCost);
             if (requiredCredits > animationCreditsAvailable) {
-                openAnimationCreditPrompt(requiredCredits, 'image');
+                // Route to the IG-specific top-up modal (PR 5 scaffold) so
+                // usage-based image-credit flow is discoverable. The older
+                // animation-credit prompt was the single path before the IG
+                // system landed — using it for image gen made image users
+                // think they needed to buy ANIMATION credits.
+                setIGRequiredCredits(requiredCredits);
+                setIGTopUpModalOpen(true);
                 return;
             }
         }
