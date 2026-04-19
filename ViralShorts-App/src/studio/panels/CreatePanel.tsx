@@ -239,6 +239,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [bulkImageGenRunning, setBulkImageGenRunning] = useState(false);
     const [bulkImageGenDone, setBulkImageGenDone] = useState(0);
     const [bulkImageGenTotal, setBulkImageGenTotal] = useState(0);
+    // PR #3: auto-fire bulk image gen the moment scene prompts land, so
+    // picking an idea in the Spark modal feels like a single continuous
+    // "generating scene prompts → generating images" stream (Korpi-parity).
+    const [autoRunImageBatchRequested, setAutoRunImageBatchRequested] = useState(false);
     const [createSubTab, setCreateSubTab] = useState<'builder' | 'projects'>('builder');
     const [workspaceStage, setWorkspaceStage] = useState<'script' | 'scenes' | 'audio'>('script');
     const [scenePromptEditorIndex, setScenePromptEditorIndex] = useState<number | null>(null);
@@ -1702,6 +1706,21 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         }
     };
 
+    // Fire bulk image gen automatically once script prompts land + session
+    // is ready, if the user-facing flow requested it (e.g. via a Spark-modal
+    // idea pick). Declared as a ref so the useEffect below sees the latest
+    // function reference without becoming a dependency cycle.
+    const handleGenerateSceneImageBatchRef = useRef<() => Promise<void> | void>(() => {});
+    useEffect(() => {
+        if (!autoRunImageBatchRequested) return;
+        if (!scriptScenesReady) return;
+        if (!sessionId) return;
+        if (bulkImageGenRunning || sceneBuildLoading) return;
+        if (creativeScenes.length === 0) return;
+        setAutoRunImageBatchRequested(false);
+        void handleGenerateSceneImageBatchRef.current();
+    }, [autoRunImageBatchRequested, scriptScenesReady, sessionId, bulkImageGenRunning, sceneBuildLoading, creativeScenes.length]);
+
     const handleGenerateSceneImageBatch = async () => {
         if (!sessionId) return;
         const scenes = creativeScenesRef.current;
@@ -1732,6 +1751,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
             setBulkImageGenRunning(false);
         }
     };
+
+    // Keep the ref pointing at the latest closure so the auto-run useEffect
+    // above always invokes the current bound function.
+    useEffect(() => {
+        handleGenerateSceneImageBatchRef.current = handleGenerateSceneImageBatch;
+    });
 
     const normalizeUpstreamErrorMessage = (message?: string, statusCode?: number, fallback = "Request failed") => {
         const raw = String(message || "").trim();
@@ -2842,6 +2867,40 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         </div>
                     )}
                 </div>
+                {workspaceStage === 'scenes' && (sceneBuildLoading || bulkImageGenRunning) && (
+                    <div className="rounded-xl border border-violet-500/30 bg-violet-500/[0.06] p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                                <Loader2 className="h-4 w-4 animate-spin text-violet-300" />
+                                <span className="text-sm font-semibold text-white">
+                                    {sceneBuildLoading
+                                        ? 'Generating scene prompts...'
+                                        : `Generating images: ${bulkImageGenDone}/${bulkImageGenTotal}`}
+                                </span>
+                            </div>
+                            <span className="text-xs tabular-nums text-violet-200">
+                                {sceneBuildLoading
+                                    ? '...'
+                                    : `${bulkImageGenTotal > 0 ? Math.round((bulkImageGenDone / bulkImageGenTotal) * 100) : 0}%`}
+                            </span>
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.05]">
+                            <div
+                                className="h-full rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 transition-all"
+                                style={{
+                                    width: sceneBuildLoading
+                                        ? '35%'
+                                        : `${bulkImageGenTotal > 0 ? Math.min(100, (bulkImageGenDone / bulkImageGenTotal) * 100) : 0}%`,
+                                }}
+                            />
+                        </div>
+                        {sceneBuildLoading && (
+                            <p className="text-[11px] text-gray-400">
+                                Sparking scene prompts from your topic, then image generation kicks in automatically.
+                            </p>
+                        )}
+                    </div>
+                )}
                 {animationCreditsShort && (
                     <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
                         This render currently needs {animationCreditsRequired} Catalyst credit{animationCreditsRequired === 1 ? '' : 's'} on {selectedVideoModel.label}, but your account only has {animationCreditsAvailable}. Switch to slideshow, choose a basic video lane, or top up before final render.
@@ -3531,6 +3590,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         setCreativeMode('creative');
                     }
                     setWorkspaceStage('scenes');
+                    setAutoRunImageBatchRequested(true);
                     void handleGenerateScriptToShortScenes(topic);
                 }}
             />
@@ -4493,6 +4553,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         setCreativeMode('creative');
                     }
                     setWorkspaceStage('scenes');
+                    setAutoRunImageBatchRequested(true);
                     void handleGenerateScriptToShortScenes(topic);
                 }}
             />
