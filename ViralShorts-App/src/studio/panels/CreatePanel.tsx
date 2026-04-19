@@ -1,8 +1,9 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
-import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X, Zap } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Video, Wand2, X, Zap } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
+import AnimateAllModal, { type AnimateAllScene, type AnimateAllModel } from '../components/AnimateAllModal';
 import ChatStoryPanel from './ChatStoryPanel';
 import { storyArtStyleOptions } from '../lib/storyArtStyleCatalog';
 import { customVoiceLibrary, customVoicePresetMap } from '../lib/studioVoiceLibrary';
@@ -205,6 +206,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [creativeTitle, setCreativeTitle] = useState("");
     const [creativeNarration, setCreativeNarration] = useState("");
     const [aiScriptModalOpen, setAiScriptModalOpen] = useState(false);
+    const [animateAllModalOpen, setAnimateAllModalOpen] = useState(false);
+    const [animateAllMuteAudio, setAnimateAllMuteAudio] = useState(false);
     const [scriptAdvancedOpen, setScriptAdvancedOpen] = useState(false);
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
@@ -3449,8 +3452,20 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         )}
                     </button>
                 ) : (
-                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        All scene images are ready. Move to <span className="font-semibold">Finale</span> to render the full short.
+                    <div className="space-y-3">
+                        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+                            All scene images are ready. Hit <span className="font-semibold">Animate All</span> to turn every scene into a clip, or skip to <span className="font-semibold">Audio</span> to finalize.
+                        </div>
+                        {effectiveAnimationEnabled && (
+                            <button
+                                type="button"
+                                onClick={() => setAnimateAllModalOpen(true)}
+                                disabled={loading || !sessionId || promptSceneCount === 0}
+                                className="w-full py-4 bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 hover:opacity-95 disabled:opacity-40 text-white font-bold rounded-xl text-lg transition-all flex items-center justify-center gap-3 shadow-lg shadow-violet-900/20"
+                            >
+                                <Video className="w-5 h-5" /> Animate All Scenes
+                            </button>
+                        )}
                     </div>
                 ))}
 
@@ -3592,6 +3607,34 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     setWorkspaceStage('scenes');
                     setAutoRunImageBatchRequested(true);
                     void handleGenerateScriptToShortScenes(topic);
+                }}
+            />
+            <AnimateAllModal
+                open={animateAllModalOpen}
+                scenes={creativeScenes.map<AnimateAllScene>((s, idx) => ({
+                    index: idx,
+                    imageData: s.imageData,
+                    visual_description: s.visual_description,
+                    duration_sec: s.duration_sec,
+                }))}
+                model={{
+                    id: selectedVideoModel.id,
+                    label: selectedVideoModel.label,
+                    subtitle: `Animation lane — ${animationCreditsRequired} credits for ${creativeScenes.length} scenes`,
+                    parallel_limit: 8,
+                    fixed_duration_sec: 8,
+                    supports_audio: true,
+                } as AnimateAllModel}
+                availableCredits={animationCreditsAvailable}
+                requiredCredits={animationCreditsRequired}
+                disabled={loading || scriptLoading}
+                muteAudio={animateAllMuteAudio}
+                onMuteAudioToggle={setAnimateAllMuteAudio}
+                onClose={() => setAnimateAllModalOpen(false)}
+                onAnimate={() => {
+                    setAnimateAllModalOpen(false);
+                    setWorkspaceStage('audio');
+                    void handleFinalize();
                 }}
             />
             </>
