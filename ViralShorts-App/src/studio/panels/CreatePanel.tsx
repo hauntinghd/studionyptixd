@@ -1529,8 +1529,20 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 duration_sec: 5,
             }]);
             setCreativeTitle(data.title || (creativeMode === 'script_to_short' ? "Script to Short" : (prompt || "Creative Draft")));
-            if (!creativeNarration.trim()) {
-                setCreativeNarration(scriptText);
+            // Prefer a backend-returned top-level narration; else stitch the
+            // generated per-scene narrations into the full script. This
+            // overwrites any seed value (e.g. the raw topic the Spark modal
+            // set to keep the textarea from looking empty during gen).
+            // Only fall back to scriptText (the raw topic) if the backend
+            // returned zero narration content anywhere.
+            const backendNarration = typeof (data as any)?.narration === 'string' ? String((data as any).narration).trim() : "";
+            const stitchedNarration = generatedScenes
+                .map(s => s.narration.trim())
+                .filter(Boolean)
+                .join(' ');
+            const finalNarration = backendNarration || stitchedNarration || scriptText;
+            if (finalNarration && finalNarration !== creativeNarration) {
+                setCreativeNarration(finalNarration);
             }
             setScriptScenesReady(generatedScenes.length > 0);
         } catch (e: any) {
