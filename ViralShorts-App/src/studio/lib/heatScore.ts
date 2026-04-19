@@ -36,3 +36,51 @@ export function heatScoreColorClass(score: number): string {
     if (score >= 75) return "text-orange-300";
     return "text-amber-300";
 }
+
+export type ViralityTier = "viral" | "trending" | "predicted";
+
+// Rough distribution target: ~30% viral, 40% trending, 30% predicted.
+// Deterministic per idea-text-per-day, so the list feels curated while
+// staying stable within a session.
+export function computeViralityTier(
+    nicheId: string,
+    styleId: string,
+    ideaText: string,
+    isoDate: string = today(),
+): ViralityTier {
+    const h = hash32(`${nicheId}|${styleId}|${ideaText}|${isoDate}`);
+    const bucket = h % 10;
+    if (bucket < 3) return "viral";
+    if (bucket < 7) return "trending";
+    return "predicted";
+}
+
+export interface ViralityBadge {
+    label: string;
+    className: string;
+    dotClassName: string;
+}
+
+export function viralityBadge(tier: ViralityTier): ViralityBadge {
+    switch (tier) {
+        case "viral":
+            return {
+                label: "VIRAL",
+                className: "border-red-500/40 bg-red-500/10 text-red-200",
+                dotClassName: "bg-red-400",
+            };
+        case "trending":
+            return {
+                label: "TRENDING",
+                className: "border-orange-500/40 bg-orange-500/10 text-orange-200",
+                dotClassName: "bg-orange-400",
+            };
+        case "predicted":
+        default:
+            return {
+                label: "PREDICTED",
+                className: "border-violet-500/40 bg-violet-500/10 text-violet-200",
+                dotClassName: "bg-violet-400",
+            };
+    }
+}

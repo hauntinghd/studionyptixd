@@ -2797,6 +2797,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     };
 
         return (
+            <>
             <div className="w-full max-w-none pb-10 space-y-6">
                 {renderWorkspaceChrome({
                     subtitle: activeStageCopy[workspaceStage].description,
@@ -3509,6 +3510,30 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 {animationCreditPromptModal}
                 {globalRenderProgressWindow}
             </div>
+            <GenerateScriptWithAIModal
+                open={aiScriptModalOpen}
+                template={selectedTemplate}
+                templateLabel={(() => {
+                    const t = selectedTemplate || '';
+                    if (t === 'skeleton') return 'Skeleton';
+                    if (t === 'daytrading') return 'Day Trading';
+                    if (t === 'dilemma') return 'Moral Dilemma';
+                    return t.charAt(0).toUpperCase() + t.slice(1);
+                })()}
+                disabled={loading || scriptLoading}
+                onClose={() => setAiScriptModalOpen(false)}
+                onGenerate={(topic) => {
+                    setAiScriptModalOpen(false);
+                    setPrompt(topic);
+                    if (!creativeNarration.trim()) {
+                        setCreativeNarration(topic);
+                    }
+                    if (creativeMode !== 'creative') {
+                        setCreativeMode('creative');
+                    }
+                }}
+            />
+            </>
         );
     }
 
