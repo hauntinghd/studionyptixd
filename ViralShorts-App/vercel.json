@@ -16,11 +16,11 @@
   "rewrites": [
     {
       "source": "/api",
-      "destination": "https://api.nyptidindustries.com/api"
+      "destination": "https://api-studio.nyptidindustries.com/api"
     },
     {
       "source": "/api/:path*",
-      "destination": "https://api.nyptidindustries.com/api/:path*"
+      "destination": "https://api-studio.nyptidindustries.com/api/:path*"
     },
     {
       "source": "/(.*)",

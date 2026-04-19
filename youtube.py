@@ -1906,6 +1906,17 @@ configure_youtube_public_view_hooks(
 def _youtube_connection_public_view(record: dict) -> dict:
     data = dict(record or {})
     analytics_snapshot = dict(data.get("analytics_snapshot") or {})
+    last_sync_error = str(data.get("last_sync_error", "") or "")
+    last_outcome_sync_error = str(data.get("last_outcome_sync_error", "") or "")
+    needs_reconnect = bool(
+        _google_oauth_error_suggests_reconnect_required(last_sync_error)
+        or _google_oauth_error_suggests_reconnect_required(last_outcome_sync_error)
+        or (
+            # No refresh token stored — the previous session was lost or never persisted.
+            not str(data.get("refresh_token", "") or "").strip()
+            and float(data.get("linked_at", 0.0) or 0.0) > 0
+        )
+    )
     return {
         "channel_id": str(data.get("channel_id", "") or ""),
         "title": str(data.get("title", "") or ""),
@@ -1920,8 +1931,9 @@ def _youtube_connection_public_view(record: dict) -> dict:
         "last_synced_at": float(data.get("last_synced_at", 0.0) or 0.0),
         "last_outcome_sync_at": float(data.get("last_outcome_sync_at", 0.0) or 0.0),
         "last_outcome_sync_count": int(data.get("last_outcome_sync_count", 0) or 0),
-        "last_outcome_sync_error": str(data.get("last_outcome_sync_error", "") or ""),
-        "last_sync_error": str(data.get("last_sync_error", "") or ""),
+        "last_outcome_sync_error": last_outcome_sync_error,
+        "last_sync_error": last_sync_error,
+        "needs_reconnect": needs_reconnect,
         "token_expires_at": float(data.get("token_expires_at", 0.0) or 0.0),
         "oauth_mode": str(data.get("oauth_mode", "") or ""),
         "oauth_source": str(data.get("oauth_source", "") or ""),
