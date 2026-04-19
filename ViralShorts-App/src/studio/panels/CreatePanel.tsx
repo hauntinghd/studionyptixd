@@ -3787,10 +3787,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 onSelectPack={(pack: IGPack) => {
                     // Deep-links into the existing BillingPage (`?pack=...` is
                     // the existing query param it reads for topup packs).
-                    // `#topup-packs` scrolls the user straight to the packs
+                    // `provider=paypal` routes through BillingPage's
+                    // verifyPayPalOrder flow — Studio is PayPal-only per
+                    // Casey 2026-04-19. `#topup-packs` scrolls to the packs
                     // section.
                     setIGTopUpModalOpen(false);
-                    window.location.href = `/billing?pack=${encodeURIComponent(pack.id)}&section=topups#topup-packs`;
+                    window.location.href = `/billing?pack=${encodeURIComponent(pack.id)}&provider=paypal&section=topups#topup-packs`;
                 }}
             />
             </>
