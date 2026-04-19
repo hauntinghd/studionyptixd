@@ -195,7 +195,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [loading, setLoading] = useState(false);
     const [language, setLanguage] = useState('en');
     const [languages, setLanguages] = useState<{code: string; name: string}[]>([]);
-    const [creativeMode, setCreativeMode] = useState<'auto' | 'creative' | 'script_to_short'>('auto');
+    const [creativeMode, setCreativeMode] = useState<'creative' | 'script_to_short'>('creative');
     const [creativeStep, setCreativeStep] = useState<'topic' | 'edit' | 'generating'>('topic');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [creativeScenes, setCreativeScenes] = useState<CreativeScene[]>([]);
@@ -794,7 +794,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
             if (saved.selectedTemplate) setSelectedTemplate(saved.selectedTemplate);
             if (saved.resolution === '720p' || saved.resolution === '1080p') setResolution(saved.resolution);
             if (typeof saved.language === 'string' && saved.language) setLanguage(saved.language);
-            if (saved.creativeMode === 'auto' || saved.creativeMode === 'creative' || saved.creativeMode === 'script_to_short') setCreativeMode(saved.creativeMode);
+            if (saved.creativeMode === 'creative' || saved.creativeMode === 'script_to_short') setCreativeMode(saved.creativeMode);
+            else if (saved.creativeMode === 'auto') setCreativeMode('creative');
             if (saved.creativeStep === 'topic' || saved.creativeStep === 'edit' || saved.creativeStep === 'generating') setCreativeStep(saved.creativeStep);
             if (typeof saved.prompt === 'string') setPrompt(saved.prompt);
             if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null);
@@ -2581,7 +2582,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
             } else {
                 setAnimateOutputEnabled(true);
             }
-            setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : (p.mode === 'creative' ? 'creative' : 'auto'));
+            setCreativeMode(p.mode === 'script_to_short' ? 'script_to_short' : 'creative');
             if (typeof p.voice_id === 'string') setStoryVoiceId(p.voice_id);
             if (typeof p.voice_speed === 'number' && Number.isFinite(p.voice_speed)) {
                 setStoryVoiceSpeed(Math.max(0.8, Math.min(1.35, p.voice_speed)));
@@ -3671,20 +3672,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 )}
                 {workspaceStage === 'script' && showScriptClutter && (
                 <>
-                {/* MODE TOGGLE */}
+                {/* MODE TOGGLE (Auto removed 2026-04-19 — Creative Control is the default; Script to Short is an input variant) */}
                 <div>
                     <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Creation Mode</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                        <button onClick={() => !loading && setCreativeMode('auto')}
-                            className={`flex-1 p-3 rounded-lg text-center transition-all border ${
-                                creativeMode === 'auto' ? 'border-violet-500 bg-violet-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
-                            }`}>
-                            <Wand2 className="w-4 h-4 mx-auto mb-1 text-violet-400" />
-                            <div className="text-xs font-bold">Auto</div>
-                            <div className="text-[11px] text-gray-500 mt-0.5">
-                                AI handles everything
-                            </div>
-                        </button>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                         <button onClick={() => !loading && setCreativeMode('creative')}
                             className={`flex-1 p-3 rounded-lg text-center transition-all border ${
                                 creativeMode === 'creative' ? 'border-amber-500 bg-amber-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
@@ -3698,11 +3689,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                 creativeMode === 'script_to_short' ? 'border-cyan-500 bg-cyan-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                             }`}>
                             <Clapperboard className="w-4 h-4 mx-auto mb-1 text-cyan-400" />
-                            <div className="text-xs font-bold flex items-center justify-center gap-1">
-                                Script to Short
-                                <span className="rounded border border-cyan-500/40 bg-cyan-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-cyan-200">Open Beta</span>
-                            </div>
-                            <div className="text-[11px] text-cyan-300 mt-0.5">Paste a script, get editable scenes</div>
+                            <div className="text-xs font-bold">Script to Short</div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">Paste a script, same editable scene flow</div>
                         </button>
                     </div>
                 </div>
