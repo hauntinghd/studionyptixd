@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { Sparkles, X } from 'lucide-react';
+import { Flame, X, Zap } from 'lucide-react';
 import { getIdeaStylesForTemplate, type IdeaStyle } from '../lib/shortFormIdeaPresets';
+import { computeHeatScore, heatScoreColorClass } from '../lib/heatScore';
 
 type TabKey = 'idea_list' | 'custom_topic';
 
@@ -13,8 +14,10 @@ interface Props {
     onGenerate: (topic: string) => void;   // parent hooks this into existing script-gen path
 }
 
-// Generate w/ AI modal — Idea List + Custom Topic tabs. "Remix Script" was
-// dropped per Casey's 2026-04-19 direction (feature not ready to ship).
+// "Spark Script" modal — Idea List + Custom Topic tabs. Each style card
+// carries a niche-emoji + "why this works" angle + a per-day heat score
+// pulled from `computeHeatScore()`. That trio (personality, framing,
+// heat) is what differentiates NYPTID from Korpi-style topic-only modals.
 export default function GenerateScriptWithAIModal({
     open,
     template,
@@ -27,6 +30,15 @@ export default function GenerateScriptWithAIModal({
     const styles = useMemo<IdeaStyle[]>(() => getIdeaStylesForTemplate(template), [template]);
     const [selectedStyleId, setSelectedStyleId] = useState<string>(styles[0]?.id ?? '');
     const [customTopic, setCustomTopic] = useState('');
+
+    // Compute heat scores once per render — they're deterministic per-day anyway.
+    const heatScores = useMemo<Record<string, number>>(() => {
+        const map: Record<string, number> = {};
+        for (const s of styles) {
+            map[s.id] = computeHeatScore(template, s.id);
+        }
+        return map;
+    }, [styles, template]);
 
     if (!open) return null;
 
@@ -55,13 +67,17 @@ export default function GenerateScriptWithAIModal({
                 {/* header */}
                 <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] p-5">
                     <div className="flex items-start gap-3">
-                        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-500/15 text-violet-300">
-                            <Sparkles className="h-5 w-5" />
+                        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 text-cyan-200">
+                            <Zap className="h-5 w-5" />
                         </span>
                         <div>
-                            <h3 className="text-lg font-semibold text-white">Generate {templateLabel} Script with AI</h3>
+                            <h3 className="text-lg font-semibold">
+                                <span className="bg-gradient-to-r from-violet-200 via-fuchsia-200 to-cyan-200 bg-clip-text text-transparent">
+                                    Spark a {templateLabel} Script
+                                </span>
+                            </h3>
                             <p className="mt-1 text-xs text-gray-400">
-                                Pick an idea or enter a custom topic.
+                                Pick a trending angle or enter a custom topic. Heat scores refresh daily.
                             </p>
                         </div>
                     </div>
@@ -115,19 +131,28 @@ export default function GenerateScriptWithAIModal({
                                     <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                                         {styles.map((style) => {
                                             const active = style.id === selectedStyle?.id;
+                                            const score = heatScores[style.id] ?? 0;
                                             return (
                                                 <button
                                                     key={style.id}
                                                     type="button"
                                                     onClick={() => setSelectedStyleId(style.id)}
-                                                    className={`rounded-lg border p-3 text-left transition ${
+                                                    className={`relative rounded-lg border p-3 text-left transition ${
                                                         active
                                                             ? 'border-violet-500 bg-violet-500/10'
                                                             : 'border-white/[0.06] bg-white/[0.02] hover:border-white/20'
                                                     }`}
                                                 >
+                                                    <div className={`absolute right-2 top-2 flex items-center gap-0.5 text-[10px] font-bold tabular-nums ${heatScoreColorClass(score)}`}>
+                                                        <Flame className="h-3 w-3" />
+                                                        {score}
+                                                    </div>
+                                                    <div className="mb-1 text-lg leading-none" aria-hidden="true">{style.emoji}</div>
                                                     <div className="text-sm font-semibold text-white">{style.label}</div>
                                                     <div className="mt-1 text-xs text-gray-400">{style.description}</div>
+                                                    <div className="mt-2 border-t border-white/[0.05] pt-2 text-[11px] italic leading-snug text-violet-300/70">
+                                                        {style.angle}
+                                                    </div>
                                                 </button>
                                             );
                                         })}
@@ -138,7 +163,7 @@ export default function GenerateScriptWithAIModal({
                             {selectedStyle && selectedStyle.ideas.length > 0 && (
                                 <div className="space-y-2">
                                     <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                                        Ideas — click one to generate
+                                        Ideas — click one to spark a script
                                     </p>
                                     <div className="space-y-2">
                                         {selectedStyle.ideas.map((idea) => (
@@ -171,9 +196,10 @@ export default function GenerateScriptWithAIModal({
                                     type="button"
                                     onClick={handleGenerateCustom}
                                     disabled={disabled || !customTopic.trim()}
-                                    className="rounded-lg bg-gradient-to-r from-violet-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-violet-900/30 transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-violet-900/30 transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
                                 >
-                                    Generate Script
+                                    <Zap className="h-4 w-4" />
+                                    Spark Script
                                 </button>
                             </div>
                         </div>

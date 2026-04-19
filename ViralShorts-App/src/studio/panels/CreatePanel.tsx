@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
-import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Wand2, X, Zap } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
@@ -388,7 +388,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     ];
     const supportsArtStyle = selectedTemplate !== 'skeleton';
     // Short-form niche templates get the Korpi-style minimal Script stage: just the
-    // narration textarea + Generate w/ AI button. All other knobs (creation mode,
+    // narration textarea + Spark w/ AI button. All other knobs (creation mode,
     // resolution, language, topic input, art style picker, sound references) collapse
     // behind an Advanced chip. Non-niche flows (chatstory, etc.) keep the full surface.
     const SHORTFORM_NICHES = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'] as const;
@@ -3010,10 +3010,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                     type="button"
                                     onClick={() => setAiScriptModalOpen(true)}
                                     disabled={loading || scriptLoading}
-                                    className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-cyan-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
                                 >
-                                    <Sparkles className="h-3.5 w-3.5" />
-                                    Generate w/ AI
+                                    <Zap className="h-3.5 w-3.5" />
+                                    Spark w/ AI
                                 </button>
                             </div>
                         </div>

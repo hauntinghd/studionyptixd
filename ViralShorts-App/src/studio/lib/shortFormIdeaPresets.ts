@@ -1,6 +1,11 @@
-// Hardcoded idea presets for the "Generate w/ AI" script wizard.
+// Hardcoded idea presets for the "Spark Script" wizard.
 // Each template exposes 3 idea styles. Picking a style populates a list of
 // concrete topic ideas the user can one-click into the narration pipeline.
+//
+// Each style carries an `emoji` (niche personality cue) and an `angle`
+// (one-line "why this works" hook-theory note shown on the card). These
+// are what differentiate NYPTID's modal from Korpi's: Korpi gives you
+// topics; we give you topics + framing + a live heat score.
 //
 // Future: move to `/api/templates/{template}/ideas` endpoint so the list
 // rotates with Catalyst trend signals. Hardcoding first to ship.
@@ -9,6 +14,8 @@ export type IdeaStyle = {
     id: string;
     label: string;
     description: string;
+    emoji: string;
+    angle: string;
     ideas: string[];
 };
 
@@ -25,6 +32,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "human_limits",
                 label: "Human Limits",
                 description: "Body and brain failure over time.",
+                emoji: "🧠",
+                angle: "30s hook → limit → twist payoff. Evergreen retention.",
                 ideas: [
                     "How long can you stay awake?",
                     "How much pain can the human body take?",
@@ -37,6 +46,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "career_compare",
                 label: "Comparing Career Paths",
                 description: "Easy-entry job vs high-difficulty path.",
+                emoji: "⚖️",
+                angle: "Two jobs, one winner — comparison hooks drive shares.",
                 ideas: [
                     "Who makes more: FBI agent or basketball player?",
                     "Plumber vs software engineer — who retires first?",
@@ -49,6 +60,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "socrates",
                 label: "Socrates",
                 description: "Selling products or opening businesses in ancient Greece.",
+                emoji: "🏛️",
+                angle: "Ancient-meets-modern framing; natural loop structure.",
                 ideas: [
                     "How would you sell sandals in ancient Athens?",
                     "What would a gym franchise look like in 400 BC?",
@@ -66,6 +79,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "patterns",
                 label: "Pattern Recognition",
                 description: "Chart setups that print money when you spot them.",
+                emoji: "📈",
+                angle: "Chart-first visual + instant 'aha' payoff = saveable.",
                 ideas: [
                     "The only candle pattern that actually works",
                     "Why you keep buying tops and selling bottoms",
@@ -78,6 +93,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "misconceptions",
                 label: "Market Misconceptions",
                 description: "What retail believes vs what actually moves price.",
+                emoji: "🚫",
+                angle: "Contrarian hook punches through retail trading noise.",
                 ideas: [
                     "Why 'buy the dip' is a trap",
                     "Technical analysis is mostly lies",
@@ -90,6 +107,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "insider_secrets",
                 label: "Institutional Secrets",
                 description: "How market makers and funds actually operate.",
+                emoji: "🕵️",
+                angle: "Forbidden-knowledge framing — highest retention in niche.",
                 ideas: [
                     "How market makers front-run your orders",
                     "The real reason hedge funds short meme stocks",
@@ -107,6 +126,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "ethics",
                 label: "Ethical Trolley Problems",
                 description: "Hard binary choices with no clean answer.",
+                emoji: "⚖️",
+                angle: "Comment-bait by design — splits the audience cleanly.",
                 ideas: [
                     "Would you steal a million dollars to save a stranger?",
                     "Snitch on your best friend or lose your job?",
@@ -119,6 +140,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "career",
                 label: "Career Ethics",
                 description: "The workplace decisions that define you.",
+                emoji: "💼",
+                angle: "Workplace relatability + high replay rate.",
                 ideas: [
                     "Take your boss's job behind their back?",
                     "Quit the second you get a better offer?",
@@ -131,6 +154,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "relationships",
                 label: "Relationship Choices",
                 description: "Love, loyalty, betrayal — pick one.",
+                emoji: "💔",
+                angle: "Emotional stakes → long watch-time + re-shares.",
                 ideas: [
                     "Tell your friend their partner is cheating?",
                     "Marry for money or marry for love?",
@@ -148,6 +173,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "founder",
                 label: "Founder Stories",
                 description: "The moment that made the company.",
+                emoji: "🚀",
+                angle: "Origin-story beats — universal narrative hook.",
                 ideas: [
                     "How Airbnb survived three near-deaths",
                     "The email that saved Stripe",
@@ -160,6 +187,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "scaling",
                 label: "Scaling Secrets",
                 description: "What actually 10x's a company.",
+                emoji: "📊",
+                angle: "Specific numbers + playbook framing = high-save rate.",
                 ideas: [
                     "The hire that unlocks $10M ARR",
                     "Why 90% of startups die at $1M",
@@ -172,6 +201,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "disruption",
                 label: "Industry Disruption",
                 description: "Who's eating whose lunch right now.",
+                emoji: "⚔️",
+                angle: "Underdog-eats-giant; inherent narrative drama.",
                 ideas: [
                     "Why Uber is losing to no-name competitors",
                     "How AI is killing the consulting industry",
@@ -189,6 +220,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "myths",
                 label: "Money Myths",
                 description: "Personal finance advice that's actually wrong.",
+                emoji: "🪙",
+                angle: "Contrarian money takes beat consensus every time.",
                 ideas: [
                     "Why paying off your mortgage early is a mistake",
                     "Index funds aren't as safe as you think",
@@ -201,6 +234,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "wealth",
                 label: "Wealth Rules",
                 description: "How rich people actually stay rich.",
+                emoji: "💰",
+                angle: "'Rich-people secret' framing → aspirational CTR spike.",
                 ideas: [
                     "The tax loophole only millionaires use",
                     "Why the wealthy never sell assets",
@@ -213,6 +248,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "macro",
                 label: "Economic Shifts",
                 description: "The macro moves reshaping your money.",
+                emoji: "🌍",
+                angle: "Big-picture authority + news-adjacent = algorithm-friendly.",
                 ideas: [
                     "Why interest rates will stay high for a decade",
                     "The housing crash no one sees coming",
@@ -230,6 +267,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "ai_reality",
                 label: "AI Reality Check",
                 description: "What AI can and can't actually do.",
+                emoji: "🤖",
+                angle: "Hype-check framing cuts through AI noise on every feed.",
                 ideas: [
                     "Why ChatGPT still can't replace a junior dev",
                     "The AI capability nobody is talking about",
@@ -242,6 +281,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "failures",
                 label: "Startup Failures",
                 description: "Billion-dollar companies that quietly died.",
+                emoji: "💥",
+                angle: "Schadenfreude + business lesson = rewatchable combo.",
                 ideas: [
                     "How WeWork lost $47 billion",
                     "The unicorn that went to zero in 60 days",
@@ -254,6 +295,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "predictions",
                 label: "Future Predictions",
                 description: "What the next 5 years actually look like.",
+                emoji: "🔮",
+                angle: "Future-bet hooks build anticipation + comment debate.",
                 ideas: [
                     "The job AI will replace next",
                     "Why remote work is already dead",
@@ -271,6 +314,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "narratives",
                 label: "Narrative Cycles",
                 description: "The meta that actually moves bags.",
+                emoji: "🌊",
+                angle: "Meta-cycle calls drive alpha-seeker shares + saves.",
                 ideas: [
                     "Why AI tokens are about to 5x",
                     "The RWA narrative nobody's priced in yet",
@@ -283,6 +328,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "whales",
                 label: "Whale Moves",
                 description: "What smart money is actually doing on-chain.",
+                emoji: "🐋",
+                angle: "On-chain-detective angle → saveable evergreen lead.",
                 ideas: [
                     "The wallet that bought the exact bottom",
                     "Why Jump Trading is accumulating this token",
@@ -295,6 +342,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "exits",
                 label: "Exit Strategies",
                 description: "How to not give it all back at the top.",
+                emoji: "🚪",
+                angle: "Practical utility → highest share rate in crypto niche.",
                 ideas: [
                     "The exit signal that printed last cycle",
                     "Why HODL is the dumbest strategy ever",
@@ -312,6 +361,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "urban_legends",
                 label: "Urban Legends",
                 description: "The stories that won't stop spreading.",
+                emoji: "👻",
+                angle: "Classic campfire loop — works across every platform.",
                 ideas: [
                     "The hotel room that shouldn't exist",
                     "The 911 call the police still won't release",
@@ -324,6 +375,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "true_crime",
                 label: "True Crime Mystery",
                 description: "Cases that still don't add up.",
+                emoji: "🔍",
+                angle: "Cold-case hooks land reliably + long comment threads.",
                 ideas: [
                     "The Delphi murders — what investigators won't say",
                     "The disappearance that was staged",
@@ -336,6 +389,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "paranormal",
                 label: "Paranormal Events",
                 description: "Real locations with unexplained history.",
+                emoji: "🕯️",
+                angle: "Real-location hook grounds the eerie — higher retention.",
                 ideas: [
                     "The forest where compasses stop working",
                     "The lighthouse nobody built",
@@ -353,6 +408,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "civilizations",
                 label: "Lost Civilizations",
                 description: "Empires that vanished before we understood them.",
+                emoji: "🏺",
+                angle: "'Lost-world' framing always clears 3-sec hook bar.",
                 ideas: [
                     "The city beneath the Sahara",
                     "Why the Minoans disappeared overnight",
@@ -365,6 +422,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "battles",
                 label: "Epic Battles",
                 description: "The fights that reshaped the world.",
+                emoji: "⚔️",
+                angle: "High-stakes narrative + built-in climax beats.",
                 ideas: [
                     "The siege that ended an empire",
                     "How 300 Spartans actually died",
@@ -377,6 +436,8 @@ export const SHORTFORM_IDEA_PRESETS: TemplateIdeaPreset[] = [
                 id: "untold",
                 label: "Untold Stories",
                 description: "Historical figures you were never taught.",
+                emoji: "📜",
+                angle: "Rediscovered-hero angle → high shares from educators.",
                 ideas: [
                     "The emperor who faked his own death",
                     "The queen who led her army in person",
