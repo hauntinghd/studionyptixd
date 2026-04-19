@@ -205,6 +205,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     const [creativeTitle, setCreativeTitle] = useState("");
     const [creativeNarration, setCreativeNarration] = useState("");
     const [aiScriptModalOpen, setAiScriptModalOpen] = useState(false);
+    const [scriptAdvancedOpen, setScriptAdvancedOpen] = useState(false);
     const [creativeReferenceImage, setCreativeReferenceImage] = useState<File | null>(null);
     const [creativeReferenceStatus, setCreativeReferenceStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
     const [creativeReferenceAttached, setCreativeReferenceAttached] = useState(false);
@@ -386,6 +387,13 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         { id: 'history', title: 'Historical Epic', desc: 'Cinematic history', icon: '⚔️' },
     ];
     const supportsArtStyle = selectedTemplate !== 'skeleton';
+    // Short-form niche templates get the Korpi-style minimal Script stage: just the
+    // narration textarea + Generate w/ AI button. All other knobs (creation mode,
+    // resolution, language, topic input, art style picker, sound references) collapse
+    // behind an Advanced chip. Non-niche flows (chatstory, etc.) keep the full surface.
+    const SHORTFORM_NICHES = ['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history'] as const;
+    const isShortFormNiche = (SHORTFORM_NICHES as readonly string[]).includes(selectedTemplate);
+    const showScriptClutter = !isShortFormNiche || scriptAdvancedOpen;
     const publicDefaultTemplateId = 'skeleton';
     const templateIds = new Set(templates.map(t => t.id));
     const liveTemplateIds = new Set(['skeleton', 'daytrading', 'dilemma', 'business', 'finance', 'tech', 'crypto', 'scary', 'history']);
@@ -3052,7 +3060,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     </div>
                 )}
 
-                {workspaceStage === 'script' && supportsArtStyle && (
+                {workspaceStage === 'script' && supportsArtStyle && showScriptClutter && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
                         <p className="text-sm font-semibold text-white">Art Style ({storyArtStyleOptions.length} verified looks)</p>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -3075,7 +3083,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     </div>
                 )}
 
-                {workspaceStage === 'script' && (
+                {workspaceStage === 'script' && showScriptClutter && (
                     <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
                         <div>
                             <p className="text-sm font-semibold text-white">Sound References</p>
@@ -3612,7 +3620,31 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 ) : (
                 <>
                 {renderWorkspaceStageTabs()}
-                {workspaceStage === 'script' && (
+                {workspaceStage === 'script' && isShortFormNiche && !scriptAdvancedOpen && (
+                    <div className="flex justify-end">
+                        <button
+                            type="button"
+                            onClick={() => setScriptAdvancedOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-400 transition hover:border-white/20 hover:text-white"
+                        >
+                            <Sliders className="h-3 w-3" />
+                            Advanced
+                        </button>
+                    </div>
+                )}
+                {workspaceStage === 'script' && isShortFormNiche && scriptAdvancedOpen && (
+                    <div className="flex justify-end">
+                        <button
+                            type="button"
+                            onClick={() => setScriptAdvancedOpen(false)}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-violet-200 transition hover:border-violet-400"
+                        >
+                            <X className="h-3 w-3" />
+                            Hide Advanced
+                        </button>
+                    </div>
+                )}
+                {workspaceStage === 'script' && showScriptClutter && (
                 <>
                 {/* MODE TOGGLE */}
                 <div>
