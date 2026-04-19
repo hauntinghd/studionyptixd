@@ -172,12 +172,16 @@ const fallbackImageModelCatalog: CreativeModelProfile[] = [
 // so the first-paint AC cost shown to the user matches what the backend will actually
 // charge on enqueue.
 const fallbackVideoModelCatalog: CreativeModelProfile[] = [
-    { id: 'pixverse_v6', label: 'PixVerse V6', provider: 'fal', tier: 'basic', summary: 'Latest PixVerse lane. Cheaper than Kling Std at 720p, strong motion.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.045, billing_unit: 'second', credit_multiplier: 1 },
+    // --- Consumer / basic lane (cheapest) ---
+    { id: 'pixverse_v6', label: 'PixVerse V6', provider: 'fal', tier: 'basic', summary: 'Most affordable animation lane. Strong motion at 720p. Studio default for consumer pricing.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.045, billing_unit: 'second', credit_multiplier: 1 },
+    { id: 'kling21_standard', label: 'Kling 2.1 Standard', provider: 'fal', tier: 'basic', summary: 'Reliable animation lane. A notch above PixVerse on crispness.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.056, billing_unit: 'second', credit_multiplier: 1 },
+    // --- Premium lane ---
     { id: 'pixverse_c1', label: 'PixVerse C1 (Film Grade)', provider: 'fal', tier: 'premium', summary: 'Film-grade hyper-realistic PixVerse lane at 720p.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.050, billing_unit: 'second', credit_multiplier: 1 },
-    { id: 'kling21_standard', label: 'Kling 2.1 Standard', provider: 'fal', tier: 'basic', summary: 'Default animation lane for Studio renders.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.056, billing_unit: 'second', credit_multiplier: 1 },
-    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 2 },
-    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Premium cinematic motion with heavier wallet burn.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 2 },
-    { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Highest-cost Kling lane for top-end shot quality.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
+    { id: 'kling21_pro', label: 'Kling 2.1 Pro', provider: 'fal', tier: 'premium', summary: 'Sharper motion and stronger camera handling than Std.', speed: 'Balanced', enabled: true, estimated_unit_usd: 0.098, billing_unit: 'second', credit_multiplier: 2 },
+    { id: 'veo3_fast', label: 'Veo 3 Fast', provider: 'fal', tier: 'premium', summary: 'Google Veo 3 lane. Premium cinematic motion + sound.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.1, billing_unit: 'second', credit_multiplier: 2 },
+    // --- Elite lane (most expensive — "world's most premium" per Casey) ---
+    { id: 'kling21_master', label: 'Kling 2.1 Master', provider: 'fal', tier: 'elite', summary: 'Top-end Kling lane. Highest fidelity at the highest cost.', speed: 'Slow', enabled: true, estimated_unit_usd: 0.28, billing_unit: 'second', credit_multiplier: 5 },
+    { id: 'sora2', label: 'Sora 2', provider: 'fal', tier: 'elite', summary: "OpenAI's top i2v lane. 8s @ 1080p with native audio. Most-premium animation available — coming soon.", speed: 'Slow', enabled: false, estimated_unit_usd: 0.40, billing_unit: 'second', credit_multiplier: 7 },
 ];
 
 interface CreatePanelProps {
@@ -2396,12 +2400,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                         <div className="flex flex-wrap items-center gap-2">
                                             <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
                                                 model.tier === 'elite'
-                                                    ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                    ? 'border border-fuchsia-500/40 bg-gradient-to-r from-fuchsia-500/20 via-violet-500/20 to-cyan-500/20 text-fuchsia-100'
                                                     : model.tier === 'premium'
                                                         ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
                                                         : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
                                             }`}>
-                                                {formatModelTierLabel(model)}
+                                                {formatModelTierLabel(model)}{model.tier === 'elite' ? ' · top-end' : model.tier === 'basic' ? ' · most affordable' : ''}
                                             </span>
                                             {active ? (
                                                 <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
@@ -2488,12 +2492,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                         <div className="flex flex-wrap items-center gap-2">
                                             <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
                                                 model.tier === 'elite'
-                                                    ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                                    ? 'border border-fuchsia-500/40 bg-gradient-to-r from-fuchsia-500/20 via-violet-500/20 to-cyan-500/20 text-fuchsia-100'
                                                     : model.tier === 'premium'
                                                         ? 'border border-amber-500/30 bg-amber-500/10 text-amber-200'
                                                         : 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
                                             }`}>
-                                                {formatModelTierLabel(model)}
+                                                {formatModelTierLabel(model)}{model.tier === 'elite' ? ' · top-end' : model.tier === 'basic' ? ' · most affordable' : ''}
                                             </span>
                                             {active ? (
                                                 <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
