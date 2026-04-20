@@ -558,31 +558,47 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     }, [selectedTemplate, voiceProvider, customVoiceId, storyPacingMode, soundReferencePreset, applyCustomVoicePreset]);
 
     const renderWorkspaceStageTabs = () => (
-        <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-1.5">
-            {workspaceTabs.map((tab, idx) => {
-                const active = workspaceStage === tab.id;
-                return (
-                    <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => setWorkspaceStage(tab.id)}
-                        className={`group flex items-center gap-2.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                            active
-                                ? 'bg-gradient-to-r from-violet-600 to-cyan-600 text-white shadow-md shadow-violet-900/20'
-                                : 'bg-transparent text-gray-400 hover:bg-white/[0.04] hover:text-white'
-                        }`}
-                    >
-                        <span
-                            className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
-                                active ? 'bg-white/20 text-white' : 'bg-white/[0.05] text-gray-400 group-hover:bg-white/[0.1] group-hover:text-white'
+        <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-1.5">
+                {workspaceTabs.map((tab, idx) => {
+                    const active = workspaceStage === tab.id;
+                    return (
+                        <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setWorkspaceStage(tab.id)}
+                            className={`group flex items-center gap-2.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                                active
+                                    ? 'bg-gradient-to-r from-violet-600 to-cyan-600 text-white shadow-md shadow-violet-900/20'
+                                    : 'bg-transparent text-gray-400 hover:bg-white/[0.04] hover:text-white'
                             }`}
                         >
-                            {idx + 1}
-                        </span>
-                        {tab.label}
-                    </button>
-                );
-            })}
+                            <span
+                                className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                                    active ? 'bg-white/20 text-white' : 'bg-white/[0.05] text-gray-400 group-hover:bg-white/[0.1] group-hover:text-white'
+                                }`}
+                            >
+                                {idx + 1}
+                            </span>
+                            {tab.label}
+                        </button>
+                    );
+                })}
+            </div>
+            <button
+                type="button"
+                onClick={() => {
+                    const confirmWipe = !sessionId || window.confirm('Start a new project? Current draft will be cleared.');
+                    if (!confirmWipe) return;
+                    handleResetCreative();
+                    setWorkspaceStage('script');
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20"
+                title="Clear the current draft and start fresh"
+            >
+                <Plus className="h-3.5 w-3.5" />
+                New Project
+            </button>
         </div>
     );
     const renderCustomVoiceLibraryCard = () => (
