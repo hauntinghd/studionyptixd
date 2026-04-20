@@ -17289,6 +17289,14 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
     session["image_previews_debited"] = len(_paid_scene_indices)
     async with _creative_sessions_lock:
         _save_creative_sessions_to_disk(remote_session_id=req.session_id)
+    # Block on the Supabase write for the scene_images mirror. The existing
+    # _save_creative_sessions_to_disk above fires a best-effort background
+    # task, but empirically those writes were racing with _creative_finalize
+    # — we saw sessions land in Supabase with scenes:10 but scene_images:{}.
+    # The finalize on a worker with a stale Supabase read would then overwrite
+    # the good state. Awaiting the verify wrapper here guarantees the row is
+    # readable before we return 200 to the client.
+    await _upsert_session_remote_with_verify(req.session_id, session)
     await _update_project_by_session(user.get("id", ""), req.session_id, {
         "status": "draft",
         "scene_count": len(session["scenes"]),
