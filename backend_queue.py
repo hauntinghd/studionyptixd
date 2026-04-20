@@ -238,9 +238,18 @@ async def persist_job_state(job_id: str, job_state: dict[str, Any]):
         _log.warning(f"Local job persistence failed for {job_id}: {e}")
     # Cross-worker write-through. Fire-and-forget on a separate task so this
     # call stays fast — the status endpoint reads back from Supabase on miss.
+    # STRONG REF REQUIRED: the Task returned by create_task() must be held
+    # somewhere reachable, otherwise Python's GC can collect it on the next
+    # await inside _persist_job_state_supabase (the httpx POST) and silently
+    # cancel the coroutine. This is the exact same trap that caused the main
+    # pipeline to hang at scene 1 before the strong-ref fix in
+    # enqueue_generation_job. Symptom here: `jobs` table stays empty, cross-
+    # worker status polls 404 with "Job not found" after a completed render.
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_persist_job_state_supabase(job_id, job_state))
+        task = loop.create_task(_persist_job_state_supabase(job_id, job_state))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
     except RuntimeError:
         pass
 
