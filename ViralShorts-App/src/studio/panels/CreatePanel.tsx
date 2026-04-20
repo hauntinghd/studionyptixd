@@ -4039,7 +4039,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     <ChatStoryPanel />
                 ) : (
                 <>
-                {renderWorkspaceStageTabs()}
+                {/* Stage tabs render once higher in the tree; a second set here buried Narration+Spark below the fold. */}
                 {workspaceStage === 'script' && isShortFormNiche && !scriptAdvancedOpen && (
                     <div className="flex justify-end">
                         <button
