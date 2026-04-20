@@ -4039,7 +4039,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     <ChatStoryPanel />
                 ) : (
                 <>
-                {/* Stage tabs render once higher in the tree; a second set here buried Narration+Spark below the fold. */}
+                {renderWorkspaceStageTabs()}
                 {workspaceStage === 'script' && isShortFormNiche && !scriptAdvancedOpen && (
                     <div className="flex justify-end">
                         <button
@@ -4266,9 +4266,20 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
 
                 {/* PROMPT */}
                 <div>
-                    <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
-                        {creativeMode === 'script_to_short' ? 'Script' : 'Topic'}
-                    </h2>
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            {creativeMode === 'script_to_short' ? 'Script' : 'Topic'}
+                        </h2>
+                        <button
+                            type="button"
+                            onClick={() => setAiScriptModalOpen(true)}
+                            disabled={loading || scriptLoading}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            <Zap className="h-3.5 w-3.5" />
+                            Spark w/ AI
+                        </button>
+                    </div>
                     <div className="relative">
                         {creativeMode === 'script_to_short' ? (
                             <textarea
