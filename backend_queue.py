@@ -36,6 +36,12 @@ _job_state_file_lock = asyncio.Lock()
 _JOB_STATE_DIR = TEMP_DIR / "job_state_cache"
 _JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Background tasks we've spawned from enqueue_generation_job. Python's asyncio
+# garbage-collects tasks that nothing references — silently cancelling the
+# coroutine on the next yield. Holding refs here keeps them alive until they
+# finish. Tasks self-remove via the done callback.
+_background_tasks: set[asyncio.Task] = set()
+
 
 def _job_state_file(job_id: str) -> Path:
     return _JOB_STATE_DIR / f"{job_id}.json"
@@ -344,7 +350,17 @@ async def enqueue_generation_job(
                 except Exception:
                     pass
 
-    asyncio.create_task(_runner())
+    # CRITICAL: hold a strong reference to the task. Without this, Python's
+    # asyncio can garbage-collect the Task object on the next yield point
+    # (e.g. the first `await` inside _run_creative_pipeline that hits I/O),
+    # which silently cancels the coroutine. Empirically seen: the render would
+    # fire `animation_start` for scene 1, then freeze forever on `await
+    # animate_scene(...)` because the _runner() Task got GC'd while awaiting
+    # fal's queue poll. The set+discard pattern keeps the Task alive until it
+    # actually finishes.
+    task = asyncio.create_task(_runner())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def dequeue_generation_job() -> dict[str, Any] | None:
