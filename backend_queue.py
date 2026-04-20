@@ -140,6 +140,76 @@ async def _ensure_job_workers():
         asyncio.get_event_loop().create_task(_job_queue_worker(i + 1))
 
 
+async def _persist_job_state_supabase(job_id: str, job_state: dict[str, Any]) -> bool:
+    """Write-through job state to Supabase `jobs` table so other workers can read it.
+    Required for cross-worker state when workersMax > 1 — the local-disk path only
+    covers the same worker that created the job."""
+    from backend_settings import SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_ANON_KEY
+    key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not (SUPABASE_URL and key):
+        return False
+    try:
+        import httpx
+        # Map our in-memory job dict onto the existing jobs table schema.
+        # Full state goes in `payload` (jsonb); top-level columns mirror the
+        # hot fields so the status endpoint can return them fast without
+        # parsing the blob. user_id is NOT NULL on the table.
+        row = {
+            "id": job_id,
+            "user_id": str(job_state.get("user_id", "") or "unknown"),
+            "status": str(job_state.get("status", "") or ""),
+            "payload": job_state,
+            "total_chunks": int(job_state.get("total_scenes", 0) or 0),
+            "done_chunks": int(job_state.get("progress", 0) or 0),
+            "error": str(job_state.get("error", "") or "") or None,
+        }
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                json=row,
+            )
+            if resp.status_code >= 300:
+                _log.warning(f"Supabase job persist for {job_id} FAILED status={resp.status_code} body={resp.text[:200]}")
+                return False
+        return True
+    except Exception as e:
+        _log.warning(f"Supabase job persist EXC for {job_id}: {type(e).__name__}: {e}")
+        return False
+
+
+async def _fetch_job_state_supabase(job_id: str) -> dict[str, Any] | None:
+    """Cross-worker fallback: read job state from Supabase."""
+    from backend_settings import SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_ANON_KEY
+    key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not (SUPABASE_URL and key):
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                params={"id": f"eq.{job_id}", "select": "payload", "limit": 1},
+            )
+            if resp.status_code != 200:
+                return None
+            rows = resp.json() or []
+            if not rows:
+                return None
+            payload = rows[0].get("payload") if isinstance(rows[0], dict) else None
+            if isinstance(payload, dict):
+                return payload
+    except Exception as e:
+        _log.warning(f"Supabase job fetch EXC for {job_id}: {type(e).__name__}: {e}")
+    return None
+
+
 async def persist_job_state(job_id: str, job_state: dict[str, Any]):
     payload = json.dumps(job_state, ensure_ascii=True)
     redis = await _get_redis()
@@ -156,6 +226,13 @@ async def persist_job_state(job_id: str, job_state: dict[str, Any]):
             tmp.replace(path)
     except Exception as e:
         _log.warning(f"Local job persistence failed for {job_id}: {e}")
+    # Cross-worker write-through. Fire-and-forget on a separate task so this
+    # call stays fast — the status endpoint reads back from Supabase on miss.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_job_state_supabase(job_id, job_state))
+    except RuntimeError:
+        pass
 
 
 async def get_persisted_job_state(job_id: str) -> dict[str, Any] | None:
@@ -174,14 +251,21 @@ async def get_persisted_job_state(job_id: str) -> dict[str, Any] | None:
         except Exception as e:
             _log.warning(f"Local job load failed for {job_id}: {e}")
             raw = None
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        return None
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    # Supabase fallback — works across workers. This is the case that was
+    # failing before: worker A created the job + persisted to its local disk,
+    # but a subsequent /api/status/{job_id} poll routed to worker B whose
+    # local disk has no file for this job_id. Without this path, worker B
+    # returned 404 "Job not found" even though worker A was still rendering.
+    remote = await _fetch_job_state_supabase(job_id)
+    if isinstance(remote, dict):
+        return remote
     return None
 
 
