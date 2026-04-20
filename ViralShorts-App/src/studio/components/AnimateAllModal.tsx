@@ -21,6 +21,8 @@ interface Props {
     open: boolean;
     scenes: AnimateAllScene[];
     model: AnimateAllModel;
+    availableModels?: AnimateAllModel[];
+    onModelChange?: (modelId: string) => void;
     availableCredits: number;
     requiredCredits: number;
     disabled?: boolean;
@@ -37,6 +39,8 @@ export default function AnimateAllModal({
     open,
     scenes,
     model,
+    availableModels,
+    onModelChange,
     availableCredits,
     requiredCredits,
     disabled = false,
@@ -119,17 +123,34 @@ export default function AnimateAllModal({
                     <div className="space-y-5 p-5">
                         <div>
                             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Animation Model</p>
-                            <div className="rounded-lg border border-violet-500/40 bg-violet-500/10 p-3">
-                                <div className="flex items-start gap-2">
-                                    <Video className="mt-0.5 h-4 w-4 shrink-0 text-violet-300" />
-                                    <div className="min-w-0">
-                                        <div className="text-sm font-semibold text-white truncate">{model.label}</div>
-                                        <div className="mt-0.5 text-[11px] text-violet-300/80">{model.subtitle}</div>
+                            {availableModels && availableModels.length > 1 && onModelChange ? (
+                                <select
+                                    value={model.id}
+                                    onChange={(e) => onModelChange(e.target.value)}
+                                    className="w-full rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-2.5 text-sm font-semibold text-white outline-none transition focus:border-violet-400"
+                                    style={{ colorScheme: 'dark' }}
+                                >
+                                    {availableModels.map((m) => (
+                                        <option key={m.id} value={m.id} style={{ backgroundColor: '#0b0b12', color: '#ffffff' }}>
+                                            {m.label} — {m.subtitle}
+                                        </option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <div className="rounded-lg border border-violet-500/40 bg-violet-500/10 p-3">
+                                    <div className="flex items-start gap-2">
+                                        <Video className="mt-0.5 h-4 w-4 shrink-0 text-violet-300" />
+                                        <div className="min-w-0">
+                                            <div className="text-sm font-semibold text-white truncate">{model.label}</div>
+                                            <div className="mt-0.5 text-[11px] text-violet-300/80">{model.subtitle}</div>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
+                            )}
                             <p className="mt-2 text-[11px] text-gray-500">
-                                Change model in the main Scenes stage. Animate-All uses whatever's currently picked.
+                                {availableModels && availableModels.length > 1
+                                    ? 'Switching here overrides the main Scenes stage model for this Animate All batch.'
+                                    : 'Change model in the main Scenes stage. Animate-All uses whatever\'s currently picked.'}
                             </p>
                         </div>
 
