@@ -1815,20 +1815,27 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         void handleGenerateSceneImageBatchRef.current();
     }, [autoRunImageBatchRequested, scriptScenesReady, sessionId, bulkImageGenRunning, sceneBuildLoading, creativeScenes.length]);
 
-    // Auto-advance from Script → Scenes once the script gen actually finishes
-    // (scenes + session both live). Keeps the user staring at the "writing
-    // the script..." card on the Script stage instead of an empty Scene grid.
+    // Auto-advance Script → Scenes as soon as the script gen call completes
+    // (regardless of whether the backend returned scene prompts — some niches
+    // return narration only and the user has to click Generate Scene Prompts
+    // on the Scenes stage). Previously gated on scriptScenesReady + non-empty
+    // creativeScenes, which silently swallowed the advance when /api/creative/script
+    // returned narration with zero scenes (Casey bug 2026-04-20).
+    // Triggered by the sceneBuildLoading true→false transition so we only fire
+    // on an actual completion event, never on initial-render state.
+    const wasSceneBuildLoadingRef = useRef(false);
     useEffect(() => {
+        const wasLoading = wasSceneBuildLoadingRef.current;
+        wasSceneBuildLoadingRef.current = sceneBuildLoading;
+        if (!wasLoading || sceneBuildLoading) return;
         if (!pendingSparkAdvance) return;
-        if (sceneBuildLoading) return;
-        if (!scriptScenesReady) return;
+        if (sceneBuildError) return;
         if (!sessionId) return;
-        if (creativeScenes.length === 0) return;
         setPendingSparkAdvance(false);
         if (workspaceStage !== 'scenes') {
             setWorkspaceStage('scenes');
         }
-    }, [pendingSparkAdvance, sceneBuildLoading, scriptScenesReady, sessionId, creativeScenes.length, workspaceStage]);
+    }, [sceneBuildLoading, pendingSparkAdvance, sceneBuildError, sessionId, workspaceStage]);
     // Abort the pending advance if gen failed (sceneBuildError surfaced).
     useEffect(() => {
         if (pendingSparkAdvance && sceneBuildError) {
