@@ -558,8 +558,8 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     }, [selectedTemplate, voiceProvider, customVoiceId, storyPacingMode, soundReferencePreset, applyCustomVoicePreset]);
 
     const renderWorkspaceStageTabs = () => (
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-0.5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1">
                 {workspaceTabs.map((tab, idx) => {
                     const active = workspaceStage === tab.id;
                     return (
@@ -567,14 +567,14 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                             key={tab.id}
                             type="button"
                             onClick={() => setWorkspaceStage(tab.id)}
-                            className={`group flex items-center gap-2.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                            className={`group flex items-center gap-2 rounded-lg px-3 py-1.5 text-[13px] font-semibold transition ${
                                 active
                                     ? 'bg-gradient-to-r from-violet-600 to-cyan-600 text-white shadow-md shadow-violet-900/20'
                                     : 'bg-transparent text-gray-400 hover:bg-white/[0.04] hover:text-white'
                             }`}
                         >
                             <span
-                                className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                                className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold ${
                                     active ? 'bg-white/20 text-white' : 'bg-white/[0.05] text-gray-400 group-hover:bg-white/[0.1] group-hover:text-white'
                                 }`}
                             >
@@ -593,10 +593,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     handleResetCreative();
                     setWorkspaceStage('script');
                 }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20"
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20"
                 title="Clear the current draft and start fresh"
             >
-                <Plus className="h-3.5 w-3.5" />
+                <Plus className="h-3 w-3" />
                 New Project
             </button>
         </div>
@@ -1122,7 +1122,10 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/status`, {
                     headers: { Authorization: `Bearer ${session.access_token}` },
                 });
-                if (!res.ok) return;
+                if (!res.ok) {
+                    console.warn(`[creative-restore] /session/${sessionId}/status failed: HTTP ${res.status}`);
+                    return;
+                }
                 const { data } = await readJsonResponse<any>(res);
                 if (!data || typeof data !== "object") return;
                 if (cancelled) return;
@@ -1160,7 +1163,11 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 const res = await fetch(`${GENERATION_API}/api/creative/session/${sessionId}/scene-images`, {
                     headers: { Authorization: `Bearer ${session.access_token}` },
                 });
-                if (!res.ok) return;
+                if (!res.ok) {
+                    console.warn(`[creative-restore] /session/${sessionId}/scene-images failed: HTTP ${res.status} \u2014 user can regenerate per-scene`);
+                    hydratedSceneImagesSessionRef.current = null;
+                    return;
+                }
                 const { data } = await readJsonResponse<any>(res);
                 if (!data || typeof data !== "object") return;
                 if (cancelled) return;
@@ -2245,14 +2252,14 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
     };
 
     const renderWorkspaceChrome = ({ subtitle, showBack }: { subtitle: string; showBack?: boolean }) => (
-        <div className="rounded-[28px] border border-white/[0.06] bg-white/[0.02] p-4 sm:p-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex flex-wrap items-center gap-3">
-                    <div className="grid grid-cols-2 gap-2 rounded-2xl border border-white/[0.06] bg-black/20 p-1">
+        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3 sm:p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                    <div className="grid grid-cols-2 gap-1 rounded-xl border border-white/[0.06] bg-black/20 p-0.5">
                         <button
                             type="button"
                             onClick={handleWorkspaceCreateClick}
-                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+                            className={`rounded-lg px-3 py-1.5 text-[13px] font-semibold transition ${
                                 createSubTab === 'builder'
                                     ? 'bg-violet-600 text-white'
                                     : 'text-gray-300 hover:bg-white/[0.04] hover:text-white'
@@ -2263,7 +2270,7 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                         <button
                             type="button"
                             onClick={() => setCreateSubTab('projects')}
-                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+                            className={`rounded-lg px-3 py-1.5 text-[13px] font-semibold transition ${
                                 createSubTab === 'projects'
                                     ? 'bg-violet-600 text-white'
                                     : 'text-gray-300 hover:bg-white/[0.04] hover:text-white'
@@ -2275,65 +2282,65 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     <button
                         type="button"
                         onClick={openTemplateChooser}
-                        className="inline-flex items-center gap-2 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-2.5 text-left text-sm font-semibold text-white transition hover:border-violet-500/40 hover:bg-violet-500/10"
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-black/20 px-3 py-1.5 text-left text-[13px] font-semibold text-white transition hover:border-violet-500/40 hover:bg-violet-500/10"
                     >
-                        <Sparkles className="h-4 w-4 text-violet-300" />
+                        <Sparkles className="h-3.5 w-3.5 text-violet-300" />
                         {currentTemplateMeta.title}
                     </button>
                     {selectedTemplate === 'chatstory' ? (
-                        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-200">
-                            Catalyst Lane
+                        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-violet-200">
+                            Catalyst
                         </span>
                     ) : (
-                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
-                            Live Now
+                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-200">
+                            Live
                         </span>
                     )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                     {!showQuickStart && createSubTab === 'builder' && (
                         <button
                             onClick={() => { setQuickStartStep(0); setShowQuickStart(true); }}
-                            className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 transition hover:bg-white/5 hover:text-white"
+                            className="rounded-md border border-white/10 px-2.5 py-1.5 text-[11px] text-gray-300 transition hover:bg-white/5 hover:text-white"
                         >
-                            Show Quick Start
+                            Quick Start
                         </button>
                     )}
                     {showBack && (
                         <button
                             type="button"
                             onClick={handleResetCreative}
-                            className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/[0.06]"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[12px] text-gray-300 transition hover:bg-white/[0.06]"
                         >
-                            <ArrowRight className="h-4 w-4 rotate-180" />
+                            <ArrowRight className="h-3.5 w-3.5 rotate-180" />
                             Back
                         </button>
                     )}
                 </div>
             </div>
-            <p className="mt-4 text-sm text-gray-400">{subtitle}</p>
+            <p className="mt-2 text-[12px] leading-snug text-gray-400">{subtitle}</p>
         </div>
     );
 
     const templateChooserModal = templateChooserOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-8">
-            <div className="w-full max-w-5xl rounded-[32px] border border-white/[0.08] bg-[#0d0d11] p-6 shadow-2xl shadow-black/50">
-                <div className="flex items-start justify-between gap-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 px-4 py-6">
+            <div className="w-full max-w-5xl rounded-2xl border border-white/[0.08] bg-[#0d0d11] p-4 shadow-2xl shadow-black/50">
+                <div className="flex items-start justify-between gap-3">
                     <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">Pick a niche</p>
-                        <h3 className="mt-2 text-2xl font-bold text-white">Nine live niches. Pick the one that fits your channel.</h3>
-                        <p className="mt-2 text-sm text-gray-400">Each niche has its own voice tuning, scene pacing, and prompt scaffolding. You can switch any time.</p>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-300">Pick a niche</p>
+                        <h3 className="mt-1 text-lg font-bold text-white">Nine live niches — pick what fits your channel.</h3>
+                        <p className="mt-0.5 text-[12px] text-gray-400">Each niche has its own voice, pacing, and prompt scaffolding. Switch any time.</p>
                     </div>
                     <button
                         type="button"
                         onClick={() => setTemplateChooserOpen(false)}
-                        className="rounded-lg p-2 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
+                        className="rounded-md p-1.5 text-gray-400 transition hover:bg-white/[0.05] hover:text-white"
                         title="Close niche picker"
                     >
                         <X className="h-4 w-4" />
                     </button>
                 </div>
-                <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div className="mt-3 grid gap-2.5 md:grid-cols-2 xl:grid-cols-3">
                     {liveWorkspaceTemplates.map((template) => {
                         const active = selectedTemplate === template.id;
                         return (
@@ -2341,13 +2348,13 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                 key={template.id}
                                 type="button"
                                 onClick={() => handleTemplateSelection(template.id)}
-                                className={`group relative overflow-hidden rounded-[24px] border text-left transition ${
+                                className={`group relative overflow-hidden rounded-xl border text-left transition ${
                                     active
                                         ? 'border-violet-500 shadow-lg shadow-violet-900/30'
                                         : 'border-white/[0.08] hover:border-violet-500/40'
                                 }`}
                             >
-                                <div className="relative aspect-[16/10] overflow-hidden bg-zinc-900">
+                                <div className="relative aspect-[16/9] overflow-hidden bg-zinc-900">
                                     <img
                                         src={`/niche_thumbs/${template.id}.jpg`}
                                         alt={template.title}
@@ -2355,20 +2362,20 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                         className="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105"
                                     />
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent" />
-                                    <div className="absolute inset-x-0 bottom-0 p-4">
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-2xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.icon}</span>
-                                            <h4 className="text-lg font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.title}</h4>
+                                    <div className="absolute inset-x-0 bottom-0 p-2.5">
+                                        <div className="flex items-center gap-1.5">
+                                            <span className="text-lg drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.icon}</span>
+                                            <h4 className="text-sm font-bold text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.6)]">{template.title}</h4>
                                         </div>
                                     </div>
                                     {active ? (
-                                        <span className="absolute right-3 top-3 rounded-full border border-emerald-400/40 bg-emerald-500/30 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 backdrop-blur-sm">
+                                        <span className="absolute right-2 top-2 rounded-full border border-emerald-400/40 bg-emerald-500/30 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-emerald-100 backdrop-blur-sm">
                                             Active
                                         </span>
                                     ) : null}
                                 </div>
-                                <div className="bg-white/[0.02] p-4 group-hover:bg-violet-500/[0.04]">
-                                    <p className="text-sm leading-relaxed text-gray-400">{template.desc}</p>
+                                <div className="bg-white/[0.02] px-3 py-2 group-hover:bg-violet-500/[0.04]">
+                                    <p className="text-[12px] leading-snug text-gray-400">{template.desc}</p>
                                 </div>
                             </button>
                         );
@@ -2938,46 +2945,58 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
 
         return (
             <>
-            <div className="w-full max-w-none pb-10 space-y-6">
+            <div className="w-full max-w-none pb-6 space-y-3">
                 {renderWorkspaceChrome({
                     subtitle: activeStageCopy[workspaceStage].description,
                     showBack: true,
                 })}
 
-                <div className="grid gap-3 md:grid-cols-4">
-                    {workspaceReadiness.map((item) => (
-                        <div key={item.label} className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-                            <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.label}</p>
-                            <p className={`mt-2 text-sm font-semibold ${item.done ? 'text-emerald-200' : 'text-gray-300'}`}>
-                                {item.done ? 'Ready' : 'Pending'}
-                            </p>
-                        </div>
-                    ))}
+                {/* Readiness stepper — collapses 4 large status cards into a single
+                    horizontal strip so users see overall progress at a glance. */}
+                <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                    {workspaceReadiness.map((item, idx) => {
+                        const shortLabel = item.label.replace(' ready', '').replace(' planned', '');
+                        return (
+                            <div key={item.label} className="flex items-center gap-1.5">
+                                <span className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold ${
+                                    item.done ? 'bg-emerald-500/30 text-emerald-100' : 'bg-white/[0.06] text-gray-500'
+                                }`}>
+                                    {item.done ? '✓' : idx + 1}
+                                </span>
+                                <span className={`text-[11px] font-semibold ${item.done ? 'text-emerald-200' : 'text-gray-400'}`}>
+                                    {shortLabel}
+                                </span>
+                                {idx < workspaceReadiness.length - 1 && (
+                                    <span className="ml-1 text-gray-600 text-[10px]">›</span>
+                                )}
+                            </div>
+                        );
+                    })}
                 </div>
 
-                <div className="space-y-6 min-w-0">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-3 min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                        <h1 className="text-xl font-bold text-white">{creativeTitle || activeTemplateMeta?.title || 'Untitled Project'}</h1>
-                        <p className="text-sm text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Control'} &middot; {resolution} &middot; {language.toUpperCase()}</p>
+                        <h1 className="text-base font-bold text-white">{creativeTitle || activeTemplateMeta?.title || 'Untitled Project'}</h1>
+                        <p className="text-[11px] text-gray-500">{creativeScenes.length} scene{creativeScenes.length !== 1 ? 's' : ''} &middot; {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Control'} &middot; {resolution} &middot; {language.toUpperCase()}</p>
                     </div>
                     {workspaceStage === 'audio' ? (
                         <button
                             type="button"
                             onClick={globalToggleAnimationMode}
                             disabled={loading || scriptLoading}
-                            className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] transition ${
+                            className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
                                 effectiveAnimationEnabled
                                     ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/20'
                                     : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/15'
                             } disabled:opacity-50`}
                             title="Switch output mode"
                         >
-                            {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode • Click to Animate'}
+                            {effectiveAnimationEnabled ? 'Animation On' : 'Slideshow • Click to Animate'}
                         </button>
                     ) : (
-                        <div className="rounded-full border border-white/[0.08] bg-black/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
-                            {effectiveAnimationEnabled ? 'Animation Enabled' : 'Slideshow Mode'}
+                        <div className="rounded-full border border-white/[0.08] bg-black/20 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-300">
+                            {effectiveAnimationEnabled ? 'Animation On' : 'Slideshow'}
                         </div>
                     )}
                 </div>
@@ -3048,36 +3067,36 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     </div>
                 )}
                 {animationCreditsShort && (
-                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                        This render currently needs {animationCreditsRequired} Catalyst credit{animationCreditsRequired === 1 ? '' : 's'} on {selectedVideoModel.label}, but your account only has {animationCreditsAvailable}. Switch to slideshow, choose a basic video lane, or top up before final render.
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-snug text-amber-100">
+                        Need {animationCreditsRequired} credit{animationCreditsRequired === 1 ? '' : 's'} on {selectedVideoModel.label}, have {animationCreditsAvailable}. Switch to slideshow, pick a basic lane, or top up.
                     </div>
                 )}
                 {workspaceStage === 'scenes' && imageCreditsShort && (
-                    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                        Your selected image lane ({selectedImageModel.label}) needs {batchImageCreditsRequired} Catalyst credits to generate the remaining scene images, but only {animationCreditsAvailable} are available. Switch to a basic image lane or top up before batch generation.
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-snug text-amber-100">
+                        {selectedImageModel.label} needs {batchImageCreditsRequired} credits for remaining scenes, have {animationCreditsAvailable}. Pick a basic image lane or top up.
                     </div>
                 )}
 
                 {renderWorkspaceStageTabs()}
 
                 {workspaceStage === 'scenes' && (
-                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
+                    <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
                         <button
                             type="button"
                             onClick={() => setImageModelPickerOpen(true)}
-                            className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
+                            className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3.5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
                         >
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div>
-                                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Image Generation Model</p>
-                                    <h3 className="mt-2 text-lg font-semibold text-white">{selectedImageModel.label}</h3>
-                                    <p className="mt-2 text-sm text-gray-400">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">Image Model</p>
+                                    <h3 className="mt-1 text-sm font-semibold text-white">{selectedImageModel.label}</h3>
+                                    <p className="mt-1 text-[12px] leading-snug text-gray-400">
                                         {skeletonSceneModelRecommended && selectedImageModel.id === 'grok_imagine'
-                                            ? 'Grok Imagine is the recommended Skeleton AI lane — its reference-image style lock keeps the ivory bones / amber-shell look consistent across scenes.'
+                                            ? 'Grok Imagine — recommended Skeleton AI lane (reference-image style lock keeps ivory/amber consistent).'
                                             : selectedImageModel.summary}
                                     </p>
                                 </div>
-                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] ${
                                     selectedImageModel.tier === 'elite'
                                         ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
                                         : selectedImageModel.tier === 'premium'
@@ -3087,44 +3106,44 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                     {formatModelTierLabel(selectedImageModel)}
                                 </span>
                             </div>
-                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-300">
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[12px] text-gray-300">
                                 <span>{formatModelSpendLabel(selectedImageModel, 'image')}</span>
                                 <span>{selectedImageModel.speed}</span>
                             </div>
-                            <p className="mt-4 text-xs text-gray-500">
+                            <p className="mt-1.5 text-[11px] text-gray-500">
                                 {skeletonSceneModelRecommended
-                                    ? 'Grok Imagine is the Skeleton AI default. Other lanes work too — swap any time for a different aesthetic.'
-                                    : 'Premium image lanes pull Catalyst credits from included credits first, then your wallet. Click to change the model.'}
+                                    ? 'Skeleton AI default. Click to swap.'
+                                    : 'Click to change model. Premium lanes pull Catalyst credits.'}
                             </p>
                         </button>
-                        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
-                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Catalyst Spend Snapshot</p>
-                            <p className="mt-2 text-lg font-semibold text-white">
+                        <div className="rounded-xl border border-white/[0.08] bg-black/20 p-3.5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500">Catalyst Spend</p>
+                            <p className="mt-1 text-sm font-semibold text-white">
                                 {selectedImageCreditCost > 0
-                                    ? `${selectedImageCreditCost} credits per image on ${selectedImageModel.label}`
-                                    : `${selectedImageModel.label} stays on the basic image lane`}
+                                    ? `${selectedImageCreditCost} credits/image · ${selectedImageModel.label}`
+                                    : `${selectedImageModel.label} (basic lane)`}
                             </p>
-                            <p className="mt-2 text-sm text-gray-400">
-                                Available now: {animationCreditsAvailable} combined credits across included monthly usage and the wallet.
+                            <p className="mt-1 text-[12px] text-gray-400">
+                                {animationCreditsAvailable} credits available (monthly + wallet).
                             </p>
                         </div>
                     </div>
                 )}
 
                 {workspaceStage === 'audio' && (
-                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
+                    <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
                         <button
                             type="button"
                             onClick={() => setVideoModelPickerOpen(true)}
-                            className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
+                            className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3.5 text-left transition hover:border-cyan-400/40 hover:bg-cyan-500/[0.04]"
                         >
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div>
-                                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">Video Generation Model</p>
-                                    <h3 className="mt-2 text-lg font-semibold text-white">{selectedVideoModel.label}</h3>
-                                    <p className="mt-2 text-sm text-gray-400">{selectedVideoModel.summary}</p>
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">Video Model</p>
+                                    <h3 className="mt-1 text-sm font-semibold text-white">{selectedVideoModel.label}</h3>
+                                    <p className="mt-1 text-[12px] leading-snug text-gray-400">{selectedVideoModel.summary}</p>
                                 </div>
-                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] ${
                                     selectedVideoModel.tier === 'elite'
                                         ? 'border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
                                         : selectedVideoModel.tier === 'premium'
@@ -3134,65 +3153,69 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                     {formatModelTierLabel(selectedVideoModel)}
                                 </span>
                             </div>
-                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-300">
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[12px] text-gray-300">
                                 <span>{formatModelSpendLabel(selectedVideoModel, 'video')}</span>
                                 <span>{selectedVideoModel.speed}</span>
                             </div>
-                            <p className="mt-4 text-xs text-gray-500">Kling 2.1 Standard stays on the base animation lane. Premium video lanes multiply Catalyst credit burn by scene count.</p>
+                            <p className="mt-1.5 text-[11px] text-gray-500">Kling 2.1 Std = base lane. Premium lanes multiply credit burn × scene count.</p>
                         </button>
-                        <div className="rounded-2xl border border-white/[0.08] bg-black/20 p-5">
-                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Render Spend Snapshot</p>
-                            <p className="mt-2 text-lg font-semibold text-white">
+                        <div className="rounded-xl border border-white/[0.08] bg-black/20 p-3.5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500">Render Spend</p>
+                            <p className="mt-1 text-sm font-semibold text-white">
                                 {effectiveAnimationEnabled
-                                    ? `${animationCreditsRequired} total Catalyst credits on ${selectedVideoModel.label}`
-                                    : 'Slideshow mode keeps animation credit burn at zero'}
+                                    ? `${animationCreditsRequired} credits · ${selectedVideoModel.label}`
+                                    : 'Slideshow mode (zero animation burn)'}
                             </p>
-                            <p className="mt-2 text-sm text-gray-400">
+                            <p className="mt-1 text-[12px] text-gray-400">
                                 {effectiveAnimationEnabled
-                                    ? `${Math.max(1, promptSceneCount || creativeScenes.length || 1)} animated scene${Math.max(1, promptSceneCount || creativeScenes.length || 1) === 1 ? '' : 's'} × ${selectedVideoCreditMultiplier}x multiplier.`
-                                    : 'Switch animation back on if you want motion render instead of a slideshow export.'}
+                                    ? `${Math.max(1, promptSceneCount || creativeScenes.length || 1)} scene${Math.max(1, promptSceneCount || creativeScenes.length || 1) === 1 ? '' : 's'} × ${selectedVideoCreditMultiplier}× multiplier`
+                                    : 'Switch animation on for motion render.'}
                             </p>
                         </div>
                     </div>
                 )}
 
                 {workspaceStage === 'scenes' && showGenerateScenes && (
-                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-                        <p className="text-sm font-semibold text-amber-300">
-                            {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Scene Builder'}
-                        </p>
-                        <p className="text-xs text-amber-200/80 mt-1">
-                            {creativeMode === 'script_to_short'
-                                ? 'Generate prompt beats from the exact narration in order. Studio keeps every prompt editable, but it no longer starts from a blank scene list.'
-                                : 'Start in Scenes, build the scene list, then generate images one by one across the full set before you render.'}
-                        </p>
-                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="min-w-0">
+                                <p className="text-[13px] font-semibold text-amber-300">
+                                    {creativeMode === 'script_to_short' ? 'Script to Short' : 'Creative Scene Builder'}
+                                </p>
+                                <p className="text-[11px] leading-snug text-amber-200/80">
+                                    {creativeMode === 'script_to_short'
+                                        ? 'Prompt beats are locked to narration order — edit any prompt before render.'
+                                        : 'Build scene list, then generate images one-by-one before render.'}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
                             <button
                                 onClick={() => handleGenerateScriptToShortScenes()}
                                 disabled={sceneBuildLoading || (!creativeNarration.trim() && !prompt.trim())}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
+                                className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white transition"
                             >
-                                {sceneBuildLoading ? "Generating scene prompts..." : (scriptScenesReady ? "Regenerate Prompts" : "Generate Scene Prompts")}
+                                {sceneBuildLoading ? "Generating prompts..." : (scriptScenesReady ? "Regenerate Prompts" : "Generate Scene Prompts")}
                             </button>
                             <button
                                 onClick={handleGenerateSceneImageBatch}
                                 disabled={bulkImageGenRunning || !sessionId || sceneBuildLoading || promptSceneCount === 0}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white transition"
+                                className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white transition"
                             >
-                                {bulkImageGenRunning ? "Generating images..." : "Generate Images"}
+                                {bulkImageGenRunning ? "Generating..." : "Generate Images"}
                             </button>
                             {!sessionId && (
-                                <p className="text-xs text-amber-100/90">Generate scenes first.</p>
+                                <p className="text-[11px] text-amber-100/90">Generate scenes first.</p>
                             )}
                             {(bulkImageGenRunning || bulkImageGenTotal > 0) && (
-                                <p className="text-xs text-amber-100/90">
+                                <p className="text-[11px] text-amber-100/90">
                                     {bulkImageGenRunning
-                                        ? `Batch progress: ${bulkImageGenDone}/${bulkImageGenTotal}`
-                                        : `Images ready: ${imageReadyCount}/${promptSceneCount}`}
+                                        ? `${bulkImageGenDone}/${bulkImageGenTotal}`
+                                        : `Ready: ${imageReadyCount}/${promptSceneCount}`}
                                 </p>
                             )}
                             {sceneBuildError && (
-                                <p className="text-xs text-red-300">{sceneBuildError}</p>
+                                <p className="text-[11px] text-red-300">{sceneBuildError}</p>
                             )}
                         </div>
                     </div>

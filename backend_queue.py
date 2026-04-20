@@ -217,30 +217,50 @@ async def enqueue_generation_job(
         except Exception as e:
             _log.warning(f"Redis enqueue failed; falling back to inprocess queue: {e}")
 
-    # Inprocess path: under RunPod serverless + FastAPI TestClient each HTTP
-    # request runs on a FRESH event loop that is torn down the moment the
-    # response returns. asyncio workers spawned via _ensure_job_workers() die
-    # with that loop, but the `_job_workers_started` module-flag stays True, so
-    # subsequent requests enqueue jobs into a queue no worker is draining --
-    # which is the stuck-at-5% symptom. Longform hit the same bug and fixed it
-    # by awaiting the pipeline inline (see backend.py:13893 comment). Same fix
-    # here: run the pipeline on the current request's loop so it completes
-    # before the loop tears down. The Cloudflare Worker's poll-on-IN_QUEUE
-    # behavior already accommodates long /runsync requests via RunPod's queue.
+    # Inprocess path: production runs uvicorn under RunPod serverless workers
+    # which keep a SINGLE long-lived event loop across requests for the worker's
+    # idleTimeout window (~300s between requests, but the loop itself never
+    # tears down between requests on a warm worker). Spawning the pipeline as
+    # asyncio.create_task() lets the HTTP handler return immediately while the
+    # render continues on the same loop. The frontend polls /api/status/{job_id}
+    # every 2s for progress.
+    #
+    # Why we ABANDONED the prior inline-await design:
+    #   The old code did `await coro_func(*args)` here so the request blocked
+    #   until the full render completed. That kept the loop alive (good for
+    #   asyncio task survival) but the HTTP response could take 3-5 minutes for
+    #   animation+TTS+compose. Cloudflare's proxy in front of
+    #   api-studio.nyptidindustries.com (CF-RAY confirmed) returns 504 at ~100s
+    #   — the client gets a timeout error, the project never appears in the
+    #   Projects tab, and there is no way to recover.
+    #
+    # TestClient note (the original reason inline-await existed):
+    #   FastAPI's TestClient creates a fresh event loop per request and tears
+    #   it down on response. asyncio.create_task() under TestClient WILL get
+    #   cancelled when the loop closes. That breaks tests but not production —
+    #   tests that exercise this path should `await` the pipeline directly or
+    #   stub enqueue.
     priority = _plan_queue_priority(plan)
     if _jobs_ref is not None and job_id in _jobs_ref:
         _jobs_ref[job_id]["queue_priority"] = priority
         _jobs_ref[job_id]["queue_mode"] = "inprocess"
         _jobs_ref[job_id]["queue_position"] = 1
         _jobs_ref[job_id]["queue_total"] = 1
-    try:
-        await coro_func(*args)
-    except Exception as e:
-        _log.error(f"[{job_id}] Inline pipeline error: {e}", exc_info=True)
-        if _jobs_ref is not None and job_id in _jobs_ref:
-            _jobs_ref[job_id]["status"] = "error"
-            _jobs_ref[job_id]["error"] = str(e)
-        raise
+
+    async def _runner():
+        try:
+            await coro_func(*args)
+        except Exception as e:
+            _log.error(f"[{job_id}] Background pipeline error: {e}", exc_info=True)
+            if _jobs_ref is not None and job_id in _jobs_ref:
+                _jobs_ref[job_id]["status"] = "error"
+                _jobs_ref[job_id]["error"] = str(e)
+                try:
+                    await persist_job_state(job_id, _jobs_ref[job_id])
+                except Exception:
+                    pass
+
+    asyncio.create_task(_runner())
 
 
 async def dequeue_generation_job() -> dict[str, Any] | None:
