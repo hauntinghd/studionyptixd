@@ -617,6 +617,7 @@ from backend_queue import (
     get_persisted_job_state,
     init_queue_runtime,
     persist_job_state,
+    persist_job_state_awaited,
     schedule_persist_job_state,
 )
 try:
@@ -16073,6 +16074,15 @@ async def _start_longform_finalize_internal(session_id: str, acting_user: Option
         _save_longform_sessions()
 
     _job_diag_init(job_id, "longform")
+    # Synchronously land the job row in Supabase before kicking off the pipeline.
+    # Same reasoning as creative finalize: frontend polls immediately and any
+    # cross-worker status fetch needs the row to exist.
+    try:
+        _ok = await persist_job_state_awaited(job_id, jobs[job_id])
+        if not _ok:
+            _log.error(f"[{job_id}] longform finalize: Supabase persist failed; cross-worker polls will 404")
+    except Exception as _e:
+        _log.error(f"[{job_id}] longform finalize: persist EXC: {type(_e).__name__}: {_e}")
     # Same RunPod serverless fix as _queue_next_longform_chapter_if_ready:
     # await inline so the render task survives past the HTTP response boundary.
     await _run_longform_pipeline_isolated(job_id, session_id)
@@ -17501,6 +17511,19 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         "background_music": str(getattr(req, "background_music", "") or "").strip(),
     }
     _job_diag_init(job_id, "creative")
+    # Synchronously land the job row in Supabase BEFORE the HTTP response
+    # returns. Frontend starts polling /api/status/{job_id} every 2s the
+    # moment this endpoint replies — any poll routed to a worker that
+    # didn't create the job needs to find the row in Supabase or it 404s
+    # with "Job not found". Fire-and-forget persist (schedule_persist_job_state)
+    # isn't enough because the response can be sent before the Supabase
+    # write completes.
+    try:
+        _ok = await persist_job_state_awaited(job_id, jobs[job_id])
+        if not _ok:
+            _log.error(f"[{job_id}] creative finalize: Supabase persist failed; cross-worker polls will 404")
+    except Exception as _e:
+        _log.error(f"[{job_id}] creative finalize: persist EXC: {type(_e).__name__}: {_e}")
     await _update_project_by_session(user.get("id", ""), req.session_id, {
         "status": "rendering",
         "job_id": job_id,
@@ -19071,6 +19094,14 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         "background_music": str(getattr(req, "background_music", "") or "").strip(),
     }
     _job_diag_init(job_id, "auto")
+    # Synchronously land the job row in Supabase before returning.
+    # Status polls hitting a different worker need the row to exist.
+    try:
+        _ok = await persist_job_state_awaited(job_id, jobs[job_id])
+        if not _ok:
+            _log.error(f"[{job_id}] auto finalize: Supabase persist failed; cross-worker polls will 404")
+    except Exception as _e:
+        _log.error(f"[{job_id}] auto finalize: persist EXC: {type(_e).__name__}: {_e}")
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
     if user:
         project_id = _new_project_id()
