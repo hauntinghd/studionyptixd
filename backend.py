@@ -8847,8 +8847,15 @@ def _build_fal_video_payload(
     aspect_ratio: str,
 ) -> dict:
     model_id = str(profile.get("id", "") or "").strip().lower()
+    # Pixverse v6 caps prompts at 2048 chars; skeleton-template animation prompts
+    # (scene visual + TEMPLATE_KLING_MOTION + identity lock) can exceed that.
+    # Truncate defensively so fal doesn't 422 with "Sequence should have at most
+    # 2048 items". The identity-lock tail is the least load-bearing part.
+    safe_prompt = str(prompt or "").strip()
+    if len(safe_prompt) > 1900:
+        safe_prompt = safe_prompt[:1900].rstrip() + "..."
     payload: dict[str, object] = {
-        "prompt": prompt,
+        "prompt": safe_prompt,
         "image_url": image_url,
         "aspect_ratio": aspect_ratio,
     }

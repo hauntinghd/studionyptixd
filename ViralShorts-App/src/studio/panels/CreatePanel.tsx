@@ -3846,6 +3846,15 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     fixed_duration_sec: 8,
                     supports_audio: true,
                 } as AnimateAllModel}
+                availableModels={videoModelCatalog.filter((m) => m.enabled !== false).map((m) => ({
+                    id: m.id,
+                    label: m.label,
+                    subtitle: m.tier === 'basic' ? 'basic lane' : m.tier === 'premium' ? 'premium lane' : 'elite lane',
+                    parallel_limit: 8,
+                    fixed_duration_sec: 8,
+                    supports_audio: true,
+                } as AnimateAllModel))}
+                onModelChange={(id) => setVideoModelId(id)}
                 availableCredits={animationCreditsAvailable}
                 requiredCredits={animationCreditsRequired}
                 disabled={loading || scriptLoading}
