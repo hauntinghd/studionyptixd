@@ -181,7 +181,11 @@ async def _persist_job_state_supabase(job_id: str, job_state: dict[str, Any]) ->
                 json=row,
             )
             if resp.status_code >= 300:
-                _log.warning(f"Supabase job persist for {job_id} FAILED status={resp.status_code} body={resp.text[:200]}")
+                body = resp.text[:200]
+                hint = ""
+                if resp.status_code in (400, 409) and "user_id" in body and ("integer" in body.lower() or "type" in body.lower()):
+                    hint = " -- SCHEMA MISMATCH: `jobs.user_id` must be text (not integer). Apply migrations/2026-04-20_jobs.sql."
+                _log.error(f"Supabase job persist for {job_id} FAILED status={resp.status_code} body={body}{hint}")
                 return False
         return True
     except Exception as e:
