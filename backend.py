@@ -617,6 +617,7 @@ from backend_queue import (
     get_persisted_job_state,
     init_queue_runtime,
     persist_job_state,
+    schedule_persist_job_state,
 )
 try:
     import paramiko
@@ -11641,10 +11642,7 @@ def _job_diag_init(job_id: str, mode: str):
         "stage_durations_sec": {},
         "scene_events": [],
     }
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 
 def _job_set_stage(job_id: str, status: str, progress: int | None = None):
@@ -11673,10 +11671,7 @@ def _job_set_stage(job_id: str, status: str, progress: int | None = None):
     job["status"] = status
     if progress is not None:
         job["progress"] = progress
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 
 def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, event: str, detail: str = ""):
@@ -11696,10 +11691,7 @@ def _job_record_scene_event(job_id: str, scene_idx: int, total_scenes: int, even
     if len(events) > 30:
         del events[:-30]
     diag["last_updated_at"] = now
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 
 def _job_update_preview(job_id: str, preview_url: str = "", preview_type: str = "image", preview_label: str = ""):
@@ -11710,10 +11702,7 @@ def _job_update_preview(job_id: str, preview_url: str = "", preview_type: str = 
         job["preview_url"] = str(preview_url or "").strip()
         job["preview_type"] = str(preview_type or "image").strip() or "image"
         job["preview_label"] = str(preview_label or "").strip()
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 
 def _job_update_scene_pointer(
@@ -11733,10 +11722,7 @@ def _job_update_scene_pointer(
         job["current_chapter"] = max(0, int(chapter_index or 0))
     if scene_num is not None:
         job["current_chapter_scene"] = max(0, int(scene_num or 0))
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 
 def _job_diag_finalize(job_id: str):
@@ -11789,10 +11775,7 @@ def _job_diag_finalize(job_id: str):
             "ts": now,
         })
     _record_kpi_for_job(job_id, job)
-    try:
-        asyncio.create_task(persist_job_state(job_id, job))
-    except Exception:
-        pass
+    schedule_persist_job_state(job_id, job)
 
 async def run_generation_pipeline(
     job_id: str,
