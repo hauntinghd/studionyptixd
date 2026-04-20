@@ -254,6 +254,26 @@ async def persist_job_state(job_id: str, job_state: dict[str, Any]):
         pass
 
 
+def schedule_persist_job_state(job_id: str, job_state: dict[str, Any]) -> None:
+    """Fire-and-forget wrapper around persist_job_state that holds a strong
+    reference to the scheduled Task.
+
+    Callers that use `asyncio.create_task(persist_job_state(...))` directly
+    and discard the return value hit the same asyncio GC trap that empties
+    the Supabase `jobs` table silently: Python collects the Task on the
+    first await inside persist_job_state (the Redis SET / disk write /
+    httpx POST), cancelling the whole chain. Every caller that needs
+    non-blocking persistence should route through this helper.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(persist_job_state(job_id, job_state))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 async def get_persisted_job_state(job_id: str) -> dict[str, Any] | None:
     redis = await _get_redis()
     raw = None
