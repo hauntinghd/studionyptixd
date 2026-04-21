@@ -274,6 +274,45 @@ def schedule_persist_job_state(job_id: str, job_state: dict[str, Any]) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+async def persist_job_state_awaited(job_id: str, job_state: dict[str, Any]) -> bool:
+    """Fully-awaited persist: Redis + disk + Supabase all complete before
+    returning. Use this from endpoints where the caller will start polling
+    status immediately (e.g. /api/creative/finalize) — if the row isn't in
+    Supabase before the HTTP response is sent, the first status poll that
+    routes to a different worker 404s with "Job not found".
+
+    Later in-pipeline updates (progress ticks, stage changes) can stay
+    fire-and-forget via schedule_persist_job_state since the row already
+    exists and upserts are idempotent.
+
+    Returns True if the Supabase write succeeded, False otherwise.
+    Redis + disk failures are logged but don't fail the call.
+    """
+    payload = json.dumps(job_state, ensure_ascii=True)
+    redis = await _get_redis()
+    if redis is not None:
+        try:
+            await redis.set(_job_key(job_id), payload, ex=60 * 60 * 6)
+        except Exception as e:
+            _log.warning(f"Redis job persistence failed for {job_id}: {e}")
+    try:
+        async with _job_state_file_lock:
+            path = _job_state_file(job_id)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(path)
+    except Exception as e:
+        _log.warning(f"Local job persistence failed for {job_id}: {e}")
+    try:
+        ok = await _persist_job_state_supabase(job_id, job_state)
+        if not ok:
+            _log.error(f"[{job_id}] AWAITED Supabase persist returned False — status polls from other workers will 404")
+        return ok
+    except Exception as e:
+        _log.error(f"[{job_id}] AWAITED Supabase persist EXC: {type(e).__name__}: {e}")
+        return False
+
+
 async def get_persisted_job_state(job_id: str) -> dict[str, Any] | None:
     redis = await _get_redis()
     raw = None
