@@ -114,7 +114,8 @@ export default function GenerateScriptWithAIModal({
             onClick={onClose}
         >
             <div
-                className="flex w-full max-w-2xl max-h-[90vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b12] shadow-2xl"
+                className="flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b12] shadow-2xl"
+                style={{ maxHeight: '90vh' }}
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* header */}

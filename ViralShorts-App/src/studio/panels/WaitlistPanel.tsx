@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Loader2, Mail, RefreshCw, XCircle } from 'lucide-react';
+import { CheckCircle2, Loader2, Mail, RefreshCw, Trash2, XCircle } from 'lucide-react';
 import { AuthContext, GENERATION_API } from '../shared';
 
 interface WaitlistRow {
@@ -55,6 +55,31 @@ export default function WaitlistPanel() {
     }, [session]);
 
     useEffect(() => { void fetchAll(); }, [fetchAll]);
+
+    const [removingEmail, setRemovingEmail] = useState<string | null>(null);
+    const removeEntry = useCallback(async (email: string) => {
+        if (!session || !email) return;
+        if (!window.confirm(`Remove ${email} from the waitlist? This deletes their entry from both the canonical waiting_list table and the app_settings fallback. Not reversible.`)) return;
+        setRemovingEmail(email);
+        setError(null);
+        try {
+            const res = await fetch(`${GENERATION_API}/api/admin/waiting-list/${encodeURIComponent(email)}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${session.access_token}` },
+            });
+            if (!res.ok) {
+                const txt = await res.text().catch(() => '');
+                throw new Error(txt || `HTTP ${res.status}`);
+            }
+            // Optimistically drop from the UI; then refetch to confirm summary totals.
+            setRows((prev) => prev.filter((r) => String(r.email || '').toLowerCase() !== email.toLowerCase()));
+            await fetchAll();
+        } catch (e: any) {
+            setError(e?.message || `Failed to remove ${email}`);
+        } finally {
+            setRemovingEmail(null);
+        }
+    }, [session, fetchAll]);
 
     const filtered = useMemo(() => {
         if (filter === 'paid') return rows.filter((r) => Boolean(r.paid));
@@ -137,6 +162,7 @@ export default function WaitlistPanel() {
                             <th className="px-4 py-2 text-right">Deposit</th>
                             <th className="px-4 py-2 text-left">Paid</th>
                             <th className="px-4 py-2 text-left">Joined</th>
+                            <th className="px-4 py-2 text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -177,6 +203,22 @@ export default function WaitlistPanel() {
                                     </td>
                                     <td className="px-4 py-2 text-[11px] text-gray-500">
                                         {row.created_at ? new Date(row.created_at).toLocaleString() : '—'}
+                                    </td>
+                                    <td className="px-4 py-2 text-right">
+                                        <button
+                                            type="button"
+                                            onClick={() => void removeEntry(String(row.email || ''))}
+                                            disabled={!row.email || removingEmail === row.email}
+                                            className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                                            title={`Remove ${row.email || 'this entry'} from the waitlist`}
+                                        >
+                                            {removingEmail === row.email ? (
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                            ) : (
+                                                <Trash2 className="h-3 w-3" />
+                                            )}
+                                            Remove
+                                        </button>
                                     </td>
                                 </tr>
                             );
