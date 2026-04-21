@@ -6363,6 +6363,13 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
         payload["style"] = "realistic_image"
     elif model_id == "nano_banana_pro":
         payload["output_format"] = "png"
+    elif model_id == "flux_lora_skeleton":
+        # fal-ai/flux-lora expects image_size + output_format, and the
+        # caller attaches `loras` as a separate step (see
+        # _generate_image_fal_selected_model for lora_url injection).
+        payload["image_size"] = image_size
+        payload["output_format"] = "png"
+        payload["num_images"] = 1
     return payload
 
 
@@ -6381,13 +6388,27 @@ async def _generate_image_fal_selected_model(
     if not FAL_AI_KEY:
         raise RuntimeError("FAL_AI_KEY not configured")
 
+    resolved_id = str(profile.get("id", "") or model_id)
+    composed_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
+    # Custom LoRA models (e.g. flux_lora_skeleton) must have their trigger
+    # word prepended so the trained concept activates. Without the trigger
+    # word in the prompt, FLUX behaves like stock FLUX and the LoRA
+    # weights have zero effect on the output.
+    trigger_word = str(profile.get("trigger_word", "") or "").strip()
+    if trigger_word and trigger_word.lower() not in composed_prompt.lower():
+        composed_prompt = f"{trigger_word}, {composed_prompt}"
     payload = _build_fal_image_model_payload(
-        str(profile.get("id", "") or model_id),
-        _creative_model_prompt(prompt, negative_prompt=negative_prompt),
+        resolved_id,
+        composed_prompt,
         resolution,
     )
-    if str(profile.get("id", "") or "") == "grok_imagine" and reference_image_url:
+    if resolved_id == "grok_imagine" and reference_image_url:
         payload["image_url"] = reference_image_url
+    # FLUX LoRA endpoint expects a `loras` array. Pull the trained weights
+    # URL from the profile and attach at scale 1.0.
+    lora_url = str(profile.get("lora_url", "") or "").strip()
+    if lora_url and endpoint_id == "fal-ai/flux-lora":
+        payload["loras"] = [{"path": lora_url, "scale": 1.0}]
 
     # Route through fal_gate so the 20-concurrent-limit on fal is respected
     # across ALL call sites. Before this migration, raw httpx.post calls here

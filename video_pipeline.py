@@ -276,6 +276,31 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         "enabled": bool(FAL_AI_KEY),
         "supports_reference_conditioning": False,
     },
+    {
+        # NYPTID-trained Skeleton LoRA on top of FLUX.
+        # Trained 2026-04-21 on 200 canonical Cryptic Science skeleton
+        # images (subset of skeleton_training_dataset v1+v2, 118 outfit
+        # categories, 1000 steps via fal-ai/flux-lora-fast-training).
+        # Trigger word "nyptid_skeleton" locks the ivory-white anatomical
+        # skull + visible-bones-through-outfit identity. Pixel-level lock
+        # that text prompts alone couldn't achieve — fixes the nude-skeleton
+        # and identity-drift failure modes that burned through several
+        # Skeleton AI renders.
+        "id": "flux_lora_skeleton",
+        "label": "NYPTID Skeleton LoRA (FLUX)",
+        "provider": "fal",
+        "tier": "premium",
+        "summary": "Custom LoRA trained on Casey's canonical Cryptic Science skeleton. Skeleton-template default.",
+        "speed": "Medium",
+        "credit_cost_per_image": 3,
+        "estimated_unit_usd": 0.035,
+        "billing_unit": "image",
+        "fal_endpoint_id": "fal-ai/flux-lora",
+        "enabled": bool(FAL_AI_KEY),
+        "supports_reference_conditioning": False,
+        "lora_url": "https://v3b.fal.media/files/b/0a9733ff/Bkucfhd84UnGjSPkJrX1o_pytorch_lora_weights.safetensors",
+        "trigger_word": "nyptid_skeleton",
+    },
 ]
 CREATIVE_IMAGE_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_IMAGE_MODEL_PROFILES}
 
@@ -376,6 +401,14 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
     requested = str(value or "").strip().lower()
     if requested in CREATIVE_IMAGE_MODEL_MAP and bool(CREATIVE_IMAGE_MODEL_MAP[requested].get("enabled", False)):
         return requested
+    # Skeleton template: if no explicit pick, default to the trained
+    # NYPTID Skeleton LoRA. Pixel-level identity lock is strictly
+    # better than text-only on this template (validated 2026-04-21
+    # against naked-skeleton / glass-dome failure modes).
+    if str(template or "").strip().lower() == "skeleton":
+        lora_profile = CREATIVE_IMAGE_MODEL_MAP.get("flux_lora_skeleton")
+        if lora_profile and bool(lora_profile.get("enabled", False)):
+            return "flux_lora_skeleton"
     for candidate in (
         DEFAULT_CREATIVE_IMAGE_MODEL_ID,
         "imagen4_fast",
