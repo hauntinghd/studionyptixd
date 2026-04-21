@@ -3244,10 +3244,35 @@ def _build_creative_passthrough_scene_prompt(
     return str(visual_description or "").strip()
 
 
+_SKELETON_FOUNDATIONAL_NEGATIVE = (
+    "glass dome, bell jar, vitrine display case, museum case behind glass, "
+    "translucent skin over bones, rubbery flesh covering skeleton, "
+    "nude skeleton without clothing, missing outfit, wrong era outfit, "
+    "floating props with no anchor, floating disembodied flashlight, "
+    "generic halloween spooky skeleton, plastic halloween prop, cartoon skeleton, "
+    "green tinted lighting, neon green glow, radioactive green, "
+    "modern smartphone, modern laptop, modern television, modern wristwatch, "
+    "anachronistic tech in period scene, futuristic props in vintage setting, "
+    "low-poly 3d model look, unreal engine demo look, amateur 3d render"
+)
+
+
 def _augment_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
+    """Compose skeleton scene negative prompt.
+
+    Foundational negatives apply to EVERY skeleton render regardless of prompt
+    (block glass-dome / nude-skeleton / anachronistic-props failure modes that
+    have hit us repeatedly). Contextual extras stack on top when the prompt
+    mentions specific triggers.
+    """
     text = str(prompt or "").strip().lower()
+    parts_foundation: list[str] = []
+    if _SKELETON_FOUNDATIONAL_NEGATIVE:
+        parts_foundation.append(_SKELETON_FOUNDATIONAL_NEGATIVE)
     if not text:
-        return str(base_negative or "").strip()
+        base_str = str(base_negative or "").strip()
+        combined = ", ".join([p for p in parts_foundation + ([base_str] if base_str else []) if p]).strip(", ")
+        return combined
     extras: list[str] = []
     has_brain = bool(re.search(r"\bbrain\b", text))
     has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", text))
@@ -3296,7 +3321,10 @@ def _augment_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
             "upright heroic posture",
             "confident energetic stance",
         ])
-    parts = [str(base_negative or "").strip()] if str(base_negative or "").strip() else []
+    parts: list[str] = list(parts_foundation)
+    base_str = str(base_negative or "").strip()
+    if base_str:
+        parts.append(base_str)
     if extras:
         parts.append(", ".join(dict.fromkeys(extras)))
     merged = ", ".join([p for p in parts if p]).strip(", ")
@@ -3306,8 +3334,6 @@ def _augment_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
 def _relax_skeleton_negative_prompt_for_passthrough(base_negative: str, prompt: str) -> str:
     text = str(prompt or "").strip().lower()
     neg = str(base_negative or "").strip()
-    if not neg:
-        return neg
     wants_damage = bool(re.search(r"\b(crack|cracks|fracture|fractured|chip|chipped|bruise|bruises|damaged|damage)\b", text))
     wants_tired = bool(re.search(r"\b(tired|fatigued|weary|slouch|slouched|hunch|hunched|droop|drooping|exhausted)\b", text))
     parts = [p.strip() for p in neg.split(",") if p and p.strip()]
@@ -3322,7 +3348,10 @@ def _relax_skeleton_negative_prompt_for_passthrough(base_negative: str, prompt: 
             if pl in _SKELETON_HUMAN_FACE_NEGATIVE_TOKENS or pl in _SKELETON_EXTRA_PERSON_NEGATIVE_TOKENS:
                 continue
         out.append(part)
-    merged = ", ".join(out).strip(", ")
+    # Foundational negatives apply in passthrough mode too — block glass-dome /
+    # nude-skeleton / anachronistic-props failure modes regardless of prompt.
+    prepend: list[str] = [_SKELETON_FOUNDATIONAL_NEGATIVE] if _SKELETON_FOUNDATIONAL_NEGATIVE else []
+    merged = ", ".join([p for p in prepend + out if p]).strip(", ")
     return _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
 
 
@@ -3747,8 +3776,12 @@ def _compact_skeleton_negative_prompt(base_negative: str, prompt: str) -> str:
     merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
     if base:
         merged = f"{base}, {merged}"
+    # Prepend foundational negatives so glass-dome / nude-skeleton / anachronistic
+    # failure modes are blocked on the mainline scene path too.
+    if _SKELETON_FOUNDATIONAL_NEGATIVE:
+        merged = f"{_SKELETON_FOUNDATIONAL_NEGATIVE}, {merged}"
     merged = _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
-    return _truncate_words(merged, 95)
+    return _truncate_words(merged, 130)
 
 
 def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
@@ -3802,8 +3835,12 @@ def _build_skeleton_lora_fast_negative(base_negative: str, prompt: str) -> str:
     merged = ", ".join(dict.fromkeys([t for t in tokens if t and t.strip()]))
     if base:
         merged = f"{base}, {merged}"
+    # Prepend foundational negatives so glass-dome / nude-skeleton failure modes
+    # are also blocked on the LoRA fast render path.
+    if _SKELETON_FOUNDATIONAL_NEGATIVE:
+        merged = f"{_SKELETON_FOUNDATIONAL_NEGATIVE}, {merged}"
     merged = _skeleton_named_human_negative_adjustment(merged, prompt, allow_extra_people=True)
-    return _truncate_words(merged, 110)
+    return _truncate_words(merged, 140)
 
 
 def _score_generated_image_quality(image_path: str, prompt: str = "", template: str = "") -> dict:
