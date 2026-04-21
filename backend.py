@@ -11072,19 +11072,29 @@ def _apply_mint_scene_compiler(scenes: list, template: str, mint_mode: bool = Tr
         if template == "skeleton":
             skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a topic-matched cinematic environment."
             first_chunk = chunks[0].strip()
-            explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
+            outfit_keyword_re = re.compile(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket|hat|fedora|helmet|tie|shirt|pants|boots|shoes)\b", re.IGNORECASE)
+            explicit_outfit_request = bool(outfit_keyword_re.search(" ".join(chunks)))
             has_canonical_lock = bool(re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE)) and bool(re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE))
             if explicit_outfit_request:
-                # Lead with outfit-locked variant so image models don't drop outfit
-                # tokens after tokenizing the canonical-skeleton intro. The failed
-                # Hoover render came back nude because the outfit directive was
-                # buried 30+ tokens deep. Leading with outfit + locking canonical
-                # identity AFTER preserves both intents and consistently puts the
-                # skeleton in the right clothing.
-                if not has_canonical_lock:
-                    outfit_lead = "A canonical ivory-white anatomical skeleton with large realistic eyeballs wears the scene's explicitly requested outfit."
-                    first_chunk = f"{outfit_lead} {first_chunk}".strip()
-                first_chunk = first_chunk.rstrip(".!?") + ". Outfit MUST stay fully visible on the skeleton throughout the shot."
+                # Find the first sentence (from the user's scene prompt) that
+                # actually names the outfit, and lead with it verbatim. Image
+                # models weight the front of the prompt heaviest — burying the
+                # outfit phrase mid-prompt caused the Hoover render to come back
+                # nude despite "dark 1920s FBI suit and fedora" being in the beat.
+                # Repeating the outfit phrase at the start AND at the end of the
+                # first chunk gives outfit tokens ~3x the attention weight of
+                # a single occurrence.
+                outfit_sentence = next(
+                    (c.strip() for c in chunks if c and outfit_keyword_re.search(c)),
+                    "",
+                )
+                if outfit_sentence and not has_canonical_lock:
+                    lead = f"{outfit_sentence.rstrip('.!?')}. A canonical ivory-white anatomical skeleton with large realistic eyeballs wearing those exact clothes."
+                    first_chunk = f"{lead} {first_chunk}".strip() if outfit_sentence not in first_chunk else f"{lead} {first_chunk[len(outfit_sentence):].lstrip(' .!?')}".strip()
+                elif not has_canonical_lock:
+                    lead = "A canonical ivory-white anatomical skeleton with large realistic eyeballs wears the scene's explicitly requested outfit."
+                    first_chunk = f"{lead} {first_chunk}".strip()
+                first_chunk = first_chunk.rstrip(".!?") + ". Outfit MUST stay fully visible on the skeleton throughout the shot — do not render the skeleton nude under any condition."
             else:
                 if not has_canonical_lock:
                     first_chunk = f"{skeleton_lock} {first_chunk}".strip()
@@ -11330,13 +11340,21 @@ def _apply_template_scene_constraints(scenes: list, template: str, quality_mode:
         if template == "skeleton":
             skeleton_lock = "A canonical ivory-white anatomical skeleton with large realistic eyeballs and a clearly visible translucent body silhouette appears in a topic-matched cinematic environment."
             first_chunk = chunks[0].strip()
-            explicit_outfit_request = bool(re.search(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket)\b", " ".join(chunks), re.IGNORECASE))
+            outfit_keyword_re = re.compile(r"\b(outfit|uniform|suit|coat|armor|jersey|scrubs|clothes|clothing|costume|dress|robe|hoodie|jacket|hat|fedora|helmet|tie|shirt|pants|boots|shoes)\b", re.IGNORECASE)
+            explicit_outfit_request = bool(outfit_keyword_re.search(" ".join(chunks)))
             has_canonical_lock = bool(re.search(r"\b(canonical|anatomical)\b", first_chunk, re.IGNORECASE)) and bool(re.search(r"\b(translucent|glass[- ]?like|body silhouette)\b", first_chunk, re.IGNORECASE))
             if explicit_outfit_request:
-                if not has_canonical_lock:
-                    outfit_lead = "A canonical ivory-white anatomical skeleton with large realistic eyeballs wears the scene's explicitly requested outfit."
-                    first_chunk = f"{outfit_lead} {first_chunk}".strip()
-                first_chunk = first_chunk.rstrip(".!?") + ". Outfit MUST stay fully visible on the skeleton throughout the shot."
+                outfit_sentence = next(
+                    (c.strip() for c in chunks if c and outfit_keyword_re.search(c)),
+                    "",
+                )
+                if outfit_sentence and not has_canonical_lock:
+                    lead = f"{outfit_sentence.rstrip('.!?')}. A canonical ivory-white anatomical skeleton with large realistic eyeballs wearing those exact clothes."
+                    first_chunk = f"{lead} {first_chunk}".strip() if outfit_sentence not in first_chunk else f"{lead} {first_chunk[len(outfit_sentence):].lstrip(' .!?')}".strip()
+                elif not has_canonical_lock:
+                    lead = "A canonical ivory-white anatomical skeleton with large realistic eyeballs wears the scene's explicitly requested outfit."
+                    first_chunk = f"{lead} {first_chunk}".strip()
+                first_chunk = first_chunk.rstrip(".!?") + ". Outfit MUST stay fully visible on the skeleton throughout the shot — do not render the skeleton nude under any condition."
             else:
                 if not has_canonical_lock:
                     first_chunk = f"{skeleton_lock} {first_chunk}".strip()
