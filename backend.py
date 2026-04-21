@@ -12150,13 +12150,21 @@ async def run_generation_pipeline(
                 if template == "skeleton":
                     anim_prompt = anim_prompt + _canonical_skeleton_animation_lock()
                 try:
+                    # Skeleton default swapped from kling21_standard → pixverse_v6
+                    # on 2026-04-21. Kling 2.1 Standard kept 422-erroring through
+                    # fal.ai, forcing every skeleton scene to fall back to a static
+                    # zoomed image with zero motion (verified on job 1776790793_9589).
+                    # PixVerse V6 at 720p renders reliably (same model Sanjay Shah
+                    # 12-min doc was built on) and produces the motion the animation
+                    # preview + final MP4 actually need. Users can still pick Kling
+                    # via the Video Model picker if they want it specifically.
                     anim_result = await animate_scene(
                         img_path, anim_prompt,
                         str(TEMP_DIR), i, gen_ts,
                         duration_sec=scene.get("duration_sec", 5),
                         image_cdn_url=cdn_url,
                         prefer_wan=False,
-                        video_model_id="kling21_standard" if template == "skeleton" else "",
+                        video_model_id="pixverse_v6" if template == "skeleton" else "",
                     )
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
