@@ -1,0 +1,13 @@
+{
+  "version": "v2",
+  "total_images_this_run": 1197,
+  "trigger_token": "nyptid_skeleton",
+  "base_model": "stabilityai/stable-diffusion-xl-base-1.0",
+  "training_method": "DreamBooth LoRA",
+  "image_size": "9:16 portrait (1024x1824 for SDXL training)",
+  "style": "Photorealistic 3D skeleton, teal backdrop, UE5 quality",
+  "professions_covered": 118,
+  "action_scenes": 8,
+  "budget_usd": 24.0,
+  "spent_usd_estimate": 23.94
+}
