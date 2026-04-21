@@ -1867,6 +1867,12 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 return;
             }
         }
+        // Clear stale per-scene error banners on EVERY scene, not just the
+        // ones being regenerated. Scenes with existing imageData + stale
+        // imageError (e.g. left over from a previous failed render) are
+        // skipped by the batch, but their error banner lingers until the
+        // user manually re-generates them — confusing UI clutter.
+        setCreativeScenes(prev => prev.map(s => ({ ...s, imageError: undefined })));
         setBulkImageGenRunning(true);
         setBulkImageGenTotal(targets.length);
         setBulkImageGenDone(0);
