@@ -1,5 +1,7 @@
+import type { PageNav } from '../components/NavBar';
+
 interface Props {
-    onNavigate: (page: string) => void;
+    onNavigate: PageNav;
 }
 
 export default function WaitlistConfirmationPage({ onNavigate }: Props) {

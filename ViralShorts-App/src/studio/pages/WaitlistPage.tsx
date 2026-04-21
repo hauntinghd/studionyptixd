@@ -1,8 +1,9 @@
 import { useContext, useState } from 'react';
 import { AuthContext, API } from '../shared';
+import type { PageNav } from '../components/NavBar';
 
 interface Props {
-    onNavigate: (page: string) => void;
+    onNavigate: PageNav;
 }
 
 type Plan = 'starter' | 'creator' | 'pro';
