@@ -472,6 +472,115 @@ DILEMMA_NEGATIVE_PROMPT = (
     "no text, no words, no letters, no readable text, no captions, no titles"
 )
 
+# ===== Per-template cross-scene consistency anchors (Casey 2026-04-20) =====
+# Each per-scene prompt goes independently to fal.ai. Without an anchor, subtle
+# LLM drift produces different "characters" and different visual identity across
+# the 10 scenes of a single short — same complaint Casey has been hitting.
+# These anchors get injected into EVERY scene's prompt for that template, so
+# scenes 1-10 share the same canonical subject, setting, palette, lens, and
+# color grade. Skeleton already has its own (SKELETON_MASTER_CONSISTENCY_PROMPT);
+# this covers the other 8 short-form templates.
+
+DAYTRADING_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical trader figure (same age, same face, same dark charcoal crew-neck sweater or black t-shirt, same hair), "
+    "SAME multi-monitor workspace (4-6 matte-black monitors in identical layout, same mechanical keyboard, same black chair, same desk), "
+    "SAME floor-to-ceiling window showing the SAME city skyline at night with identical bokeh pattern, "
+    "SAME color grade (deep blacks, electric blue + green PnL accents, warm desk-lamp key), "
+    "SAME lens (ARRI anamorphic, same focal length, same anamorphic flare signature). "
+    "Do NOT change the trader's appearance, workspace layout, window view, or time of day across scenes."
+)
+
+BUSINESS_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical executive figure (same age, same face, same tailored navy or charcoal suit, same haircut, same tie style), "
+    "SAME corporate space identity (marble-and-dark-wood boardroom OR glass-walled conference room with same city view — pick ONE and keep it consistent), "
+    "SAME lighting pattern (controlled directional lighting, warm golden-hour backdrop, clean negative space), "
+    "SAME color grade (prestige drama palette, warm blacks + gold + navy), "
+    "SAME lens (ARRI Alexa prime cinema lens, rule-of-thirds framing with hero left-third). "
+    "Do NOT swap the executive, the building, or the palette across scenes."
+)
+
+FINANCE_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical Wall Street setting identity (either the SAME trading floor with identical monitor rows OR the SAME vintage-wood banker's office — pick ONE), "
+    "SAME human figure if present (same suited analyst/banker, same face, same tailored suit), "
+    "SAME color palette (deep navy + gold + dark wood with selective spot lighting), "
+    "SAME signature props appearing scene-to-scene (NYSE bell, gold bullion, mechanical watch, fountain pen, leather chair — reuse the SAME objects, not variant versions), "
+    "SAME lens (ARRI anamorphic, financial documentary grade). "
+    "Do NOT change the setting, figure, or signature objects across scenes."
+)
+
+TECH_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical founder/developer figure (same age, same face, same hoodie or dark crew-neck, same hair), "
+    "SAME workspace identity (dual-monitor setup with IDE, mechanical keyboard, whiteboard with identical markings, SAME desk and chair), "
+    "SAME color palette (neutral grey + electric cyan + warm desk-lamp accent), "
+    "SAME macro-detail style when showing hardware (silicon, fiber optics, server racks — Wired-magazine clarity), "
+    "SAME lens (ARRI with macro lens, consistent sharp depth of field). "
+    "Do NOT change the founder's appearance, workspace, or hardware style across scenes."
+)
+
+CRYPTO_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical trader figure (same age, same face, same dark hoodie or black shirt, same hair), "
+    "SAME crypto workspace (same multi-monitor layout, same chair, same dark room), "
+    "SAME rain-slick window with SAME neon city lights bleeding through in identical color pattern, "
+    "SAME color palette (deep purple + electric magenta + neon cyan — vaporwave-meets-financial-noir), "
+    "SAME signature props (SAME physical Bitcoin coins, SAME blockchain visualization style), "
+    "SAME lens (ARRI anamorphic with consistent flare signature). "
+    "Do NOT change the trader, workspace, or neon palette across scenes."
+)
+
+DILEMMA_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical hero subject across all scenes (same age, same face, same outfit, same hair), "
+    "SAME cold blue/teal grade with red accent flashes on stakes elements (the red hue is identical saturation + position logic every scene), "
+    "SAME 2.35:1 letterbox anamorphic widescreen framing, "
+    "SAME atmospheric haze density and dust-particle density, "
+    "SAME motivated practical-light source (same color temperature, same angle), "
+    "SAME lens (ARRI Alexa with anamorphic prime). "
+    "Do NOT swap the hero or the color grade between scenes."
+)
+
+SCARY_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME canonical haunted location identity — one building or one outdoor setting carried across all scenes (SAME hallway, SAME room, SAME exterior), "
+    "SAME Fincher-style desaturated blue/green/sickly-yellow palette with identical saturation and contrast, "
+    "SAME shadow density (shadows occupy ~60% of the frame in every scene), "
+    "SAME found-footage grain texture (same grain amount, same chromatic aberration level), "
+    "SAME film-noir lighting (single weak practical source, heavy falloff), "
+    "SAME lens (slight wide-angle with subtle barrel distortion). "
+    "Do NOT change the location, palette, or grain between scenes."
+)
+
+HISTORY_CONSISTENCY_ANCHOR = (
+    "CROSS-SCENE CONSISTENCY LOCK (all scenes share): "
+    "SAME historical period throughout (if Roman Empire, stay Roman for every scene; do NOT mix medieval with Napoleonic etc.), "
+    "SAME canonical protagonist figure if the story follows one person (same face, same period-accurate costume), "
+    "SAME Ridley-Scott-blockbuster color grade (deep golds, smoky browns, cool blue shadows) with identical saturation, "
+    "SAME atmospheric haze and volumetric god-ray density, "
+    "SAME lens (ARRI Alexa anamorphic with visible film grain), "
+    "SAME production design fidelity — period-accurate costumes, architecture, props with ultra-detailed textures. "
+    "Do NOT time-travel between scenes or swap the protagonist."
+)
+
+# Map template id -> consistency anchor string. Used by the generic image-prompt
+# builder to inject the anchor alongside TEMPLATE_PROMPT_PREFIXES.
+TEMPLATE_CONSISTENCY_ANCHORS = {
+    "daytrading":    DAYTRADING_CONSISTENCY_ANCHOR,
+    "business":      BUSINESS_CONSISTENCY_ANCHOR,
+    "finance":       FINANCE_CONSISTENCY_ANCHOR,
+    "tech":          TECH_CONSISTENCY_ANCHOR,
+    "crypto":        CRYPTO_CONSISTENCY_ANCHOR,
+    "dilemma":       DILEMMA_CONSISTENCY_ANCHOR,
+    "scary":         SCARY_CONSISTENCY_ANCHOR,
+    "history":       HISTORY_CONSISTENCY_ANCHOR,
+    # skeleton has its own (SKELETON_MASTER_CONSISTENCY_PROMPT, injected via
+    # _build_skeleton_image_prompt) and doesn't go through the generic path.
+}
+
+
 TEMPLATE_PROMPT_PREFIXES = {
     "skeleton": SKELETON_IMAGE_PROMPT_PREFIX,
     "history": HISTORY_IMAGE_PROMPT_PREFIX,
