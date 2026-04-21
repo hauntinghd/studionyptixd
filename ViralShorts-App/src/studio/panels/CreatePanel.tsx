@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
-import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Video, Wand2, X, Zap } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Clapperboard, Clock, Download, Film, Image, Loader2, Lock, Plus, Sliders, Sparkles, Trash2, Video, Volume2, Wand2, X, Zap } from 'lucide-react';
 import { API, AuthContext, CREATE_WORKFLOW_PERSISTENCE_ENABLED, GENERATION_API, Logo, startYouTubeBrowserConnect } from '../shared';
 import { FeedbackWidget, JobDiagnostics, ProgressBar, RenderProgressWindow } from '../components/StudioWidgets';
 import GenerateScriptWithAIModal from '../components/GenerateScriptWithAIModal';
@@ -599,145 +599,6 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 <Plus className="h-3 w-3" />
                 New Project
             </button>
-        </div>
-    );
-    const renderCustomVoiceLibraryCard = () => (
-        <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
-            <div className="flex items-start justify-between gap-3">
-                <div>
-                    <p className="text-sm font-semibold text-white">Audio Engine</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                        ElevenLabs voice stack with custom presets per template. Background music is disabled — NYPTID testing showed it hurts retention.
-                    </p>
-                </div>
-                <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
-                    ElevenLabs First
-                </span>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Source</label>
-                    <div className="grid grid-cols-3 gap-2">
-                        <button
-                            type="button"
-                            onClick={() => setVoiceProvider('custom')}
-                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
-                                voiceProvider === 'custom'
-                                    ? 'bg-violet-600 text-white'
-                                    : 'bg-black/20 text-gray-300 hover:bg-white/[0.06]'
-                            }`}
-                        >
-                            Custom Library
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setVoiceProvider('elevenlabs')}
-                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
-                                voiceProvider === 'elevenlabs'
-                                    ? 'bg-cyan-600 text-white'
-                                    : 'bg-black/20 text-gray-300 hover:bg-white/[0.06]'
-                            }`}
-                        >
-                            ElevenLabs
-                        </button>
-                        <button
-                            type="button"
-                            disabled
-                            className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-amber-200 opacity-90"
-                        >
-                            Custom Upload Soon
-                        </button>
-                    </div>
-                </div>
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Caption Font</label>
-                    <select
-                        value={captionFont}
-                        onChange={(e) => setCaptionFont(e.target.value)}
-                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
-                    >
-                        {finaleCaptionFonts.map((font) => (
-                            <option key={font} value={font}>{font}</option>
-                        ))}
-                    </select>
-                </div>
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
-                    <input
-                        type="range"
-                        min={0.8}
-                        max={1.4}
-                        step={0.05}
-                        value={storyVoiceSpeed}
-                        onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
-                        className="w-full accent-violet-500"
-                    />
-                </div>
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Pitch (profile-locked)</label>
-                    <input
-                        type="range"
-                        min={0.8}
-                        max={1.2}
-                        step={0.05}
-                        value={voicePitch}
-                        onChange={(e) => setVoicePitch(Number(e.target.value))}
-                        disabled
-                        className="w-full accent-cyan-500"
-                    />
-                </div>
-                <div>
-                    <label className="mb-1 block text-xs uppercase tracking-wider text-gray-500">Voice Language</label>
-                    <select
-                        value={language}
-                        onChange={(e) => setLanguage(e.target.value)}
-                        className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:outline-none"
-                    >
-                        {languages.length > 0 ? languages.map((lang) => (
-                            <option key={lang.code} value={lang.code}>{lang.name}</option>
-                        )) : (
-                            <option value="en">English</option>
-                        )}
-                    </select>
-                </div>
-            </div>
-            {voiceProvider === 'custom' ? (
-                <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                        <div>
-                            <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Custom Voice Library</p>
-                            <p className="mt-1 text-sm text-white">{availableCustomVoices.length}-profile Catalyst voice rack</p>
-                        </div>
-                        <p className="text-xs text-gray-500">Each preset resolves to a real render voice and tuned delivery profile.</p>
-                    </div>
-                    <div className="mt-4 grid max-h-[26rem] gap-2 overflow-y-auto pr-1 md:grid-cols-2 xl:grid-cols-3">
-                        {availableCustomVoices.map((voice) => (
-                            <button
-                                key={voice.id}
-                                type="button"
-                                onClick={() => applyCustomVoicePreset(voice.id)}
-                                className={`rounded-xl border p-3 text-left transition ${
-                                    customVoiceId === voice.id
-                                        ? 'border-violet-500 bg-violet-500/10'
-                                        : 'border-white/[0.08] bg-white/[0.02] hover:border-violet-500/30'
-                                }`}
-                            >
-                                <p className="text-sm font-semibold text-white">{voice.name}</p>
-                                <p className="mt-1 text-[11px] text-gray-400">{voice.profile}</p>
-                                <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-cyan-300">{voice.category || 'Catalyst'} · {voice.accent || 'global'}</p>
-                                <p className="mt-1 text-[10px] uppercase tracking-[0.14em] text-gray-500">{voice.source}</p>
-                            </button>
-                        ))}
-                    </div>
-                    <p className="mt-3 text-[11px] text-gray-500">
-                        Custom library mode is still available for the house voice rack, but ElevenLabs is the default live render path right now.
-                    </p>
-                </div>
-            ) : (
-                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-                    ElevenLabs is the main live voice lane right now. If it fails upstream, Studio falls back to the custom voice stack or the default narrator.
-                </div>
-            )}
         </div>
     );
     const readJsonResponse = async <T = any>(res: Response): Promise<{ data: T | null; raw: string }> => {
@@ -3364,62 +3225,161 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                     </div>
                 )}
 
-                {workspaceStage === 'audio' && renderCustomVoiceLibraryCard()}
-
-                {workspaceStage === 'audio' && templateSupportsVoiceControls && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-4">
-                        <p className="text-sm font-semibold text-white">Voice Pitch</p>
-                        <div className="flex items-center gap-3">
-                            <input
-                                type="range"
-                                min="0.7"
-                                max="1.3"
-                                step="0.05"
-                                value={storyVoicePitch}
-                                onChange={(e) => setStoryVoicePitch(Number(e.target.value))}
-                                className="flex-1 accent-violet-500"
-                            />
-                            <span className="w-12 text-right text-sm tabular-nums text-white">{storyVoicePitch.toFixed(2)}x</span>
+                {workspaceStage === 'audio' && (
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6 space-y-5">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <h3 className="text-base font-bold text-white">Narration Voice</h3>
+                                <p className="mt-0.5 text-[12px] text-gray-500">
+                                    Pick a voice, tune speed and pitch, and choose your caption font. Subtitles burn into the final video automatically.
+                                </p>
+                            </div>
+                            {templateSupportsVoiceControls && (
+                                <button
+                                    type="button"
+                                    onClick={() => { void previewStoryVoice(); }}
+                                    disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-semibold text-gray-200 transition hover:bg-white/[0.05] disabled:opacity-40 disabled:cursor-not-allowed"
+                                    title="Preview selected voice"
+                                >
+                                    {storyPreviewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}
+                                    Preview
+                                </button>
+                            )}
                         </div>
-                        <p className="text-[11px] text-gray-500">
-                            Lower pitch = deeper, upper pitch = brighter. 1.00x is the neutral ElevenLabs voice.
-                        </p>
+
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            {templateSupportsVoiceControls ? (
+                                <>
+                                    <label className="block space-y-1.5">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">Voice</span>
+                                        <select
+                                            value={storyVoiceId}
+                                            onChange={(e) => setStoryVoiceId(e.target.value)}
+                                            className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:border-violet-400 focus:outline-none"
+                                        >
+                                            {storyVoicesLoading ? (
+                                                <option value="">Loading voices…</option>
+                                            ) : storyVoices.length > 0 ? (
+                                                storyVoices.map((v: any) => (
+                                                    <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
+                                                        {String(v.name || v.voice_id || "Voice")}
+                                                    </option>
+                                                ))
+                                            ) : (
+                                                <option value="">Default voice</option>
+                                            )}
+                                        </select>
+                                        {storyPreviewError ? (
+                                            <p className="text-[11px] text-red-300">{storyPreviewError}</p>
+                                        ) : null}
+                                    </label>
+
+                                    <label className="block space-y-1.5">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">Voice Speed</span>
+                                            <span className="font-mono text-[11px] text-gray-400">{storyVoiceSpeed.toFixed(2)}x</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min={0.8}
+                                            max={1.35}
+                                            step={0.05}
+                                            value={storyVoiceSpeed}
+                                            onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
+                                            className="w-full accent-violet-500"
+                                        />
+                                    </label>
+
+                                    <label className="block space-y-1.5">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">Voice Pitch</span>
+                                            <span className="font-mono text-[11px] text-gray-400">{storyVoicePitch.toFixed(2)}x</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min={0.8}
+                                            max={1.2}
+                                            step={0.05}
+                                            value={storyVoicePitch}
+                                            onChange={(e) => setStoryVoicePitch(Number(e.target.value))}
+                                            className="w-full accent-violet-500"
+                                        />
+                                    </label>
+
+                                    <label className="block space-y-1.5">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">Voice Language</span>
+                                        <select
+                                            value={language}
+                                            onChange={(e) => setLanguage(e.target.value)}
+                                            className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:border-violet-400 focus:outline-none"
+                                        >
+                                            {languages.length > 0 ? languages.map((lang) => (
+                                                <option key={lang.code} value={lang.code}>{lang.name}</option>
+                                            )) : (
+                                                <option value="en">English</option>
+                                            )}
+                                        </select>
+                                    </label>
+                                </>
+                            ) : (
+                                <div className="md:col-span-2 rounded-lg border border-violet-500/20 bg-violet-500/10 p-4 text-xs text-violet-100">
+                                    This template uses baked narration — voice, speed, and pitch controls don't apply. Caption font still does.
+                                </div>
+                            )}
+
+                            <label className="block space-y-1.5 md:col-span-2">
+                                <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">Caption Font</span>
+                                <select
+                                    value={captionFont}
+                                    onChange={(e) => setCaptionFont(e.target.value)}
+                                    className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white focus:border-violet-400 focus:outline-none"
+                                >
+                                    {finaleCaptionFonts.map((font) => (
+                                        <option key={font} value={font}>{font}</option>
+                                    ))}
+                                </select>
+                            </label>
+                        </div>
+
+                        {storyVoicesWarning ? (
+                            <p className="text-[11px] text-amber-300">{storyVoicesWarning}</p>
+                        ) : storyVoicesSource === 'fallback' ? (
+                            <p className="text-[11px] text-gray-500">Using fallback voice catalog.</p>
+                        ) : null}
                     </div>
                 )}
 
                 {workspaceStage === 'audio' && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-3">
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6 space-y-3">
                         <div>
-                            <p className="text-sm font-semibold text-white">Background Music</p>
-                            <p className="text-[11px] text-gray-500 mt-0.5">
-                                Upload your own track. Studio does not ship a built-in library — YouTube Shorts takedowns are too common.
+                            <h3 className="text-base font-bold text-white">Background Music <span className="ml-2 text-[11px] font-normal text-gray-500">(optional)</span></h3>
+                            <p className="mt-0.5 text-[12px] text-gray-500">
+                                Upload your own track. Studio doesn't ship a library because YouTube Shorts takedowns are too common.
                             </p>
                         </div>
-                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[11px] leading-snug text-amber-100">
-                            <span className="font-semibold">Warning:</span> Do not add background music if you plan to post on YouTube Shorts unless you own the rights — Content ID will strike or mute your video.
+                        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[11px] leading-snug text-amber-100">
+                            <span className="font-semibold">Warning:</span> don't add background music if you plan to post on YouTube Shorts unless you own the rights — Content ID will strike or mute your video.
                         </div>
-                        <label className="block">
-                            <span className="sr-only">Choose BG music file</span>
-                            <input
-                                type="file"
-                                accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/m4a"
-                                onChange={async (e) => {
-                                    const f = e.target.files?.[0] || null;
-                                    setBgMusicFile(f);
-                                    if (f) {
-                                        try {
-                                            const dataUrl = await fileToDataUrl(f);
-                                            setBgMusicDataUrl(dataUrl);
-                                        } catch {
-                                            setBgMusicDataUrl("");
-                                        }
-                                    } else {
+                        <input
+                            type="file"
+                            accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/x-m4a,audio/m4a"
+                            onChange={async (e) => {
+                                const f = e.target.files?.[0] || null;
+                                setBgMusicFile(f);
+                                if (f) {
+                                    try {
+                                        const dataUrl = await fileToDataUrl(f);
+                                        setBgMusicDataUrl(dataUrl);
+                                    } catch {
                                         setBgMusicDataUrl("");
                                     }
-                                }}
-                                className="block w-full text-xs text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-violet-600 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-white hover:file:bg-violet-500"
-                            />
-                        </label>
+                                } else {
+                                    setBgMusicDataUrl("");
+                                }
+                            }}
+                            className="block w-full cursor-pointer rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-xs text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-violet-500/20 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-violet-100 hover:file:bg-violet-500/30"
+                        />
                         {bgMusicFile && (
                             <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-xs text-gray-200">
                                 <div className="truncate">
@@ -3438,119 +3398,6 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                                 </button>
                             </div>
                         )}
-                    </div>
-                )}
-
-                {workspaceStage === 'audio' && templateSupportsVoiceControls && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5 space-y-5">
-                        <div className="flex items-center justify-between gap-3">
-                            <div>
-                                <p className="text-sm font-semibold text-white">Voice &amp; Pacing</p>
-                                <p className="text-[11px] text-gray-500 mt-0.5">These settings lock before render — preview a line to double-check before shipping.</p>
-                            </div>
-                            <button
-                                onClick={() => { void previewStoryVoice(); }}
-                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 text-white hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed transition whitespace-nowrap"
-                            >
-                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
-                            </button>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-1.5">
-                                <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Voice</label>
-                                <select
-                                    value={storyVoiceId}
-                                    onChange={(e) => setStoryVoiceId(e.target.value)}
-                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
-                                >
-                                    {storyVoicesLoading ? (
-                                        <option value="">Loading voices...</option>
-                                    ) : storyVoices.length > 0 ? (
-                                        storyVoices.map((v: any) => (
-                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
-                                                {String(v.name || v.voice_id || "Voice")}
-                                            </option>
-                                        ))
-                                    ) : (
-                                        <option value="">Default voice</option>
-                                    )}
-                                </select>
-                                {storyVoicesWarning ? (
-                                    <p className="text-[11px] text-amber-300">{storyVoicesWarning}</p>
-                                ) : storyVoicesSource === 'fallback' ? (
-                                    <p className="text-[11px] text-gray-500">Using fallback voice catalog.</p>
-                                ) : null}
-                                {storyPreviewError ? (
-                                    <p className="text-[11px] text-red-300">{storyPreviewError}</p>
-                                ) : null}
-                            </div>
-
-                            <div className="space-y-1.5">
-                                <div className="flex items-center justify-between">
-                                    <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Speed</label>
-                                    <span className="text-[11px] text-gray-400 font-mono">{storyVoiceSpeed.toFixed(2)}x</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min={0.8}
-                                    max={1.35}
-                                    step={0.05}
-                                    value={storyVoiceSpeed}
-                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
-                                    className="w-full accent-cyan-500"
-                                />
-                                <div className="flex justify-between text-[10px] text-gray-600 font-mono">
-                                    <span>0.80x</span>
-                                    <span>1.00x</span>
-                                    <span>1.35x</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Pacing</label>
-                            <div className="grid grid-cols-3 gap-2">
-                                {[
-                                    { id: 'standard', label: 'Standard', desc: 'Conversational' },
-                                    { id: 'fast', label: 'Fast', desc: 'Energetic' },
-                                    { id: 'very_fast', label: 'Very Fast', desc: 'High-velocity' },
-                                ].map((p) => (
-                                    <button
-                                        key={p.id}
-                                        type="button"
-                                        onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
-                                        className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
-                                            storyPacingMode === p.id
-                                                ? 'bg-cyan-600 text-white border-cyan-500/40 shadow-md shadow-cyan-600/20'
-                                                : 'bg-white/[0.03] text-gray-300 border-white/[0.06] hover:bg-white/[0.06] hover:border-white/[0.1]'
-                                        }`}
-                                    >
-                                        <div>{p.label}</div>
-                                        <div className={`text-[10px] mt-0.5 ${storyPacingMode === p.id ? 'text-cyan-100/80' : 'text-gray-500'}`}>{p.desc}</div>
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="rounded-lg border border-white/[0.06] bg-black/20 px-4 py-3 flex items-center justify-between">
-                            <div>
-                                <p className="text-sm text-white font-medium">Burn subtitles into video</p>
-                                <p className="text-[11px] text-gray-500 mt-0.5">Recommended — most short-form plays muted at first.</p>
-                            </div>
-                            <label className="relative inline-flex items-center cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    checked={subtitlesEnabled}
-                                    onChange={(e) => setSubtitlesEnabled(e.target.checked)}
-                                    className="sr-only peer"
-                                />
-                                <div className="w-11 h-6 bg-white/[0.08] rounded-full peer-checked:bg-cyan-600 transition-colors">
-                                    <div className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform mt-0.5 ml-0.5 ${subtitlesEnabled ? 'translate-x-5' : ''}`} />
-                                </div>
-                            </label>
-                        </div>
                     </div>
                 )}
 
@@ -4488,131 +4335,45 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
                 )}
 
                 {workspaceStage === 'audio' && (
-                <>
-                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                    <div className="space-y-3">
-                        <div>
-                            <p className="text-sm font-semibold text-white">Output Type</p>
-                            <p className="text-xs text-gray-500 mt-1">
-                                Switch to animation here if you forgot earlier. Slideshow stays free, animation uses Catalyst render credits.
+                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                        <div className="space-y-3">
+                            <div>
+                                <p className="text-sm font-semibold text-white">Output Type</p>
+                                <p className="mt-1 text-xs text-gray-500">
+                                    Switch to animation here if you forgot earlier. Slideshow stays free, animation uses render credits.
+                                </p>
+                            </div>
+                            <div className="inline-flex rounded-xl border border-white/[0.08] bg-black/30 p-1">
+                                <button
+                                    type="button"
+                                    onClick={() => globalSetRenderMode('slideshow')}
+                                    disabled={loading || scriptLoading}
+                                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                        !effectiveAnimationEnabled
+                                            ? "bg-white text-black"
+                                            : "text-gray-300 hover:bg-white/[0.08]"
+                                    } disabled:opacity-50`}
+                                >
+                                    Slideshow
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => globalSetRenderMode('animation')}
+                                    disabled={loading || scriptLoading}
+                                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                        effectiveAnimationEnabled
+                                            ? "bg-emerald-600/80 text-white"
+                                            : "text-cyan-200 hover:bg-cyan-500/15"
+                                    } disabled:opacity-50`}
+                                >
+                                    Animation
+                                </button>
+                            </div>
+                            <p className="text-[11px] text-gray-400">
+                                Current mode: <span className="font-semibold text-white">{effectiveAnimationEnabled ? 'Animation' : 'Slideshow'}</span>
                             </p>
                         </div>
-                        <div className="inline-flex rounded-xl border border-white/[0.08] bg-black/30 p-1">
-                            <button
-                                type="button"
-                                onClick={() => globalSetRenderMode('slideshow')}
-                                disabled={loading || scriptLoading}
-                                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                                    !effectiveAnimationEnabled
-                                        ? "bg-white text-black"
-                                        : "text-gray-300 hover:bg-white/[0.08]"
-                                } disabled:opacity-50`}
-                            >
-                                Slideshow
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => globalSetRenderMode('animation')}
-                                disabled={loading || scriptLoading}
-                                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                                    effectiveAnimationEnabled
-                                        ? "bg-emerald-600/80 text-white"
-                                        : "text-cyan-200 hover:bg-cyan-500/15"
-                                } disabled:opacity-50`}
-                            >
-                                Animation
-                            </button>
-                        </div>
-                        <p className="text-[11px] text-gray-400">
-                            Current mode: <span className="font-semibold text-white">{effectiveAnimationEnabled ? 'Animation' : 'Slideshow'}</span>
-                        </p>
                     </div>
-                </div>
-                {renderCustomVoiceLibraryCard()}
-                {templateSupportsVoiceControls && (
-                    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-4">
-                        <div className="flex items-center justify-between gap-3">
-                            <div>
-                                <p className="text-sm font-semibold text-white">Voice + Pacing</p>
-                                <p className="text-xs text-gray-500 mt-1">Choose the render voice, tune speed, and set pacing before render.</p>
-                            </div>
-                            <button
-                                onClick={() => { void previewStoryVoice(); }}
-                                disabled={!storyVoiceId || storyPreviewLoading || storyVoicesLoading}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 text-gray-200 hover:bg-white/15 disabled:opacity-50"
-                            >
-                                {storyPreviewLoading ? "Previewing..." : "Preview Voice"}
-                            </button>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice</label>
-                                <select
-                                    value={storyVoiceId}
-                                    onChange={(e) => setStoryVoiceId(e.target.value)}
-                                    className="w-full bg-black/30 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
-                                >
-                                    {storyVoicesLoading ? (
-                                        <option value="">Loading voices...</option>
-                                    ) : storyVoices.length > 0 ? (
-                                        storyVoices.map((v: any) => (
-                                            <option key={String(v.voice_id || v.name || Math.random())} value={String(v.voice_id || "")}>
-                                                {String(v.name || v.voice_id || "Voice")}
-                                            </option>
-                                        ))
-                                    ) : (
-                                        <option value="">Default voice</option>
-                                    )}
-                                </select>
-                                {storyVoicesWarning ? (
-                                    <p className="text-[11px] text-amber-300 mt-1">{storyVoicesWarning}</p>
-                                ) : storyVoicesSource === 'fallback' ? (
-                                    <p className="text-[11px] text-gray-400 mt-1">Using fallback voice catalog.</p>
-                                ) : null}
-                                {storyPreviewError ? (
-                                    <p className="text-[11px] text-red-300 mt-1">{storyPreviewError}</p>
-                                ) : null}
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Voice Speed ({storyVoiceSpeed.toFixed(2)}x)</label>
-                                <input
-                                    type="range"
-                                    min={0.8}
-                                    max={1.35}
-                                    step={0.05}
-                                    value={storyVoiceSpeed}
-                                    onChange={(e) => setStoryVoiceSpeed(Number(e.target.value))}
-                                    className="w-full accent-cyan-500"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase tracking-wider mb-1 block">Pacing</label>
-                                <div className="grid grid-cols-3 gap-1">
-                                    {[
-                                        { id: 'standard', label: 'Standard' },
-                                        { id: 'fast', label: 'Fast' },
-                                        { id: 'very_fast', label: 'Very Fast' },
-                                    ].map((p) => (
-                                        <button
-                                            key={p.id}
-                                            type="button"
-                                            onClick={() => setStoryPacingMode(p.id as 'standard' | 'fast' | 'very_fast')}
-                                            className={`px-2 py-1.5 rounded-md text-xs font-semibold transition ${
-                                                storyPacingMode === p.id ? 'bg-cyan-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/15'
-                                            }`}
-                                        >
-                                            {p.label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-                    Finale is where voice and captions get locked. Generate scenes first, then use the scene editor to tune prompts before final render.
-                </div>
-                </>
                 )}
 
                 {/* MODEL PICKERS (auto + creative + script_to_short — always visible above Generate) */}
