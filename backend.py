@@ -18558,6 +18558,11 @@ async def _billing_refund_request(req: Request):
     doesn't exist yet (migration not applied), writes a local JSON
     fallback under APP_DATA_DIR/refund_requests.jsonl so no requests
     are lost.
+
+    As of 2026-04-21 all four fields are required: reason, amount_usd,
+    payment_reference (PayPal order id / invoice), and image_proof
+    (data URL or https URL to a screenshot). This prevents bad-faith
+    requests where we can't match a charge.
     """
     user = await get_current_user_from_request(req) if req else None
     if not user:
@@ -18567,18 +18572,41 @@ async def _billing_refund_request(req: Request):
     except Exception:
         body = {}
     reason = str(body.get("reason", "") or "").strip()
-    amount_usd = body.get("amount_usd")
+    amount_raw = body.get("amount_usd")
     payment_reference = str(body.get("payment_reference", "") or "").strip()
+    image_proof = str(body.get("image_proof", "") or "").strip()
     if not reason:
         raise HTTPException(400, "Reason is required")
     if len(reason) > 4000:
         reason = reason[:4000]
+    try:
+        amount_usd = float(amount_raw) if amount_raw is not None and amount_raw != "" else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Amount paid must be a number")
+    if amount_usd is None or amount_usd <= 0:
+        raise HTTPException(400, "Amount paid is required and must be greater than zero")
+    if not payment_reference:
+        raise HTTPException(400, "PayPal order / invoice id is required")
+    if not image_proof:
+        raise HTTPException(400, "Image proof is required")
+    # Accept data-URL uploads (image/<type>;base64,...) OR a plain https URL
+    # pointing to a hosted screenshot. Anything else = reject.
+    is_data_url = image_proof.startswith("data:image/")
+    is_https_url = image_proof.startswith("https://") or image_proof.startswith("http://")
+    if not (is_data_url or is_https_url):
+        raise HTTPException(400, "Image proof must be an uploaded image or an https URL")
+    # Cap data-URL payload at ~3 MB (base64 expands ~1.37x, so 2 MB raw file
+    # = ~2.75 MB base64). Client enforces 2 MB raw; server gives a 3 MB safety
+    # margin before refusing.
+    if len(image_proof) > 3 * 1024 * 1024:
+        raise HTTPException(413, "Image proof is too large (max 2 MB)")
     payload = {
         "user_id": str(user.get("id", "") or ""),
         "email": str(user.get("email", "") or ""),
         "reason": reason,
-        "amount_usd": float(amount_usd) if amount_usd is not None else None,
-        "payment_reference": payment_reference or None,
+        "amount_usd": amount_usd,
+        "payment_reference": payment_reference,
+        "image_proof": image_proof,
         "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

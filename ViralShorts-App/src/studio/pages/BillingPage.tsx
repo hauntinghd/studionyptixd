@@ -467,17 +467,57 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     );
 }
 
+const MAX_PROOF_BYTES = 2 * 1024 * 1024;
+
 function RefundRequestCard() {
     const { session } = useContext(AuthContext);
     const [open, setOpen] = useState(false);
     const [reason, setReason] = useState('');
     const [amount, setAmount] = useState('');
     const [paymentRef, setPaymentRef] = useState('');
+    const [imageProof, setImageProof] = useState<string>('');
+    const [imageProofName, setImageProofName] = useState<string>('');
     const [submitting, setSubmitting] = useState(false);
     const [submitted, setSubmitted] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const canSubmit = reason.trim().length > 10 && !submitting;
+    const amountNumber = Number(amount);
+    const amountValid = amount.trim().length > 0 && Number.isFinite(amountNumber) && amountNumber > 0;
+    const canSubmit =
+        reason.trim().length > 10 &&
+        amountValid &&
+        paymentRef.trim().length > 0 &&
+        imageProof.length > 0 &&
+        !submitting;
+
+    const handleProofFile = (file: File | null) => {
+        setError(null);
+        if (!file) {
+            setImageProof('');
+            setImageProofName('');
+            return;
+        }
+        if (!file.type.startsWith('image/')) {
+            setError('Image proof must be an image file (PNG, JPG, etc.).');
+            return;
+        }
+        if (file.size > MAX_PROOF_BYTES) {
+            setError(`Image proof is too large (max 2 MB). Yours is ${(file.size / 1024 / 1024).toFixed(1)} MB.`);
+            return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => setError('Could not read the selected file.');
+        reader.onload = () => {
+            const result = typeof reader.result === 'string' ? reader.result : '';
+            if (!result) {
+                setError('Could not read the selected file.');
+                return;
+            }
+            setImageProof(result);
+            setImageProofName(file.name);
+        };
+        reader.readAsDataURL(file);
+    };
 
     const submit = async () => {
         if (!session || !canSubmit) return;
@@ -492,8 +532,9 @@ function RefundRequestCard() {
                 },
                 body: JSON.stringify({
                     reason: reason.trim(),
-                    amount_usd: amount.trim() ? Number(amount) : null,
-                    payment_reference: paymentRef.trim() || null,
+                    amount_usd: amountNumber,
+                    payment_reference: paymentRef.trim(),
+                    image_proof: imageProof,
                 }),
             });
             if (!res.ok) {
@@ -504,6 +545,8 @@ function RefundRequestCard() {
             setReason('');
             setAmount('');
             setPaymentRef('');
+            setImageProof('');
+            setImageProofName('');
         } catch (e: any) {
             setError(e?.message || 'Could not submit refund request');
         } finally {
@@ -537,8 +580,11 @@ function RefundRequestCard() {
             )}
             {open && !submitted && (
                 <div className="mt-4 space-y-3">
+                    <p className="text-[11px] text-gray-500">
+                        All four fields are required so we can match your request to the PayPal charge and respond quickly.
+                    </p>
                     <label className="block">
-                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Reason (required)</span>
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Reason <span className="text-red-400">(required)</span></span>
                         <textarea
                             value={reason}
                             onChange={(e) => setReason(e.target.value)}
@@ -549,28 +595,49 @@ function RefundRequestCard() {
                     </label>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <label className="block">
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Amount (USD, optional)</span>
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Amount paid (USD) <span className="text-red-400">(required)</span></span>
                             <input
                                 type="number"
                                 value={amount}
                                 onChange={(e) => setAmount(e.target.value)}
                                 step="0.01"
-                                min="0"
+                                min="0.01"
+                                required
                                 placeholder="29.00"
                                 className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
                             />
                         </label>
                         <label className="block">
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">PayPal order / invoice id (optional)</span>
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">PayPal order / invoice id <span className="text-red-400">(required)</span></span>
                             <input
                                 type="text"
                                 value={paymentRef}
                                 onChange={(e) => setPaymentRef(e.target.value)}
+                                required
                                 placeholder="8AB123456789"
                                 className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
                             />
                         </label>
                     </div>
+                    <label className="block">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                            Image proof <span className="text-red-400">(required)</span>
+                            <span className="ml-1 font-normal normal-case tracking-normal text-gray-500">— PayPal receipt, order page, or bank statement screenshot (max 2 MB)</span>
+                        </span>
+                        <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => handleProofFile(e.target.files?.[0] ?? null)}
+                            required
+                            className="mt-1 block w-full cursor-pointer rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-xs text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-violet-500/20 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-violet-100 hover:file:bg-violet-500/30"
+                        />
+                        {imageProof && (
+                            <span className="mt-1 flex items-center gap-2 text-[11px] text-emerald-300">
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                Uploaded: {imageProofName} ({Math.round(imageProof.length / 1024)} KB encoded)
+                            </span>
+                        )}
+                    </label>
                     {error && (
                         <p className="text-[11px] text-red-300">{error}</p>
                     )}

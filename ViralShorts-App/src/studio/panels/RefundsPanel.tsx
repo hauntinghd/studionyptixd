@@ -9,6 +9,7 @@ interface RefundRequest {
     reason: string;
     amount_usd?: number | null;
     payment_reference?: string | null;
+    image_proof?: string | null;
     status?: string;
     admin_note?: string | null;
     created_at?: string;
@@ -170,6 +171,20 @@ export default function RefundsPanel() {
                                         )}
                                     </div>
                                     <p className="mt-2 text-[13px] leading-snug text-gray-300">{refund.reason}</p>
+                                    {refund.image_proof ? (
+                                        <a
+                                            href={refund.image_proof}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="mt-2 inline-flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-200 transition hover:bg-emerald-500/20"
+                                        >
+                                            View image proof ↗
+                                        </a>
+                                    ) : (
+                                        <span className="mt-2 inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-200">
+                                            No image proof (legacy request)
+                                        </span>
+                                    )}
                                     {refund.admin_note && (
                                         <p className="mt-1 text-[11px] italic text-violet-300/70">Admin: {refund.admin_note}</p>
                                     )}

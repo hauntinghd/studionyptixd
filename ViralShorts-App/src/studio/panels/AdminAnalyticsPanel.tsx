@@ -126,10 +126,10 @@ export default function AdminAnalyticsPanel() {
             {loading && <p className="text-gray-500 text-sm">Loading analytics...</p>}
             {error && <p className="text-red-400 text-sm">{error}</p>}
 
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-4">
-                <h3 className="font-semibold text-emerald-200">Waitlist Removed</h3>
-                <p className="text-sm text-emerald-100 mt-1">
-                    Studio now uses free slideshow access plus usage-based animation credits. Monthly waitlist/subscription onboarding has been retired.
+            <div className="rounded-xl border border-violet-500/30 bg-violet-500/[0.06] p-4">
+                <h3 className="font-semibold text-violet-200">Open-Beta Waitlist is live</h3>
+                <p className="text-sm text-violet-100 mt-1">
+                    Paid first-month deposits are flowing in from the landing waitlist. See the Waitlist tab in the sidebar for the full list, plan mix, and paid revenue.
                 </p>
             </div>
 
