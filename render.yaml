@@ -5,7 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: ./ops/run_render_service.sh
-    plan: starter
+    plan: standard
     numInstances: 1
     healthCheckPath: /api/health
     maxShutdownDelaySeconds: 120
@@ -65,6 +65,10 @@ services:
         value: "false"
       - key: CHATSTORY_ELEVENLABS_MODEL_ID
         value: eleven_multilingual_v2
+      - key: WAITLIST_ONLY_MODE
+        value: "true"
+      - key: WAITLIST_REQUIRE_STRIPE_PAYMENT
+        value: "false"
       - key: XAI_API_KEY
         sync: false
       - key: ALGROW_API_KEY
@@ -82,6 +86,16 @@ services:
       - key: ELEVENLABS_API_KEY
         sync: false
       - key: FAL_AI_KEY
+        sync: false
+      - key: FAL_AI_KEY_2
+        sync: false
+      - key: FAL_AI_KEY_3
+        sync: false
+      - key: FAL_AI_KEY_4
+        sync: false
+      - key: FAL_AI_KEY_5
+        sync: false
+      - key: FAL_AI_KEY_6
         sync: false
       - key: PIKZELS_API_KEY
         sync: false
