@@ -23,7 +23,7 @@ export default function WaitlistPage({ onNavigate }: Props) {
     const [email, setEmail] = useState(defaultEmail);
     const [name, setName] = useState('');
     const [plan, setPlan] = useState<Plan>('starter');
-    const [provider, setProvider] = useState<Provider>('stripe');
+    const [provider, setProvider] = useState<Provider>('paypal');
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState('');
 
@@ -161,23 +161,38 @@ export default function WaitlistPage({ onNavigate }: Props) {
                             <div className="grid grid-cols-2 gap-3">
                                 {(['stripe', 'paypal'] as Provider[]).map((p) => {
                                     const active = provider === p;
+                                    const isStripe = p === 'stripe';
                                     return (
                                         <button
                                             key={p}
                                             type="button"
-                                            onClick={() => setProvider(p)}
-                                            disabled={submitting}
-                                            className={`rounded-lg border p-4 text-sm font-semibold transition ${
-                                                active
-                                                    ? 'border-cyan-400 bg-cyan-500/[0.08] text-white'
-                                                    : 'border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
+                                            onClick={() => !isStripe && setProvider(p)}
+                                            disabled={submitting || isStripe}
+                                            aria-disabled={isStripe}
+                                            title={isStripe ? 'Card checkout is temporarily unavailable while we recover our Stripe account.' : undefined}
+                                            className={`relative rounded-lg border p-4 text-sm font-semibold transition ${
+                                                isStripe
+                                                    ? 'border-white/[0.06] bg-white/[0.015] text-gray-500 cursor-not-allowed'
+                                                    : active
+                                                        ? 'border-cyan-400 bg-cyan-500/[0.08] text-white'
+                                                        : 'border-white/[0.08] bg-white/[0.02] text-gray-300 hover:border-white/20'
                                             }`}
                                         >
-                                            {p === 'stripe' ? 'Pay with card (Stripe)' : 'Pay with PayPal'}
+                                            {isStripe ? (
+                                                <span className="flex items-center justify-center gap-2">
+                                                    <span className="line-through opacity-70">Pay with card (Stripe)</span>
+                                                    <span className="rounded-full border border-amber-400/40 bg-amber-500/[0.12] px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-200">Coming soon</span>
+                                                </span>
+                                            ) : (
+                                                'Pay with PayPal'
+                                            )}
                                         </button>
                                     );
                                 })}
                             </div>
+                            <p className="mt-2 text-[11px] text-gray-500">
+                                Card checkout is temporarily paused while we recover our Stripe account. PayPal works now and supports cards at checkout.
+                            </p>
                         </div>
 
                         {error && (
