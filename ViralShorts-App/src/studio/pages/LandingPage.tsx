@@ -89,6 +89,14 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
                                     type="button"
+                                    onClick={() => onNavigate('waitlist')}
+                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-8 py-4 text-lg font-semibold text-white shadow-lg shadow-violet-900/30 transition hover:opacity-95"
+                                >
+                                    Join Waiting List
+                                    <ArrowRight className="h-5 w-5" />
+                                </button>
+                                <button
+                                    type="button"
                                     onClick={openDashboard}
                                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                                 >

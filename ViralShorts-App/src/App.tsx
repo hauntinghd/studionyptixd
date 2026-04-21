@@ -8,10 +8,12 @@ import PrivacyPage from './studio/pages/PrivacyPage';
 import SettingsPage from './studio/pages/SettingsPage';
 import SubscriptionPage from './studio/pages/SubscriptionPage';
 import TermsPage from './studio/pages/TermsPage';
+import WaitlistPage from './studio/pages/WaitlistPage';
+import WaitlistConfirmationPage from './studio/pages/WaitlistConfirmationPage';
 import { AuthContext, AuthProvider, isBillingHost } from './studio/shared';
 import { trackStudioPageView } from './studio/lib/googleAds';
 
-type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'privacy' | 'terms';
+type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'privacy' | 'terms' | 'waitlist' | 'waitlist_confirmation';
 
 const hasPendingAuthRedirectArtifacts = (): boolean => {
     if (typeof window === 'undefined') return false;
@@ -28,7 +30,7 @@ const hasPendingAuthRedirectArtifacts = (): boolean => {
 };
 
 function AppShell() {
-    const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
+    const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage, waitlistOnlyMode } = useContext(AuthContext);
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const resolvePageFromLocation = useCallback((): StudioPage | null => {
@@ -36,6 +38,8 @@ function AppShell() {
         const pathname = String(window.location.pathname || '').replace(/\/+$/, '').toLowerCase();
         if (pathname === '/privacy') return 'privacy';
         if (pathname === '/terms') return 'terms';
+        if (pathname === '/waitlist') return 'waitlist';
+        if (pathname === '/waitlist/confirmation') return 'waitlist_confirmation';
         const search = new URLSearchParams(window.location.search);
         const urlPage = String(search.get('page') || '').trim().toLowerCase();
         if (urlPage === 'dashboard') return 'dashboard';
@@ -47,6 +51,8 @@ function AppShell() {
         if (urlPage === 'account') return 'account';
         if (urlPage === 'privacy') return 'privacy';
         if (urlPage === 'terms') return 'terms';
+        if (urlPage === 'waitlist') return 'waitlist';
+        if (urlPage === 'waitlist_confirmation') return 'waitlist_confirmation';
         return billingHost ? 'billing' : null;
     }, [billingHost]);
     const [page, setPage] = useState<StudioPage>(() => {
@@ -119,6 +125,19 @@ function AppShell() {
         // and when signed out (no forced-auth redirect). Google's OAuth verification flow
         // needs these URLs to load for any visitor, logged in or not.
         if (page === 'privacy' || page === 'terms') return;
+        // Waitlist pages are always reachable — that's the whole point.
+        if (page === 'waitlist' || page === 'waitlist_confirmation') return;
+        // WAITLIST GATE: when the backend flags waitlistOnlyMode=true, every
+        // non-admin user (signed in or not) gets redirected to /waitlist for
+        // any dashboard/settings/billing route. Admins keep full access so
+        // Casey can still debug + test behind the gate.
+        if (waitlistOnlyMode && role !== 'admin') {
+            const gatedPages: StudioPage[] = ['dashboard', 'account', 'settings', 'billing', 'subscription'];
+            if (gatedPages.includes(page)) {
+                setPage('waitlist');
+                return;
+            }
+        }
         const authRedirectPending = hasPendingAuthRedirectArtifacts();
         if (billingHost) {
             if (!session && !authRedirectPending && (page === 'dashboard' || page === 'account' || page === 'settings')) {
@@ -148,7 +167,7 @@ function AppShell() {
         if (session && (page === 'landing' || page === 'auth')) {
             setPage('dashboard');
         }
-    }, [session, loading, page, role, backendOffline, billingHost]);
+    }, [session, loading, page, role, backendOffline, billingHost, waitlistOnlyMode]);
 
     return (
         <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
@@ -166,6 +185,8 @@ function AppShell() {
             {page === 'subscription' && <SubscriptionPage onNavigate={setPage} />}
             {page === 'privacy' && <PrivacyPage />}
             {page === 'terms' && <TermsPage />}
+            {page === 'waitlist' && <WaitlistPage onNavigate={setPage} />}
+            {page === 'waitlist_confirmation' && <WaitlistConfirmationPage onNavigate={setPage} />}
         </div>
     );
 }

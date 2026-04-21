@@ -85,6 +85,13 @@ class TopupCheckoutRequest(BaseModel):
 
 class WaitlistJoinRequest(BaseModel):
     plan: str
+    # Unauthenticated waitlist signups (landing page visitors not yet signed up)
+    # provide email directly. Authenticated flow can leave it empty and the
+    # backend falls back to the session user's email.
+    email: str = ""
+    name: str = ""
+    # "stripe" (default) or "paypal". Anything else rejected.
+    provider: str = "stripe"
 
 
 class SetPlanRequest(BaseModel):
