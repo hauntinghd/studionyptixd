@@ -2,7 +2,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Bell, ChevronDown, LogOut, MessageSquarePlus, Settings, User, WalletCards } from 'lucide-react';
 import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
-export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription') => void;
+export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'waitlist' | 'waitlist_confirmation') => void;
 
 export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; active?: string }) {
     const { session, role, signInWithGoogle, signOut, topupCreditsRemaining, monthlyCreditsRemaining, membershipActive } = useContext(AuthContext);

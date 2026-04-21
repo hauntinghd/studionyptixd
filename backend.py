@@ -20425,9 +20425,30 @@ async def _paypal_return(token: str = "", PayerID: str = ""):
         plan_suffix = f"&plan={quote(plan)}" if plan else ""
         success_url = f"{_billing_site_url()}?page=subscription&subscription=success&provider=paypal{plan_suffix}{order_suffix}"
         error_url = f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=paypal{plan_suffix}{order_suffix}"
+    elif order_kind == "waitlist":
+        plan = str(order_meta.get("plan", "") or "").strip().lower()
+        success_url = f"{_billing_site_url()}/waitlist/confirmation?provider=paypal&plan={quote(plan)}{order_suffix}"
+        error_url = f"{_billing_site_url()}/waitlist?status=cancelled&provider=paypal{order_suffix}"
     try:
         if order_kind in {"subscription", "monthly"}:
             await _capture_paypal_subscription_order(order_id)
+        elif order_kind == "waitlist":
+            # Capture the PayPal order, then upsert the waitlist row as paid.
+            order_data, _capture_id = await _capture_paypal_order_api(order_id)
+            _ = order_data  # capture details kept on the order record
+            try:
+                await _supabase_upsert_waitlist_entry(
+                    email=str(order_meta.get("email", "") or "").strip().lower(),
+                    plan=str(order_meta.get("plan", "") or "").strip().lower(),
+                    price_usd=float(order_meta.get("price_usd", 0.0) or 0.0),
+                    paid=True,
+                )
+            except Exception as e:
+                log.error(f"waitlist upsert after paypal capture failed for {order_id}: {e}")
+            async with _paypal_orders_lock:
+                if order_id in _paypal_orders:
+                    _paypal_orders[order_id]["activated"] = True
+                    _save_paypal_orders()
         else:
             await _capture_paypal_topup_order(order_id)
         return RedirectResponse(url=success_url, status_code=302)
@@ -20845,8 +20866,157 @@ async def _create_billing_portal_session(user: dict = Depends(require_auth)):
         raise HTTPException(500, "Could not open billing portal")
 
 
-async def _join_waitlist(req: WaitlistJoinRequest, user: dict = Depends(require_auth)):
-    raise HTTPException(410, "Waiting list has been removed from Studio.")
+async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
+    """Open-beta waitlist reservation. Accepts BOTH unauthenticated visitors
+    (from the public /waitlist landing) AND authenticated users (dashboard
+    redirect when WAITLIST_ONLY_MODE=true). Creates a Stripe or PayPal
+    checkout for the first-month subscription deposit and returns the URL.
+
+    On successful payment, the existing Stripe webhook handler upserts the
+    `waitlist` table row with paid=true (see line 20905). PayPal completion
+    is handled via _paypal_return redirecting through
+    _capture_paypal_subscription_order which persists similarly.
+    """
+    plan = str(req.plan or "").strip().lower()
+    provider = str(req.provider or "stripe").strip().lower()
+    email_override = str(req.email or "").strip().lower()
+    name = str(req.name or "").strip()[:100]
+
+    if plan not in {"starter", "creator", "pro"}:
+        raise HTTPException(400, "Invalid plan. Pick starter, creator, or pro.")
+    if provider not in {"stripe", "paypal"}:
+        raise HTTPException(400, "Provider must be 'stripe' or 'paypal'.")
+
+    # Try auth first (authenticated users), fall back to email-in-body for
+    # unauthenticated landing-page visitors.
+    auth_user: dict | None = None
+    try:
+        if request is not None:
+            auth_user = await get_current_user_from_request(request)
+    except Exception:
+        auth_user = None
+
+    email = ""
+    user_id = ""
+    if auth_user and auth_user.get("email"):
+        email = str(auth_user.get("email", "") or "").strip().lower()
+        user_id = str(auth_user.get("id", "") or "")
+    elif email_override:
+        email = email_override
+    else:
+        raise HTTPException(400, "Email is required (either sign in or provide 'email' in the body).")
+
+    # Basic email sanity. Full RFC validation not needed; downstream checkout
+    # flows will bounce bad addresses.
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(400, "Invalid email format.")
+
+    price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
+    if price_usd <= 0:
+        raise HTTPException(500, f"Plan {plan} has no configured price.")
+
+    # Upsert a PENDING entry so admins can see unpaid signups too. Paid status
+    # flips to true when the checkout completes (Stripe webhook / PayPal return).
+    try:
+        await _supabase_upsert_waitlist_entry(
+            email=email,
+            plan=plan,
+            price_usd=price_usd,
+            paid=False,
+        )
+    except Exception as e:
+        log.warning(f"waitlist pre-upsert failed for {email}: {e}")
+
+    site = _billing_site_url()
+    success_url = f"{site}/waitlist/confirmation?provider={provider}&plan={plan}"
+    cancel_url = f"{site}/waitlist?status=cancelled"
+
+    if provider == "stripe":
+        if not STRIPE_SECRET_KEY:
+            raise HTTPException(400, "Stripe is not configured yet. Please try PayPal.")
+        stripe_lib.api_key = STRIPE_SECRET_KEY
+        try:
+            session = stripe_lib.checkout.Session.create(
+                mode="payment",
+                line_items=[{
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": int(round(price_usd * 100)),
+                        "product_data": {
+                            "name": f"Studio Open-Beta Waitlist — {plan.title()} ({price_usd:.0f}/mo)",
+                            "description": "First-month deposit to reserve your beta slot. We'll email before each monthly renewal while Studio is in closed beta.",
+                        },
+                    },
+                    "quantity": 1,
+                }],
+                success_url=success_url,
+                cancel_url=cancel_url,
+                customer_email=email,
+                client_reference_id=user_id or email,
+                metadata={
+                    "checkout_kind": "waitlist_reservation",
+                    "plan": plan,
+                    "plan_price_usd": f"{price_usd:.2f}",
+                    "user_id": user_id,
+                    "name": name,
+                    "email": email,
+                },
+                payment_method_types=["card"],
+            )
+            return {"checkout_url": session.url, "provider": "stripe"}
+        except Exception as e:
+            log.error(f"Stripe waitlist checkout error for {email}: {e}")
+            raise HTTPException(500, f"Stripe checkout failed: {str(e)}")
+
+    # PayPal branch
+    if not _paypal_enabled():
+        raise HTTPException(400, "PayPal is not configured yet. Please try Stripe.")
+    order_payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [
+            {
+                "reference_id": f"waitlist_{plan}",
+                "custom_id": f"waitlist_reservation:{plan}:{email}",
+                "description": f"Studio Open-Beta Waitlist — {plan.title()} (first-month deposit)",
+                "amount": {
+                    "currency_code": "USD",
+                    "value": f"{price_usd:.2f}",
+                },
+            }
+        ],
+        "application_context": {
+            "brand_name": "NYPTID Studio",
+            "landing_page": "LOGIN",
+            "user_action": "PAY_NOW",
+            "shipping_preference": "NO_SHIPPING",
+            "return_url": f"{_api_public_url()}/api/paypal/return",
+            "cancel_url": f"{site}/waitlist?status=cancelled",
+        },
+    }
+    data = await _paypal_request("POST", "/v2/checkout/orders", json_body=order_payload)
+    order_id = str(data.get("id", "") or "")
+    approve_url = ""
+    for link in list(data.get("links", []) or []):
+        if str(link.get("rel", "") or "").lower() == "approve":
+            approve_url = str(link.get("href", "") or "")
+            break
+    if not order_id or not approve_url:
+        raise HTTPException(500, "PayPal approval URL missing for waitlist order")
+    async with _paypal_orders_lock:
+        _paypal_orders[order_id] = {
+            "kind": "waitlist",
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "price_id": f"waitlist_{plan}",
+            "plan": plan,
+            "price_usd": price_usd,
+            "activated": False,
+            "capture_id": "",
+            "created_at": time.time(),
+        }
+        _save_paypal_orders()
+    return {"checkout_url": approve_url, "provider": "paypal", "order_id": order_id}
 
 
 async def _stripe_webhook(request: Request):
