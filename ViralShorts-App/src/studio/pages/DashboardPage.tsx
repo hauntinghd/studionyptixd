@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Loader2, Monitor, PanelLeftOpen, Receipt, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Loader2, Monitor, PanelLeftOpen, Receipt, Sparkles, Users, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import CreatePanel from '../panels/CreatePanel';
@@ -16,6 +16,7 @@ const DemoPanel = lazy(() => import('../panels/DemoPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
+const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 
 const PanelFallback = () => (
     <div className="flex h-[40vh] items-center justify-center gap-2 text-sm text-gray-500">
@@ -23,7 +24,7 @@ const PanelFallback = () => (
     </div>
 );
 
-type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst' | 'refunds';
+type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst' | 'refunds' | 'waitlist';
 
 type SidebarItem = {
     id: DashboardTab;
@@ -43,6 +44,7 @@ const OWNER_ALL_ACCESS = {
     analytics: true,
     catalyst: true,
     refunds: true,
+    waitlist: true,
 };
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -72,7 +74,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, []);
     const isTabUnlocked = useCallback((nextTab: DashboardTab) => {
         if (nextTab === 'create') return true;
-        if (nextTab === 'analytics' || nextTab === 'catalyst' || nextTab === 'refunds') return isAdmin;
+        if (nextTab === 'analytics' || nextTab === 'catalyst' || nextTab === 'refunds' || nextTab === 'waitlist') return isAdmin;
         return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
     }, [isAdmin, laneAccess]);
 
@@ -90,7 +92,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         const params = new URLSearchParams(window.location.search);
         const requestedTab = String(params.get('tab') || params.get('focus') || '').trim().toLowerCase();
         if (!requestedTab) return;
-        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst', 'refunds']);
+        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst', 'refunds', 'waitlist']);
         if (!allowedTabs.has(requestedTab as DashboardTab)) return;
         const nextTab = requestedTab as DashboardTab;
         const unlocked = isTabUnlocked(nextTab);
@@ -153,6 +155,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         label: 'Refunds',
         icon: Receipt,
         hidden: !isAdmin,
+    }, {
+        id: 'waitlist',
+        label: 'Waitlist',
+        icon: Users,
+        hidden: !isAdmin,
     }] as SidebarItem[]).filter((item) => !item.hidden);
 
     const openCreateWorkspace = () => {
@@ -184,6 +191,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
+        if (tab === 'waitlist' && isAdmin) return lazyPanel(<WaitlistPanel />);
         if (tab === 'clone' && laneAccess.clone) return lazyPanel(<ClonePanel />);
         if (tab === 'longform' && laneAccess.longform) return lazyPanel(<LongFormPanel />);
         if (tab === 'thumbnails' && laneAccess.thumbnails) return lazyPanel(<ThumbnailPanel />);
