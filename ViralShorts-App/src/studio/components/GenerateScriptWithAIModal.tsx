@@ -114,11 +114,11 @@ export default function GenerateScriptWithAIModal({
             onClick={onClose}
         >
             <div
-                className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[#0b0b12] shadow-2xl"
+                className="flex w-full max-w-2xl max-h-[90vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b12] shadow-2xl"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* header */}
-                <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] p-5">
+                <div className="flex shrink-0 items-start justify-between gap-4 border-b border-white/[0.06] p-5">
                     <div className="flex items-start gap-3">
                         <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 text-cyan-200">
                             <Zap className="h-5 w-5" />
@@ -145,7 +145,7 @@ export default function GenerateScriptWithAIModal({
                 </div>
 
                 {/* tab switcher */}
-                <div className="flex gap-1 border-b border-white/[0.06] p-3">
+                <div className="flex shrink-0 gap-1 border-b border-white/[0.06] p-3">
                     <button
                         type="button"
                         onClick={() => setTab('idea_list')}
@@ -170,8 +170,8 @@ export default function GenerateScriptWithAIModal({
                     </button>
                 </div>
 
-                {/* content */}
-                <div className="p-5">
+                {/* content — scrolls inside the modal, never past viewport */}
+                <div className="flex-1 overflow-y-auto p-5">
                     {tab === 'idea_list' ? (
                         <div className="space-y-4">
                             {/* Idea Style picker */}
@@ -302,7 +302,7 @@ export default function GenerateScriptWithAIModal({
 
                 {/* sticky Generate Ideas CTA footer (Idea List only) */}
                 {tab === 'idea_list' && selectedStyle && (
-                    <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] p-4">
+                    <div className="flex shrink-0 items-center justify-between gap-3 border-t border-white/[0.06] p-4">
                         <p className="text-[11px] text-gray-500">
                             {ideasGenerated
                                 ? 'Rotated daily · VIRAL · TRENDING · PREDICTED'
