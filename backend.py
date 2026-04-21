@@ -6363,6 +6363,13 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
         payload["style"] = "realistic_image"
     elif model_id == "nano_banana_pro":
         payload["output_format"] = "png"
+    elif model_id == "flux_lora_skeleton":
+        # fal-ai/flux-lora expects image_size + output_format, and the
+        # caller attaches `loras` as a separate step (see
+        # _generate_image_fal_selected_model for lora_url injection).
+        payload["image_size"] = image_size
+        payload["output_format"] = "png"
+        payload["num_images"] = 1
     return payload
 
 
@@ -6381,13 +6388,45 @@ async def _generate_image_fal_selected_model(
     if not FAL_AI_KEY:
         raise RuntimeError("FAL_AI_KEY not configured")
 
+    resolved_id = str(profile.get("id", "") or model_id)
+    composed_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
+    # Custom LoRA models (e.g. flux_lora_skeleton) must have their trigger
+    # word prepended so the trained concept activates. Without the trigger
+    # word in the prompt, FLUX behaves like stock FLUX and the LoRA
+    # weights have zero effect on the output.
+    trigger_word = str(profile.get("trigger_word", "") or "").strip()
+    if trigger_word and trigger_word.lower() not in composed_prompt.lower():
+        composed_prompt = f"{trigger_word}, {composed_prompt}"
+    # Skeleton LoRA anatomy lock: at scale 1.0 + default prompt, FLUX-schnell
+    # rendered "human body with skull face" instead of "full anatomical
+    # skeleton" (validated 2026-04-21 on the anime-sorcerer test where
+    # bodies came back fully human with only skeletal hands + skull makeup).
+    # Explicit anatomy tokens alongside the trigger pull the LoRA back to
+    # its training distribution: visible ribcage, pelvis, leg bones through
+    # whatever outfit the scene prompt requests.
+    anatomy_lock = str(profile.get("anatomy_lock", "") or "").strip()
+    if anatomy_lock and anatomy_lock.lower() not in composed_prompt.lower():
+        if trigger_word and composed_prompt.lower().startswith(trigger_word.lower()):
+            tail = composed_prompt[len(trigger_word):].lstrip(" ,.")
+            composed_prompt = f"{trigger_word}, {anatomy_lock}, {tail}".strip()
+        else:
+            composed_prompt = f"{anatomy_lock}, {composed_prompt}"
     payload = _build_fal_image_model_payload(
-        str(profile.get("id", "") or model_id),
-        _creative_model_prompt(prompt, negative_prompt=negative_prompt),
+        resolved_id,
+        composed_prompt,
         resolution,
     )
-    if str(profile.get("id", "") or "") == "grok_imagine" and reference_image_url:
+    if resolved_id == "grok_imagine" and reference_image_url:
         payload["image_url"] = reference_image_url
+    # FLUX LoRA endpoint expects a `loras` array. Pull the trained weights
+    # URL + scale from the profile. scale=1.0 was too weak on flux-schnell
+    # (rendered human bodies with skull overlay); 1.3 is the sweet spot
+    # where the full anatomical skeleton + outfit + pose all co-exist.
+    # 1.5 goes too far and strips the outfit off.
+    lora_url = str(profile.get("lora_url", "") or "").strip()
+    lora_scale = float(profile.get("lora_scale", 1.0) or 1.0)
+    if lora_url and endpoint_id == "fal-ai/flux-lora":
+        payload["loras"] = [{"path": lora_url, "scale": lora_scale}]
 
     # Route through fal_gate so the 20-concurrent-limit on fal is respected
     # across ALL call sites. Before this migration, raw httpx.post calls here
