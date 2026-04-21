@@ -21700,6 +21700,71 @@ async def stop_catalyst_backfill_auto_loop():
         pass
 
 
+# Terminal statuses — jobs that reached one of these are NOT mid-flight and
+# must be left alone on shutdown. Anything else is treated as interrupted.
+_TERMINAL_JOB_STATUSES = {"done", "completed", "error", "cancelled", "interrupted", "failed"}
+
+
+@app.on_event("shutdown")
+async def _drain_inflight_jobs_on_shutdown():
+    """Render redeploys SIGTERM the old instance. Without a drain, in-flight
+    renders stop getting scene_events the moment the old worker dies — the
+    frontend spins forever on the last `animating_scenes` progress tick.
+
+    On shutdown: for every job that isn't in a terminal state, mark it
+    `interrupted`, refund the AC charge if one was made, and mirror the
+    state into the project store so the UI shows a clean retry banner
+    instead of the silent-stall state.
+
+    This does not attempt resume — that requires worker-independent state
+    reconstruction we don't have today. Failing loudly beats silent stall.
+    """
+    inflight: list[tuple[str, dict]] = []
+    try:
+        for job_id, job in list(jobs.items()):
+            status = str((job or {}).get("status", "") or "").lower()
+            if status in _TERMINAL_JOB_STATUSES:
+                continue
+            inflight.append((job_id, job))
+    except Exception as e:
+        log.warning(f"Shutdown drain: failed to enumerate jobs: {e}")
+        return
+
+    if not inflight:
+        log.info("Shutdown drain: no in-flight jobs to interrupt")
+        return
+
+    log.warning(f"Shutdown drain: marking {len(inflight)} in-flight job(s) as interrupted")
+    for job_id, job in inflight:
+        try:
+            job["status"] = "interrupted"
+            job["error"] = "Render was interrupted by a backend deploy. Click Retry to re-queue this short."
+            # Refund the AC charge if we took one and haven't refunded already
+            if job.get("credit_charged") and not job.get("credit_refunded"):
+                try:
+                    await _refund_generation_credit(
+                        str(job.get("user_id", "") or ""),
+                        str(job.get("credit_source", "") or ""),
+                        month_key=str(job.get("credit_month_key", "") or ""),
+                        credits=int(job.get("credit_amount", 1) or 1),
+                    )
+                    job["credit_refunded"] = True
+                except Exception as refund_exc:
+                    log.error(f"Shutdown drain: AC refund failed for {job_id}: {refund_exc}")
+            # Mirror into project store so the UI banner updates on next poll
+            try:
+                await _update_project_by_job(job_id, {
+                    "status": "error",
+                    "error": job["error"],
+                    "interrupted_by_deploy": True,
+                })
+            except Exception as proj_exc:
+                log.error(f"Shutdown drain: project store update failed for {job_id}: {proj_exc}")
+        except Exception as e:
+            log.error(f"Shutdown drain: failed to interrupt {job_id}: {e}")
+    log.warning("Shutdown drain: complete")
+
+
 # â"€â"€â"€ Thumbnail System â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
