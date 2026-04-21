@@ -504,6 +504,7 @@ from backend_image_prompts import (
     SKELETON_IMAGE_SUFFIX,
     TEMPLATE_KLING_MOTION,
     TEMPLATE_PROMPT_PREFIXES,
+    TEMPLATE_CONSISTENCY_ANCHORS,
     TEMPLATE_NEGATIVE_PROMPTS,
     NEGATIVE_PROMPT,
     WAN22_I2V_HIGH,
@@ -3158,8 +3159,20 @@ def _build_scene_prompt_with_reference(
             immutable_context=immutable_context,
         )
     prefix = TEMPLATE_PROMPT_PREFIXES.get(template, "")
+    # Inject the per-template cross-scene consistency anchor so all scenes in
+    # a single short share the same canonical subject, setting, palette, and
+    # lens. Skeleton has its own anchor baked into _build_skeleton_image_prompt
+    # and doesn't hit this path. Templates without an anchor (legacy ones like
+    # reddit/top5/random/etc.) just get an empty string here — no regression.
+    consistency = TEMPLATE_CONSISTENCY_ANCHORS.get(template, "")
     if immutable_context:
-        return f"{prefix} IMMUTABLE STYLE: {immutable_context} SCENE DELTA: {delta}"
+        segments = [prefix, f"IMMUTABLE STYLE: {immutable_context}"]
+        if consistency:
+            segments.append(consistency)
+        segments.append(f"SCENE DELTA: {delta}")
+        return " ".join(s for s in segments if s).strip()
+    if consistency:
+        return f"{prefix} {consistency} {delta}".strip()
     return prefix + delta
 
 
