@@ -910,6 +910,47 @@ async def _supabase_upsert_waitlist_entry(
         return False
 
 
+async def _supabase_delete_waitlist_entry(*, email: str) -> bool:
+    """Admin-only. Remove a waitlist entry by email from both the canonical
+    `waiting_list` table and the `app_settings` fallback. Returns True on
+    any successful delete so the admin UI can optimistically refresh.
+    """
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    normalized_email = str(email or "").strip().lower()
+    if not svc_key or not SUPABASE_URL or not normalized_email:
+        return False
+    any_deleted = False
+    fallback_table = "app_settings"
+    fallback_prefix = "studio_waitlist_reservation:"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            # Primary: canonical waiting_list table
+            try:
+                resp = await client.delete(
+                    f"{SUPABASE_URL}/rest/v1/waiting_list?email=eq.{quote(normalized_email)}",
+                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+                )
+                if resp.status_code in {200, 204}:
+                    any_deleted = True
+            except Exception as e:
+                log.warning(f"Supabase waiting_list delete (canonical) failed for {normalized_email}: {e}")
+            # Fallback: app_settings JSON row
+            try:
+                fallback_key = f"{fallback_prefix}{normalized_email}"
+                fallback_resp = await client.delete(
+                    f"{SUPABASE_URL}/rest/v1/{fallback_table}?key=eq.{quote(fallback_key)}",
+                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+                )
+                if fallback_resp.status_code in {200, 204}:
+                    any_deleted = True
+            except Exception as e:
+                log.warning(f"Supabase waiting_list delete (fallback) failed for {normalized_email}: {e}")
+    except Exception as e:
+        log.warning(f"Supabase waiting_list delete failed for {normalized_email}: {e}")
+        return False
+    return any_deleted
+
+
 def _record_kpi_for_job(job_id: str, job_state: dict) -> None:
     if not isinstance(job_state, dict):
         return

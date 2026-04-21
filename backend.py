@@ -370,6 +370,7 @@ from billing import (
     _supabase_get_waitlist_rows,
     _supabase_set_user_plan,
     _supabase_upsert_waitlist_entry,
+    _supabase_delete_waitlist_entry,
     _to_unix,
     _wallet_for_user,
 )
@@ -18358,6 +18359,24 @@ async def _admin_waiting_list_payload(user: dict):
             "paid_revenue_monthly_usd": round(paid_revenue_monthly, 2),
         },
     }
+
+
+@app.delete("/api/admin/waiting-list/{email}", include_in_schema=False)
+async def _admin_waiting_list_remove(email: str, request: Request):
+    """Admin-only: remove a waitlist entry by email. Deletes from both the
+    canonical `waiting_list` table and the `app_settings` fallback.
+    """
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    admin_email = str(user.get("email", "") or "").lower()
+    if admin_email not in {e.lower() for e in ADMIN_EMAILS}:
+        raise HTTPException(403, "Admin only")
+    target = unquote(str(email or "")).strip().lower()
+    if not target or "@" not in target:
+        raise HTTPException(400, "Invalid email")
+    removed = await _supabase_delete_waitlist_entry(email=target)
+    return {"ok": bool(removed), "email": target, "removed": bool(removed)}
 
 
 async def _admin_billing_audit_payload(user: dict):
