@@ -300,6 +300,18 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         "supports_reference_conditioning": False,
         "lora_url": "https://v3b.fal.media/files/b/0a9733ff/Bkucfhd84UnGjSPkJrX1o_pytorch_lora_weights.safetensors",
         "trigger_word": "nyptid_skeleton",
+        # Scale 1.3 validated 2026-04-21 — 1.0 rendered human bodies with
+        # skull overlay only; 1.5 stripped outfits. 1.3 gets the full
+        # anatomical skeleton + clothing visible simultaneously.
+        "lora_scale": 1.3,
+        # Anatomy tokens injected alongside the trigger word so flux-schnell
+        # reproduces the training-distribution skeleton body, not "human
+        # with skeletal accessories."
+        "anatomy_lock": (
+            "fully anatomical ivory-white 3D skeleton body with exposed rib cage, "
+            "visible pelvis bones, exposed forearm radius ulna, kneecap bones visible, "
+            "no human skin on torso, no human muscle tissue, complete skeletal form head to feet"
+        ),
     },
 ]
 CREATIVE_IMAGE_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_IMAGE_MODEL_PROFILES}
