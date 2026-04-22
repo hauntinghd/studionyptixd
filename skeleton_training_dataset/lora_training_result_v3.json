@@ -1,0 +1,22 @@
+{
+  "trigger_word": "nyptid_skeleton",
+  "steps": 1000,
+  "subset_count": 240,
+  "images_data_url": "https://v3b.fal.media/files/b/0a9734ae/MOb0C9Dq2NZOThauIWA6V_lora_training_v3_subset.zip",
+  "completed_at": 1776816206.350953,
+  "result": {
+    "diffusers_lora_file": {
+      "url": "https://v3b.fal.media/files/b/0a9734d4/phvDy4eJ6enG0E6Dvwq2A_pytorch_lora_weights.safetensors",
+      "content_type": "application/octet-stream",
+      "file_name": "pytorch_lora_weights.safetensors",
+      "file_size": 89745224
+    },
+    "config_file": {
+      "url": "https://v3b.fal.media/files/b/0a9734d4/gc-ZjlSeqrllwTBgimSKH_config.json",
+      "content_type": "application/octet-stream",
+      "file_name": "config.json",
+      "file_size": 532
+    },
+    "debug_preprocessed_output": null
+  }
+}
