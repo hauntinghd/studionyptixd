@@ -313,11 +313,26 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         # skull overlay only; 1.5 stripped outfits. 1.3 gets canonical
         # skeleton + clothing visible simultaneously.
         "lora_scale": 1.3,
-        # No anatomy_lock on v3 — the canonical reference doesn't show
-        # full-body exposed ribcage through clothing. Clothing fits the
-        # skeleton body like a real person; bones are visible only at
-        # head, hands, and cervical bridge between collar and jaw. v3
-        # training distribution embeds this correctly.
+        # Balanced aesthetic prompt validated 2026-04-21 against 4 diverse
+        # outfits (FBI, greek toga, politician, astronaut). Splits the two
+        # concepts cleanly:
+        #   (a) translucent rubber skin MANDATORY on face + neck — always
+        #       visible regardless of outfit, with the skull showing through
+        #   (b) clothing OPAQUE on body — no see-through effect over torso
+        #       or limbs, bones visible only at head + hands + cervical
+        #       bridge between shirt collar and jaw
+        # Injected alongside the trigger word so every Skeleton render
+        # gets the canonical look automatically.
+        "anatomy_lock": (
+            "translucent rubbery silicone skin visible on the cheeks, chin, jaw, and temples "
+            "with the polished porcelain ivory skull showing through, LARGE 3D cartoon eyeballs "
+            "with white sclera and small black pupils in the eye sockets, partial translucent "
+            "skin on the sides of the neck with 3 to 5 cervical vertebrae visible between shirt "
+            "collar and jaw. Body wearing OPAQUE clothing that fits like a real person, no "
+            "see-through effect over the torso or limbs, skeletal bones visible ONLY at the "
+            "head, hands, and neck bridge. Correctly proportioned human skeleton, normal body "
+            "proportions, no warped bones"
+        ),
     },
 ]
 CREATIVE_IMAGE_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_IMAGE_MODEL_PROFILES}
