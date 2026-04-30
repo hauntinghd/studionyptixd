@@ -12,11 +12,9 @@ You only need to do these once per workstation / per channel.
 
 1. **Be signed in to Studio.** Visit `https://studio.nyptidindustries.com` and sign in with the admin email. The owner-beta gate at [`backend.py:14942`](backend.py) and the new `WAITLIST_ONLY_MODE` gate at [`backend.py:930`](backend.py) both require an admin email.
 2. **Connect the YouTube channel** you want to publish from. Studio → "Channels" → connect each of: Empire Magnates, History Rewind, PB Lies, NYPTID Clips. The OAuth flow grants `youtube.upload` + `youtube.readonly` + `yt-analytics.readonly` + `youtube.force-ssl` scopes (see [`youtube.py:53-58`](youtube.py)).
-3. **Set the channel's locked visual lane.** This is enforced inside the long-form prompt path:
-   - Empire Magnates → white porcelain mannequin (`_coerce_empire_longform_channel_memory` at [`backend.py:12995`](backend.py))
-   - History Rewind → illustration (`_coerce_history_rewind_longform_channel_memory` at [`backend.py:13184`](backend.py))
-   - Cryptic Reads → cryptic science / skeleton (`_coerce_cryptic_longform_channel_memory` at [`backend.py:13098`](backend.py))
-   - PB Lies → wooden / theatrical (manual; not yet a `_coerce_*` helper — set in the long-form panel manually)
+3. **Channel visual aesthetic — photoreal premium for every channel** (policy change 2026-04-30; the old porcelain/wooden/skeleton/illustration locks are RETIRED). All channels target cinematic photoreal prestige-TV documentary grade — Lemmino / Coldfusion / Inside Job / The Trade. The `_coerce_*_longform_channel_memory` helpers in [`backend.py`](backend.py) still exist but should be patched to emit `PHOTOREAL_STYLE` + per-episode `CAST` blocks instead of the old porcelain/illustration/skeleton language. Until that backend patch ships, override the visual cue per-episode in the build script (see [`E:/recaps/empire_magnates/parmalat/build_parmalat_real.py`](https://github.com/hauntinghd/studionyptixd/blob/master/STUDIO_WORKFLOW.md) for the canonical photoreal pattern).
+   - Channels in scope (long-form): **Empire Magnates · We Are Lacuna · Cryptic Science · Hidden Cortex · PB Lies · History Rewind · Lexi Manhua**
+   - Shorts-only channel: **Zero Tier** (comic-verse, capped at 4 shorts)
 4. **Confirm Render is up.** Hit `https://studio.nyptidindustries.com/api/health` — should return 200. If you see 503 with `X-Render-Routing: suspend`, the Render service is paused — unsuspend it before proceeding.
 
 ---
