@@ -525,10 +525,6 @@ export default function CreatePanel({ initialTemplate }: CreatePanelProps = {}) 
         reader.onerror = () => reject(new Error("Failed to read reference image"));
         reader.readAsDataURL(file);
     });
-    const availableCustomVoices = useMemo(
-        () => customVoiceLibrary.filter((voice) => voice.available),
-        [],
-    );
     const applyCustomVoicePreset = useCallback((voiceId: string, shouldApplyTuning = true) => {
         const preset = customVoicePresetMap.get(voiceId);
         if (!preset || !preset.available) return;
