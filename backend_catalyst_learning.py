@@ -1,7 +1,10 @@
+import logging
 import time
 from datetime import datetime
 import re
 from pathlib import Path
+
+from fastapi import HTTPException
 
 from backend_catalyst_core import (
     _clip_text,
@@ -1973,6 +1976,56 @@ def _longform_session_needs_outcome_refresh(session: dict, refresh_existing: boo
 
 
 async def _harvest_catalyst_outcomes_for_channel(
+    *,
+    user_id: str,
+    channel_id: str,
+    session_id: str = "",
+    candidate_limit: int = 18,
+    refresh_existing: bool = False,
+) -> dict:
+    """Pull recent + popular videos for a channel and attach analytics-driven
+    outcome records to any matching long-form sessions.
+
+    Returns a structured dict (always, never raises non-HTTPException). Channels
+    without prior long-form sessions return {ok: True, synced_count: 0,
+    sync_note: "no_prior_sessions"} instead of crashing. Internal failures
+    surface as {ok: False, error: "..."} so the UI can show a useful message.
+    """
+    try:
+        return await _harvest_catalyst_outcomes_for_channel_inner(
+            user_id=user_id,
+            channel_id=channel_id,
+            session_id=session_id,
+            candidate_limit=candidate_limit,
+            refresh_existing=refresh_existing,
+        )
+    except HTTPException:
+        # 400/404/etc are intentional validation errors — let them propagate as-is.
+        raise
+    except Exception as exc:
+        # Any other exception (TypeError, AttributeError, network, etc.) becomes
+        # a structured error response instead of a 500. Log it for diagnosis.
+        import traceback as _tb
+        log = logging.getLogger("nyptid-studio.catalyst.harvest")
+        log.error(
+            "Catalyst harvest crashed for user=%s channel=%s session=%s: %s\n%s",
+            str(user_id or "")[:48], str(channel_id or "")[:48], str(session_id or "")[:48],
+            exc, _tb.format_exc()[-2000:],
+        )
+        return {
+            "ok": False,
+            "error": _clip_text(str(exc) or exc.__class__.__name__, 320),
+            "error_class": exc.__class__.__name__,
+            "synced_count": 0,
+            "synced_sessions": [],
+            "scanned_sessions": 0,
+            "candidate_videos": 0,
+            "matched_video_ids": [],
+            "session": {},
+        }
+
+
+async def _harvest_catalyst_outcomes_for_channel_inner(
     *,
     user_id: str,
     channel_id: str,
