@@ -13065,7 +13065,51 @@ def _is_history_rewind_channel(channel_context: dict | None) -> bool:
 
 def _is_nyptid_clips_channel(channel_context: dict | None) -> bool:
     haystack = _channel_context_haystack(channel_context)
-    return any(token in haystack for token in ("nyptid clips", "nyptidclips", "@nyptidclips"))
+    return any(token in haystack for token in (
+        "nyptid clips", "nyptidclips", "@nyptidclips",
+        "nyptid recaps", "nyptidrecaps", "@nyptidrecaps",
+    ))
+
+
+def _is_we_are_lacuna_channel(channel_context: dict | None) -> bool:
+    """We Are Lacuna — paranormal/mystery long-form (rebrand of NYPTID Clips
+    per Casey 2026-04-30; same channel, same audience). Match both the new
+    @WeAreLacuna handle AND legacy NYPTID handles so existing connections work."""
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in (
+        "we are lacuna", "wearelacuna", "@wearelacuna", "lacuna",
+    )) or _is_nyptid_clips_channel(channel_context)
+
+
+def _is_hidden_cortex_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in (
+        "hidden cortex", "hiddencortex", "@hiddencortex",
+    ))
+
+
+def _is_lexi_manhwa_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in (
+        "lexi manhwa", "lexi manhua", "leximanhwa", "leximanhua",
+        "@leximanhwa", "@leximanhwaa", "@leximanhua",
+    ))
+
+
+def _is_zero_tier_channel(channel_context: dict | None) -> bool:
+    """Zero Tier — comic-verse shorts (Wally West vs every superhero).
+    SHORTS-ONLY per Casey 2026-04-30, capped at 4 shorts."""
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in (
+        "zero tier", "zerotier", "@zerotier",
+    ))
+
+
+def _is_pb_lies_channel(channel_context: dict | None) -> bool:
+    haystack = _channel_context_haystack(channel_context)
+    return any(token in haystack for token in (
+        "pb lies", "pblies", "@pblies",
+    ))
 
 
 def _channel_prefers_fal_scene_generation(channel_context: dict | None) -> bool:
@@ -13335,6 +13379,199 @@ def _coerce_history_rewind_longform_channel_memory(
     return updated
 
 
+def _coerce_we_are_lacuna_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+) -> dict:
+    """We Are Lacuna — paranormal/mystery long-form, LEMMiNO-style (per Casey's
+    project_lacuna_dyatlov_pending memory). Photoreal-everywhere policy honored."""
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_we_are_lacuna_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "paranormal_mystery_documentary"
+    updated["niche_label"] = "Paranormal / Unexplained Mystery"
+    updated["archetype_key"] = "lemmino_mystery"
+    updated["archetype_label"] = "LEMMiNO-style Mystery Documentary"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on a still cinematic image and a single uncertain sentence. No question, no narration setup, no music swell. Trust silence.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Slow contemplative pace. Long beats between sentences. The viewer should feel the cold, the dark, the not-knowing. No tension cues, no rushing.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Photoreal cinematic recreation: real period-accurate environments, single locked-off shots, dust motes in slanted light, atmospheric stillness. NO porcelain, NO mannequins, NO 3D. Reference: LEMMiNO, Coldfusion.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Restrained ambient pad, real diegetic sound (wind, distant footsteps, equipment hum). Long silences. No horror cues, no jump scares.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Title is one declarative cinematic line + place + year. Thumbnail is a single uncertain photograph. No clickbait questions, no faces.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "We Are Lacuna runs as photoreal cinematic mystery doc — LEMMiNO grade. Slow, cold, uncertain. Honors the photoreal-everywhere policy.",
+        320,
+    )
+    updated["operator_target_niches"] = _dedupe_preserve_order(
+        list(updated.get("operator_target_niches") or []) + [
+            "paranormal", "unsolved mystery", "cold case", "lost expedition",
+            "abandoned site", "Soviet-era mystery", "occult history",
+        ],
+        max_items=8, max_chars=80,
+    )
+    updated["operator_guardrails"] = _dedupe_preserve_order(
+        list(updated.get("operator_guardrails") or []) + [
+            "No horror cues, no jump scares, no scary-music swells",
+            "No porcelain mannequins, no 3D character renders",
+            "No clickbait questions in title",
+            "Hold cinematic stillness — long beats are the brand",
+        ],
+        max_items=10, max_chars=180,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
+def _coerce_hidden_cortex_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+) -> dict:
+    """Hidden Cortex — NEW channel. Photoreal-everywhere; cognitive-science +
+    hidden-systems documentary lane. Stub seeded so Catalyst has SOME opinion;
+    will refine from outcome data once channel has published videos."""
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_hidden_cortex_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "cognitive_systems_documentary"
+    updated["niche_label"] = "Cognitive Systems / Hidden Mechanisms"
+    updated["archetype_key"] = "cognitive_systems_documentary"
+    updated["archetype_label"] = "Cognitive Systems Documentary"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on a single counter-intuitive claim, with a precise concrete consequence, before any explanation.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Premium proof-first pacing: claim → counter-example → mechanism → consequence → payoff. No textbook drift.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Photoreal cinematic documentary: real environments, real human cast, prestige-TV grade. NO 3D brain renders, NO sterile lab clichés, NO floating-object filler.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Documentary tension, restrained low-end pulses, silence pockets before reveals. Avoid horror or sci-fi sound design.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Package around one counter-intuitive claim and one premium proof image. No clickbait questions.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "Hidden Cortex runs as photoreal cognitive-systems doc. New channel; learn aggressively from early outcomes.",
+        320,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
+def _coerce_lexi_manhwa_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+) -> dict:
+    """Lexi Manhwa — recap channel for manhwa series (per Casey's
+    project_manhwa_recap_pipeline memory). Long-form recap format."""
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() not in {"documentary", "recap"} or not _is_lexi_manhwa_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "manhwa_recap"
+    updated["niche_label"] = "Manhwa Recap / Cinematic Retelling"
+    updated["archetype_key"] = "manhwa_recap"
+    updated["archetype_label"] = "Manhwa Recap (Cinematic Rewrite)"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on the most striking single panel of the source manhwa, narrated as a 2-sentence cold open.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Beat-driven Ken Burns recap. 2-3 stills per beat (Casey 2026-04-22 feedback: panels TAD too long previously).",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Source manhwa panels with cinematic Ken Burns + subtle effects. Original art preserved. No AI-generated panels.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Brian-style ElevenLabs voice, calm-then-intense. Subtle ambient + cinematic stings on reveals.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Title with the manhwa name + the moment of payoff. Thumbnail = the single best panel.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "Lexi Manhwa runs as cinematic-rewrite manhwa recap. ~7,400 chars per remake fits free ElevenLabs tier.",
+        320,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
+def _coerce_pb_lies_longform_channel_memory(
+    channel_context: dict | None,
+    channel_memory: dict | None,
+    *,
+    format_preset: str = "",
+) -> dict:
+    """PB Lies — investigative deception/fraud documentary. Photoreal-everywhere
+    per Casey 2026-04-30 (was wooden mannequin lane, retired)."""
+    memory = dict(channel_memory or {})
+    if str(format_preset or "").strip().lower() != "documentary" or not _is_pb_lies_channel(channel_context):
+        return memory
+    updated = dict(memory)
+    updated["niche_key"] = "deception_fraud_documentary"
+    updated["niche_label"] = "Deception / Fraud Documentary"
+    updated["archetype_key"] = "deception_documentary"
+    updated["archetype_label"] = "Deception / Fraud Documentary"
+    updated["archetype_hook_rule"] = _clip_text(
+        "Open on the lie + the moment it broke. Single concrete consequence first, no explanation.",
+        220,
+    )
+    updated["archetype_pace_rule"] = _clip_text(
+        "Investigative pace: claim, evidence, twist, payoff. Trust the audience to follow detail.",
+        220,
+    )
+    updated["archetype_visual_rule"] = _clip_text(
+        "Photoreal cinematic investigative documentary: real props (documents, courtrooms, photographs), prestige-TV grade. NO wooden mannequins, NO theatrical 3D.",
+        220,
+    )
+    updated["archetype_sound_rule"] = _clip_text(
+        "Restrained investigative tension. Diegetic typewriter, paper, footsteps. Silence around big reveals.",
+        220,
+    )
+    updated["archetype_packaging_rule"] = _clip_text(
+        "Package around one specific lie + the dollar/year/place. Thumbnail = single damning piece of evidence.",
+        220,
+    )
+    updated["summary"] = _clip_text(
+        "PB Lies runs as photoreal investigative documentary. Wooden mannequin lane retired 2026-04-30.",
+        320,
+    )
+    updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
+    return updated
+
+
 def _coerce_documentary_longform_channel_memory(
     channel_context: dict | None,
     channel_memory: dict | None,
@@ -13343,6 +13580,8 @@ def _coerce_documentary_longform_channel_memory(
     topic: str = "",
     input_title: str = "",
 ) -> dict:
+    """Route to the channel-specific coercer. First match wins. Falls through
+    to the input memory unchanged if no channel matches (default behavior)."""
     updated = _coerce_empire_longform_channel_memory(
         channel_context,
         channel_memory,
@@ -13355,13 +13594,26 @@ def _coerce_documentary_longform_channel_memory(
         topic=topic,
         input_title=input_title,
     )
-    return _coerce_history_rewind_longform_channel_memory(
+    updated = _coerce_history_rewind_longform_channel_memory(
         channel_context,
         updated,
         format_preset=format_preset,
         topic=topic,
         input_title=input_title,
     )
+    updated = _coerce_we_are_lacuna_longform_channel_memory(
+        channel_context, updated, format_preset=format_preset,
+    )
+    updated = _coerce_hidden_cortex_longform_channel_memory(
+        channel_context, updated, format_preset=format_preset,
+    )
+    updated = _coerce_lexi_manhwa_longform_channel_memory(
+        channel_context, updated, format_preset=format_preset,
+    )
+    updated = _coerce_pb_lies_longform_channel_memory(
+        channel_context, updated, format_preset=format_preset,
+    )
+    return updated
 
 
 def _longform_hosted_image_model_candidates(
