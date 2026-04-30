@@ -2077,6 +2077,49 @@ async def _harvest_catalyst_outcomes_for_channel_for_user(
     candidate_limit: int = 18,
     refresh_existing: bool = False,
 ) -> dict:
+    """Pull recent + popular videos for a channel and attach analytics-driven
+    outcome records to any matching long-form sessions.
+
+    Wrapped in defensive try/except so internal failures (network, schema,
+    etc.) surface as {ok: False, error: "..."} instead of HTTP 500.
+    HTTPException (400/404/503 from auth/validation) still propagates."""
+    try:
+        return await _harvest_catalyst_outcomes_for_channel_for_user_inner(
+            user_id=user_id, channel_id=channel_id, session_id=session_id,
+            candidate_limit=candidate_limit, refresh_existing=refresh_existing,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import logging as _log_mod
+        import traceback as _tb_mod
+        _log = _log_mod.getLogger("nyptid-studio.catalyst.harvest")
+        _log.error(
+            "Catalyst harvest crashed for user=%s channel=%s session=%s: %s\n%s",
+            str(user_id or "")[:48], str(channel_id or "")[:48], str(session_id or "")[:48],
+            exc, _tb_mod.format_exc()[-2000:],
+        )
+        return {
+            "ok": False,
+            "error": str(exc)[:320] or exc.__class__.__name__,
+            "error_class": exc.__class__.__name__,
+            "synced_count": 0,
+            "synced_sessions": [],
+            "scanned_sessions": 0,
+            "candidate_videos": 0,
+            "matched_video_ids": [],
+            "session": {},
+        }
+
+
+async def _harvest_catalyst_outcomes_for_channel_for_user_inner(
+    *,
+    user_id: str,
+    channel_id: str,
+    session_id: str = "",
+    candidate_limit: int = 18,
+    refresh_existing: bool = False,
+) -> dict:
     user_key = str(user_id or "").strip()
     channel_key = str(channel_id or "").strip()
     session_filter = str(session_id or "").strip()
