@@ -5123,25 +5123,46 @@ async def youtube_upload_video(
 
     log.info("YouTube upload starting: %s (%.1f MB, privacy=%s)", title[:50], file_size / 1e6, privacy)
 
-    # Step 1: Initiate resumable upload
-    async with httpx.AsyncClient(timeout=30) as client:
-        init_resp = await client.post(
-            "https://www.googleapis.com/upload/youtube/v3/videos"
-            "?uploadType=resumable&part=snippet,status",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Length": str(file_size),
-                "X-Upload-Content-Type": "video/*",
-            },
-            content=json.dumps(metadata),
+    # Reserve quota BEFORE the resumable-upload init. videos.insert costs 1600
+    # units (Google's published cost); refuse the upload if the daily cap would be
+    # exceeded. Tracked under the user-initiated "interactive" pool because uploads
+    # are always user-driven.
+    upload_cost = youtube_quota.cost_for("videos.insert")
+    if not await youtube_quota.reserve(upload_cost, "videos.insert", note=f"upload {title[:60]}"):
+        raise RuntimeError(
+            "YouTube daily quota cap reached; cannot upload more videos today. "
+            "Quota resets at 00:00 UTC."
         )
-        if init_resp.status_code not in {200, 308}:
-            raise RuntimeError(f"YouTube upload init failed ({init_resp.status_code}): {init_resp.text[:300]}")
 
-        upload_url = init_resp.headers.get("Location")
-        if not upload_url:
-            raise RuntimeError("YouTube upload init returned no Location header")
+    # Step 1: Initiate resumable upload
+    upload_committed = False
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            init_resp = await client.post(
+                "https://www.googleapis.com/upload/youtube/v3/videos"
+                "?uploadType=resumable&part=snippet,status",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Length": str(file_size),
+                    "X-Upload-Content-Type": "video/*",
+                },
+                content=json.dumps(metadata),
+            )
+            if init_resp.status_code not in {200, 308}:
+                raise RuntimeError(f"YouTube upload init failed ({init_resp.status_code}): {init_resp.text[:300]}")
+
+            upload_url = init_resp.headers.get("Location")
+            if not upload_url:
+                raise RuntimeError("YouTube upload init returned no Location header")
+            # Init succeeded → Google is now committed; quota is correctly spent.
+            upload_committed = True
+    finally:
+        # If the resumable-init never reached Google (e.g. our httpx call raised
+        # before the request went out), refund the units. Once init returned a
+        # response — even an error — Google counts it against quota, so leave it.
+        if not upload_committed:
+            await youtube_quota.refund(upload_cost, "videos.insert", reason="init_failed_pre_request")
 
     # Step 2: Upload video in 5MB chunks
     chunk_size = 5 * 1024 * 1024  # 5MB
@@ -5183,24 +5204,38 @@ async def youtube_upload_video(
 
     # Step 3: Set custom thumbnail if provided
     if thumbnail_path and Path(thumbnail_path).exists():
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                with open(thumbnail_path, "rb") as thumb_f:
-                    thumb_resp = await client.post(
-                        f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
-                        f"?videoId={video_id}",
-                        headers={
-                            "Authorization": f"Bearer {access_token}",
-                            "Content-Type": "image/png",
-                        },
-                        content=thumb_f.read(),
-                    )
-                    if thumb_resp.status_code == 200:
-                        log.info("YouTube thumbnail set for video %s", video_id)
-                    else:
-                        log.warning("YouTube thumbnail upload failed: %s", thumb_resp.text[:200])
-        except Exception as thumb_exc:
-            log.warning("YouTube thumbnail upload error: %s", str(thumb_exc)[:200])
+        # thumbnails.set costs 50 units. Reserve before the call; if the local
+        # httpx call fails before reaching Google, refund.
+        thumb_cost = youtube_quota.cost_for("thumbnails.set")
+        thumb_reserved = await youtube_quota.reserve(
+            thumb_cost, "thumbnails.set", note=f"thumb for {video_id}"
+        )
+        if not thumb_reserved:
+            log.warning("YouTube thumbnail skipped: daily quota cap reached for thumbnails.set")
+        else:
+            thumb_committed = False
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    with open(thumbnail_path, "rb") as thumb_f:
+                        thumb_resp = await client.post(
+                            f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
+                            f"?videoId={video_id}",
+                            headers={
+                                "Authorization": f"Bearer {access_token}",
+                                "Content-Type": "image/png",
+                            },
+                            content=thumb_f.read(),
+                        )
+                        thumb_committed = True
+                        if thumb_resp.status_code == 200:
+                            log.info("YouTube thumbnail set for video %s", video_id)
+                        else:
+                            log.warning("YouTube thumbnail upload failed: %s", thumb_resp.text[:200])
+            except Exception as thumb_exc:
+                log.warning("YouTube thumbnail upload error: %s", str(thumb_exc)[:200])
+            finally:
+                if not thumb_committed:
+                    await youtube_quota.refund(thumb_cost, "thumbnails.set", reason="local_error_pre_request")
 
     return {
         "video_id": video_id,
