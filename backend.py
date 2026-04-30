@@ -927,6 +927,39 @@ _longform_sessions_lock = asyncio.Lock()
 _catalyst_auto_pilot_channels: dict[str, dict] = {}  # {user_id:channel_id -> {enabled, last_check, interval_hours}}
 
 
+def _assert_not_waitlist_only_for_non_owner(user: dict | None) -> None:
+    """If WAITLIST_ONLY_MODE is true, only ADMIN_EMAILS users can hit generation
+    routes. Public users in waitlist mode get redirected to the waitlist page by
+    the frontend; this is the server-side fail-closed gate so a stale token or
+    direct API call cannot bypass the UX."""
+    if not WAITLIST_ONLY_MODE:
+        return
+    email = str((user or {}).get("email", "") or "").strip().lower()
+    if email and email in {e.strip().lower() for e in ADMIN_EMAILS}:
+        return
+    raise HTTPException(
+        503,
+        "Studio is currently in waitlist-only mode. Reserve your slot at /waitlist; "
+        "we'll email when generation reopens.",
+    )
+
+
+# Strong-ref set for module-owned background tasks created via asyncio.create_task().
+# Without this, Python may garbage-collect the task object (PEP 0492 + asyncio docs)
+# and silently cancel the coroutine — which is what was happening to the Catalyst
+# monitor loop before this set existed.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background_task(coro, name: str = "") -> asyncio.Task:
+    """Create + retain a background task. Use this anywhere you'd otherwise call
+    bare `asyncio.create_task(...)` for a long-running module-owned task."""
+    task = asyncio.create_task(coro, name=name) if name else asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 async def _catalyst_autonomous_monitor_tick():
     """Background tick: check all auto-pilot channels for decay."""
     for key, config in list(_catalyst_auto_pilot_channels.items()):
@@ -11934,7 +11967,33 @@ async def run_generation_pipeline(
         catalyst_shorts_instructions = str(job_state.get("catalyst_shorts_instructions", "") or "").strip()
         extra_instructions = lang_instruction + (("\n\n" + catalyst_shorts_instructions) if catalyst_shorts_instructions else "")
         channel_context = {}  # Initialize before try/except so it's always defined
+
+        # Heartbeat: while generate_script is running, bump progress 6->9 every 20s
+        # so the UI never appears frozen at 5%. Without this, a slow LLM call (up
+        # to the 150s outer cap) shows the user nothing for the full duration and
+        # has historically been reported as "stuck at 5%".
+        async def _script_progress_heartbeat():
+            try:
+                # Beat at 20, 40, 60, 80, 100, 120s -> progress 6, 7, 8, 9, 9, 9
+                bumps = [(20, 6), (40, 7), (60, 8), (80, 9), (100, 9), (120, 9)]
+                last = 0
+                for delay, target in bumps:
+                    await asyncio.sleep(delay - last)
+                    last = delay
+                    job = jobs.get(job_id)
+                    if not job or job.get("status") not in (None, "queued", "generating_script"):
+                        return
+                    cur = int(job.get("progress", 0) or 0)
+                    if target > cur:
+                        _job_set_stage(job_id, "generating_script", target)
+            except asyncio.CancelledError:
+                pass
+            except Exception as hb_exc:
+                log.warning(f"[{job_id}] script heartbeat error: {hb_exc}")
+
+        heartbeat_task = asyncio.create_task(_script_progress_heartbeat())
         try:
+          try:
             # Hard 150-sec outer timeout. generate_script has per-call timeouts of 60-90s
             # but retries up to 3x, which can mean 270s of silent hang. Cap that so a
             # stuck script gen falls through to the skeleton local fallback fast.
@@ -11942,10 +12001,10 @@ async def run_generation_pipeline(
                 generate_script(template, topic, extra_instructions=extra_instructions),
                 timeout=150.0,
             )
-        except asyncio.TimeoutError as e:
+          except asyncio.TimeoutError as e:
             log.warning(f"[{job_id}] generate_script timed out after 150s; using fallback")
             raise
-        except Exception as e:
+          except Exception as e:
             if template == "skeleton":
                 channel_context = {}
                 trend_titles: list[str] = []
@@ -12015,7 +12074,32 @@ async def run_generation_pipeline(
                     trend_hunt_enabled=trend_hunt_enabled,
                 )
             else:
-                raise
+                # Non-skeleton templates have no local fallback. Surface a
+                # specific, actionable error so the user sees WHY the job died
+                # instead of a generic "failed at 5%" silence. The exception
+                # bubbles to the top-level handler which marks the job errored.
+                cause = str(e)[:200] or e.__class__.__name__
+                if isinstance(e, asyncio.TimeoutError):
+                    msg = (
+                        f"Script generation timed out after 150s for template '{template}'. "
+                        "This usually means the LLM provider (fal any-llm / Claude) is rate-limited "
+                        "or overloaded. Try again in a minute, or switch to the 'skeleton' template "
+                        "which has a local fallback."
+                    )
+                else:
+                    msg = (
+                        f"Script generation failed for template '{template}': {cause}. "
+                        "Check fal.ai status + API key, then retry. Switch to 'skeleton' template "
+                        "if you need a guaranteed-render fallback."
+                    )
+                log.error(f"[{job_id}] {msg}")
+                raise RuntimeError(msg) from e
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
         scenes = _normalize_scenes_for_render(script_data.get("scenes", []))
         quality_mode = _normalize_skeleton_quality_mode(quality_mode, template=template)
         mint_mode = _normalize_mint_mode(mint_mode, template=template)
@@ -17494,6 +17578,7 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
     user = await get_current_user_from_request(request) if request else None
     if not user:
         raise HTTPException(401, "Auth required")
+    _assert_not_waitlist_only_for_non_owner(user)
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
     session = await _get_creative_session(req.session_id)
@@ -18124,15 +18209,40 @@ def _languages_payload():
     return {"languages": [{"code": k, "name": v["name"]} for k, v in SUPPORTED_LANGUAGES.items()]}
 
 
+_HEALTH_PROBE_CACHE: dict[str, tuple[float, bool]] = {}
+_HEALTH_PROBE_TTL_SEC = 30.0
+
+
+async def _cached_probe(name: str, fn) -> bool:
+    """Memoize a probe coroutine for _HEALTH_PROBE_TTL_SEC seconds.
+
+    Render hits /api/health frequently. Without caching, every probe (skeleton
+    LoRA, HiDream, Wan2.2, ComfyUI) re-runs on each call, and a single slow
+    external service stacks 15s timeouts into a 502 wave. The probes themselves
+    already cache the *underlying* availability state — this just stops us from
+    paying their per-call overhead on every health check."""
+    entry = _HEALTH_PROBE_CACHE.get(name)
+    now = time.time()
+    if entry and (now - entry[0]) < _HEALTH_PROBE_TTL_SEC:
+        return entry[1]
+    try:
+        value = bool(await fn())
+    except Exception as e:
+        log.warning("Health probe %s raised: %s", name, str(e)[:200])
+        value = False
+    _HEALTH_PROBE_CACHE[name] = (now, value)
+    return value
+
+
 async def _health_payload():
-    skeleton_lora = await check_skeleton_lora_available()
+    skeleton_lora = await _cached_probe("skeleton_lora", check_skeleton_lora_available)
     provider_order = _configured_image_provider_order()
     hidream_configured = any(_normalize_image_provider_key(p) == "hidream" for p in provider_order)
     wan_configured = any(_normalize_image_provider_key(p) == "wan22" for p in provider_order)
-    hidream_ready = await check_hidream_available() if hidream_configured else False
-    hidream_edit_ready = await check_hidream_edit_available() if hidream_configured else False
-    wan_ready = await check_wan22_available() if wan_configured else False
-    wan_t2i_ready = await check_wan22_t2i_available() if wan_configured else False
+    hidream_ready = await _cached_probe("hidream", check_hidream_available) if hidream_configured else False
+    hidream_edit_ready = await _cached_probe("hidream_edit", check_hidream_edit_available) if hidream_configured else False
+    wan_ready = await _cached_probe("wan22", check_wan22_available) if wan_configured else False
+    wan_t2i_ready = await _cached_probe("wan22_t2i", check_wan22_t2i_available) if wan_configured else False
     now_ts = time.time()
     hidream_checked_ts = float(_hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
     hidream_last_ok_ts = float(_hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
@@ -19115,6 +19225,7 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         raise HTTPException(500, "FAL_AI_KEY not configured")
 
     user = await get_current_user_from_request(request) if request else None
+    _assert_not_waitlist_only_for_non_owner(user)
     if user and not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
@@ -21031,6 +21142,58 @@ async def _create_billing_portal_session(user: dict = Depends(require_auth)):
         raise HTTPException(500, "Could not open billing portal")
 
 
+_WAITLIST_RATE_BUCKET: dict[str, list[float]] = {}
+_WAITLIST_RATE_LOCK = asyncio.Lock()
+_WAITLIST_RATE_WINDOW_SEC = 60.0
+_WAITLIST_RATE_MAX_ATTEMPTS = 5
+
+
+async def _waitlist_rate_check(client_ip: str) -> None:
+    """Per-IP token bucket: max 5 waitlist signups per 60s.
+
+    In WAITLIST_ONLY_MODE this is the only public ingress for new users — without
+    rate limiting it's an obvious DoS / spam target. Per-worker bucket; for a
+    single-instance Render deployment that's the entire app."""
+    if not client_ip:
+        return  # Don't block requests we can't identify (likely internal health checks)
+    now = time.time()
+    cutoff = now - _WAITLIST_RATE_WINDOW_SEC
+    async with _WAITLIST_RATE_LOCK:
+        history = _WAITLIST_RATE_BUCKET.setdefault(client_ip, [])
+        # Drop entries older than the window
+        history[:] = [t for t in history if t >= cutoff]
+        if len(history) >= _WAITLIST_RATE_MAX_ATTEMPTS:
+            retry_after = max(1, int(_WAITLIST_RATE_WINDOW_SEC - (now - history[0])))
+            log.warning(
+                "Waitlist rate-limit hit for ip=%s (%d attempts in %ds)",
+                client_ip, len(history), int(_WAITLIST_RATE_WINDOW_SEC),
+            )
+            raise HTTPException(
+                429,
+                detail=f"Too many signup attempts. Try again in {retry_after}s.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        history.append(now)
+        # Periodic prune of stale IPs to keep dict size bounded
+        if len(_WAITLIST_RATE_BUCKET) > 1000:
+            stale_ips = [ip for ip, hist in _WAITLIST_RATE_BUCKET.items() if not hist or hist[-1] < cutoff]
+            for ip in stale_ips:
+                _WAITLIST_RATE_BUCKET.pop(ip, None)
+
+
+def _client_ip_from_request(request: Request | None) -> str:
+    """Resolve client IP, preferring X-Forwarded-For (Render is behind a proxy)."""
+    if request is None:
+        return ""
+    xff = request.headers.get("x-forwarded-for", "") or ""
+    if xff:
+        # Use the leftmost address (originating client per RFC 7239 convention).
+        return xff.split(",")[0].strip()
+    if request.client:
+        return request.client.host or ""
+    return ""
+
+
 async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
     """Open-beta waitlist reservation. Accepts BOTH unauthenticated visitors
     (from the public /waitlist landing) AND authenticated users (dashboard
@@ -21042,6 +21205,9 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
     is handled via _paypal_return redirecting through
     _capture_paypal_subscription_order which persists similarly.
     """
+    # Rate limit BEFORE any DB or Stripe call so spam can't burn quotas.
+    await _waitlist_rate_check(_client_ip_from_request(request))
+
     plan = str(req.plan or "").strip().lower()
     provider = str(req.provider or "stripe").strip().lower()
     email_override = str(req.email or "").strip().lower()
@@ -21188,11 +21354,15 @@ async def _stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 
+    # Fail-closed: if STRIPE_WEBHOOK_SECRET isn't configured, refuse the webhook
+    # rather than silently parsing the unsigned body. Anyone who knows the URL
+    # could forge "checkout.session.completed" events otherwise.
+    if not STRIPE_WEBHOOK_SECRET:
+        log.error("Stripe webhook rejected: STRIPE_WEBHOOK_SECRET is not configured")
+        raise HTTPException(503, "Webhook signing is not configured on the server")
+
     try:
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        else:
-            event = json.loads(payload)
+        event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception as e:
         log.error(f"Webhook signature verification failed: {e}")
         raise HTTPException(400, "Invalid signature")
@@ -21764,54 +21934,68 @@ SEED_ACCOUNTS = {
 }
 
 
-@app.on_event("startup")
-async def seed_profiles():
+async def _seed_profiles_inner():
+    """Seed admin profiles into Supabase. Idempotent. Called from startup with
+    a hard outer timeout so Supabase latency cannot delay port-binding."""
     svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
     if not SUPABASE_URL or not svc_key:
         log.warning("Supabase not configured, skipping profile seeding")
         return
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            users_resp = await client.get(
-                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
-                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+    async with httpx.AsyncClient(timeout=4) as client:
+        users_resp = await client.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+            headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+        )
+        if users_resp.status_code != 200:
+            log.warning(f"Could not list users for seeding (status {users_resp.status_code})")
+            return
+
+        users_data = users_resp.json()
+        user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+
+        for email, profile in SEED_ACCOUNTS.items():
+            user_id = None
+            for u in user_list:
+                if u.get("email") == email:
+                    user_id = u["id"]
+                    break
+            if not user_id:
+                log.info(f"Seed user {email} not found in auth yet (will be seeded on first login)")
+                continue
+
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/profiles",
+                headers={
+                    "apikey": svc_key,
+                    "Authorization": f"Bearer {svc_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+                json={"id": user_id, "plan": profile["plan"], "role": profile["role"]},
             )
-            if users_resp.status_code != 200:
-                log.warning(f"Could not list users for seeding (status {users_resp.status_code})")
-                return
+            log.info(f"Seeded {email} -> {profile['plan']} (status {resp.status_code})")
 
-            users_data = users_resp.json()
-            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
 
-            for email, profile in SEED_ACCOUNTS.items():
-                user_id = None
-                for u in user_list:
-                    if u.get("email") == email:
-                        user_id = u["id"]
-                        break
-                if not user_id:
-                    log.info(f"Seed user {email} not found in auth yet (will be seeded on first login)")
-                    continue
+@app.on_event("startup")
+async def seed_profiles():
+    # Run the seeding off the startup critical path so a slow Supabase cannot
+    # delay uvicorn from accepting connections (which previously stacked Render
+    # health-check failures into 502 waves on cold start).
+    async def _runner():
+        try:
+            await asyncio.wait_for(_seed_profiles_inner(), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning("Profile seeding skipped: exceeded 10s soft timeout")
+        except Exception as e:
+            log.warning(f"Profile seeding failed: {e}")
 
-                resp = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/profiles",
-                    headers={
-                        "apikey": svc_key,
-                        "Authorization": f"Bearer {svc_key}",
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates",
-                    },
-                    json={"id": user_id, "plan": profile["plan"], "role": profile["role"]},
-                )
-                log.info(f"Seeded {email} -> {profile['plan']} (status {resp.status_code})")
-    except Exception as e:
-        log.warning(f"Profile seeding failed: {e}")
+    _spawn_background_task(_runner(), name="seed_profiles")
 
 
 @app.on_event("startup")
 async def start_catalyst_monitor_loop():
-    asyncio.create_task(_start_catalyst_monitor())
+    _spawn_background_task(_start_catalyst_monitor(), name="catalyst_monitor")
 
 
 @app.on_event("startup")
