@@ -96,7 +96,6 @@ export default function CreatePanel(_props: CreatePanelProps) {
     // immediately, scenesAbortRef holds the AbortController for the Stop button.
     const [scenesGenerating, setScenesGenerating] = useState(false);
     const [renderedScenes, setRenderedScenes] = useState<RenderedScene[]>([]);
-    const [scenesEndpoint, setScenesEndpoint] = useState<string>('');
     const [scenesProgress, setScenesProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
     const [sceneError, setSceneError] = useState<string>('');
     const scenesAbortRef = useRef<AbortController | null>(null);
@@ -133,7 +132,6 @@ export default function CreatePanel(_props: CreatePanelProps) {
         // Reset state for a fresh run.
         setScenesGenerating(true);
         setRenderedScenes([]);
-        setScenesEndpoint('');
         setSceneError('');
         setScenesProgress({ done: 0, total: 0 });
 
@@ -181,7 +179,6 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     try { payload = JSON.parse(dataStr); } catch { continue; }
                     if (currentEvent === 'meta') {
                         setScenesProgress({ done: 0, total: Number(payload.total || 0) });
-                        setScenesEndpoint(String(payload.endpoint || ''));
                     } else if (currentEvent === 'scene') {
                         setRenderedScenes((prev) => {
                             const next = [...prev, payload as RenderedScene];
@@ -282,7 +279,6 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     onGenerateAndAnimate={() => { setTab('audio'); }}
                     scenesGenerating={scenesGenerating}
                     renderedScenes={renderedScenes}
-                    scenesEndpoint={scenesEndpoint}
                     scenesProgress={scenesProgress}
                     sceneError={sceneError}
                     accessToken={accessToken}
@@ -419,8 +415,7 @@ function ScriptTab({
 function ScenesTab({
     imageModel, setImageModel, charCount, duration, estimatedScenes, scriptValid,
     onGenerateScenes, onStopGenerateScenes, onGenerateAndAnimate,
-    scenesGenerating, renderedScenes, scenesEndpoint, scenesProgress,
-    sceneError, accessToken,
+    scenesGenerating, renderedScenes, scenesProgress, sceneError, accessToken,
 }: {
     imageModel: ImageModel;
     setImageModel: (m: ImageModel) => void;
@@ -433,7 +428,6 @@ function ScenesTab({
     onGenerateAndAnimate: () => void;
     scenesGenerating: boolean;
     renderedScenes: RenderedScene[];
-    scenesEndpoint: string;
     scenesProgress: { done: number; total: number };
     sceneError: string;
     accessToken: string;
@@ -501,12 +495,6 @@ function ScenesTab({
             {sceneError && (
                 <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-sm text-rose-200">
                     {sceneError}
-                </div>
-            )}
-
-            {scenesEndpoint && (
-                <div className="text-xs text-zinc-500">
-                    Rendering via <span className="font-mono text-zinc-300">{scenesEndpoint}</span>
                 </div>
             )}
 

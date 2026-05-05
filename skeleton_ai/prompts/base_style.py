@@ -9,48 +9,28 @@ reference frames. Prior specs (v4 porcelain / v5 rubber gel / v6 clear-glass /
 v7 polished plastic) all rejected — see project_skeleton_spec_canonical.md.
 """
 
-# Per-image base style — stuff before the per-scene specifics.
+# Per-image base style — kept SHORT so cheaper models (ernie_image, free
+# nano-banana) don't truncate. ~75 words. Full canonical signature lives in
+# project_skeleton_spec_canonical.md and is enforced by NEG_STILL below.
 SKELETON_BASE_STYLE = (
-    "Cinematic 3D render of the Cryptic Science skeleton character — a "
-    "stylized cartoon-mascot anatomical skeleton. PURE WHITE smooth anatomical "
-    "bone skull (medical-grade detail, NOT polished plastic toy, NOT porcelain). "
-    "HOLLOW DARK eye sockets (deep black) with SMALL WHITE DOT PUPILS centered "
-    "inside each socket — eyes look calm and slightly cartoon-mascot, NEVER "
-    "glowing, NEVER bright supernatural light. Visible teeth, jaw structure, "
-    "nasal cavity. The body wears REAL OPAQUE CLOTHING per the scene's role "
-    "(real fabric, real cotton/wool/synthetic, drapes naturally on the skeleton). "
-    "Skeletal bones visible ONLY at: hands at wrists below cuffs, neck above "
-    "collar (3-5 cervical vertebrae visible), and forearms when sleeves are "
-    "short. Body proportions are normal adult (~6-7 head heights). "
+    "3D cartoon-mascot anatomical skeleton on solid mint-green studio backdrop. "
+    "Pure white smooth bone skull with hollow dark eye sockets and small white "
+    "dot pupils inside each socket. Body wears real opaque clothing for the "
+    "scene's role; bones visible only at hands and neck. Vertical 9:16 frame, "
+    "cinematic studio lighting. "
 )
 
-# The mint green backdrop is the channel signature — every scene unless macro
-# prop close-up overrides.
-MINT_GREEN_BG = (
-    "Solid mint green / cyan studio backdrop, color approximately #5AC8B8 "
-    "to #6FD4C0 with a subtle smooth top-to-bottom gradient. Full bleed, "
-    "no border. Cinematic studio lighting from upper-left key. "
-)
+# Solid mint backdrop — kept as a separate token so callers can override
+# (e.g., specific scene-level macro shots).
+MINT_GREEN_BG = "Mint-green seamless backdrop (#5AC8B8). "
 
-# Per-image NEG list — suppresses the failure modes we identified in v6/v7.
+# Per-image NEG list — kept tight so cheaper models actually parse it.
+# Hits the specific v4-v7 failure modes from project_skeleton_spec_canonical.md.
 NEG_STILL = (
-    "text, watermark, logo, words, lettering, captions, signs, "
-    "blur, low quality, deformed hands, extra fingers, multiple heads, child, "
-    # Reject prior wrong-spec attempts:
-    "polished plastic toy bones, glass shell body, clear acrylic body, "
-    "translucent gel skin, rubber silicone wrap, x-ray fade, ghost-like body, "
-    # Reject eye glow / supernatural artifacts:
-    "glowing eyes, glowing eyeball, white glowing eye, bright eye glow, "
-    "supernatural eyes, demonic eyes, possessed eyes, light beams from eyes, "
-    "asymmetric eyes, mismatched eye colors, "
-    # Reject background drift:
-    "photoreal real-world environment, classroom, kitchen, hallway, "
-    "office, courtroom — UNLESS scene specifies, "
-    # Reject skull defects:
-    "cracked skull, weathered skull, yellowed skull, beige skull, decayed skull, "
-    # Reject body issues:
-    "see-through clothing, x-ray clothing, transparent fabric, ghost in clothing, "
-    "stunted body, floating legs, missing legs, deformed proportions"
+    "text, watermark, logo, glowing eyes, supernatural eyes, "
+    "polished plastic toy, porcelain shell, glass body, translucent gel skin, "
+    "see-through clothing, x-ray clothing, exposed brain, cracked skull, "
+    "yellowed skull, deformed hands, extra fingers, blurry, low quality"
 )
 
 
