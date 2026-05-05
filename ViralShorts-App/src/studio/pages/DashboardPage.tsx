@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { ArrowLeft, BarChart3, BrainCircuit, LayoutDashboard, Loader2, PanelLeftOpen, Receipt, Sparkles, Users, Wand2 } from 'lucide-react';
+import { ArrowLeft, BarChart3, BrainCircuit, Film, LayoutDashboard, Loader2, PanelLeftOpen, Receipt, Sparkles, Users, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import CreatePanel from '../panels/CreatePanel';
@@ -7,9 +7,11 @@ import CreatePanel from '../panels/CreatePanel';
 // Studio strip-down 2026-05-05 (per Casey): kept only Create, Catalyst, Refunds,
 // Waitlist, Product Analytics. Removed: Clone, Long Form, Thumbnails, Product Demo,
 // Auto Clipper. Their pipelines are being rebuilt from scratch one at a time,
-// starting with Skeleton AI inside the Create tab.
+// starting with Skeleton AI (inside Create) — and now Long Form (its own tab,
+// 6 channels with Catalyst-fed outlines).
 const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
+const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 
@@ -19,7 +21,7 @@ const PanelFallback = () => (
     </div>
 );
 
-type DashboardTab = 'create' | 'analytics' | 'catalyst' | 'refunds' | 'waitlist';
+type DashboardTab = 'create' | 'longform' | 'analytics' | 'catalyst' | 'refunds' | 'waitlist';
 
 type SidebarItem = {
     id: DashboardTab;
@@ -31,6 +33,7 @@ type SidebarItem = {
 
 const OWNER_ALL_ACCESS = {
     create: true,
+    longform: true,
     analytics: true,
     catalyst: true,
     refunds: true,
@@ -64,6 +67,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, []);
     const isTabUnlocked = useCallback((nextTab: DashboardTab) => {
         if (nextTab === 'create') return true;
+        if (nextTab === 'longform') return isAdmin;   // owner-only until public launch
         if (nextTab === 'analytics' || nextTab === 'catalyst' || nextTab === 'refunds' || nextTab === 'waitlist') return isAdmin;
         return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
     }, [isAdmin, laneAccess]);
@@ -105,6 +109,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         id: 'create',
         label: 'Create',
         icon: Sparkles,
+    }, {
+        id: 'longform',
+        label: 'Long Form',
+        icon: Film,
+        hidden: !isAdmin,
     }, {
         id: 'analytics',
         label: 'Product Analytics',
@@ -153,6 +162,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         <Suspense fallback={<PanelFallback />}>{node}</Suspense>
     );
     const panel = (() => {
+        if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);

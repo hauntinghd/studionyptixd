@@ -23807,6 +23807,25 @@ except Exception as _skeleton_ai_err:
     log.warning(f"Skeleton AI router NOT mounted: {_skeleton_ai_err}")
 
 
+# Long-form generation (Casey 2026-05-05 — replaces stripped Long Form panel).
+# Six channels: Lacuna, Hidden Cortex, PB Live, Lo-Fi Radio, Empire Magnates,
+# History Rewind. Catalyst Hub data threads into the Grok outline call so each
+# channel's actual top-performer hooks bias the generated topic + framing.
+# Implementation: long_form/ module + long_form_router.py. The legacy
+# /api/longform/* + /api/creative/* routes (28 endpoints) remain mounted —
+# they back the existing v5 sessions that shipped Wirecard / Mongol 9H /
+# Ottoman 9H. New /api/long-form/* (hyphenated) is the clean v6 surface.
+try:
+    from long_form_router import build_long_form_router
+    app.include_router(build_long_form_router(
+        require_auth=require_auth,
+        catalyst_hub_snapshot_for_user=_catalyst_hub_snapshot_for_user,
+    ))
+    log.info("Long-form router mounted at /api/long-form")
+except Exception as _long_form_err:
+    log.warning(f"Long-form router NOT mounted: {_long_form_err}")
+
+
 # â"€â"€â"€ Static Files â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
