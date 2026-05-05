@@ -15,7 +15,7 @@
  *          white skull with hollow dark sockets + dot pupils, real opaque
  *          clothing, ~12 narration beats per 60s, 2-tier captions).
  */
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
 import { AuthContext } from '../shared';
 
@@ -91,9 +91,15 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
 
     // Stills-only scene render state (Generate Scenes button on the Scenes tab).
+    // SSE-streamed: scenes pop into renderedScenes as fal returns each one,
+    // scenesProgress.total set on first event so the progress bar can render
+    // immediately, scenesAbortRef holds the AbortController for the Stop button.
     const [scenesGenerating, setScenesGenerating] = useState(false);
     const [renderedScenes, setRenderedScenes] = useState<RenderedScene[]>([]);
     const [scenesEndpoint, setScenesEndpoint] = useState<string>('');
+    const [scenesProgress, setScenesProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+    const [sceneError, setSceneError] = useState<string>('');
+    const scenesAbortRef = useRef<AbortController | null>(null);
 
     // Fetch voices once we have an auth token (voices route is auth-gated).
     useEffect(() => {
@@ -112,11 +118,9 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const estimatedDuration = Math.round(scriptCharCount / 15); // rough: 15 chars/sec
     const estimatedScenes = Math.max(1, Math.ceil(estimatedDuration / 5));
 
-    // Generate Scenes (stills only) — called when the user clicks the
-    // purple "Generate Scenes" button on the Scenes tab. Hits the backend
-    // at /api/skeleton-ai/scenes which uses the currently-selected
-    // imageModel verbatim. Switching the picker mid-session changes the
-    // fal endpoint hit on the NEXT click — no caching, no debounce.
+    // Generate Scenes (stills only) — Korpi-style SSE streaming. Each scene
+    // appears in the gallery the moment fal returns it. Stop button cancels
+    // mid-flight via AbortController.
     const startGenerateScenes = useCallback(async () => {
         if (!script.trim()) {
             alert('Add or generate a skeleton script first.');
@@ -126,38 +130,87 @@ export default function CreatePanel(_props: CreatePanelProps) {
             alert('You must be signed in to generate scenes.');
             return;
         }
+        // Reset state for a fresh run.
         setScenesGenerating(true);
         setRenderedScenes([]);
         setScenesEndpoint('');
+        setSceneError('');
+        setScenesProgress({ done: 0, total: 0 });
+
+        const controller = new AbortController();
+        scenesAbortRef.current = controller;
+
         try {
             const r = await fetch('/api/skeleton-ai/scenes', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({
-                    script,
-                    image_model: imageModel,
-                }),
+                body: JSON.stringify({ script, image_model: imageModel }),
+                signal: controller.signal,
             });
-            if (!r.ok) {
+            if (!r.ok || !r.body) {
                 const txt = await r.text().catch(() => '');
                 throw new Error(`scenes failed: ${r.status} ${txt.slice(0, 240)}`);
             }
-            const d = await r.json();
-            if (Array.isArray(d.scenes)) {
-                setRenderedScenes(d.scenes);
-                setScenesEndpoint(String(d.endpoint || ''));
-            } else {
-                throw new Error('scenes response missing scenes array');
+            // Parse SSE stream: events are 'event: <name>\ndata: <json>\n\n'.
+            const reader = r.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            let currentEvent = '';
+            outer:
+            for (;;) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                // Events are separated by blank lines (\n\n). Process complete events only.
+                let sep: number;
+                while ((sep = buf.indexOf('\n\n')) !== -1) {
+                    const block = buf.slice(0, sep);
+                    buf = buf.slice(sep + 2);
+                    currentEvent = '';
+                    let dataStr = '';
+                    for (const line of block.split('\n')) {
+                        if (line.startsWith('event: ')) currentEvent = line.slice(7).trim();
+                        else if (line.startsWith('data: ')) dataStr += line.slice(6);
+                    }
+                    if (!dataStr) continue;
+                    let payload: any;
+                    try { payload = JSON.parse(dataStr); } catch { continue; }
+                    if (currentEvent === 'meta') {
+                        setScenesProgress({ done: 0, total: Number(payload.total || 0) });
+                        setScenesEndpoint(String(payload.endpoint || ''));
+                    } else if (currentEvent === 'scene') {
+                        setRenderedScenes((prev) => {
+                            const next = [...prev, payload as RenderedScene];
+                            next.sort((a, b) => a.beat_index - b.beat_index);
+                            return next;
+                        });
+                        setScenesProgress((prev) => ({ ...prev, done: prev.done + 1 }));
+                    } else if (currentEvent === 'error') {
+                        setSceneError(String(payload.message || 'render error'));
+                    } else if (currentEvent === 'complete') {
+                        break outer;
+                    }
+                }
             }
         } catch (e) {
-            alert((e as Error).message);
+            const err = e as Error;
+            if (err.name !== 'AbortError') {
+                setSceneError(err.message || String(err));
+            }
         } finally {
             setScenesGenerating(false);
+            scenesAbortRef.current = null;
         }
     }, [script, imageModel, accessToken]);
+
+    const stopGenerateScenes = useCallback(() => {
+        scenesAbortRef.current?.abort();
+        scenesAbortRef.current = null;
+    }, []);
 
     const startGenerate = useCallback(async () => {
         if (!script.trim()) {
@@ -225,10 +278,13 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     estimatedScenes={estimatedScenes}
                     scriptValid={script.trim().length > 0}
                     onGenerateScenes={startGenerateScenes}
+                    onStopGenerateScenes={stopGenerateScenes}
                     onGenerateAndAnimate={() => { setTab('audio'); }}
                     scenesGenerating={scenesGenerating}
                     renderedScenes={renderedScenes}
                     scenesEndpoint={scenesEndpoint}
+                    scenesProgress={scenesProgress}
+                    sceneError={sceneError}
                     accessToken={accessToken}
                 />
             )}
@@ -362,8 +418,9 @@ function ScriptTab({
 
 function ScenesTab({
     imageModel, setImageModel, charCount, duration, estimatedScenes, scriptValid,
-    onGenerateScenes, onGenerateAndAnimate, scenesGenerating, renderedScenes,
-    scenesEndpoint, accessToken,
+    onGenerateScenes, onStopGenerateScenes, onGenerateAndAnimate,
+    scenesGenerating, renderedScenes, scenesEndpoint, scenesProgress,
+    sceneError, accessToken,
 }: {
     imageModel: ImageModel;
     setImageModel: (m: ImageModel) => void;
@@ -372,10 +429,13 @@ function ScenesTab({
     estimatedScenes: number;
     scriptValid: boolean;
     onGenerateScenes: () => void;
+    onStopGenerateScenes: () => void;
     onGenerateAndAnimate: () => void;
     scenesGenerating: boolean;
     renderedScenes: RenderedScene[];
     scenesEndpoint: string;
+    scenesProgress: { done: number; total: number };
+    sceneError: string;
     accessToken: string;
 }) {
     const [pickerOpen, setPickerOpen] = useState(false);
@@ -407,23 +467,24 @@ function ScenesTab({
             </div>
 
             <div className="flex flex-col gap-2">
-                <button
-                    disabled={!scriptValid || scenesGenerating}
-                    onClick={onGenerateScenes}
-                    className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                    {scenesGenerating ? (
-                        <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Rendering scenes…
-                        </>
-                    ) : (
-                        <>
-                            <ImageIcon className="h-4 w-4" />
-                            Generate Scenes
-                        </>
-                    )}
-                </button>
+                {scenesGenerating ? (
+                    <button
+                        onClick={onStopGenerateScenes}
+                        className="w-full rounded-md bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-600 flex items-center justify-center gap-2"
+                    >
+                        <X className="h-4 w-4" />
+                        Stop Image Generation
+                    </button>
+                ) : (
+                    <button
+                        disabled={!scriptValid}
+                        onClick={onGenerateScenes}
+                        className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                        <ImageIcon className="h-4 w-4" />
+                        Generate Scenes
+                    </button>
+                )}
                 <button
                     disabled={!scriptValid || scenesGenerating}
                     onClick={onGenerateAndAnimate}
@@ -433,14 +494,39 @@ function ScenesTab({
                 </button>
             </div>
 
+            {(scenesGenerating || scenesProgress.total > 0) && (
+                <ScenesProgressBar progress={scenesProgress} active={scenesGenerating} />
+            )}
+
+            {sceneError && (
+                <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-sm text-rose-200">
+                    {sceneError}
+                </div>
+            )}
+
             {scenesEndpoint && (
                 <div className="text-xs text-zinc-500">
-                    Last render via <span className="font-mono text-zinc-300">{scenesEndpoint}</span>
+                    Rendering via <span className="font-mono text-zinc-300">{scenesEndpoint}</span>
                 </div>
             )}
 
             {renderedScenes.length > 0 && (
-                <SceneGallery scenes={renderedScenes} accessToken={accessToken} />
+                <>
+                    <div className="flex items-center justify-between mt-2">
+                        <h3 className="text-sm font-semibold text-white">
+                            Generated Scenes ({renderedScenes.length}{scenesProgress.total ? ` / ${scenesProgress.total}` : ''})
+                        </h3>
+                        {!scenesGenerating && renderedScenes.length === scenesProgress.total && scenesProgress.total > 0 && (
+                            <button
+                                onClick={onGenerateAndAnimate}
+                                className="rounded-md bg-cyan-500 hover:bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white"
+                            >
+                                Animate All
+                            </button>
+                        )}
+                    </div>
+                    <SceneGallery scenes={renderedScenes} accessToken={accessToken} />
+                </>
             )}
 
             {!scriptValid && (
@@ -457,6 +543,30 @@ function ScenesTab({
                 />
             )}
         </section>
+    );
+}
+
+function ScenesProgressBar({ progress, active }: { progress: { done: number; total: number }; active: boolean }) {
+    const total = progress.total || 0;
+    const done = progress.done || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : (active ? 5 : 0);
+    return (
+        <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2.5">
+            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
+                <span>
+                    {active ? (
+                        total > 0 ? `Generating images ${done + 1}–${total} of ${total}…` : 'Generating scene prompts…'
+                    ) : `Rendered ${done} / ${total}`}
+                </span>
+                <span className="font-mono">{pct}%</span>
+            </div>
+            <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                    className="h-full bg-violet-500 transition-all duration-300"
+                    style={{ width: `${pct}%` }}
+                />
+            </div>
+        </div>
     );
 }
 

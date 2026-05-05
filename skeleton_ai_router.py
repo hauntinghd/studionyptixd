@@ -196,6 +196,21 @@ def build_skeleton_ai_router(
 
     @router.post("/scenes")
     async def generate_scenes(body: ScenesRequest, _user: dict = auth_dep):
+        """
+        SSE-streaming stills render. Emits events as scenes complete so the
+        frontend can reveal each tile the moment fal returns it (Korpi-style),
+        instead of waiting for all 12 to finish before the user sees anything.
+
+        Event sequence:
+          event: meta       data: {job_id, image_model, endpoint, total}
+          event: plan       data: {plan}             # locked character sheet
+          event: scene_start  data: {beat_index, narration}
+          event: scene      data: {beat_index, narration, outfit,
+                                  scene_action, motion_prompt, image_path}
+          ... repeated per beat ...
+          event: complete   data: {job_id, scenes_count}
+          event: error      data: {beat_index?, message}    # on failure
+        """
         if not body.script or not body.script.strip():
             raise HTTPException(400, "script is required")
         if body.image_model not in MODEL_ENDPOINTS:
@@ -215,9 +230,6 @@ def build_skeleton_ai_router(
             except ValueError:
                 cat_label = ""
 
-        # Lock the canonical character sheet once for this script.
-        plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
-
         sentences = split_script_into_beats(body.script, target_count=body.beats_target)
         if not sentences:
             raise HTTPException(400, "script produced zero beats")
@@ -226,47 +238,74 @@ def build_skeleton_ai_router(
         workspace = OUTPUT_ROOT / job_id
         stills_dir = workspace / "stills"
         stills_dir.mkdir(parents=True, exist_ok=True)
-        (workspace / "scene_plan.json").write_text(
-            json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
         (workspace / "script.txt").write_text(body.script, encoding="utf-8")
 
-        scenes_out: list[dict] = []
-        for i, narration in enumerate(sentences):
-            sid = f"b{i:02d}"
-            outfit, action, motion = derive_beat_visuals(
-                grok, narration, cat_label, plan=plan
-            )
-            still_prompt = assemble_scene_prompt(action, outfit, mint_bg=True)
-            try:
-                still_path = gen_still_for_model(
-                    body.image_model,
-                    still_prompt,
-                    stills_dir / f"{sid}.png",
-                    negative_prompt=NEG_STILL,
-                )
-            except StillsError as e:
-                raise HTTPException(502, f"image gen failed at beat {i}: {e}")
-            # Frontend needs a URL it can <img src=>. Serve via the existing
-            # /generated/{job_id}/stills/{sid}.png static path if mounted, else
-            # return a path string the client can resolve through a follow-up
-            # static route. For now expose a relative 'image_path'.
-            scenes_out.append({
-                "beat_index": i,
-                "narration": narration,
-                "outfit": outfit,
-                "scene_action": action,
-                "motion_prompt": motion,
-                "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
-            })
+        endpoint = MODEL_ENDPOINTS[body.image_model]
 
-        return {
-            "job_id": job_id,
-            "image_model": body.image_model,
-            "endpoint": MODEL_ENDPOINTS[body.image_model],
-            "plan": plan,
-            "scenes": scenes_out,
-        }
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        def event_stream():
+            scenes_out: list[dict] = []
+            try:
+                # 1. Meta + plan up front so the UI can show "Generating x/N" immediately.
+                yield sse("meta", {
+                    "job_id": job_id,
+                    "image_model": body.image_model,
+                    "endpoint": endpoint,
+                    "total": len(sentences),
+                })
+                plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
+                (workspace / "scene_plan.json").write_text(
+                    json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                yield sse("plan", {"plan": plan})
+
+                # 2. Per beat: derive visuals + render still + stream the result.
+                for i, narration in enumerate(sentences):
+                    sid = f"b{i:02d}"
+                    yield sse("scene_start", {"beat_index": i, "narration": narration})
+                    try:
+                        outfit, action, motion = derive_beat_visuals(
+                            grok, narration, cat_label, plan=plan
+                        )
+                        still_prompt = assemble_scene_prompt(action, outfit, mint_bg=True)
+                        gen_still_for_model(
+                            body.image_model,
+                            still_prompt,
+                            stills_dir / f"{sid}.png",
+                            negative_prompt=NEG_STILL,
+                        )
+                    except StillsError as e:
+                        yield sse("error", {"beat_index": i, "message": str(e)})
+                        continue
+                    except Exception as e:  # pragma: no cover — defensive
+                        yield sse("error", {"beat_index": i, "message": f"{type(e).__name__}: {e}"})
+                        continue
+                    scene = {
+                        "beat_index": i,
+                        "narration": narration,
+                        "outfit": outfit,
+                        "scene_action": action,
+                        "motion_prompt": motion,
+                        "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+                    }
+                    scenes_out.append(scene)
+                    yield sse("scene", scene)
+
+                # 3. Persist final manifest + signal completion.
+                (workspace / "scenes.json").write_text(
+                    json.dumps({"job_id": job_id, "scenes": scenes_out}, indent=2),
+                    encoding="utf-8",
+                )
+                yield sse("complete", {"job_id": job_id, "scenes_count": len(scenes_out)})
+            except GeneratorExit:
+                # Client cancelled (Stop button). Don't crash the worker.
+                return
+            except Exception as e:  # pragma: no cover
+                yield sse("error", {"message": f"fatal: {type(e).__name__}: {e}"})
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @router.get("/jobs/{job_id}/stills/{filename}")
     async def serve_still(job_id: str, filename: str, _user: dict = auth_dep):
