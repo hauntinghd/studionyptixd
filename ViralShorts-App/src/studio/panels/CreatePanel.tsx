@@ -200,6 +200,10 @@ export default function CreatePanel(_props: CreatePanelProps) {
                         setScript(text);
                         setIdeaModalOpen(false);
                         setScriptStreaming(false);
+                        // Auto-jump to Scenes so the user immediately sees the
+                        // image-model picker + can hit "Generate Scenes" for
+                        // a stills-only preview before burning fal on i2v.
+                        setTab('scenes');
                     }}
                     onStreamStart={() => setScriptStreaming(true)}
                     onStreamEnd={() => setScriptStreaming(false)}
