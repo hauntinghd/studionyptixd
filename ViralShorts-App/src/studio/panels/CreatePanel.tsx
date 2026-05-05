@@ -202,7 +202,6 @@ export default function CreatePanel(_props: CreatePanelProps) {
                         setScriptStreaming(false);
                     }}
                     onStreamStart={() => setScriptStreaming(true)}
-                    onStreamChunk={(piece) => setScript((s) => s + piece)}
                     onStreamEnd={() => setScriptStreaming(false)}
                 />
             )}
@@ -576,13 +575,12 @@ function RangeRow({
 }
 
 function IdeaModal({
-    accessToken, onClose, onScript, onStreamStart, onStreamChunk, onStreamEnd,
+    accessToken, onClose, onScript, onStreamStart, onStreamEnd,
 }: {
     accessToken: string;
     onClose: () => void;
     onScript: (s: string) => void;
     onStreamStart: () => void;
-    onStreamChunk: (piece: string) => void;
     onStreamEnd: () => void;
 }) {
     const [modalTab, setModalTab] = useState<'idea_list' | 'custom_topic' | 'remix'>('idea_list');
@@ -610,34 +608,27 @@ function IdeaModal({
         onStreamStart();
         onScript('');
         try {
+            // Non-streaming: grok-4-fast-reasoning's SSE deltas interleave
+            // multiple reasoning paths, which produces garbled text mid-stream
+            // ("labsserman of vs" etc.). The /script endpoint returns clean
+            // {script: "..."} when stream=false, so use that and reveal the
+            // result in one write.
             const r = await fetch('/api/skeleton-ai/script', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({ category: selectedCat, topic, stream: true }),
+                body: JSON.stringify({ category: selectedCat, topic, stream: false }),
             });
-            if (!r.ok || !r.body) {
+            if (!r.ok) {
                 const txt = await r.text().catch(() => '');
-                throw new Error(`script gen failed: ${r.status} ${txt.slice(0, 120)}`);
+                throw new Error(`script gen failed: ${r.status} ${txt.slice(0, 200)}`);
             }
-            const reader = r.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = '';
-            for (;;) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                buf += decoder.decode(value, { stream: true });
-                const lines = buf.split('\n');
-                buf = lines.pop() || '';
-                for (const line of lines) {
-                    if (!line.startsWith('data: ')) continue;
-                    const piece = line.slice(6);
-                    if (piece === '[DONE]') break;
-                    onStreamChunk(piece);
-                }
-            }
+            const data = await r.json();
+            const text = String(data.script || '').trim();
+            if (!text) throw new Error('script gen returned empty content');
+            onScript(text);
             onStreamEnd();
             onClose();
         } catch (e) {
