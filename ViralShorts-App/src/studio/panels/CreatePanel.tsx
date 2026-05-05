@@ -48,6 +48,15 @@ interface ImageModelOption {
     speed: 'fast' | 'medium' | 'slow';
 }
 
+interface RenderedScene {
+    beat_index: number;
+    narration: string;
+    outfit: string;
+    scene_action: string;
+    motion_prompt: string;
+    image_path: string;
+}
+
 const IMAGE_MODELS: ImageModelOption[] = [
     { key: 'seedream_45', name: 'SeeDream 4.5', description: 'High quality with image input support', tier: 'paid', credits: 4, speed: 'fast' },
     { key: 'flux_2_pro', name: 'Flux 2 Pro', description: 'Fast and creative AI art generation', tier: 'paid', credits: 5, speed: 'fast' },
@@ -81,6 +90,11 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const [generating, setGenerating] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
 
+    // Stills-only scene render state (Generate Scenes button on the Scenes tab).
+    const [scenesGenerating, setScenesGenerating] = useState(false);
+    const [renderedScenes, setRenderedScenes] = useState<RenderedScene[]>([]);
+    const [scenesEndpoint, setScenesEndpoint] = useState<string>('');
+
     // Fetch voices once we have an auth token (voices route is auth-gated).
     useEffect(() => {
         if (!accessToken) return;
@@ -97,6 +111,53 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const scriptCharCount = script.length;
     const estimatedDuration = Math.round(scriptCharCount / 15); // rough: 15 chars/sec
     const estimatedScenes = Math.max(1, Math.ceil(estimatedDuration / 5));
+
+    // Generate Scenes (stills only) — called when the user clicks the
+    // purple "Generate Scenes" button on the Scenes tab. Hits the backend
+    // at /api/skeleton-ai/scenes which uses the currently-selected
+    // imageModel verbatim. Switching the picker mid-session changes the
+    // fal endpoint hit on the NEXT click — no caching, no debounce.
+    const startGenerateScenes = useCallback(async () => {
+        if (!script.trim()) {
+            alert('Add or generate a skeleton script first.');
+            return;
+        }
+        if (!accessToken) {
+            alert('You must be signed in to generate scenes.');
+            return;
+        }
+        setScenesGenerating(true);
+        setRenderedScenes([]);
+        setScenesEndpoint('');
+        try {
+            const r = await fetch('/api/skeleton-ai/scenes', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                    script,
+                    image_model: imageModel,
+                }),
+            });
+            if (!r.ok) {
+                const txt = await r.text().catch(() => '');
+                throw new Error(`scenes failed: ${r.status} ${txt.slice(0, 240)}`);
+            }
+            const d = await r.json();
+            if (Array.isArray(d.scenes)) {
+                setRenderedScenes(d.scenes);
+                setScenesEndpoint(String(d.endpoint || ''));
+            } else {
+                throw new Error('scenes response missing scenes array');
+            }
+        } catch (e) {
+            alert((e as Error).message);
+        } finally {
+            setScenesGenerating(false);
+        }
+    }, [script, imageModel, accessToken]);
 
     const startGenerate = useCallback(async () => {
         if (!script.trim()) {
@@ -163,6 +224,12 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     duration={estimatedDuration}
                     estimatedScenes={estimatedScenes}
                     scriptValid={script.trim().length > 0}
+                    onGenerateScenes={startGenerateScenes}
+                    onGenerateAndAnimate={() => { setTab('audio'); }}
+                    scenesGenerating={scenesGenerating}
+                    renderedScenes={renderedScenes}
+                    scenesEndpoint={scenesEndpoint}
+                    accessToken={accessToken}
                 />
             )}
             {tab === 'audio' && (
@@ -295,6 +362,8 @@ function ScriptTab({
 
 function ScenesTab({
     imageModel, setImageModel, charCount, duration, estimatedScenes, scriptValid,
+    onGenerateScenes, onGenerateAndAnimate, scenesGenerating, renderedScenes,
+    scenesEndpoint, accessToken,
 }: {
     imageModel: ImageModel;
     setImageModel: (m: ImageModel) => void;
@@ -302,6 +371,12 @@ function ScenesTab({
     duration: number;
     estimatedScenes: number;
     scriptValid: boolean;
+    onGenerateScenes: () => void;
+    onGenerateAndAnimate: () => void;
+    scenesGenerating: boolean;
+    renderedScenes: RenderedScene[];
+    scenesEndpoint: string;
+    accessToken: string;
 }) {
     const [pickerOpen, setPickerOpen] = useState(false);
     const selected = IMAGE_MODELS.find((m) => m.key === imageModel)!;
@@ -333,19 +408,40 @@ function ScenesTab({
 
             <div className="flex flex-col gap-2">
                 <button
-                    disabled={!scriptValid}
-                    className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed"
+                    disabled={!scriptValid || scenesGenerating}
+                    onClick={onGenerateScenes}
+                    className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                    <ImageIcon className="inline h-4 w-4 mr-2" />
-                    Generate Scenes
+                    {scenesGenerating ? (
+                        <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Rendering scenes…
+                        </>
+                    ) : (
+                        <>
+                            <ImageIcon className="h-4 w-4" />
+                            Generate Scenes
+                        </>
+                    )}
                 </button>
                 <button
-                    disabled={!scriptValid}
+                    disabled={!scriptValid || scenesGenerating}
+                    onClick={onGenerateAndAnimate}
                     className="w-full rounded-md bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white border border-zinc-800 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                    Generate Scenes & Animate
+                    Generate Scenes &amp; Animate
                 </button>
             </div>
+
+            {scenesEndpoint && (
+                <div className="text-xs text-zinc-500">
+                    Last render via <span className="font-mono text-zinc-300">{scenesEndpoint}</span>
+                </div>
+            )}
+
+            {renderedScenes.length > 0 && (
+                <SceneGallery scenes={renderedScenes} accessToken={accessToken} />
+            )}
 
             {!scriptValid && (
                 <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
@@ -361,6 +457,59 @@ function ScenesTab({
                 />
             )}
         </section>
+    );
+}
+
+function SceneGallery({ scenes, accessToken }: { scenes: RenderedScene[]; accessToken: string }) {
+    // Each still is served by an auth-gated endpoint, so we have to fetch
+    // with a Bearer header and convert to a blob URL — a plain <img src>
+    // can't attach Authorization. Cleanup blobs on unmount/replace.
+    const [blobUrls, setBlobUrls] = useState<Record<number, string>>({});
+    useEffect(() => {
+        let cancelled = false;
+        const created: string[] = [];
+        const next: Record<number, string> = {};
+        (async () => {
+            for (const s of scenes) {
+                try {
+                    const r = await fetch(s.image_path, {
+                        headers: { Authorization: `Bearer ${accessToken}` },
+                    });
+                    if (!r.ok) continue;
+                    const blob = await r.blob();
+                    const url = URL.createObjectURL(blob);
+                    created.push(url);
+                    next[s.beat_index] = url;
+                    if (!cancelled) setBlobUrls((prev) => ({ ...prev, [s.beat_index]: url }));
+                } catch {
+                    /* ignore one-image failures, keep loading the rest */
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+            for (const u of created) URL.revokeObjectURL(u);
+        };
+    }, [scenes, accessToken]);
+
+    return (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mt-2">
+            {scenes.map((s) => (
+                <div key={s.beat_index} className="rounded-md overflow-hidden border border-zinc-800 bg-zinc-950">
+                    <div className="aspect-[9/16] bg-zinc-900 flex items-center justify-center">
+                        {blobUrls[s.beat_index] ? (
+                            <img src={blobUrls[s.beat_index]} alt={`Beat ${s.beat_index + 1}`} className="w-full h-full object-cover" />
+                        ) : (
+                            <Loader2 className="h-6 w-6 text-zinc-600 animate-spin" />
+                        )}
+                    </div>
+                    <div className="px-2 py-1.5 text-[10px] text-zinc-400 truncate">
+                        <span className="text-zinc-500">{`b${String(s.beat_index).padStart(2, '0')}: `}</span>
+                        {s.narration}
+                    </div>
+                </div>
+            ))}
+        </div>
     );
 }
 

@@ -25,9 +25,20 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from skeleton_ai.prompts.idea_lists import list_categories, get_category
+from skeleton_ai.prompts.base_style import assemble_scene_prompt, NEG_STILL
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError, build_script_prompt
 from skeleton_ai.voice_elevenlabs import ElevenLabsClient, ElevenLabsAuthError
-from skeleton_ai.pipeline import run as run_pipeline, analyze_script
+from skeleton_ai.pipeline import (
+    run as run_pipeline,
+    analyze_script,
+    derive_beat_visuals,
+    split_script_into_beats,
+)
+from skeleton_ai.stills_engine import (
+    generate as gen_still_for_model,
+    MODEL_ENDPOINTS,
+    StillsError,
+)
 from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
 
 
@@ -52,6 +63,14 @@ class PlanRequest(BaseModel):
     script: str
     category: str | None = None
     topic: str | None = None
+
+
+class ScenesRequest(BaseModel):
+    script: str
+    category: str | None = None
+    topic: str | None = None
+    image_model: str = Field(default="seedream_45")
+    beats_target: int = 12
 
 
 def build_skeleton_ai_router(
@@ -168,6 +187,98 @@ def build_skeleton_ai_router(
                 cat_label = ""
         plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
         return {"plan": plan}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Stills-only render: script → plan → 12 stills via the user's chosen
+    # image_model. NO i2v, NO audio, NO mux — this is the cheap preview gate
+    # before the full pipeline burn. Frontend calls this on Generate Scenes.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.post("/scenes")
+    async def generate_scenes(body: ScenesRequest, _user: dict = auth_dep):
+        if not body.script or not body.script.strip():
+            raise HTTPException(400, "script is required")
+        if body.image_model not in MODEL_ENDPOINTS:
+            raise HTTPException(
+                400,
+                f"unknown image_model {body.image_model!r}. valid: {sorted(MODEL_ENDPOINTS.keys())}"
+            )
+        try:
+            grok = GrokClient()
+        except GrokAuthError as e:
+            raise HTTPException(503, f"config: {e}")
+
+        cat_label = ""
+        if body.category:
+            try:
+                cat_label = get_category(body.category).get("label", "")
+            except ValueError:
+                cat_label = ""
+
+        # Lock the canonical character sheet once for this script.
+        plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
+
+        sentences = split_script_into_beats(body.script, target_count=body.beats_target)
+        if not sentences:
+            raise HTTPException(400, "script produced zero beats")
+
+        job_id = uuid.uuid4().hex[:12]
+        workspace = OUTPUT_ROOT / job_id
+        stills_dir = workspace / "stills"
+        stills_dir.mkdir(parents=True, exist_ok=True)
+        (workspace / "scene_plan.json").write_text(
+            json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (workspace / "script.txt").write_text(body.script, encoding="utf-8")
+
+        scenes_out: list[dict] = []
+        for i, narration in enumerate(sentences):
+            sid = f"b{i:02d}"
+            outfit, action, motion = derive_beat_visuals(
+                grok, narration, cat_label, plan=plan
+            )
+            still_prompt = assemble_scene_prompt(action, outfit, mint_bg=True)
+            try:
+                still_path = gen_still_for_model(
+                    body.image_model,
+                    still_prompt,
+                    stills_dir / f"{sid}.png",
+                    negative_prompt=NEG_STILL,
+                )
+            except StillsError as e:
+                raise HTTPException(502, f"image gen failed at beat {i}: {e}")
+            # Frontend needs a URL it can <img src=>. Serve via the existing
+            # /generated/{job_id}/stills/{sid}.png static path if mounted, else
+            # return a path string the client can resolve through a follow-up
+            # static route. For now expose a relative 'image_path'.
+            scenes_out.append({
+                "beat_index": i,
+                "narration": narration,
+                "outfit": outfit,
+                "scene_action": action,
+                "motion_prompt": motion,
+                "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+            })
+
+        return {
+            "job_id": job_id,
+            "image_model": body.image_model,
+            "endpoint": MODEL_ENDPOINTS[body.image_model],
+            "plan": plan,
+            "scenes": scenes_out,
+        }
+
+    @router.get("/jobs/{job_id}/stills/{filename}")
+    async def serve_still(job_id: str, filename: str, _user: dict = auth_dep):
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        if not filename.endswith(".png") or "/" in filename or ".." in filename:
+            raise HTTPException(400, "bad_filename")
+        path = OUTPUT_ROOT / job_id / "stills" / filename
+        if not path.exists():
+            raise HTTPException(404, "not_found")
+        from fastapi.responses import FileResponse
+        return FileResponse(str(path), media_type="image/png")
 
     # ──────────────────────────────────────────────────────────────────────
     # Full pipeline (synchronous v0; queue later)
