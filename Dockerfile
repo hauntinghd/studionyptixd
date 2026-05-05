@@ -29,6 +29,9 @@ COPY ops ./ops
 # Skeleton AI short-form pipeline package — Casey 2026-05-05 rebuild.
 # Top-level *.py glob above does NOT recurse into subpackages.
 COPY skeleton_ai ./skeleton_ai
+# Long-form pipeline package — Casey 2026-05-05 rebuild (6 channels +
+# Catalyst-fed outlines). Same recursion gotcha as skeleton_ai.
+COPY long_form ./long_form
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
