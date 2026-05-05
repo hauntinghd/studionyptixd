@@ -1,21 +1,16 @@
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useState, type ComponentType } from 'react';
-import { ArrowLeft, BarChart3, BrainCircuit, Clapperboard, Copy, Film, Image, LayoutDashboard, Loader2, Monitor, PanelLeftOpen, Receipt, Sparkles, Users, Wand2 } from 'lucide-react';
+import { ArrowLeft, BarChart3, BrainCircuit, LayoutDashboard, Loader2, PanelLeftOpen, Receipt, Sparkles, Users, Wand2 } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
 import { AuthContext } from '../shared';
 import CreatePanel from '../panels/CreatePanel';
 
-// Heavy/rarely-clicked panels are code-split via React.lazy — each one ships
-// as its own chunk Vite serves on demand. Before this, the whole bundle
-// shipped every panel upfront (~900 KB gz 230 KB), making cold refreshes
-// feel slow. CreatePanel stays eager because it's the landing surface.
+// Studio strip-down 2026-05-05 (per Casey): kept only Create, Catalyst, Refunds,
+// Waitlist, Product Analytics. Removed: Clone, Long Form, Thumbnails, Product Demo,
+// Auto Clipper. Their pipelines are being rebuilt from scratch one at a time,
+// starting with Skeleton AI inside the Create tab.
 const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
-const AutoClipperPanel = lazy(() => import('../panels/AutoClipperPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
-const ClonePanel = lazy(() => import('../panels/ClonePanel'));
-const DemoPanel = lazy(() => import('../panels/DemoPanel'));
-const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
-const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 
 const PanelFallback = () => (
@@ -24,7 +19,7 @@ const PanelFallback = () => (
     </div>
 );
 
-type DashboardTab = 'create' | 'clone' | 'longform' | 'thumbnails' | 'demo' | 'autoclipper' | 'analytics' | 'catalyst' | 'refunds' | 'waitlist';
+type DashboardTab = 'create' | 'analytics' | 'catalyst' | 'refunds' | 'waitlist';
 
 type SidebarItem = {
     id: DashboardTab;
@@ -36,11 +31,6 @@ type SidebarItem = {
 
 const OWNER_ALL_ACCESS = {
     create: true,
-    clone: true,
-    longform: true,
-    thumbnails: true,
-    demo: true,
-    autoclipper: true,
     analytics: true,
     catalyst: true,
     refunds: true,
@@ -92,7 +82,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         const params = new URLSearchParams(window.location.search);
         const requestedTab = String(params.get('tab') || params.get('focus') || '').trim().toLowerCase();
         if (!requestedTab) return;
-        const allowedTabs = new Set<DashboardTab>(['create', 'clone', 'longform', 'thumbnails', 'demo', 'autoclipper', 'analytics', 'catalyst', 'refunds', 'waitlist']);
+        const allowedTabs = new Set<DashboardTab>(['create', 'analytics', 'catalyst', 'refunds', 'waitlist']);
         if (!allowedTabs.has(requestedTab as DashboardTab)) return;
         const nextTab = requestedTab as DashboardTab;
         const unlocked = isTabUnlocked(nextTab);
@@ -115,31 +105,6 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         id: 'create',
         label: 'Create',
         icon: Sparkles,
-    }, {
-        id: 'clone',
-        label: 'Clone',
-        icon: Copy,
-        comingSoon: !ownerOverride,
-    }, {
-        id: 'longform',
-        label: 'Long Form',
-        icon: Film,
-        comingSoon: !ownerOverride,
-    }, {
-        id: 'thumbnails',
-        label: 'Thumbnails',
-        icon: Image,
-        comingSoon: !ownerOverride,
-    }, {
-        id: 'demo',
-        label: 'Product Demo',
-        icon: Monitor,
-        hidden: !ownerOverride,
-    }, {
-        id: 'autoclipper',
-        label: 'Auto Clipper',
-        icon: Clapperboard,
-        comingSoon: !ownerOverride,
     }, {
         id: 'analytics',
         label: 'Product Analytics',
@@ -192,11 +157,6 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
         if (tab === 'waitlist' && isAdmin) return lazyPanel(<WaitlistPanel />);
-        if (tab === 'clone' && laneAccess.clone) return lazyPanel(<ClonePanel />);
-        if (tab === 'longform' && laneAccess.longform) return lazyPanel(<LongFormPanel />);
-        if (tab === 'thumbnails' && laneAccess.thumbnails) return lazyPanel(<ThumbnailPanel />);
-        if (tab === 'demo' && ownerOverride) return lazyPanel(<DemoPanel />);
-        if (tab === 'autoclipper' && ownerOverride) return lazyPanel(<AutoClipperPanel />);
         return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
 

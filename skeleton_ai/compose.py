@@ -39,7 +39,12 @@ def trim_with_captions(
     height: int = 1280,
     fps: int = 30,
 ) -> Path:
-    """Trim a scene clip to exact duration and burn captions + watermark."""
+    """Trim a scene clip to exact duration and burn captions + watermark.
+
+    Uses -filter_script:v to load the filter chain from a file — this avoids
+    the catastrophic shell-escaping problem with drawtext filters when the
+    text contains apostrophes, em-dashes, etc.
+    """
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
@@ -56,17 +61,20 @@ def trim_with_captions(
         f"{','.join(drawtexts)}"
     )
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    filter_script = out_path.parent / f"{out_path.stem}_filter.txt"
+    filter_script.write_text(vf, encoding="utf-8")
+
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(src_clip),
         "-t", f"{duration_sec:.3f}",
-        "-vf", vf,
+        "-filter_script:v", str(filter_script),
         "-an",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-pix_fmt", "yuv420p",
         str(out_path),
     ]
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(cmd, check=True)
     return out_path
 

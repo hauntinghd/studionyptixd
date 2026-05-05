@@ -15,8 +15,8 @@
  *          white skull with hollow dark sockets + dot pupils, real opaque
  *          clothing, ~12 narration beats per 60s, 2-tier captions).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X, Play, Pause } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
 
 type Tab = 'script' | 'scenes' | 'audio';
 type IdeaCategory = 'human_limits' | 'marvel_vs_dc' | 'ancient_history' | 'futuristic_socrates';

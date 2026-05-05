@@ -90,7 +90,27 @@ def time_phrases(phrases: list[str], total_duration: float) -> list[CaptionPhras
 
 
 def _esc(text: str) -> str:
-    return text.replace("'", "\\'").replace(":", "\\:").replace(",", "\\,")
+    """Sanitize + escape text for ffmpeg drawtext.
+
+    drawtext escaping is hellish with apostrophes — every workaround breaks on
+    Windows shell quoting. Easiest fix: strip apostrophes/quotes/em-dashes/etc
+    from caption text outright. Captions are short anyway (1-3 words) — losing
+    a contraction is fine.
+    """
+    # Replace problematic Unicode + ASCII special chars.
+    repl = {
+        "‘": "", "’": "",       # smart single quotes
+        "“": "", "”": "",       # smart double quotes
+        "–": "-", "—": "-",     # en/em dash
+        "…": "...",                   # ellipsis
+        "'": "", '"': "",                  # ASCII quotes
+        "%": "",                           # ffmpeg drawtext treats % specially
+        "\\": "",                          # backslash itself
+    }
+    for src, dst in repl.items():
+        text = text.replace(src, dst)
+    # Now escape only the ffmpeg-special chars that remain.
+    return text.replace(":", "\\:").replace(",", "\\,")
 
 
 def caption_drawtext(
