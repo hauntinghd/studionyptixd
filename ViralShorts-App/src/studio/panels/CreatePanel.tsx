@@ -15,8 +15,9 @@
  *          white skull with hollow dark sockets + dot pupils, real opaque
  *          clothing, ~12 narration beats per 60s, 2-tier captions).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
+import { AuthContext } from '../shared';
 
 type Tab = 'script' | 'scenes' | 'audio';
 type IdeaCategory = 'human_limits' | 'marvel_vs_dc' | 'ancient_history' | 'futuristic_socrates';
@@ -62,6 +63,9 @@ interface CreatePanelProps {
 }
 
 export default function CreatePanel(_props: CreatePanelProps) {
+    const { session } = useContext(AuthContext);
+    const accessToken = session?.access_token || '';
+
     const [tab, setTab] = useState<Tab>('script');
     const [script, setScript] = useState('');
     const [ideaModalOpen, setIdeaModalOpen] = useState(false);
@@ -77,15 +81,18 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const [generating, setGenerating] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
 
-    // Fetch voices once on mount.
+    // Fetch voices once we have an auth token (voices route is auth-gated).
     useEffect(() => {
-        fetch('/api/skeleton-ai/voices')
+        if (!accessToken) return;
+        fetch('/api/skeleton-ai/voices', {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        })
             .then((r) => r.json())
             .then((d) => {
                 if (Array.isArray(d.voices)) setVoices(d.voices);
             })
             .catch(() => setVoices([]));
-    }, []);
+    }, [accessToken]);
 
     const scriptCharCount = script.length;
     const estimatedDuration = Math.round(scriptCharCount / 15); // rough: 15 chars/sec
@@ -96,11 +103,18 @@ export default function CreatePanel(_props: CreatePanelProps) {
             alert('Add or generate a skeleton script in Step 1 before generating.');
             return;
         }
+        if (!accessToken) {
+            alert('You must be signed in to generate.');
+            return;
+        }
         setGenerating(true);
         try {
             const r = await fetch('/api/skeleton-ai/generate', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
                 body: JSON.stringify({
                     script,
                     image_model: imageModel,
@@ -118,7 +132,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
         } finally {
             setGenerating(false);
         }
-    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier]);
+    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken]);
 
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
@@ -180,6 +194,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
 
             {ideaModalOpen && (
                 <IdeaModal
+                    accessToken={accessToken}
                     onClose={() => setIdeaModalOpen(false)}
                     onScript={(text) => {
                         setScript(text);
@@ -561,8 +576,9 @@ function RangeRow({
 }
 
 function IdeaModal({
-    onClose, onScript, onStreamStart, onStreamChunk, onStreamEnd,
+    accessToken, onClose, onScript, onStreamStart, onStreamChunk, onStreamEnd,
 }: {
+    accessToken: string;
     onClose: () => void;
     onScript: (s: string) => void;
     onStreamStart: () => void;
@@ -577,6 +593,7 @@ function IdeaModal({
     const [remixPlatform, setRemixPlatform] = useState<'youtube' | 'facebook' | 'tiktok' | 'instagram'>('youtube');
     const [busy, setBusy] = useState(false);
 
+    // Categories endpoint is unauthed — populates the Idea List tab.
     useEffect(() => {
         fetch('/api/skeleton-ai/categories')
             .then((r) => r.json())
@@ -585,13 +602,20 @@ function IdeaModal({
     }, []);
 
     const generate = async (topic: string | null) => {
+        if (!accessToken) {
+            alert('You must be signed in to generate a script.');
+            return;
+        }
         setBusy(true);
         onStreamStart();
         onScript('');
         try {
             const r = await fetch('/api/skeleton-ai/script', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
                 body: JSON.stringify({ category: selectedCat, topic, stream: true }),
             });
             if (!r.ok || !r.body) {
