@@ -48,6 +48,12 @@ class GenerateRequest(BaseModel):
     script_override: str | None = None  # if user edited the script in the textarea
 
 
+class PlanRequest(BaseModel):
+    script: str
+    category: str | None = None
+    topic: str | None = None
+
+
 def build_skeleton_ai_router(
     require_auth: Callable[..., dict] | None = None,
 ) -> APIRouter:
@@ -145,11 +151,6 @@ def build_skeleton_ai_router(
     # Visual planner — preview the locked character + style sheet before
     # burning fal money on stills. Frontend calls this after the script lands.
     # ──────────────────────────────────────────────────────────────────────
-
-    class PlanRequest(BaseModel):
-        script: str
-        category: str | None = None
-        topic: str | None = None
 
     @router.post("/plan")
     async def plan_script(body: PlanRequest, _user: dict = auth_dep):
