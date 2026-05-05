@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from skeleton_ai.prompts.idea_lists import list_categories, get_category
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError, build_script_prompt
 from skeleton_ai.voice_elevenlabs import ElevenLabsClient, ElevenLabsAuthError
-from skeleton_ai.pipeline import run as run_pipeline
+from skeleton_ai.pipeline import run as run_pipeline, analyze_script
 from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
 
 
@@ -140,6 +140,33 @@ def build_skeleton_ai_router(
 
         text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
         return {"script": text}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Visual planner — preview the locked character + style sheet before
+    # burning fal money on stills. Frontend calls this after the script lands.
+    # ──────────────────────────────────────────────────────────────────────
+
+    class PlanRequest(BaseModel):
+        script: str
+        category: str | None = None
+        topic: str | None = None
+
+    @router.post("/plan")
+    async def plan_script(body: PlanRequest, _user: dict = auth_dep):
+        if not body.script or not body.script.strip():
+            raise HTTPException(400, "script is required")
+        try:
+            grok = GrokClient()
+        except GrokAuthError as e:
+            raise HTTPException(503, f"config: {e}")
+        cat_label = ""
+        if body.category:
+            try:
+                cat_label = get_category(body.category).get("label", "")
+            except ValueError:
+                cat_label = ""
+        plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
+        return {"plan": plan}
 
     # ──────────────────────────────────────────────────────────────────────
     # Full pipeline (synchronous v0; queue later)

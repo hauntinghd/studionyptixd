@@ -52,58 +52,147 @@ def split_script_into_beats(script_text: str, target_count: int = 12) -> list[st
     return sentences[:target_count]
 
 
-def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str) -> tuple[str, str, str]:
+_PLAN_SYSTEM_PROMPT = (
+    "You are the visual planner for Cryptic Science / Skeleton AI YouTube Shorts. "
+    "Every scene shows a stylized white anatomical SKELETON on a mint green backdrop. "
+    "The skull and bones are FIXED — what changes scene to scene is the OUTFIT, "
+    "PROPS, and POSE. Character identity must come 100% from costume + props.\n\n"
+    "Given a full narration script and an optional topic hint, identify every "
+    "named subject (real person, fictional character, profession, era role) and "
+    "lock a SINGLE canonical outfit description for each. The same subject must "
+    "look identical in every beat where they appear, so be specific: name colors, "
+    "logos, signature props, era-correct details.\n\n"
+    "Subject-rendering rules:\n"
+    "  - Marvel/DC heroes: render their canonical costume. "
+    "Thor → winged silver helmet, red flowing cape, gold-and-silver Asgardian "
+    "breastplate with circular bosses, brown leather wrist bracers, Mjolnir hammer. "
+    "Superman → blue spandex bodysuit with red-and-yellow S-shield, red flowing "
+    "cape, red trunks over blue tights, yellow belt, red boots. "
+    "Hulk → torn purple pants, bare bone torso with faint green energy aura "
+    "(NEVER green skin — body stays white bone), exaggerated wide shoulders. "
+    "Iron Man → red-and-gold full plate armor, glowing arc reactor on chest, "
+    "helmet with triangular slit eyes. "
+    "Batman → black cowl with pointed ears, gray bodysuit, yellow utility belt, "
+    "flowing black cape, bat-symbol on chest. "
+    "Spider-Man → red-and-blue webbed full suit with black spider on chest. "
+    "Wonder Woman → red-and-gold bustier, blue star-spangled briefs, silver "
+    "bracers, golden tiara, lasso of truth on hip. "
+    "Wolverine → yellow-and-blue tight suit OR brown leather jacket and jeans, "
+    "metal claws extended from knuckles, fur-shoulder cowl. "
+    "  - Real people: workplace-correct attire (Tony Stark casual = goatee-ish "
+    "facial markings on skull, dark band tee + blazer; Bruce Wayne formal = "
+    "tailored black tuxedo, white pocket square). "
+    "  - Era roles: period-correct details. "
+    "Roman centurion → red tunic, lorica segmentata, plumed galea helmet, "
+    "gladius sword, leather sandals. "
+    "Egyptian pharaoh → white linen kilt, broad gold collar with lapis inlay, "
+    "nemes headcloth striped blue and gold. "
+    "Spartan hoplite → bronze muscle cuirass, crested helmet, large round "
+    "shield with lambda, dory spear. "
+    "Mars colonist 2050 → white sci-fi flight suit with insignia patches, "
+    "transparent visor helmet, magnetic boots. "
+    "WW2 fighter pilot → brown leather flight jacket, white silk scarf, "
+    "leather flying cap with goggles, parachute harness. "
+    "  - Generic / unknown subjects: pick concrete era + role + at least 4 "
+    "specific clothing details. NEVER 'plain suit', NEVER 'casual clothes'.\n\n"
+    "Output strict JSON:\n"
+    "  {\n"
+    '    "characters": { "<subject name>": "<full canonical outfit, ~25-40 words>" },\n'
+    '    "topic_setting": "<one sentence describing the world / genre / mood>",\n'
+    '    "fallback_outfit": "<outfit for narration beats with no named subject, ~20 words>"\n'
+    "  }\n"
+    "No markdown fences, no commentary outside the JSON."
+)
+
+
+def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = "",
+                   topic: str | None = None) -> dict:
     """
-    For one narration beat, ask Grok to return:
-      - OUTFIT description (short)
-      - SCENE_ACTION description (short)
-      - MOTION_PROMPT for i2v (short)
+    Pre-pass: read the full script and lock a canonical character + style sheet.
+
+    The returned plan is then passed to derive_beat_visuals so every beat
+    that mentions the same character renders the SAME outfit. Without this
+    pre-pass, Grok would re-invent Thor's cape color on every beat.
     """
-    sys = (
-        "You design single-scene visual prompts for the Cryptic Science skeleton "
-        "character on a mint green backdrop. The skeleton's BODY is always pure "
-        "white anatomical bone with hollow dark eye sockets — character identity "
-        "must come ENTIRELY from costume, props, and silhouette accessories. "
-        "Given a narration sentence and a topic category, output JSON with three "
-        "fields: outfit, scene_action, motion_prompt. Each field is one sentence, "
-        "concrete and visual. "
-        "\n\n"
-        "OUTFIT must be specific and recognizable. When the narration mentions "
-        "a known character, render their CANONICAL costume in detail — colors, "
-        "logos, signature props. Examples: "
-        "Thor → red flowing cape, gold-and-silver Asgardian breastplate, winged "
-        "helmet, Mjolnir hammer in hand. "
-        "Superman → blue spandex bodysuit with red-and-yellow S-shield on chest, "
-        "red cape, red trunks, yellow belt. "
-        "Hulk → torn purple pants, no shirt, faint green energy aura around bone "
-        "frame, exaggerated wide shoulders. "
-        "Iron Man → red-and-gold full plate armor, glowing arc reactor in chest "
-        "plate, helmet with triangular slit eyes. "
-        "Batman → black cowl with pointed ears, gray bodysuit, yellow utility "
-        "belt, flowing black cape, bat-symbol on chest. "
-        "Roman centurion → red tunic, lorica segmentata, plumed galea helmet, "
-        "gladius sword. "
-        "If the character is generic (no known IP), give era- and role-correct "
-        "clothing in detail. NEVER write 'plain suit' or vague descriptors. "
-        "\n\n"
-        "SCENE_ACTION is what's happening in the still frame (pose, prop, "
-        "camera framing). MOTION_PROMPT is what changes in the 5-second i2v "
-        "animation (subtle, single-action, no camera moves). "
-        "Output ONLY the JSON, no markdown fences."
-    )
-    user = f"Category: {category_label}\nNarration: {narration}\n\nReturn JSON now."
-    raw = grok.complete(sys, user, max_tokens=400, temperature=0.7)
+    user_lines = []
+    if category_label:
+        user_lines.append(f"Category: {category_label}")
+    if topic:
+        user_lines.append(f"Topic hint: {topic}")
+    user_lines.append("Script:")
+    user_lines.append(script_text.strip())
+    user_lines.append("\nReturn the JSON plan now.")
+    user = "\n".join(user_lines)
+
+    raw = grok.complete(_PLAN_SYSTEM_PROMPT, user, max_tokens=900, temperature=0.5)
     raw = raw.strip().strip("`").strip()
-    if raw.startswith("json"):
+    if raw.lower().startswith("json"):
+        raw = raw[4:].strip()
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        plan = {}
+    if not isinstance(plan.get("characters"), dict):
+        plan["characters"] = {}
+    plan.setdefault(
+        "fallback_outfit",
+        "neutral charcoal turtleneck and dark jeans, simple leather sneakers",
+    )
+    plan.setdefault("topic_setting", "")
+    return plan
+
+
+def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str,
+                        *, plan: dict | None = None) -> tuple[str, str, str]:
+    """
+    Per-beat visual prompt. Uses the locked character/style plan from
+    analyze_script() so every beat featuring the same subject renders the
+    same outfit. Falls back to per-beat inference if no plan is supplied
+    (older callers).
+    """
+    plan = plan or {"characters": {}, "fallback_outfit":
+                    "neutral charcoal turtleneck and dark jeans"}
+    chars_json = json.dumps(plan.get("characters", {}), ensure_ascii=False)
+    setting = plan.get("topic_setting", "")
+    fallback = plan.get("fallback_outfit", "")
+
+    sys = (
+        "You compose ONE per-scene visual prompt for the Cryptic Science skeleton "
+        "character. Skull + bones are fixed (white anatomical, mint backdrop) — "
+        "your job is to pick the right OUTFIT, ACTION, and MOTION for this beat.\n\n"
+        "RULES:\n"
+        "  1. If the narration mentions a subject already locked in the character "
+        "sheet below, COPY that subject's outfit verbatim into the OUTFIT field. "
+        "Do not invent variations.\n"
+        "  2. If the narration has no named subject, use the fallback_outfit "
+        "exactly.\n"
+        "  3. SCENE_ACTION names the pose, prop interaction, framing — one "
+        "sentence, concrete.\n"
+        "  4. MOTION_PROMPT is a single subtle change over 5 sec: a swing, a "
+        "head turn, a hammer raise, dust drifting. NO camera moves.\n\n"
+        "Output strict JSON: { \"outfit\": ..., \"scene_action\": ..., "
+        "\"motion_prompt\": ... }. No markdown fences."
+    )
+    user_lines = [f"Topic setting: {setting}" if setting else "",
+                  f"Character sheet (JSON): {chars_json}",
+                  f"Fallback outfit: {fallback}",
+                  f"Category label: {category_label}",
+                  f"Narration beat: {narration}",
+                  "Return JSON now."]
+    user = "\n".join(line for line in user_lines if line)
+
+    raw = grok.complete(sys, user, max_tokens=400, temperature=0.6)
+    raw = raw.strip().strip("`").strip()
+    if raw.lower().startswith("json"):
         raw = raw[4:].strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Fall back to neutral defaults if Grok gave us garbage.
-        return ("plain dark suit", "skeleton stands centered facing camera",
+        return (fallback or "plain dark suit",
+                "skeleton stands centered facing camera",
                 "subtle head tilt, eyes blink once")
     return (
-        data.get("outfit", "plain dark suit"),
+        data.get("outfit", fallback) or fallback or "plain dark suit",
         data.get("scene_action", "skeleton stands centered"),
         data.get("motion_prompt", "subtle head tilt"),
     )
@@ -139,15 +228,26 @@ def run(
     script_text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
     (workspace / "script.txt").write_text(script_text, encoding="utf-8")
 
-    # 2. Split into beats.
+    # 2. Pre-pass: analyze the full script to lock a canonical character +
+    # style sheet. Every beat that mentions the same subject will reuse the
+    # identical outfit description, guaranteeing visual continuity across
+    # all 12 beats. Works for the 4 idea-list categories AND custom topics.
+    plan = analyze_script(grok, script_text, category_label=cat["label"], topic=topic)
+    (workspace / "scene_plan.json").write_text(
+        json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # 3. Split into beats.
     sentences = split_script_into_beats(script_text, target_count=beats_target)
     if not sentences:
         raise RuntimeError("Grok returned empty script")
 
-    # 3. For each beat, get visual prompt + create a Beat record.
+    # 4. For each beat, derive outfit/action/motion using the locked plan.
     beats: list[Beat] = []
     for i, narration in enumerate(sentences):
-        outfit, action, motion = derive_beat_visuals(grok, narration, cat["label"])
+        outfit, action, motion = derive_beat_visuals(
+            grok, narration, cat["label"], plan=plan
+        )
         beats.append(Beat(
             index=i,
             narration=narration,
