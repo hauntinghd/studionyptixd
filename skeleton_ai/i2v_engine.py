@@ -76,6 +76,11 @@ def generate(
             "image_url": image_url,
             "duration": str(duration_sec),
             "aspect_ratio": aspect_ratio,
+            # Seedance 2.0 defaults to ON; auto-generated audio trips
+            # partner_validation_failed ("Output audio has sensitive content")
+            # because the silent skeleton clips can produce odd ambient SFX.
+            # Narration is added separately via ElevenLabs in the mux step.
+            "generate_audio": False,
         }
 
     result = fal_client.subscribe(endpoint, arguments=args)
