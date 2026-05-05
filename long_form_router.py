@@ -72,16 +72,35 @@ def build_long_form_router(
     *,
     require_auth: Callable[..., dict] | None = None,
     catalyst_hub_snapshot_for_user: Callable | None = None,
+    is_admin_check: Callable[[dict], bool] | None = None,
 ) -> APIRouter:
+    """
+    All long-form endpoints are ADMIN-ONLY (Casey 2026-05-05). Public users
+    only see /api/skeleton-ai/* via the Create tab. Long-form burns Grok
+    tokens + fal money on episode-scale renders, so we gate at the API
+    level rather than relying on frontend sidebar hiding alone.
+    """
     router = APIRouter(prefix="/api/long-form", tags=["long-form"])
     auth_dep = Depends(require_auth) if require_auth else Depends(lambda: {"user_id": "anon"})
 
+    def _gate_admin(user: dict) -> None:
+        if not is_admin_check:
+            return  # No admin checker passed (test mode) — open.
+        try:
+            if is_admin_check(user):
+                return
+        except Exception:
+            pass
+        raise HTTPException(403, "long-form is admin-only")
+
     @router.get("/channels")
-    async def list_channels_route(_user: dict = auth_dep):
+    async def list_channels_route(user: dict = auth_dep):
+        _gate_admin(user)
         return {"channels": list_channels()}
 
     @router.get("/channel/{key}")
-    async def channel_route(key: str, _user: dict = auth_dep):
+    async def channel_route(key: str, user: dict = auth_dep):
+        _gate_admin(user)
         try:
             return {"channel": get_channel(key)}
         except ValueError as e:
@@ -89,6 +108,7 @@ def build_long_form_router(
 
     @router.post("/catalyst-insights")
     async def catalyst_insights(body: CatalystInsightsRequest, user: dict = auth_dep):
+        _gate_admin(user)
         """
         Returns the shaped Catalyst snapshot for the picked channel.
         If Catalyst hasn't harvested anything yet (or the helper isn't
@@ -126,6 +146,7 @@ def build_long_form_router(
 
     @router.post("/outline")
     async def outline_route(body: OutlineRequest, user: dict = auth_dep):
+        _gate_admin(user)
         if not body.topic or not body.topic.strip():
             raise HTTPException(400, "topic is required")
         try:
@@ -167,7 +188,8 @@ def build_long_form_router(
         }
 
     @router.post("/outline/expand-chapter")
-    async def expand_chapter_route(body: ExpandChapterRequest, _user: dict = auth_dep):
+    async def expand_chapter_route(body: ExpandChapterRequest, user: dict = auth_dep):
+        _gate_admin(user)
         try:
             channel = get_channel(body.channel_key)
         except ValueError as e:
@@ -190,7 +212,8 @@ def build_long_form_router(
         }
 
     @router.post("/render")
-    async def render_route(body: RenderRequest, _user: dict = auth_dep):
+    async def render_route(body: RenderRequest, user: dict = auth_dep):
+        _gate_admin(user)
         """
         Full long-form render. PHASE 2 — wires into the v5 pipeline.
 
@@ -210,7 +233,8 @@ def build_long_form_router(
         )
 
     @router.get("/jobs/{job_id}")
-    async def job_route(job_id: str, _user: dict = auth_dep):
+    async def job_route(job_id: str, user: dict = auth_dep):
+        _gate_admin(user)
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
         # Phase 2 — read result.json from long_form/output/{job_id}/.

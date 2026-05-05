@@ -23820,8 +23820,9 @@ try:
     app.include_router(build_long_form_router(
         require_auth=require_auth,
         catalyst_hub_snapshot_for_user=_catalyst_hub_snapshot_for_user,
+        is_admin_check=_is_admin_user,
     ))
-    log.info("Long-form router mounted at /api/long-form")
+    log.info("Long-form router mounted at /api/long-form (admin-only)")
 except Exception as _long_form_err:
     log.warning(f"Long-form router NOT mounted: {_long_form_err}")
 
