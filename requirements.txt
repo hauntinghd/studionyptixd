@@ -16,3 +16,6 @@ yt-dlp==2026.03.17
 # python:3.11-slim without CUDA. Import is guarded in backend.py (try/except).
 # Only needed for local STT, not the serverless API pipeline.
 edge-tts
+# Skeleton AI short-form pipeline (Seedance i2v + Kling premium upgrade).
+# i2v_engine.py imports fal_client at module level.
+fal-client

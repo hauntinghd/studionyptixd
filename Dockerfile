@@ -26,6 +26,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY *.py ./
 COPY client_secrets.json .
 COPY ops ./ops
+# Skeleton AI short-form pipeline package — Casey 2026-05-05 rebuild.
+# Top-level *.py glob above does NOT recurse into subpackages.
+COPY skeleton_ai ./skeleton_ai
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
