@@ -23796,6 +23796,17 @@ app.include_router(
 )
 
 
+# Skeleton AI short-form pipeline (Casey 2026-05-05 — replaces dead Create/Clone/
+# Long-form/Thumbnail/Auto-Clip pipelines). Mounts /api/skeleton-ai/* routes.
+# Implementation: skeleton_ai/ module + skeleton_ai_router.py.
+try:
+    from skeleton_ai_router import build_skeleton_ai_router
+    app.include_router(build_skeleton_ai_router(require_auth=require_auth))
+    log.info("Skeleton AI router mounted at /api/skeleton-ai")
+except Exception as _skeleton_ai_err:
+    log.warning(f"Skeleton AI router NOT mounted: {_skeleton_ai_err}")
+
+
 # â"€â"€â"€ Static Files â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _default_dist_dir = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
