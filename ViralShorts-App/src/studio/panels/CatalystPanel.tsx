@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Bot, BrainCircuit, Download, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
 import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
+import CatalystReferencesSection from './CatalystReferencesSection';
 
 type CatalystChannel = {
     channel_id: string;
@@ -1164,6 +1165,10 @@ export default function CatalystPanel() {
 
     return (
         <section className="space-y-6">
+            {/* Reference Videos library — paste viral YT URLs to bias all
+                Studio generations toward what already works. (Casey 2026-05-06.) */}
+            <CatalystReferencesSection />
+
             <div className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                     <div>

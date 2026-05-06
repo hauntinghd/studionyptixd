@@ -23828,6 +23828,18 @@ except Exception as _skeleton_ai_err:
     log.warning(f"Skeleton AI router NOT mounted: {_skeleton_ai_err}")
 
 
+# Catalyst Reference Videos (Casey 2026-05-06 — "guarantee virality" lever).
+# Per-user library of viral / "winning" YouTube videos the user pastes in.
+# yt-dlp pulls metadata; Phase 2 will add Whisper transcript + vision pattern
+# decode + auto-injection into Skeleton AI / Long Form generation prompts.
+try:
+    from catalyst_references_router import build_catalyst_references_router
+    app.include_router(build_catalyst_references_router(require_auth=require_auth))
+    log.info("Catalyst references router mounted at /api/catalyst/references")
+except Exception as _cat_refs_err:
+    log.warning(f"Catalyst references router NOT mounted: {_cat_refs_err}")
+
+
 # Long-form generation (Casey 2026-05-05 — replaces stripped Long Form panel).
 # Six channels: Lacuna, Hidden Cortex, PB Live, Lo-Fi Radio, Empire Magnates,
 # History Rewind. Catalyst Hub data threads into the Grok outline call so each
