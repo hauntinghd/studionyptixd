@@ -1,18 +1,26 @@
 """
-i2v engine — Seedance 2.0 default, Kling 2.1 Pro premium upgrade.
+i2v engine — multi-model fallback for skeleton + character imagery.
 
-Per the i2v bake-off (2026-05-04):
-  - LTX 13B distilled  → BROKEN (glow drift on character eyes)
-  - Kling 2.1 Pro      → BEST quality but $0.40-0.50/clip (premium tier only)
-  - Seedance 2.0       → strong character preservation, $0.10-0.15/clip (default)
-  - Pixverse V6        → solid, similar cost to Seedance
-  - Wan 2.2            → black eye sockets glitch
+Per the i2v bake-off (2026-05-04) + Marvel-vs-DC content-policy run (2026-05-06):
+  - Seedance 2.0   → strong char preservation, $0.10-0.15/clip BUT trips
+                     Bytedance's content policy on skeleton+weapon imagery
+                     (the canonical Skeleton AI signature combination).
+                     'Output video has sensitive content' / partner_validation_failed.
+                     Kept as PRIMARY for non-character beats (intros, transitions);
+                     auto-falls back to Pixverse V6 on content_policy_violation.
+  - Pixverse V6    → $0.045/s (~$0.225/clip), permissive moderation, the
+                     fallback that actually animates skeleton-Iron-Man +
+                     skeleton-Strange without flagging.
+  - Kling 2.1 Pro  → $0.40-0.50/clip (premium tier only — best quality, mid
+                     moderation strictness).
+  - LTX 13B        → retired for skeleton (glow drift on character eyes).
+  - Wan 2.2        → black eye sockets glitch.
 
-Skeleton AI defaults:
-  Standard tier (5 AC):  Seedance 2.0
-  Premium upgrade (+2 AC): Kling 2.1 Pro
+Pipeline:
+  Standard tier (5 AC):  Seedance 2.0  → Pixverse V6 (auto-fallback)
+  Premium upgrade (7 AC): Kling 2.1 Pro
 
-Both via fal_client.subscribe.
+All via fal_client.subscribe.
 """
 from __future__ import annotations
 import os
@@ -28,7 +36,11 @@ class I2VError(RuntimeError):
 
 
 SEEDANCE_ENDPOINT = "bytedance/seedance-2.0/image-to-video"
+PIXVERSE_V6_ENDPOINT = "fal-ai/pixverse/v6/image-to-video"
 KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
+
+# Standard tier fallback chain — first model that doesn't 422 wins.
+STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
 
 
 def _ensure_fal():
@@ -37,6 +49,53 @@ def _ensure_fal():
         raise I2VError("FAL_AI_KEY not set in env")
     os.environ["FAL_KEY"] = key  # fal_client reads this
     return key
+
+
+def _is_content_policy_error(exc: Exception) -> bool:
+    """Match Bytedance's partner_validation_failed + Pixverse moderation rejects."""
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "content_policy_violation",
+        "partner_validation_failed",
+        "sensitive content",
+        "content policy",
+    ))
+
+
+def _build_args(endpoint: str, motion_prompt: str, image_url: str,
+                duration_sec: int, aspect_ratio: str) -> dict:
+    """Per-endpoint arg shape. Seedance wants generate_audio=False to dodge
+    its audio classifier; Pixverse + Kling have a leaner schema."""
+    if endpoint == SEEDANCE_ENDPOINT:
+        return {
+            "prompt": motion_prompt,
+            "image_url": image_url,
+            "duration": str(duration_sec),
+            "aspect_ratio": aspect_ratio,
+            "generate_audio": False,
+        }
+    if endpoint == PIXVERSE_V6_ENDPOINT:
+        return {
+            "prompt": motion_prompt,
+            "image_url": image_url,
+            "duration": str(duration_sec),
+            "aspect_ratio": aspect_ratio,
+            "negative_prompt": _NEG_VIDEO,
+        }
+    if endpoint == KLING_PRO_ENDPOINT:
+        return {
+            "prompt": motion_prompt,
+            "image_url": image_url,
+            "duration": str(duration_sec),
+            "aspect_ratio": aspect_ratio,
+            "negative_prompt": _NEG_VIDEO,
+        }
+    return {
+        "prompt": motion_prompt,
+        "image_url": image_url,
+        "duration": str(duration_sec),
+        "aspect_ratio": aspect_ratio,
+    }
 
 
 def generate(
@@ -51,7 +110,8 @@ def generate(
     """
     Animate a still into a short clip.
 
-    tier: "standard" (Seedance 2.0) or "premium" (Kling 2.1 Pro).
+    tier="standard" → Seedance 2.0, fallback Pixverse V6 on content policy 422.
+    tier="premium"  → Kling 2.1 Pro (no fallback — caller pays for it).
     """
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
@@ -60,33 +120,33 @@ def generate(
     _ensure_fal()
     image_url = fal_client.upload_file(str(still_path))
 
-    if tier == "premium":
-        endpoint = KLING_PRO_ENDPOINT
-        args = {
-            "prompt": motion_prompt,
-            "image_url": image_url,
-            "duration": str(duration_sec),
-            "aspect_ratio": aspect_ratio,
-            "negative_prompt": _NEG_VIDEO,
-        }
-    else:
-        endpoint = SEEDANCE_ENDPOINT
-        args = {
-            "prompt": motion_prompt,
-            "image_url": image_url,
-            "duration": str(duration_sec),
-            "aspect_ratio": aspect_ratio,
-            # Seedance 2.0 defaults to ON; auto-generated audio trips
-            # partner_validation_failed ("Output audio has sensitive content")
-            # because the silent skeleton clips can produce odd ambient SFX.
-            # Narration is added separately via ElevenLabs in the mux step.
-            "generate_audio": False,
-        }
+    chain = (
+        [KLING_PRO_ENDPOINT] if tier == "premium" else list(STANDARD_FALLBACK_CHAIN)
+    )
 
-    result = fal_client.subscribe(endpoint, arguments=args)
+    last_exc: Exception | None = None
+    used_endpoint: str | None = None
+    result: dict | None = None
+    for endpoint in chain:
+        args = _build_args(endpoint, motion_prompt, image_url, duration_sec, aspect_ratio)
+        try:
+            result = fal_client.subscribe(endpoint, arguments=args)
+            used_endpoint = endpoint
+            break
+        except Exception as e:
+            last_exc = e
+            if _is_content_policy_error(e) and endpoint != chain[-1]:
+                # Try next model in the chain.
+                print(f"  [i2v] {endpoint} flagged content_policy on {still_path.name}; falling back...")
+                continue
+            raise I2VError(f"{endpoint} failed on {still_path.name}: {e}") from e
+
+    if result is None:
+        raise I2VError(f"all i2v endpoints failed on {still_path.name}: {last_exc}")
+
     video_url = (result.get("video") or {}).get("url") or result.get("video_url")
     if not video_url:
-        raise I2VError(f"{endpoint} returned no video URL: {result}")
+        raise I2VError(f"{used_endpoint} returned no video URL: {result}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _download(video_url, out_path)
