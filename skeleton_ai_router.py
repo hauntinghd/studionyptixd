@@ -41,6 +41,54 @@ from skeleton_ai.stills_engine import (
 )
 from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
 
+# Reference videos thread into the Grok system prompt so generated scripts
+# mimic the patterns Casey saved as 'winning' inspiration. Best-effort —
+# if the references module / table isn't available, we silently skip.
+try:
+    from catalyst_references import list_user_references, references_as_grok_context
+    _REFS_AVAILABLE = True
+except Exception:
+    _REFS_AVAILABLE = False
+    def list_user_references(*_a, **_kw):  # type: ignore
+        return []
+    def references_as_grok_context(*_a, **_kw):  # type: ignore
+        return ""
+
+# Skeleton AI shorts default to the user's CrypticScience channel context,
+# but a user can re-tag a reference to 'zerotier' or 'lexi_manhwa' if the
+# script should mimic that channel's pattern instead.
+SKELETON_AI_SHORTS_CHANNEL_KEYS = ("cryptic_science", "zerotier", "lexi_manhwa", "")
+
+
+def _user_id(user: dict) -> str:
+    return str((user or {}).get("id", "") or (user or {}).get("user_id", "") or "")
+
+
+def _references_for_skeleton_ai(user: dict) -> str:
+    """Pull user's saved refs whose channel_key matches a shorts channel
+    or is universal (''). Returns a Grok-ready text block, possibly empty."""
+    if not _REFS_AVAILABLE:
+        return ""
+    uid = _user_id(user)
+    if not uid:
+        return ""
+    matched: list[dict] = []
+    seen_ids: set[str] = set()
+    try:
+        for ck in SKELETON_AI_SHORTS_CHANNEL_KEYS:
+            try:
+                rows = list_user_references(uid, channel_key=ck)
+            except Exception:
+                continue
+            for r in rows or []:
+                rid = str((r or {}).get("id", ""))
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    matched.append(r)
+    except Exception:
+        return ""
+    return references_as_grok_context(matched, max_refs=8)
+
 
 OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 
@@ -165,19 +213,32 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/script")
-    async def generate_script(body: ScriptRequest, _user: dict = auth_dep):
+    async def generate_script(body: ScriptRequest, user: dict = auth_dep):
         try:
             cat = get_category(body.category)
             grok = GrokClient()
         except (ValueError, GrokAuthError) as e:
             raise HTTPException(503, f"config: {e}")
 
+        # Append the user's reference-video context (if any) so the script
+        # mimics patterns from saved viral inspirations.
+        refs_block = _references_for_skeleton_ai(user)
+        if refs_block:
+            system = (
+                cat["system_prompt"]
+                + "\n\n"
+                + refs_block
+                + "\n\nMatch the hook structure and pacing of these references where it fits the topic."
+            )
+        else:
+            system = cat["system_prompt"]
+
         user_prompt = build_script_prompt(cat["system_prompt"], body.topic)
 
         if body.stream:
             def sse_generator():
                 try:
-                    for piece in grok.stream(cat["system_prompt"], user_prompt, max_tokens=1500):
+                    for piece in grok.stream(system, user_prompt, max_tokens=1500):
                         # Escape newlines so SSE framing isn't broken.
                         safe = piece.replace("\n", "\\n")
                         yield f"data: {safe}\n\n"
@@ -186,8 +247,11 @@ def build_skeleton_ai_router(
                     yield f"event: error\ndata: {e}\n\n"
             return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-        text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
-        return {"script": text}
+        text = grok.complete(system, user_prompt, max_tokens=1500)
+        return {
+            "script": text,
+            "references_used": bool(refs_block),
+        }
 
     # ──────────────────────────────────────────────────────────────────────
     # Visual planner — preview the locked character + style sheet before

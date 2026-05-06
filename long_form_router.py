@@ -41,6 +41,41 @@ from long_form.catalyst_bridge import (
 
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
 
+# Reference videos thread into the Grok system prompt so generated outlines
+# mimic patterns from videos the user picked as inspiration. Best-effort.
+try:
+    from catalyst_references import list_user_references, references_as_grok_context
+    _REFS_AVAILABLE = True
+except Exception:
+    _REFS_AVAILABLE = False
+    def list_user_references(*_a, **_kw):  # type: ignore
+        return []
+    def references_as_grok_context(*_a, **_kw):  # type: ignore
+        return ""
+
+
+def _references_for_channel(user: dict, channel_key: str) -> str:
+    """Pull user's saved refs whose channel_key matches the requested
+    channel OR is universal (''). Returns a Grok-ready text block."""
+    if not _REFS_AVAILABLE:
+        return ""
+    uid = str((user or {}).get("id", "") or (user or {}).get("user_id", "") or "")
+    if not uid:
+        return ""
+    matched: list[dict] = []
+    seen: set[str] = set()
+    for ck in (channel_key, ""):
+        try:
+            rows = list_user_references(uid, channel_key=ck)
+        except Exception:
+            continue
+        for r in rows or []:
+            rid = str((r or {}).get("id", ""))
+            if rid and rid not in seen:
+                seen.add(rid)
+                matched.append(r)
+    return references_as_grok_context(matched, max_refs=8)
+
 
 OUTPUT_ROOT = Path(os.getenv("LONG_FORM_OUTPUT_ROOT", "long_form/output"))
 
@@ -214,19 +249,33 @@ def build_long_form_router(
                 except Exception:
                     catalyst_text = ""
 
+        # Pull reference-video context (user's saved viral inspirations
+        # tagged to this channel OR the universal '' tag).
+        refs_text = _references_for_channel(user, body.channel_key)
+
+        # Combine both signal blocks under one header so Grok sees them as
+        # a single 'channel performance + viral references' bias.
+        combined_context_parts: list[str] = []
+        if catalyst_text:
+            combined_context_parts.append(catalyst_text)
+        if refs_text:
+            combined_context_parts.append(refs_text)
+        combined_context = "\n\n".join(combined_context_parts)
+
         target_minutes = body.target_minutes or channel["default_minutes"]
         outline = generate_outline(
             grok,
             channel["system_prompt"],
             topic=body.topic,
             target_minutes=int(target_minutes),
-            catalyst_context=catalyst_text,
+            catalyst_context=combined_context,
         )
         return {
             "channel_key": body.channel_key,
             "topic": body.topic,
             "target_minutes": int(target_minutes),
             "catalyst_context_used": bool(catalyst_text),
+            "references_used": bool(refs_text),
             "outline": outline,
         }
 

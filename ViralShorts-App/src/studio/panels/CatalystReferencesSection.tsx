@@ -13,7 +13,7 @@
  */
 import { useCallback, useContext, useEffect, useState } from 'react';
 import {
-    BookmarkPlus, Eye, Heart, Link2, Loader2, MessageSquare, Plus, Trash2,
+    BookmarkPlus, Edit3, Eye, Heart, Link2, Loader2, MessageSquare, Plus, Trash2,
 } from 'lucide-react';
 import { AuthContext } from '../shared';
 
@@ -131,6 +131,26 @@ export default function CatalystReferencesSection() {
         }
     }, [accessToken]);
 
+    const updateRef = useCallback(async (id: string, patch: { channel_key?: string; notes?: string }) => {
+        if (!accessToken) return;
+        try {
+            const r = await fetch(`/api/catalyst/references/${id}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify(patch),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const d = await r.json();
+            const updated = d.reference as ReferenceRow;
+            setRefs((prev) => prev.map((rf) => (rf.id === id ? { ...rf, ...updated } : rf)));
+        } catch (e) {
+            setError(`update failed: ${(e as Error).message}`);
+        }
+    }, [accessToken]);
+
     const totalRefs = refs.length;
     const totalViews = refs.reduce((s, r) => s + (r.view_count || 0), 0);
 
@@ -223,17 +243,32 @@ export default function CatalystReferencesSection() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {refs.map((r) => (
-                    <ReferenceCard key={r.id} ref_={r} onRemove={() => removeRef(r.id)} />
+                    <ReferenceCard
+                        key={r.id}
+                        ref_={r}
+                        onRemove={() => removeRef(r.id)}
+                        onUpdate={(patch) => updateRef(r.id, patch)}
+                    />
                 ))}
             </div>
         </section>
     );
 }
 
-function ReferenceCard({ ref_, onRemove }: { ref_: ReferenceRow; onRemove: () => void }) {
+function ReferenceCard({
+    ref_, onRemove, onUpdate,
+}: {
+    ref_: ReferenceRow;
+    onRemove: () => void;
+    onUpdate: (patch: { channel_key?: string; notes?: string }) => void;
+}) {
+    const [editingChannel, setEditingChannel] = useState(false);
+    const [editingNotes, setEditingNotes] = useState(false);
+    const [draftNotes, setDraftNotes] = useState(ref_.user_notes || '');
     const dur = ref_.duration_sec || 0;
     const durStr = dur >= 60 ? `${Math.floor(dur / 60)}m ${dur % 60}s` : `${dur}s`;
     const channelLabel = (CHANNEL_KEY_OPTIONS.find((o) => o.key === ref_.channel_key)?.label) || ref_.channel_key || 'all channels';
+
     return (
         <div className="rounded-md border border-zinc-800 bg-zinc-900 p-3 flex gap-3">
             {ref_.thumbnail_url ? (
@@ -287,15 +322,76 @@ function ReferenceCard({ ref_, onRemove }: { ref_: ReferenceRow; onRemove: () =>
                     )}
                     <span>{durStr}</span>
                 </div>
+
+                {/* Channel-tag: clickable badge → inline dropdown to re-assign */}
                 <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="rounded bg-violet-500/10 border border-violet-500/30 text-violet-300 px-1.5 py-0.5 text-[9px] font-mono">
-                        {channelLabel}
-                    </span>
+                    {editingChannel ? (
+                        <select
+                            autoFocus
+                            value={ref_.channel_key || ''}
+                            onChange={(e) => {
+                                onUpdate({ channel_key: e.target.value });
+                                setEditingChannel(false);
+                            }}
+                            onBlur={() => setEditingChannel(false)}
+                            className="rounded bg-zinc-950 border border-violet-500 text-[10px] text-white px-1 py-0.5 outline-none"
+                        >
+                            {CHANNEL_KEY_OPTIONS.map((o) => (
+                                <option key={o.key || 'all'} value={o.key}>{o.label}</option>
+                            ))}
+                        </select>
+                    ) : (
+                        <button
+                            onClick={() => setEditingChannel(true)}
+                            className="rounded bg-violet-500/10 border border-violet-500/30 text-violet-300 px-1.5 py-0.5 text-[9px] font-mono hover:bg-violet-500/20 hover:border-violet-500/50 flex items-center gap-1"
+                            title="Re-assign which channel this reference inspires"
+                        >
+                            {channelLabel}
+                            <Edit3 className="h-2.5 w-2.5 opacity-60" />
+                        </button>
+                    )}
                 </div>
-                {ref_.user_notes && (
-                    <div className="text-[10px] text-zinc-400 italic mt-0.5 line-clamp-2" title={ref_.user_notes}>
-                        {ref_.user_notes}
+
+                {/* Notes — click to edit */}
+                {editingNotes ? (
+                    <div className="flex flex-col gap-1 mt-1">
+                        <textarea
+                            autoFocus
+                            value={draftNotes}
+                            onChange={(e) => setDraftNotes(e.target.value)}
+                            rows={2}
+                            placeholder="Why does this video matter? (hook, pacing, lighting…)"
+                            className="rounded bg-zinc-950 border border-violet-500 text-[10px] text-white px-1.5 py-1 outline-none resize-none"
+                        />
+                        <div className="flex gap-1.5">
+                            <button
+                                onClick={() => {
+                                    onUpdate({ notes: draftNotes });
+                                    setEditingNotes(false);
+                                }}
+                                className="rounded bg-violet-500 hover:bg-violet-600 text-[10px] text-white px-2 py-0.5"
+                            >
+                                Save
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setDraftNotes(ref_.user_notes || '');
+                                    setEditingNotes(false);
+                                }}
+                                className="rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-300 px-2 py-0.5"
+                            >
+                                Cancel
+                            </button>
+                        </div>
                     </div>
+                ) : (
+                    <button
+                        onClick={() => setEditingNotes(true)}
+                        className="text-[10px] text-zinc-400 italic mt-0.5 line-clamp-2 text-left hover:text-zinc-200"
+                        title="Click to edit notes"
+                    >
+                        {ref_.user_notes || <span className="text-zinc-600">+ add notes</span>}
+                    </button>
                 )}
             </div>
         </div>
