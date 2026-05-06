@@ -1,45 +1,79 @@
 """
-Canonical Skeleton AI character + scene style prompt.
+Skeleton AI v3 character + scene style.
 
-Locked 2026-05-05 from reference videos at D:/recaps/do this/ and
-124 reference frames at D:/recaps/do_this_frames_new/.
+UPDATED 2026-05-06 (afternoon) per Casey's reference image:
+  An anatomically-accurate FULL-SIZE adult human skeleton standing in a
+  real-world photoreal scene (high-school hallway with students walking
+  past), no clothing, hollow empty eye sockets, slight luminous/translucent
+  bone material — integrated like a person, not a cartoon.
 
-This is the GROUND TRUTH spec. Do not alter without re-validating against
-reference frames. Prior specs (v4 porcelain / v5 rubber gel / v6 clear-glass /
-v7 polished plastic) all rejected — see project_skeleton_spec_canonical.md.
+Rejected from v1/v2:
+  - "cartoon-mascot" / "stylized chibi" wording — produced chibi proportions
+    and Funko-style heads.
+  - Small white dot pupils inside sockets — produced cute mascot eyes.
+  - Mint-green studio backdrop default — fought scene_action settings.
+  - "6-7 head heights" qualifier — got interpreted as chibi 3-4 heads.
+
+v3 ground truth:
+  - Anatomically accurate adult human skeleton, real adult proportions
+    (~7.5 head heights, life-size when next to humans).
+  - Hollow black empty eye sockets — no pupils, no dots, no glow.
+  - Slightly luminous / faintly translucent bone — looks photoreal, not toy.
+  - Naked by default; OUTFIT only when narration calls for a costume role.
+  - NO mint backdrop — every scene is a real cinematic environment.
+  - Captions (rendered post-render): single-word UPPERCASE white bold with
+    black 5-6px stroke, centered low.
 """
 
-# Per-image base style — kept SHORT so cheaper models (ernie_image, free
-# nano-banana) don't truncate. ~75 words. Full canonical signature lives in
-# project_skeleton_spec_canonical.md and is enforced by NEG_STILL below.
+# Per-image character spec — what stays constant across every scene.
+# ~70 words. Cheap-model friendly.
 SKELETON_BASE_STYLE = (
-    "3D cartoon-mascot anatomical skeleton on solid mint-green studio backdrop. "
-    "Pure white smooth bone skull with hollow dark eye sockets and small white "
-    "dot pupils inside each socket. Body wears real opaque clothing for the "
-    "scene's role; bones visible only at hands and neck. Vertical 9:16 frame, "
-    "cinematic studio lighting. "
+    "Photoreal cinematic render of an anatomically accurate adult human "
+    "skeleton standing in a real-world environment. Full life-size adult "
+    "proportions (~7.5 head heights), realistic bone density, slightly "
+    "luminous off-white bone with subtle translucent quality. Hollow empty "
+    "black eye sockets — NO pupils, NO dots, NO eye glow. Visible ribcage, "
+    "spine, pelvis, full skeletal anatomy. Integrated naturally into the "
+    "scene at human scale alongside real props and people. "
 )
 
-# Solid mint backdrop — kept as a separate token so callers can override
-# (e.g., specific scene-level macro shots).
-MINT_GREEN_BG = "Mint-green seamless backdrop (#5AC8B8). "
+# Backwards-compat alias — most callers no longer need this.
+MINT_GREEN_BG = "Soft mint-green studio backdrop. "
 
-# Per-image NEG list — kept tight so cheaper models actually parse it.
-# Hits the specific v4-v7 failure modes from project_skeleton_spec_canonical.md.
+# Per-image NEG — kills the chibi/mascot regression + previous failure modes.
 NEG_STILL = (
-    "text, watermark, logo, glowing eyes, supernatural eyes, "
+    "text, watermark, logo, "
+    "cartoon mascot, chibi, funko, big head, oversized head, child proportions, "
+    "small body, 3-4 head heights, "
+    "white dot pupils, dot pupils, eye dots, glowing eyes, glowing eyeballs, "
+    "demonic eyes, supernatural eye glow, laser beams from eyes, red laser eyes, "
     "polished plastic toy, porcelain shell, glass body, translucent gel skin, "
     "see-through clothing, x-ray clothing, exposed brain, cracked skull, "
     "yellowed skull, deformed hands, extra fingers, blurry, low quality"
 )
 
 
-def assemble_scene_prompt(scene_action: str, outfit: str, mint_bg: bool = True) -> str:
-    """Compose a full per-scene prompt with canonical character + scene specifics."""
+def assemble_scene_prompt(scene_action: str, outfit: str, mint_bg: bool = False) -> str:
+    """
+    Compose a per-scene prompt.
+
+    Default (mint_bg=False) lets `scene_action` describe the full cinematic
+    setting — hallway, rooftop, Asgardian throne room, Krypton city, etc.
+    The skeleton is a full-size adult, integrated like a real person.
+
+    `outfit` is OPTIONAL now — when narration doesn't call for a costume,
+    pass an empty string (or "no clothing" / "naked") and the skeleton
+    appears anatomically as bone.
+    """
+    outfit = (outfit or "").strip().rstrip(".")
+    scene_action = (scene_action or "").strip().rstrip(".")
+
     parts = [SKELETON_BASE_STYLE]
+    if outfit and outfit.lower() not in {"none", "naked", "no clothing", "no outfit", "n/a", "-"}:
+        parts.append(f"Outfit: {outfit}. ")
     if mint_bg:
         parts.append(MINT_GREEN_BG)
-    parts.append(f"OUTFIT: {outfit.strip()}. ")
-    parts.append(f"ACTION/POSE: {scene_action.strip()}. ")
-    parts.append("Vertical 9:16 frame. Cinematic studio composition.")
+    if scene_action:
+        parts.append(f"Scene: {scene_action}. ")
+    parts.append("Vertical 9:16 frame. Cinematic dramatic lighting, photoreal materials, real-world depth.")
     return "".join(parts)
