@@ -23801,8 +23801,29 @@ app.include_router(
 # Implementation: skeleton_ai/ module + skeleton_ai_router.py.
 try:
     from skeleton_ai_router import build_skeleton_ai_router
-    app.include_router(build_skeleton_ai_router(require_auth=require_auth))
-    log.info("Skeleton AI router mounted at /api/skeleton-ai")
+
+    async def _skeleton_reserve_credit(user: dict, *, ac_cost: int):
+        """Adapter wrapping backend.py's _reserve_generation_credit for the
+        Skeleton AI router. Resolves user plan + admin status here so the
+        router stays decoupled from billing.py."""
+        user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
+        is_admin = (user or {}).get("email", "") in ADMIN_EMAILS
+        billing_active = _billing_active_for_user(user)
+        return await _reserve_generation_credit(
+            user,
+            user_plan if not is_admin else "pro",
+            billing_active,
+            is_admin=is_admin,
+            usage_kind="animated",
+            credits_needed=ac_cost,
+        )
+
+    app.include_router(build_skeleton_ai_router(
+        require_auth=require_auth,
+        reserve_credit=_skeleton_reserve_credit,
+        refund_credit=_refund_generation_credit,
+    ))
+    log.info("Skeleton AI router mounted at /api/skeleton-ai (AC deduction enabled)")
 except Exception as _skeleton_ai_err:
     log.warning(f"Skeleton AI router NOT mounted: {_skeleton_ai_err}")
 

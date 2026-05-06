@@ -45,6 +45,20 @@ from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
 OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 
 
+async def _maybe_refund(refund_fn, user: dict, source: str, credits: int) -> None:
+    """Reverse an AC reservation when the pipeline failed AFTER charging.
+    No-op when source='admin' (no charge happened) or refund_fn is unset."""
+    if not refund_fn or source not in ("monthly", "topup"):
+        return
+    user_id = str(user.get("id", "") or user.get("user_id", "") or "")
+    if not user_id:
+        return
+    try:
+        await refund_fn(user_id, source, credits=credits)
+    except Exception:
+        pass  # refund is best-effort; never let it bubble out of the failure path
+
+
 class ScriptRequest(BaseModel):
     category: str = Field(default="human_limits")
     topic: str | None = None
@@ -75,10 +89,19 @@ class ScenesRequest(BaseModel):
 
 def build_skeleton_ai_router(
     require_auth: Callable[..., dict] | None = None,
+    *,
+    reserve_credit: Callable[..., Any] | None = None,
+    refund_credit: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """
-    Build the Skeleton AI router. require_auth is a FastAPI dependency that
-    returns the authed user dict (matches the existing backend.py pattern).
+    Build the Skeleton AI router.
+
+    require_auth     — FastAPI dep returning the authed user dict.
+    reserve_credit   — async fn(user, ac_cost) → (allowed: bool, source: str, state: dict).
+                       Caller wraps backend.py's _reserve_generation_credit + plan resolver.
+                       If None, credit gating is disabled (test/dev mode).
+    refund_credit    — async fn(user_id, source, *, credits) → None.
+                       Used to reverse a reservation if the pipeline fails after charging.
     """
     router = APIRouter(prefix="/api/skeleton-ai", tags=["skeleton-ai"])
 
@@ -328,10 +351,29 @@ def build_skeleton_ai_router(
         if body.tier not in ("standard", "premium"):
             raise HTTPException(400, "tier must be standard or premium")
 
-        # TODO(billing): deduct AC here BEFORE running. If user lacks credits, 402.
-        # ac_required = AC_COST_PREMIUM if body.tier == "premium" else AC_COST_STANDARD
-        # if not billing.deduct(user.get("user_id"), ac_required):
-        #     raise HTTPException(402, "insufficient_credits")
+        ac_required = AC_COST_PREMIUM if body.tier == "premium" else AC_COST_STANDARD
+
+        # Reserve AC up front. Returns (allowed, source, state). Source 'admin'
+        # means free (the admin/owner bypass); 'monthly' or 'topup' means we
+        # actually charged the wallet and must refund on pipeline failure.
+        credit_source = "admin"
+        if reserve_credit:
+            try:
+                allowed, credit_source, state = await reserve_credit(user, ac_cost=ac_required)
+            except Exception as e:
+                raise HTTPException(503, f"billing_check_failed: {e}")
+            if not allowed:
+                have = int(state.get("credits_total_remaining", 0) or 0)
+                raise HTTPException(
+                    402,
+                    detail={
+                        "code": "insufficient_credits",
+                        "needed": ac_required,
+                        "have": have,
+                        "tier": body.tier,
+                        "topup_packs": [{"ac": 50, "price_usd": 20}, {"ac": 200, "price_usd": 69}],
+                    },
+                )
 
         job_id = uuid.uuid4().hex[:12]
         workspace = OUTPUT_ROOT / job_id
@@ -344,11 +386,14 @@ def build_skeleton_ai_router(
                 voice_id=body.voice_id,
             )
         except (GrokAuthError, ElevenLabsAuthError) as e:
+            await _maybe_refund(refund_credit, user, credit_source, ac_required)
             raise HTTPException(503, f"upstream_auth: {e}")
         except Exception as e:
+            await _maybe_refund(refund_credit, user, credit_source, ac_required)
             raise HTTPException(500, f"pipeline_failed: {e}")
 
-        return {"job_id": job_id, **result}
+        return {"job_id": job_id, "ac_charged": ac_required if credit_source != "admin" else 0,
+                "credit_source": credit_source, **result}
 
     @router.get("/jobs/{job_id}")
     async def job_status(job_id: str, _user: dict = auth_dep):
