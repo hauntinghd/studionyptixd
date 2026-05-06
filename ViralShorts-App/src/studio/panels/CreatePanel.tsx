@@ -238,8 +238,30 @@ export default function CreatePanel(_props: CreatePanelProps) {
                 }),
             });
             const d = await r.json();
-            if (d.video_path) setGeneratedVideoUrl(d.video_path);
-            else alert(`Generation failed: ${d.detail || d.error || 'unknown'}`);
+            // 402 insufficient_credits → render a structured Top Up prompt.
+            if (r.status === 402) {
+                const detail = d?.detail || {};
+                if (detail?.code === 'insufficient_credits') {
+                    const needed = Number(detail.needed || 0);
+                    const have = Number(detail.have || 0);
+                    const tierName = String(detail.tier || tier).toUpperCase();
+                    if (window.confirm(
+                        `${tierName} short needs ${needed} AC. You have ${have}.\n\n`
+                        + `Top up to continue?`
+                    )) {
+                        // Send the user to the billing top-up flow.
+                        window.location.assign('/billing?focus=topup');
+                    }
+                    return;
+                }
+            }
+            if (r.ok && d.video_path) {
+                setGeneratedVideoUrl(d.video_path);
+                return;
+            }
+            const msg = typeof d.detail === 'string' ? d.detail
+                : (d.detail?.code || d.error || `HTTP ${r.status}`);
+            alert(`Generation failed: ${msg}`);
         } finally {
             setGenerating(false);
         }
