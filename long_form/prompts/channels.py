@@ -23,6 +23,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "We Are Lacuna",
         "tagline": "Fully-AI sci-fi/horror documentaries — LEMMiNO grade",
         "icon": "🪐",
+        "format": "long_form",
+        "channel_id": "UCYsJtSyepSf6MD7MS2GJ8vA",
         "default_minutes": 60,
         "fps": 24,
         "image_model_default": "seedream_45",
@@ -51,6 +53,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "Hidden Cortex",
         "tagline": "Psychology, consciousness, and the science of mind",
         "icon": "🧠",
+        "format": "long_form",
+        "channel_id": "",                             # not OAuth'd yet
         "default_minutes": 25,
         "fps": 30,
         "image_model_default": "seedream_45",
@@ -77,6 +81,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "PB Live",
         "tagline": "Criminal cases, CIA operations, true-crime deep dives",
         "icon": "🔍",
+        "format": "long_form",
+        "channel_id": "UCO7hTodSkBNszjiPdTMrrKA",     # stored as 'PB Lies' in OAuth store
         "default_minutes": 30,
         "fps": 30,
         "image_model_default": "seedream_45",
@@ -103,6 +109,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "Lo-Fi Radio",
         "tagline": "Extended ambient music with looping cinematic visuals",
         "icon": "🎶",
+        "format": "long_form",
+        "channel_id": "",                             # not OAuth'd yet
         "default_minutes": 60,
         "fps": 30,
         "image_model_default": "seedream_45",
@@ -129,6 +137,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "Empire Magnates",
         "tagline": "Red porcelain mannequin + photoreal financial-scam epics",
         "icon": "💼",
+        "format": "long_form",
+        "channel_id": "UCA_cn0-EW2UbBsyEA0TahNA",
         "default_minutes": 20,
         "fps": 24,
         "image_model_default": "seedream_45",
@@ -158,6 +168,8 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "label": "History Rewind",
         "tagline": "9-hour sleep documentaries — premium fal MiniMax narration",
         "icon": "🏛️",
+        "format": "long_form",
+        "channel_id": "UCHmwsIGud6CeZ3CIs5cuaUA",
         "default_minutes": 540,                       # 9 hours
         "fps": 30,
         "image_model_default": "seedream_45",
@@ -179,26 +191,105 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "warm lighting. Slow zoom + pan only, no fast motion."
         ),
     },
+
+    # ────────────────────────────────────────────────────────────────────
+    # Shorts channels — surfaced in the LongForm panel for ANALYTICS only.
+    # The render pipeline for these defers to the existing skeleton_ai/
+    # short-form module (Create tab); these entries exist so the user can
+    # see Catalyst Hub data for every connected channel in one panel.
+    # ────────────────────────────────────────────────────────────────────
+    "zerotier": {
+        "key": "zerotier",
+        "label": "ZeroTier",
+        "tagline": "Comic-book / DC-character shorts — Conflict Arc retention formula",
+        "icon": "⚡",
+        "format": "shorts",
+        "channel_id": "UC9Gth_4MVet6rdPH7MHJf-g",
+        "default_minutes": 0.6,                        # ~36s shorts
+        "fps": 30,
+        "image_model_default": "seedream_45",
+        "i2v_model_default": "kling_v21_standard",
+        "voice_provider_default": "elevenlabs",
+        "voice_id_default": "",
+        "cost_estimate_usd": 1.40,                     # standard skeleton-AI shorts cost
+        "system_prompt": (
+            "ZeroTier is a comic-book / DC-character shorts channel. The "
+            "render path for shorts goes through the Skeleton AI pipeline "
+            "in the Create tab, not Long Form. This entry exists so Catalyst "
+            "data for the channel surfaces in the Long Form analytics view."
+        ),
+        "visual_style": (
+            "See skeleton_ai/prompts/base_style.py — anatomical white skull "
+            "+ mint backdrop + real opaque clothing + canonical comic costume."
+        ),
+    },
+    "cryptic_science": {
+        "key": "cryptic_science",
+        "label": "Cryptic Science",
+        "tagline": "Skeleton AI shorts (Human Limits / Marvel vs DC / etc.)",
+        "icon": "💀",
+        "format": "shorts",
+        "channel_id": "UCOHnksm14B-9AqGhlpRxG5A",
+        "default_minutes": 1.0,                        # ~60s shorts
+        "fps": 30,
+        "image_model_default": "seedream_45",
+        "i2v_model_default": "seedance_2_0",
+        "voice_provider_default": "elevenlabs",
+        "voice_id_default": "",
+        "cost_estimate_usd": 1.40,
+        "system_prompt": (
+            "Cryptic Science is the skeleton-AI shorts channel. Render path "
+            "is the Skeleton AI pipeline in the Create tab. This entry exists "
+            "so Catalyst data surfaces alongside the long-form channels."
+        ),
+        "visual_style": "See skeleton_ai/prompts/base_style.py for the locked spec.",
+    },
+    "lexi_manhwa": {
+        "key": "lexi_manhwa",
+        "label": "Lexi Manhwa",
+        "tagline": "Manhwa recap shorts — pending pipeline rebuild",
+        "icon": "📖",
+        "format": "shorts",
+        "channel_id": "UCbtE_YDmqWZX2OfaKi0QHnA",
+        "default_minutes": 1.0,
+        "fps": 30,
+        "image_model_default": "seedream_45",
+        "i2v_model_default": "pixverse_v6",
+        "voice_provider_default": "elevenlabs",
+        "voice_id_default": "",
+        "cost_estimate_usd": 1.20,
+        "system_prompt": (
+            "Lexi Manhwa is a manhwa-recap shorts channel. Pipeline rebuild "
+            "pending. This entry exists for Catalyst analytics visibility."
+        ),
+        "visual_style": "Manhwa recap pipeline (project_manhwa_recap_pipeline.md).",
+    },
 }
 
 
-def list_channels() -> list[dict[str, Any]]:
-    """Return all channels in UI render order, lighter payload than the full registry."""
-    return [
-        {
+def list_channels(format_filter: str | None = None) -> list[dict[str, Any]]:
+    """Return channels in UI render order. format_filter='long_form' or 'shorts' to
+    restrict; None returns both."""
+    out = []
+    for v in CHANNELS.values():
+        fmt = v.get("format", "long_form")
+        if format_filter and fmt != format_filter:
+            continue
+        out.append({
             "key": v["key"],
             "label": v["label"],
             "tagline": v["tagline"],
             "icon": v["icon"],
+            "format": fmt,
+            "channel_id": v.get("channel_id", ""),
             "default_minutes": v["default_minutes"],
             "fps": v["fps"],
             "image_model_default": v["image_model_default"],
             "i2v_model_default": v["i2v_model_default"],
             "voice_provider_default": v["voice_provider_default"],
             "cost_estimate_usd": v["cost_estimate_usd"],
-        }
-        for v in CHANNELS.values()
-    ]
+        })
+    return out
 
 
 def get_channel(key: str) -> dict[str, Any]:

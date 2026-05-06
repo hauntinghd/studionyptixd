@@ -23,90 +23,140 @@ from __future__ import annotations
 from typing import Any
 
 
-# Channel key (long_form.prompts.channels) → Catalyst channel slug.
-# Keep in sync with whatever names Casey's channels are stored under in
-# Supabase `youtube_channel_connections`. The frontend uses the long-form
-# channel keys; the Catalyst-Hub APIs use the YouTube handle / channel-id.
-CHANNEL_KEY_TO_CATALYST_HANDLE: dict[str, str] = {
-    "lacuna": "WeAreLacuna",
-    "hidden_cortex": "HiddenCortex",
-    "pb_live": "PBLies",                # Catalyst was set up under PB Lies
-    "lofi_radio": "LoFiRadio",
-    "empire_magnates": "EmpireMagnates",
-    "history_rewind": "HistoryRewind",
-}
+# Channel key (long_form.prompts.channels) → YouTube channel ID
+# (the OAuth lookup key in `youtube_channel_connections`).
+# Pulled directly from each channel's "channel_id" field for single source of truth.
+def _build_channel_id_map() -> dict[str, str]:
+    from long_form.prompts.channels import CHANNELS
+    return {k: v.get("channel_id", "") for k, v in CHANNELS.items() if v.get("channel_id")}
 
 
-def shape_catalyst_insights(catalyst_payload: dict | None) -> dict[str, Any]:
+CHANNEL_KEY_TO_ID = _build_channel_id_map()
+
+
+# Legacy alias preserved so older callers don't break — same map.
+CHANNEL_KEY_TO_CATALYST_HANDLE = CHANNEL_KEY_TO_ID
+
+
+def fetch_channel_snapshot(channel_id: str) -> dict | None:
     """
-    Trim a Catalyst Hub snapshot down to the long-form-relevant signals.
+    Read the latest analytics_snapshot directly from the OAuth connection
+    store for the given channel ID. The connection store mirrors what
+    Catalyst Hub harvests during auto-tick — pulling here avoids a second
+    HTTP hop through the Hub endpoints.
+    """
+    if not channel_id:
+        return None
+    try:
+        from youtube_connections_store import hydrate
+        hyd = hydrate()
+    except Exception:
+        return None
+    for u in (hyd or {}).values():
+        if not isinstance(u, dict):
+            continue
+        ch_map = u.get("channels", {})
+        if not isinstance(ch_map, dict):
+            continue
+        rec = ch_map.get(channel_id)
+        if isinstance(rec, dict):
+            return rec
+    return None
 
-    Catalyst Hub returns a deeply-nested object full of analytics, profile
-    metadata, and reference-video output. We pull only what helps long-form:
-    top titles, breakout titles, and hook patterns.
+
+def shape_catalyst_insights(connection_record: dict | None) -> dict[str, Any]:
+    """
+    Trim a Catalyst connection-store record down to the long-form-relevant signals.
+
+    Connection store shape (verified 2026-05-06):
+      record["analytics_snapshot"] = {
+          "top_videos": [{video_id, title, views, likes, comments, ...}],
+          "top_video_titles": [str, ...],
+          "channel_audit": {...},
+          "channel_summary": {...},
+          "packaging_learnings": [str, ...],
+          "retention_learnings": [str, ...],
+          "title_pattern_hints": [str, ...],
+          "historical_compare": {...},
+      }
+    Plus channel-level fields directly on the record:
+      record["subscriber_count"], record["view_count"], record["video_count"], etc.
 
     Empty/absent fields → empty arrays (frontend hides empty sections).
     """
-    if not isinstance(catalyst_payload, dict):
-        return {
-            "top_titles": [],
-            "breakout_titles": [],
-            "hook_patterns": [],
-            "thumbnail_signals": [],
-        }
+    empty = {
+        "top_titles": [], "breakout_titles": [], "hook_patterns": [],
+        "thumbnail_signals": [], "subscribers": 0, "videos": 0,
+        "channel_views": 0, "harvest_present": False,
+    }
+    if not isinstance(connection_record, dict):
+        return empty
 
-    profile = catalyst_payload.get("profile") or {}
-    outliers = catalyst_payload.get("outliers") or {}
-    reference = catalyst_payload.get("reference_video_analysis") or {}
-    velocity = catalyst_payload.get("velocity") or {}
+    snap = connection_record.get("analytics_snapshot") or {}
+    if not isinstance(snap, dict):
+        snap = {}
 
-    top_titles = []
-    for v in (outliers.get("top_videos") or [])[:10]:
+    # Channel-level metadata sits on the record itself, not in the snapshot.
+    subs = int(connection_record.get("subscriber_count", 0) or 0)
+    videos = int(connection_record.get("video_count", 0) or 0)
+    ch_views = int(connection_record.get("view_count", 0) or 0)
+
+    top_titles: list[dict[str, Any]] = []
+    for v in (snap.get("top_videos") or [])[:10]:
         if not isinstance(v, dict):
             continue
         top_titles.append({
             "title": str(v.get("title", "")),
-            "views": int(v.get("view_count", 0) or 0),
-            "vps": float(v.get("views_per_subscriber", 0) or 0),
+            "views": int(v.get("views", v.get("view_count", 0)) or 0),
             "video_id": str(v.get("video_id", "")),
+            "likes": int(v.get("likes", v.get("like_count", 0)) or 0),
+            "vps": (
+                float(v.get("views", v.get("view_count", 0)) or 0) / subs
+                if subs > 0 else 0.0
+            ),
         })
+    # Sort by views desc.
+    top_titles.sort(key=lambda x: x["views"], reverse=True)
 
-    breakouts = []
-    for v in (outliers.get("breakout_videos") or [])[:10]:
-        if not isinstance(v, dict):
-            continue
-        breakouts.append({
-            "title": str(v.get("title", "")),
-            "views": int(v.get("view_count", 0) or 0),
-            "lift_vs_baseline": float(v.get("lift_vs_baseline", 0) or 0),
-            "video_id": str(v.get("video_id", "")),
-        })
+    # Breakouts = top titles where views > median × 2 (rough heuristic since the
+    # connection store doesn't store an explicit "breakout_videos" list).
+    breakouts: list[dict[str, Any]] = []
+    if top_titles:
+        view_list = sorted([t["views"] for t in top_titles])
+        median = view_list[len(view_list) // 2] if view_list else 0
+        for t in top_titles:
+            if median > 0 and t["views"] >= median * 2:
+                breakouts.append({
+                    "title": t["title"],
+                    "views": t["views"],
+                    "video_id": t["video_id"],
+                    "lift_vs_baseline": (t["views"] / median) if median else 0.0,
+                })
 
-    hook_patterns = []
-    decoded = profile.get("decoded_hook_formulas") or reference.get("hook_formulas") or []
-    if isinstance(decoded, list):
-        for h in decoded[:6]:
-            if isinstance(h, str) and h.strip():
-                hook_patterns.append(h.strip())
-            elif isinstance(h, dict) and h.get("formula"):
-                hook_patterns.append(str(h["formula"]))
+    # Decoded hooks / packaging learnings — Catalyst stores these as plain string lists.
+    hook_patterns: list[str] = []
+    for src in (snap.get("title_pattern_hints"), snap.get("packaging_learnings")):
+        if isinstance(src, list):
+            for h in src[:6]:
+                if isinstance(h, str) and h.strip() and h.strip() not in hook_patterns:
+                    hook_patterns.append(h.strip())
 
-    thumb_signals = []
-    decoded_thumb = profile.get("thumbnail_signals") or reference.get("thumbnail_signals") or []
-    if isinstance(decoded_thumb, list):
-        for t in decoded_thumb[:6]:
-            if isinstance(t, str) and t.strip():
-                thumb_signals.append(t.strip())
-            elif isinstance(t, dict) and t.get("description"):
-                thumb_signals.append(str(t["description"]))
+    thumb_signals: list[str] = []
+    for src in (snap.get("retention_learnings"),):
+        if isinstance(src, list):
+            for t in src[:4]:
+                if isinstance(t, str) and t.strip():
+                    thumb_signals.append(t.strip())
 
     return {
         "top_titles": top_titles,
-        "breakout_titles": breakouts,
-        "hook_patterns": hook_patterns,
-        "thumbnail_signals": thumb_signals,
-        "subscribers": int(profile.get("subscriber_count", 0) or 0),
-        "median_vps": float(velocity.get("median_views_per_subscriber", 0) or 0),
+        "breakout_titles": breakouts[:6],
+        "hook_patterns": hook_patterns[:8],
+        "thumbnail_signals": thumb_signals[:4],
+        "subscribers": subs,
+        "videos": videos,
+        "channel_views": ch_views,
+        "harvest_present": bool(snap),
     }
 
 

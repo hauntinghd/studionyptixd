@@ -30,6 +30,8 @@ interface ChannelInfo {
     label: string;
     tagline: string;
     icon: string;
+    format?: 'long_form' | 'shorts';
+    channel_id?: string;
     default_minutes: number;
     fps: number;
     image_model_default: string;
@@ -39,12 +41,28 @@ interface ChannelInfo {
 }
 
 interface CatalystInsights {
-    top_titles: { title: string; views: number; vps: number; video_id: string }[];
+    top_titles: { title: string; views: number; vps: number; video_id: string; likes?: number }[];
     breakout_titles: { title: string; views: number; lift_vs_baseline: number; video_id: string }[];
     hook_patterns: string[];
     thumbnail_signals: string[];
     subscribers?: number;
-    median_vps?: number;
+    videos?: number;
+    channel_views?: number;
+    harvest_present?: boolean;
+}
+
+interface ConnectedChannel {
+    channel_id: string;
+    channel_title: string;
+    channel_handle: string;
+    subscriber_count: number;
+    video_count: number;
+    view_count: number;
+    last_synced_at: number | null;
+    harvest_present: boolean;
+    registry_key: string;
+    registry_label: string;
+    registry_format: string;
 }
 
 interface Chapter {
@@ -65,6 +83,9 @@ interface Outline {
 const CHANNEL_ICON: Record<string, typeof BookOpen> = {
     lacuna: Search,
     hidden_cortex: BrainCircuit,
+    zerotier: TrendingUp,
+    cryptic_science: Sparkles,
+    lexi_manhwa: BookOpen,
     pb_live: Briefcase,
     lofi_radio: Headphones,
     empire_magnates: Building2,
@@ -77,6 +98,7 @@ export default function LongFormPanel() {
 
     const [tab, setTab] = useState<LongFormTab>('channel');
     const [channels, setChannels] = useState<ChannelInfo[]>([]);
+    const [connected, setConnected] = useState<ConnectedChannel[]>([]);
     const [selectedChannel, setSelectedChannel] = useState<string>('');
     const [insights, setInsights] = useState<CatalystInsights | null>(null);
     const [insightsLoading, setInsightsLoading] = useState(false);
@@ -89,7 +111,7 @@ export default function LongFormPanel() {
     const [outliningBusy, setOutliningBusy] = useState(false);
     const [outlineError, setOutlineError] = useState('');
 
-    // Load channel registry once we have an auth token.
+    // Load channel registry + connected-channel snapshot on auth.
     useEffect(() => {
         if (!accessToken) return;
         fetch('/api/long-form/channels', {
@@ -98,6 +120,12 @@ export default function LongFormPanel() {
             .then((r) => r.json())
             .then((d) => Array.isArray(d.channels) && setChannels(d.channels))
             .catch(() => setChannels([]));
+        fetch('/api/long-form/connected-channels', {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        })
+            .then((r) => r.json())
+            .then((d) => Array.isArray(d.channels) && setConnected(d.channels))
+            .catch(() => setConnected([]));
     }, [accessToken]);
 
     // When a channel is picked, default targetMinutes + fetch Catalyst insights.
@@ -162,12 +190,15 @@ export default function LongFormPanel() {
         }
     }, [selectedChannel, topic, targetMinutes, useCatalystContext, accessToken]);
 
+    const longFormChannels = channels.filter((c) => (c.format || 'long_form') === 'long_form');
+    const shortsChannels = channels.filter((c) => c.format === 'shorts');
+
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
             <header className="flex items-center justify-between">
                 <h1 className="text-2xl font-bold text-white">Long-Form</h1>
                 <div className="text-xs text-zinc-400">
-                    6 channels · Catalyst-fed outlines · v5 render pipeline
+                    {longFormChannels.length} long-form · {shortsChannels.length} shorts · {connected.length} OAuth-connected · Catalyst-fed
                 </div>
             </header>
 
@@ -176,6 +207,9 @@ export default function LongFormPanel() {
             {tab === 'channel' && (
                 <ChannelTab
                     channels={channels}
+                    longFormChannels={longFormChannels}
+                    shortsChannels={shortsChannels}
+                    connected={connected}
                     selectedChannel={selectedChannel}
                     onPickChannel={onPickChannel}
                     insights={insights}
@@ -241,10 +275,14 @@ function TabRow({ tab, setTab }: { tab: LongFormTab; setTab: (t: LongFormTab) =>
 }
 
 function ChannelTab({
-    channels, selectedChannel, onPickChannel, insights, insightsLoading,
+    channels, longFormChannels, shortsChannels, connected,
+    selectedChannel, onPickChannel, insights, insightsLoading,
     catalystPresent, onContinue,
 }: {
     channels: ChannelInfo[];
+    longFormChannels: ChannelInfo[];
+    shortsChannels: ChannelInfo[];
+    connected: ConnectedChannel[];
     selectedChannel: string;
     onPickChannel: (key: string) => void;
     insights: CatalystInsights | null;
@@ -253,51 +291,94 @@ function ChannelTab({
     onContinue: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel) || null;
+    // Map registry-key → connected-channel record so we can show OAuth +
+    // harvest status badges on each card.
+    const connectedByKey = new Map<string, ConnectedChannel>();
+    for (const c of connected) {
+        if (c.registry_key) connectedByKey.set(c.registry_key, c);
+    }
+    const renderCard = (c: ChannelInfo) => {
+        const Icon = CHANNEL_ICON[c.key] || Sparkles;
+        const isSelected = c.key === selectedChannel;
+        const conn = connectedByKey.get(c.key);
+        const hasOAuth = !!conn;
+        const hasHarvest = !!(conn && conn.harvest_present);
+        return (
+            <button
+                key={c.key}
+                onClick={() => onPickChannel(c.key)}
+                className={`text-left rounded-md border px-4 py-3 transition-colors ${
+                    isSelected
+                        ? 'border-violet-500/60 bg-violet-500/10'
+                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
+                }`}
+            >
+                <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="flex items-center gap-2">
+                        <Icon className="h-5 w-5 text-violet-300" />
+                        <span className="text-sm font-semibold text-white">{c.label}</span>
+                    </div>
+                    <span className="text-xs text-zinc-500">{c.icon}</span>
+                </div>
+                <div className="text-xs text-zinc-400 mb-2">{c.tagline}</div>
+                <div className="flex items-center gap-2 text-[10px] text-zinc-500 flex-wrap">
+                    <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {c.default_minutes >= 60
+                            ? `${(c.default_minutes / 60).toFixed(1)}h`
+                            : `${c.default_minutes}m`}
+                    </span>
+                    <span>{c.fps}fps</span>
+                    <span>~${c.cost_estimate_usd}</span>
+                    {hasHarvest && (
+                        <span className="rounded bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-emerald-300">
+                            Catalyst ✓
+                        </span>
+                    )}
+                    {hasOAuth && !hasHarvest && (
+                        <span className="rounded bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.5 text-amber-300">
+                            harvest pending
+                        </span>
+                    )}
+                    {!hasOAuth && (
+                        <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-zinc-500">
+                            no OAuth
+                        </span>
+                    )}
+                </div>
+            </button>
+        );
+    };
+
     return (
         <section className="flex flex-col gap-6">
             <div>
-                <h2 className="text-lg font-semibold text-white mb-2">Pick a channel</h2>
+                <h2 className="text-lg font-semibold text-white mb-1">Long-form channels</h2>
                 <p className="text-sm text-zinc-400 mb-4">
-                    Each channel has a locked grammar (visual style, voice, target length).
-                    Catalyst Hub data for that channel feeds the outline generator on the next tab.
+                    The 6 channels with locked long-form grammar (visual style, voice,
+                    target length). Catalyst Hub data feeds the outline generator on the
+                    next tab. Channels marked <span className="text-amber-300">harvest pending</span>{' '}
+                    were just OAuth'd — Catalyst auto-tick will fill them within a minute.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {channels.map((c) => {
-                        const Icon = CHANNEL_ICON[c.key] || Sparkles;
-                        const isSelected = c.key === selectedChannel;
-                        return (
-                            <button
-                                key={c.key}
-                                onClick={() => onPickChannel(c.key)}
-                                className={`text-left rounded-md border px-4 py-3 transition-colors ${
-                                    isSelected
-                                        ? 'border-violet-500/60 bg-violet-500/10'
-                                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                                }`}
-                            >
-                                <div className="flex items-start justify-between gap-2 mb-1">
-                                    <div className="flex items-center gap-2">
-                                        <Icon className="h-5 w-5 text-violet-300" />
-                                        <span className="text-sm font-semibold text-white">{c.label}</span>
-                                    </div>
-                                    <span className="text-xs text-zinc-500">{c.icon}</span>
-                                </div>
-                                <div className="text-xs text-zinc-400 mb-2">{c.tagline}</div>
-                                <div className="flex items-center gap-3 text-[10px] text-zinc-500">
-                                    <span className="flex items-center gap-1">
-                                        <Clock className="h-3 w-3" />
-                                        {c.default_minutes >= 60
-                                            ? `${(c.default_minutes / 60).toFixed(1)}h`
-                                            : `${c.default_minutes}m`}
-                                    </span>
-                                    <span>{c.fps}fps</span>
-                                    <span>~${c.cost_estimate_usd}</span>
-                                </div>
-                            </button>
-                        );
-                    })}
+                    {longFormChannels.map(renderCard)}
                 </div>
             </div>
+
+            {shortsChannels.length > 0 && (
+                <div>
+                    <h2 className="text-lg font-semibold text-white mb-1">
+                        Shorts channels (analytics only)
+                    </h2>
+                    <p className="text-sm text-zinc-400 mb-4">
+                        These render via the Skeleton AI pipeline in the Create tab — listed
+                        here so Catalyst data for every connected channel surfaces in one place.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {shortsChannels.map(renderCard)}
+                    </div>
+                </div>
+            )}
 
             {selectedChannel && (
                 <div>

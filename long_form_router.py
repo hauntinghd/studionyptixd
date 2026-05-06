@@ -33,9 +33,10 @@ from pydantic import BaseModel
 from long_form.prompts.channels import CHANNELS, list_channels, get_channel
 from long_form.scripting import generate_outline, expand_chapter
 from long_form.catalyst_bridge import (
-    CHANNEL_KEY_TO_CATALYST_HANDLE,
+    CHANNEL_KEY_TO_ID,
     shape_catalyst_insights,
     insights_to_grok_context,
+    fetch_channel_snapshot,
 )
 
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
@@ -94,9 +95,61 @@ def build_long_form_router(
         raise HTTPException(403, "long-form is admin-only")
 
     @router.get("/channels")
-    async def list_channels_route(user: dict = auth_dep):
+    async def list_channels_route(user: dict = auth_dep, format: str | None = None):
         _gate_admin(user)
-        return {"channels": list_channels()}
+        # format=long_form filters to the 6 generative channels;
+        # format=shorts filters to ZeroTier / CrypticScience / Lexi Manhwa;
+        # omit to get all 9.
+        return {"channels": list_channels(format_filter=format)}
+
+    @router.get("/connected-channels")
+    async def connected_channels(user: dict = auth_dep):
+        """
+        Returns every OAuth-connected channel from the local store, augmented
+        with the long-form registry data (where matched). Lets the frontend
+        show 'Catalyst sees N channels' and which of them have harvested data
+        vs which are pending the next auto-tick.
+        """
+        _gate_admin(user)
+        try:
+            from youtube_connections_store import hydrate
+            hyd = hydrate() or {}
+        except Exception as e:
+            raise HTTPException(503, f"connection store unavailable: {e}")
+
+        # Build a channel_id → registry-key map for fast lookup.
+        id_to_key = {v["channel_id"]: k for k, v in CHANNELS.items() if v.get("channel_id")}
+
+        out = []
+        for u in hyd.values():
+            if not isinstance(u, dict):
+                continue
+            for ch_id, rec in (u.get("channels") or {}).items():
+                if not isinstance(rec, dict):
+                    continue
+                snap = rec.get("analytics_snapshot") or {}
+                key = id_to_key.get(ch_id, "")
+                ch_meta = CHANNELS.get(key, {}) if key else {}
+                out.append({
+                    "channel_id": ch_id,
+                    "channel_title": rec.get("title", "") or rec.get("channel_handle", ""),
+                    "channel_handle": rec.get("channel_handle", ""),
+                    "subscriber_count": int(rec.get("subscriber_count", 0) or 0),
+                    "video_count": int(rec.get("video_count", 0) or 0),
+                    "view_count": int(rec.get("view_count", 0) or 0),
+                    "last_synced_at": rec.get("last_synced_at"),
+                    "harvest_present": bool(snap),
+                    "registry_key": key,                # may be empty if channel not in long-form registry
+                    "registry_label": ch_meta.get("label", ""),
+                    "registry_format": ch_meta.get("format", ""),  # 'long_form' or 'shorts'
+                })
+        # Sort: registered long-form first, then registered shorts, then unregistered.
+        def sort_key(c):
+            fmt = c["registry_format"]
+            return (0 if fmt == "long_form" else (1 if fmt == "shorts" else 2),
+                    -c["subscriber_count"])
+        out.sort(key=sort_key)
+        return {"channels": out, "total": len(out)}
 
     @router.get("/channel/{key}")
     async def channel_route(key: str, user: dict = auth_dep):
@@ -108,40 +161,30 @@ def build_long_form_router(
 
     @router.post("/catalyst-insights")
     async def catalyst_insights(body: CatalystInsightsRequest, user: dict = auth_dep):
+        """
+        Returns shaped Catalyst insights for the picked channel.
+
+        Reads directly from the OAuth connection-store record (where Catalyst
+        Hub auto-tick deposits harvested analytics). If the channel was just
+        OAuth'd and no harvest has run yet, returns 200 with empty arrays
+        and `harvest_present=False` so the frontend can show "pending refresh".
+        """
         _gate_admin(user)
-        """
-        Returns the shaped Catalyst snapshot for the picked channel.
-        If Catalyst hasn't harvested anything yet (or the helper isn't
-        wired), the endpoint still returns a 200 with empty insight arrays
-        so the frontend can degrade gracefully.
-        """
         try:
             channel = get_channel(body.channel_key)
         except ValueError as e:
             raise HTTPException(404, str(e))
 
-        catalyst_handle = CHANNEL_KEY_TO_CATALYST_HANDLE.get(body.channel_key, "")
+        channel_id = CHANNEL_KEY_TO_ID.get(body.channel_key, "")
+        record = fetch_channel_snapshot(channel_id) if channel_id else None
+        insights = shape_catalyst_insights(record)
 
-        snapshot: dict | None = None
-        if catalyst_hub_snapshot_for_user and catalyst_handle:
-            try:
-                snapshot = await catalyst_hub_snapshot_for_user(user, channel_handle=catalyst_handle)
-            except TypeError:
-                # Older signature without keyword arg — try positional.
-                try:
-                    snapshot = await catalyst_hub_snapshot_for_user(user, catalyst_handle)
-                except Exception:
-                    snapshot = None
-            except Exception:
-                snapshot = None
-
-        insights = shape_catalyst_insights(snapshot if isinstance(snapshot, dict) else None)
         return {
             "channel_key": body.channel_key,
             "channel_label": channel["label"],
-            "catalyst_handle": catalyst_handle,
+            "channel_id": channel_id,
             "insights": insights,
-            "catalyst_present": bool(snapshot),
+            "catalyst_present": bool(record and record.get("analytics_snapshot")),
         }
 
     @router.post("/outline")
@@ -159,15 +202,15 @@ def build_long_form_router(
         except GrokAuthError as e:
             raise HTTPException(503, f"config: {e}")
 
-        # Pull Catalyst context (best effort).
+        # Pull Catalyst context from the OAuth connection store (best effort).
         catalyst_text = ""
-        if body.use_catalyst_context and catalyst_hub_snapshot_for_user:
-            handle = CHANNEL_KEY_TO_CATALYST_HANDLE.get(body.channel_key, "")
-            if handle:
+        if body.use_catalyst_context:
+            ch_id = CHANNEL_KEY_TO_ID.get(body.channel_key, "")
+            if ch_id:
                 try:
-                    snapshot = await catalyst_hub_snapshot_for_user(user, channel_handle=handle)
-                    if isinstance(snapshot, dict):
-                        catalyst_text = insights_to_grok_context(shape_catalyst_insights(snapshot))
+                    record = fetch_channel_snapshot(ch_id)
+                    if record:
+                        catalyst_text = insights_to_grok_context(shape_catalyst_insights(record))
                 except Exception:
                     catalyst_text = ""
 
