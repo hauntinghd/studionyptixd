@@ -224,7 +224,9 @@ def _gen_em_vo(text: str, out_path: Path, *, voice_id: str = "",
             "vol": 1.0,
             "pitch": 0,
         },
-        "output_format": "mp3",
+        "output_format": "url",     # fal expects 'url' or 'hex' (response shape)
+                                     # — NOT 'mp3' (which is the container,
+                                     # already in audio_setting.format below).
         "audio_setting": {
             "sample_rate": 32000,
             "bitrate": 128000,

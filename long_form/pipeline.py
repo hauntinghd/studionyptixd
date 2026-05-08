@@ -631,7 +631,9 @@ def _gen_minimax_chapter(
             "vol": 1.0,
             "pitch": 0,
         },
-        "output_format": "mp3",
+        "output_format": "url",     # fal expects 'url' or 'hex' here — NOT 'mp3'.
+                                     # 'mp3' is the audio container which already
+                                     # goes in audio_setting.format below.
         "audio_setting": {
             "sample_rate": 32000,
             "bitrate": 128000,
