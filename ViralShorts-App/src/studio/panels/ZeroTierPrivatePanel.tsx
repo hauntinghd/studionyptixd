@@ -97,6 +97,7 @@ export default function ZeroTierPrivatePanel() {
     const [refreshing, setRefreshing] = useState(false);
     const [connecting, setConnecting] = useState(false);
     const [error, setError] = useState('');
+    const [debugInfo, setDebugInfo] = useState('');
     const [payload, setPayload] = useState<CatalystHubPayload | null>(null);
     const retriedRef = useRef(false);
 
@@ -151,23 +152,51 @@ export default function ZeroTierPrivatePanel() {
     const handleRefresh = useCallback(async (): Promise<void> => {
         if (!accessToken) return;
         setError('');
+        setDebugInfo('');
         setRefreshing(true);
+        const debugLines: string[] = [];
         try {
-            // Step 1: force a fresh YouTube fetch + persist for ALL connected
-            // channels (this is where the OAuth-authenticated path actually
-            // pulls likes/comments/CTR and writes them into the connection
-            // store). /api/catalyst/hub/refresh alone does NOT trigger this —
-            // it only rebuilds the hub payload from already-cached state.
+            // Step 1: force a fresh YouTube fetch + persist
+            debugLines.push('--- Step 1: GET /api/youtube/channels?sync=true ---');
             const ytRes = await fetch(`${API}/api/youtube/channels?sync=true`, {
                 headers: { Authorization: `Bearer ${accessToken}` },
             });
-            // Don't hard-fail if this returns non-200 — Catalyst hub refresh
-            // can still rebuild from cached state and partial data.
-            if (!ytRes.ok) {
-                console.warn(`[ZT] /api/youtube/channels?sync=true returned ${ytRes.status} — continuing to hub refresh anyway`);
+            debugLines.push(`  HTTP ${ytRes.status} ${ytRes.statusText}`);
+            let ytData: any = null;
+            try {
+                ytData = await ytRes.clone().json();
+            } catch {
+                try {
+                    ytData = await ytRes.clone().text();
+                } catch {
+                    ytData = null;
+                }
             }
-            // Step 2: rebuild the Catalyst hub payload from the freshly-synced
-            // connection-store data.
+            // Show channel-specific subset of YT response
+            try {
+                const ch = (ytData?.channels || []).find((c: any) => c?.channel_id === ZEROTIER_CHANNEL_ID);
+                if (ch) {
+                    debugLines.push(`  ZT channel found in YT sync response:`);
+                    debugLines.push(`    last_sync_error: ${JSON.stringify(ch.last_sync_error || '')}`);
+                    debugLines.push(`    needs_reconnect: ${JSON.stringify(ch.needs_reconnect || false)}`);
+                    debugLines.push(`    last_synced_at: ${JSON.stringify(ch.last_synced_at || 0)}`);
+                    debugLines.push(`    token_expires_at: ${JSON.stringify(ch.token_expires_at || 0)}`);
+                    const uploaded = (ch.analytics_snapshot?.uploaded_videos || []) as any[];
+                    debugLines.push(`    uploaded_videos.length: ${uploaded.length}`);
+                    if (uploaded[0]) {
+                        const first = uploaded[0];
+                        debugLines.push(`    first video sample: ${JSON.stringify({ video_id: first.video_id, title: first.title, views: first.views, likes: first.likes, comments: first.comments }, null, 2)}`);
+                    }
+                } else {
+                    debugLines.push(`  ZT channel NOT in YT sync response. Channels in response: ${(ytData?.channels || []).map((c: any) => c?.channel_id).join(', ')}`);
+                }
+            } catch (e: any) {
+                debugLines.push(`  YT response parse error: ${String(e?.message || e)}`);
+            }
+
+            // Step 2: rebuild Catalyst hub payload
+            debugLines.push('');
+            debugLines.push('--- Step 2: POST /api/catalyst/hub/refresh ---');
             const r = await fetch(`${API}/api/catalyst/hub/refresh`, {
                 method: 'POST',
                 headers: {
@@ -180,13 +209,34 @@ export default function ZeroTierPrivatePanel() {
                     refresh_outcomes: true,
                 }),
             });
+            debugLines.push(`  HTTP ${r.status} ${r.statusText}`);
             const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Refresh failed (${r.status})`));
+            if (!r.ok) {
+                debugLines.push(`  ERROR: ${JSON.stringify(data, null, 2).slice(0, 500)}`);
+                throw new Error(String(data?.detail || data?.error || `Refresh failed (${r.status})`));
+            }
+            try {
+                const ch = (data?.channels || []).find((c: any) => c?.channel_id === ZEROTIER_CHANNEL_ID) || data?.selected_channel;
+                if (ch) {
+                    debugLines.push(`  ZT channel from hub refresh:`);
+                    debugLines.push(`    last_sync_error: ${JSON.stringify(ch.last_sync_error || '')}`);
+                    debugLines.push(`    needs_reconnect: ${JSON.stringify(ch.needs_reconnect || false)}`);
+                    const uploaded = (ch.analytics_snapshot?.uploaded_videos || []) as any[];
+                    debugLines.push(`    uploaded_videos.length: ${uploaded.length}`);
+                    if (uploaded[0]) {
+                        const first = uploaded[0];
+                        debugLines.push(`    first video: ${JSON.stringify({ title: first.title, views: first.views, likes: first.likes, comments: first.comments }, null, 2)}`);
+                    }
+                }
+            } catch (e: any) {
+                debugLines.push(`  Hub response parse error: ${String(e?.message || e)}`);
+            }
             setPayload(data as CatalystHubPayload);
         } catch (e: any) {
             setError(String(e?.message || e || 'Refresh failed'));
         } finally {
             setRefreshing(false);
+            setDebugInfo(debugLines.join('\n'));
         }
     }, [accessToken]);
 
@@ -292,6 +342,17 @@ export default function ZeroTierPrivatePanel() {
                     <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                     <span>{error}</span>
                 </div>
+            )}
+
+            {debugInfo && (
+                <details className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 text-xs text-cyan-100">
+                    <summary className="cursor-pointer font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                        Debug — last sync trace (click to expand)
+                    </summary>
+                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-snug">
+                        {debugInfo}
+                    </pre>
+                </details>
             )}
 
             {loading && !payload && (
