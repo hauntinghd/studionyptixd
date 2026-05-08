@@ -91,6 +91,18 @@ interface Outline {
     _parse_error?: boolean;
 }
 
+// PR #137: dynamic per-render cost shape (computed from real fal pricing
+// + outline structure, replacing stale channel.cost_estimate_usd ceiling).
+interface CostEstimate {
+    stage_1_usd: number;
+    stage_2_usd: number;
+    total_usd: number;
+    breakdown: Record<string, number>;
+    n_scenes: number;
+    n_chapters: number;
+    pipeline_kind: string;
+}
+
 const CHANNEL_ICON: Record<string, typeof BookOpen> = {
     lacuna: Search,
     hidden_cortex: BrainCircuit,
@@ -160,6 +172,7 @@ interface JobFullState {
     started_at?: number;
     finished_at?: number;
     created_at?: number;
+    cost_estimate?: CostEstimate;       // PR #137 — dynamic estimate
     [k: string]: any;
 }
 
@@ -241,6 +254,9 @@ export default function LongFormPanel() {
     const [outline, setOutline] = useState<Outline | null>(null);
     const [outliningBusy, setOutliningBusy] = useState(false);
     const [outlineError, setOutlineError] = useState('');
+    // PR #137: real fal cost computed from outline structure (set when
+    // outline is generated; refreshed from /jobs/{id}/state on resume).
+    const [costEstimate, setCostEstimate] = useState<CostEstimate | null>(null);
 
     // PR #121: render-tab state
     const [activeJobId, setActiveJobId] = useState<string>('');
@@ -409,6 +425,8 @@ export default function LongFormPanel() {
             }
             const d = await r.json();
             setOutline(d.outline as Outline);
+            // PR #137: capture real fal cost computed from this outline.
+            if (d.cost_estimate) setCostEstimate(d.cost_estimate as CostEstimate);
         } catch (e) {
             setOutlineError((e as Error).message);
         } finally {
@@ -572,6 +590,7 @@ export default function LongFormPanel() {
             // the outline + kick a follow-up render off the same plan.
             if (state.channel_key) setSelectedChannel(state.channel_key);
             if (state.outline) setOutline(state.outline);
+            if (state.cost_estimate) setCostEstimate(state.cost_estimate);
             setTab('render');
 
             // PR #129: if the job was running but its asyncio task got
@@ -902,6 +921,7 @@ export default function LongFormPanel() {
                     onRegenerateThumbnail={regenerateThumbnail}
                     regeneratingThumbIdx={regeneratingThumbIdx}
                     onStartNew={startNewRender}
+                    costEstimate={costEstimate}
                 />
             )}
         </div>
@@ -1425,6 +1445,7 @@ function RenderTab({
     cancellingBusy, onCancel,
     onRegenerateThumbnail, regeneratingThumbIdx,
     onStartNew,
+    costEstimate,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1451,9 +1472,16 @@ function RenderTab({
     onRegenerateThumbnail: (idx: number, customPrompt?: string) => void;
     regeneratingThumbIdx: number | null;
     onStartNew: () => void;
+    costEstimate: CostEstimate | null;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
+    // PR #137: prefer the dynamic cost estimate (computed from outline +
+    // real fal pricing); fall back to channel.cost_estimate_usd if the
+    // estimate hasn't loaded yet.
+    const stage1 = costEstimate?.stage_1_usd ?? Math.max(1, (channel?.cost_estimate_usd || 0) * 0.7);
+    const stage2 = costEstimate?.stage_2_usd ?? Math.max(1, (channel?.cost_estimate_usd || 0) * 0.3);
+    const totalCost = costEstimate?.total_usd ?? (channel?.cost_estimate_usd || 0);
     const isRunning = jobStatus
         && jobStatus.phase !== 'done'
         && jobStatus.phase !== 'failed'
@@ -1476,12 +1504,12 @@ function RenderTab({
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Pipeline:</span> {channel.pipeline_kind || 'sleep_doc'}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Image model:</span> {channel.image_model_default}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
-                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${channel.cost_estimate_usd}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${totalCost.toFixed(2)}{costEstimate ? <span className="text-[10px] text-zinc-500 ml-2">(stage 1 ${stage1.toFixed(2)} · stage 2 ${stage2.toFixed(2)} · {costEstimate.n_scenes} scenes)</span> : null}</div>
                     </div>
                     <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200">
-                        Two-stage render: <strong>Stage 1 generates stills only (~$1-3 fal)</strong> →
+                        Two-stage render: <strong>Stage 1 generates stills only (~${stage1.toFixed(2)} fal)</strong> →
                         you review every scene → regenerate any off-style ones individually →
-                        <strong> Stage 2 burns the rest (~${(channel.cost_estimate_usd - 3).toFixed(0)} fal)</strong>{' '}
+                        <strong> Stage 2 burns the rest (~${stage2.toFixed(2)} fal)</strong>{' '}
                         on i2v + voice + SFX + compose. You can close this tab and
                         resume from the Recent Renders panel — it&apos;ll keep running.
                     </div>
@@ -1493,7 +1521,7 @@ function RenderTab({
                         {renderStarting ? (
                             <><Loader2 className="h-4 w-4 animate-spin" /> Starting…</>
                         ) : (
-                            <><Film className="h-4 w-4" /> Generate Stills (~$1-3 fal — review before bulk)</>
+                            <><Film className="h-4 w-4" /> Generate Stills (~${stage1.toFixed(2)} fal — review before bulk)</>
                         )}
                     </button>
                     {renderError && (
@@ -1515,7 +1543,7 @@ function RenderTab({
                     onRegenerateScene={onRegenerateScene}
                     onFinalize={onFinalize}
                     onReloadScenes={() => onReloadScenes(activeJobId)}
-                    finalizeCostEstimate={Math.max(1, channel.cost_estimate_usd - 3)}
+                    finalizeCostEstimate={Number(stage2.toFixed(2))}
                     renderError={renderError}
                 />
             )}
