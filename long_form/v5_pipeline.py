@@ -112,25 +112,35 @@ def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
 # Phase 3 — i2v (LTX 13B via skeleton_ai.i2v_engine, fallback chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
-LTX_13B_I2V_URL = "https://fal.run/fal-ai/ltx-video-13b-098-distilled/image-to-video"
+# Canonical LTX 13B distilled endpoint (matches every Casey script in
+# E:/recaps/{empire_magnates,zero_tier,cryptic_science}). PR #132 had this
+# wrong as 'ltx-video-13b-098-distilled' which 404'd on fal:
+#   "Application 'ltx-video-13b-098-distilled' not found".
+LTX_13B_ENDPOINT = "fal-ai/ltx-video-13b-distilled/image-to-video"
 
 
 def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
                  *, duration_sec: int = 5) -> Path:
-    """Animate the still via LTX 13B (the v5_pipeline_locked recipe winner —
-    'not even a competition, fucking flawless' per Casey's 2026-04-24 bakeoff).
+    """Animate the still via LTX 13B distilled (the v5_pipeline_locked recipe
+    winner — 'not even a competition, fucking flawless' per Casey's
+    2026-04-24 bakeoff).
 
-    PR #132: switched from skeleton_ai.i2v_engine's Seedance/Pixverse
-    fallback chain (which produced 720p output and weaker motion) to direct
-    LTX 13B 1080p calls per the channel.i2v_model_default='ltx_13b' lock.
+    PR #132 switched from skeleton_ai.i2v_engine (Seedance/Pixverse fallback,
+    720p with weaker motion) to direct LTX 13B. PR #135 fixes the endpoint
+    URL (was 404'ing) + uses fal_client.subscribe to handle LTX's async
+    queue (calls take 20-60s, plain HTTP POST returns 202 → needs polling).
 
-    EM v5 locked to 16:9 1920x1080 aspect, ~5s clips per scene. Each scene
-    clip stretches to its VO duration during scene assembly (Phase 5)."""
+    Payload mirrors Casey's wirecard_ltx.py exactly:
+        - resolution: '720p' (LTX's native max — compose ffmpeg upscales
+          to 1920x1080 in the final pass per PR #132's force_1080p logic)
+        - num_frames=300 + frame_rate=60 → 5sec @ 60fps native
+        - aspect_ratio: '16:9'
+    """
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
 
-    # Upload still to fal storage so LTX can image-condition. Lazy import
-    # so v5_pipeline imports cleanly when fal_client missing.
+    # Lazy import — keeps v5_pipeline.py importable on machines without
+    # fal_client wheel installed (sleep_doc renders don't need it).
     import fal_client
     fal_key = (os.environ.get("FAL_AI_KEY") or "").strip()
     if not fal_key:
@@ -138,27 +148,51 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     os.environ["FAL_KEY"] = fal_key
     image_url = fal_client.upload_file(str(still_path))
 
-    payload = {
-        "image_url": image_url,
-        "prompt": (motion_prompt or "subtle parallax, slow camera push-in, "
-                   "gentle ambient motion, no scene cuts, photoreal documentary").strip(),
-        "negative_prompt": (
-            "low quality, deformation, identity drift, glowing eyes, "
-            "warping, jitter, multiple subjects appearing, cartoon, anime"
-        ),
-        "num_frames": 121,                # 5 sec at 24fps
-        "frame_rate": 24,
-        "resolution": "1080p",            # 1920x1080 native
-        "aspect_ratio": "16:9",
-        "expand_prompt": False,
-    }
-    data = _fal_post(LTX_13B_I2V_URL, payload, timeout_s=600, attempts=2)
-    video = data.get("video") or {}
-    url = video.get("url") or data.get("video_url")
-    if not url:
-        raise LFRenderError(f"LTX 13B response missing video url: {str(data)[:300]}")
-    _download(url, out_path, timeout_s=180)
-    return out_path
+    motion = (motion_prompt or "").strip() or (
+        "subtle cinematic push-in, slow parallax, gentle ambient motion"
+    )
+    full_prompt = (
+        f"{motion}. Documentary cinematography, subtle realistic motion, "
+        "no camera wobble, no subject deformation, stable composition, "
+        "photoreal documentary, red porcelain mannequin character preserved"
+    )
+    neg = (
+        "blur, distort, low quality, static noise, face morphing, "
+        "subject deformation, flicker, warping, jitter, inconsistent motion, "
+        "real human face appearing, character changing"
+    )
+
+    last_err = ""
+    for attempt in range(2):
+        try:
+            result = fal_client.subscribe(
+                LTX_13B_ENDPOINT,
+                arguments={
+                    "image_url": image_url,
+                    "prompt": full_prompt,
+                    "negative_prompt": neg,
+                    "resolution": "720p",
+                    "num_frames": 300,        # 5sec at 60fps native
+                    "frame_rate": 60,
+                    "aspect_ratio": "16:9",
+                },
+            )
+            video_url = ""
+            if isinstance(result, dict):
+                video = result.get("video") or {}
+                if isinstance(video, dict):
+                    video_url = video.get("url") or ""
+                video_url = video_url or result.get("video_url", "")
+            if not video_url:
+                last_err = f"no video url in result: {str(result)[:200]}"
+                time.sleep(3 + attempt * 5)
+                continue
+            _download(video_url, out_path, timeout_s=180)
+            return out_path
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            time.sleep(3 + attempt * 5)
+    raise LFRenderError(f"LTX 13B i2v failed after retries: {last_err}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
