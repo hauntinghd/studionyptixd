@@ -31,6 +31,7 @@ def generate_outline(
     topic: str,
     target_minutes: int,
     catalyst_context: str = "",
+    title_template_block: str = "",
 ) -> dict[str, Any]:
     """
     Top-level outline pass. Returns a dict:
@@ -41,14 +42,29 @@ def generate_outline(
             {"index": 0, "title": "...", "minutes": 5, "synopsis": "..."}
         ],
         "tags": ["...", "..."],
+        "description": "<optional, when channel has a description_tail>",
       }
 
     catalyst_context is optional — if provided, it's injected as
     'Use these channel-performance signals to bias topic + framing'.
+
+    title_template_block (PR #119) is optional — when provided, it's
+    injected as a strict system-prompt block forcing Grok to use the
+    channel's decoded winner pattern (HR's 'History for Sleep' suffix,
+    EM's 'Legally Stole $X From Y'). Sourced from
+    long_form.prompts.channels.channel_outline_prompt_extras(channel_key).
     """
-    chapter_count = max(3, min(20, round(target_minutes / 5)))
+    # Sleep-doc channels (HR ~9hr) need ~30-min chapters; cinematic episode
+    # channels (EM ~20m) need ~5-min chapters. Cap chapter count between
+    # 3 and 20 either way.
+    if target_minutes >= 240:                          # 4hr+ = sleep doc territory
+        chapter_count = max(6, min(20, round(target_minutes / 30)))
+    else:
+        chapter_count = max(3, min(20, round(target_minutes / 5)))
 
     sys_lines = [channel_system_prompt]
+    if title_template_block.strip():
+        sys_lines.append(title_template_block.strip())
     if catalyst_context:
         sys_lines.append(
             "Channel performance signals (use to bias hook + framing — "
@@ -58,7 +74,8 @@ def generate_outline(
         "Output strict JSON with this shape:\n"
         '  { "title": "...", "hook": "<cold-open 1-line>", '
         '"chapters": [ {"index": 0, "title": "...", "minutes": <int>, '
-        '"synopsis": "<1-2 sentences>"} ], "tags": ["..."] }\n'
+        '"synopsis": "<1-2 sentences>"} ], "tags": ["..."], '
+        '"description": "<5-7 sentence YouTube description>" }\n'
         f"Aim for {chapter_count} chapters totaling {target_minutes} minutes. "
         "No markdown fences, no commentary."
     )
