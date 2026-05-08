@@ -17,8 +17,8 @@
  *     candidate title prefilled (Phase 2 wires the zerotier_private template).
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, Zap } from 'lucide-react';
-import { API, AuthContext } from '../shared';
+import { AlertTriangle, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, Youtube, Zap } from 'lucide-react';
+import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
 
@@ -95,6 +95,7 @@ export default function ZeroTierPrivatePanel() {
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [connecting, setConnecting] = useState(false);
     const [error, setError] = useState('');
     const [payload, setPayload] = useState<CatalystHubPayload | null>(null);
     const retriedRef = useRef(false);
@@ -178,6 +179,35 @@ export default function ZeroTierPrivatePanel() {
         void fetchHub();
     }, [fetchHub]);
 
+    const onConnectZeroTier = useCallback(() => {
+        if (!accessToken || connecting) return;
+        setConnecting(true);
+        setError('');
+        try {
+            // Pre-tag the channel id so the OAuth callback knows which channel
+            // the resulting refresh token should be linked to.
+            const nextUrl = new URL(window.location.href);
+            nextUrl.searchParams.set('youtube_channel_id', ZEROTIER_CHANNEL_ID);
+            nextUrl.searchParams.set('niche', 'zerotier_private');
+            startYouTubeBrowserConnect(accessToken, nextUrl.toString());
+            // The browser is navigating to Google; setConnecting(false) is
+            // not really needed but keeps the UI honest if the form fails.
+        } catch (e: any) {
+            setError(String(e?.message || e || 'Failed to start YouTube OAuth'));
+            setConnecting(false);
+        }
+    }, [accessToken, connecting]);
+
+    // Detect "no likes anywhere" → suggests channel is public-API only.
+    const channelLacksOAuthData = useMemo(() => {
+        if (!sortedUploads.length) return false;
+        return sortedUploads.every((v) => !v.likes);
+    }, [sortedUploads]);
+    const channelNeedsReconnect = !!channel?.needs_reconnect || (
+        typeof channel?.last_sync_error === 'string' &&
+        /refresh token|reconnect|missing google/i.test(channel.last_sync_error || '')
+    );
+
     const onBuildShort = (title: string) => {
         // Phase 1: hand off to existing build flow with the title prefilled.
         // Phase 2: wire to the dedicated zerotier_private template prompt.
@@ -232,10 +262,20 @@ export default function ZeroTierPrivatePanel() {
             {!loading && !channel && (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-6 text-sm text-amber-200">
                     <div className="font-semibold mb-1">ZeroTier channel not connected to Catalyst.</div>
-                    <p className="text-amber-100/80">
-                        Connect ZeroTier ({ZEROTIER_CHANNEL_ID}) via the YouTube OAuth flow in the Catalyst tab to enable
-                        rich analytics, topic recommendations, and per-video performance tracking.
+                    <p className="text-amber-100/80 mb-4">
+                        Connect ZeroTier ({ZEROTIER_CHANNEL_ID}) via Google OAuth to enable rich analytics
+                        (per-video likes, comments, average view duration, impression CTR) and unlock
+                        Catalyst's full topic-recommendation pipeline.
                     </p>
+                    <button
+                        type="button"
+                        onClick={onConnectZeroTier}
+                        disabled={connecting}
+                        className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60"
+                    >
+                        {connecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Youtube className="h-4 w-4" />}
+                        {connecting ? 'Opening Google…' : 'Connect ZeroTier via Google'}
+                    </button>
                 </div>
             )}
 
@@ -272,6 +312,30 @@ export default function ZeroTierPrivatePanel() {
                             <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
                                 <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                                 <span>Last sync error: {channel.last_sync_error}</span>
+                            </div>
+                        )}
+                        {(channelLacksOAuthData || channelNeedsReconnect) && (
+                            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-xs text-red-200">
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-semibold mb-0.5">
+                                        {channelNeedsReconnect
+                                            ? 'ZeroTier needs reconnection — old OAuth token expired.'
+                                            : 'Per-video likes / comments / CTR are missing.'}
+                                    </div>
+                                    <div className="text-red-100/80">
+                                        Catalyst is currently using the public YouTube API path which only returns view
+                                        counts. Connect via Google OAuth to unlock full analytics + Catalyst's learning loop.
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={onConnectZeroTier}
+                                    disabled={connecting}
+                                    className="inline-flex items-center gap-2 rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-red-500 disabled:opacity-60 shrink-0"
+                                >
+                                    {connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Youtube className="h-3.5 w-3.5" />}
+                                    {connecting ? 'Opening Google…' : 'Connect ZeroTier'}
+                                </button>
                             </div>
                         )}
                     </section>
