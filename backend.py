@@ -5028,7 +5028,7 @@ configure_video_pipeline_runtime_hooks(
 )
 
 
-CATALYST_HUB_SHORT_WORKSPACES = ["story", "motivation", "skeleton", "daytrading", "chatstory"]
+CATALYST_HUB_SHORT_WORKSPACES = ["story", "motivation", "chatstory", "alt_battles", "zerotier_private", "scary", "history", "dilemma"]
 CATALYST_HUB_LONGFORM_WORKSPACES = ["documentary", "recap", "explainer", "story_channel"]
 
 

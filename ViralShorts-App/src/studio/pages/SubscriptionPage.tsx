@@ -68,7 +68,7 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                     `${Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60))} minute max jobs`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output`,
                     planId === 'free'
-                        ? 'Create workspace with AI Stories, Motivation, Skeleton AI, and Day Trading'
+                        ? 'Create workspace with Alt-History Battles, Moral Dilemma, Scary Stories, and Historical Epic'
                         : 'Create workspace + Chat Story template access',
                 ],
             };

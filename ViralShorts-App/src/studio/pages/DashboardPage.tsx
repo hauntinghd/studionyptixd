@@ -263,7 +263,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                                         <p className="mt-1.5 max-w-2xl text-[13px] text-gray-400">
                                             {ownerOverride
                                                 ? 'Owner preview — every Studio lane is open on this account.'
-                                                : 'Pick a niche and start creating. Nine live niches: Skeleton AI, Day Trading, Moral Dilemma, Business, Finance, Tech, Crypto, Scary Stories, Historical Epic.'}
+                                                : 'Pick a niche and start creating. Four live niches: Alternate History Battles, Moral Dilemma, Scary Stories, Historical Epic.'}
                                         </p>
                                     </div>
                                     <div className="grid gap-2.5 sm:grid-cols-2">
@@ -285,10 +285,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         )}
 
                         {tab === 'create' && !createImmersive && (
-                            <NicheGallery onPick={(nicheId) => {
-                                setSelectedNiche(nicheId);
-                                setCreateWorkspaceOpen(true);
-                            }} />
+                            <NicheGallery
+                                isOwner={ownerOverride}
+                                onPick={(nicheId) => {
+                                    setSelectedNiche(nicheId);
+                                    setCreateWorkspaceOpen(true);
+                                }}
+                            />
                         )}
 
                         {tab === 'create' && createImmersive && (
@@ -312,21 +315,20 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     );
 }
 
-function NicheGallery({ onPick }: { onPick: (nicheId: string) => void }) {
+function NicheGallery({ onPick, isOwner }: { onPick: (nicheId: string) => void; isOwner: boolean }) {
     // Keep in sync with CreatePanel.tsx `templates` array (same ids, titles, icons).
-    // All 9 live niches appear here so the gallery matches the Switch-Niche modal
-    // inside the Create workspace.
-    const niches: { id: string; title: string; desc: string; icon: string; badge?: string }[] = [
-        { id: 'skeleton', title: 'Skeleton AI', desc: '3D skeleton comparison shorts', icon: '💀', badge: 'Most Popular' },
-        { id: 'daytrading', title: 'Day Trading', desc: 'Hook-forward trading shorts', icon: '📈', badge: 'Trending' },
-        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', icon: '⚖️', badge: 'New' },
-        { id: 'business', title: 'Business', desc: 'Founder and operator stories', icon: '💼' },
-        { id: 'finance', title: 'Finance', desc: 'Money and markets explainers', icon: '💸' },
-        { id: 'tech', title: 'Tech', desc: 'AI and startup updates', icon: '🧠' },
-        { id: 'crypto', title: 'Crypto', desc: 'Crypto trends and narratives', icon: '₿' },
+    // 4 public niches + 1 owner-only ZeroTier private niche (DC speedster fan-fic shorts).
+    // Niche taxonomy refactor 2026-05-08:
+    //   - Removed: skeleton, daytrading, business, finance, tech, crypto
+    //   - Replaced Skeleton AI slot with Alternate History Battles (alt_battles)
+    //   - Added private ZeroTier niche (owner-only, hidden from regular users)
+    const niches: { id: string; title: string; desc: string; icon: string; badge?: string; ownerOnly?: boolean }[] = [
+        { id: 'alt_battles', title: 'Alt-History Battles', desc: 'Napoleon vs Alexander, Romans vs Aztecs — AI battle scenes', icon: '🛡️', badge: 'New' },
+        { id: 'dilemma', title: 'Moral Dilemma', desc: 'Forced binary-choice CTAs', icon: '⚖️', badge: 'Trending' },
         { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', icon: '👻', badge: 'Trending' },
         { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', icon: '⚔️', badge: 'Trending' },
-    ];
+        { id: 'zerotier_private', title: 'ZeroTier (Private)', desc: 'DC speedster comic-book shorts — owner only', icon: '⚡', badge: 'Private', ownerOnly: true },
+    ].filter((n) => !n.ownerOnly || isOwner);
     return (
         <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4">
             <div className="mb-3 flex items-baseline justify-between">
