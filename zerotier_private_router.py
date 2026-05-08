@@ -29,9 +29,11 @@ Wiring: backend.py builds + includes this router via:
     ))
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -98,6 +100,19 @@ ZT_OUTPUT_ROOT = Path(os.getenv("ZEROTIER_PRIVATE_OUTPUT_ROOT", "zerotier_privat
 # sync) by GET /predictions. Lives outside ZT_OUTPUT_ROOT so log clean-ups
 # of past renders don't blow away the calibration history.
 ZT_PREDICTIONS_LOG = Path(os.getenv("ZEROTIER_PRIVATE_PREDICTIONS_LOG", "zerotier_private/predictions.jsonl"))
+
+# Phase 4.5b — background job state. Keys: job_id. Values: {
+#   stage: "stills" | "finalize",
+#   status: "pending" | "ready" | "failed",
+#   started_at: float,
+#   result?: dict,           # populated when status="ready"
+#   error?: str,             # populated when status="failed"
+#   _task?: asyncio.Task,    # strong ref so GC doesn't kill it mid-flight
+# }
+# Stored in-memory because Fly machines are single-instance for this app and
+# the job lifecycle is < 10 minutes — no need for Redis. result.json on disk
+# remains the durable record once a job finishes.
+_zt_jobs_status: dict[str, dict] = {}
 
 
 def _safe_filename(raw: str | None, default: str) -> str:
@@ -605,8 +620,67 @@ def build_zerotier_private_router(
             "still_url": f"/api/zerotier-private/jobs/{body.job_id}/stills/{result['still_filename']}",
         }
 
+    async def _run_finalize_background(job_id: str, workspace: Path, final_filename: str) -> None:
+        """Background task for the i2v + TTS + compose stage."""
+        try:
+            result = await asyncio.to_thread(
+                render_finalize,
+                workspace=workspace,
+                final_filename=final_filename,
+            )
+            # Merge with existing partial result.json (preserves prediction metadata)
+            prior = {}
+            try:
+                prior = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
+            except Exception:
+                pass
+            result_payload = {
+                **prior,
+                "job_id": job_id,
+                "stage": "done",
+                "status": "done",
+                **result,
+                "mp4_url": f"/api/zerotier-private/jobs/{job_id}/mp4",
+            }
+            try:
+                (workspace / "result.json").write_text(
+                    json.dumps(result_payload, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            # Phase 3: append prediction record
+            try:
+                _append_prediction_log({
+                    "job_id": job_id,
+                    "ts": int(time.time()),
+                    "topic": str(prior.get("topic", "") or "").strip(),
+                    "title": result.get("title", ""),
+                    "predicted_score": prior.get("predicted_score"),
+                    "predicted_like_rate": prior.get("predicted_like_rate"),
+                    "scene_count": result.get("scene_count"),
+                    "duration_total_sec": result.get("duration_total_sec"),
+                    "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
+                })
+            except Exception:
+                pass
+            _zt_jobs_status[job_id].update({
+                "status": "ready",
+                "finished_at": time.time(),
+                "result": result_payload,
+            })
+        except Exception as e:
+            _zt_jobs_status[job_id].update({
+                "status": "failed",
+                "finished_at": time.time(),
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     @router.post("/render-finalize")
     async def zt_render_finalize(body: ZTFinalizeRequest, user: dict = auth_dep):
+        """Phase 4.5b: returns immediately with {job_id, status:'pending'}.
+        The frontend polls /jobs/{job_id}/status until ready. Same pattern
+        as /render-stills but for the longer i2v + TTS + compose stage."""
         _gate_admin(user)
         if not body.job_id.replace("_", "").isalnum() or len(body.job_id) > 32:
             raise HTTPException(400, "bad_job_id")
@@ -619,56 +693,55 @@ def build_zerotier_private_router(
             default=f"ZeroTier_{body.job_id}.mp4",
         )
 
-        try:
-            result = render_finalize(
-                workspace=workspace,
-                final_filename=final_filename,
-            )
-        except ZTRenderError as e:
-            raise HTTPException(500, f"finalize_failed: {e}")
-        except Exception as e:
-            raise HTTPException(500, f"finalize_failed: {type(e).__name__}: {e}")
-
-        # Read existing partial result.json if present (preserves prediction
-        # metadata from stills stage), merge with finalize result.
-        prior = {}
-        try:
-            prior = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        result_payload = {
-            **prior,
-            "job_id": body.job_id,
-            "stage": "done",
-            "status": "done",
-            **result,
+        # Re-use the SAME job_id since the workspace is already keyed to it
+        # from the stills stage. The status registry overwrites the "stills"
+        # entry with "finalize" — once stills are ready we don't need to
+        # poll for them anymore.
+        _zt_jobs_status[body.job_id] = {
+            "stage": "finalize",
+            "status": "pending",
+            "started_at": time.time(),
         }
-        try:
-            (workspace / "result.json").write_text(
-                json.dumps(result_payload, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        task = asyncio.create_task(
+            _run_finalize_background(body.job_id, workspace, final_filename)
+        )
+        _zt_jobs_status[body.job_id]["_task"] = task
 
-        # Phase 3: append prediction record
-        try:
-            _append_prediction_log({
-                "job_id": body.job_id,
-                "ts": int(__import__("time").time()),
-                "topic": str(prior.get("topic", "") or "").strip(),
-                "title": result.get("title", ""),
-                "predicted_score": prior.get("predicted_score"),
-                "predicted_like_rate": prior.get("predicted_like_rate"),
-                "scene_count": result.get("scene_count"),
-                "duration_total_sec": result.get("duration_total_sec"),
-                "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
-            })
-        except Exception:
-            pass
+        return {
+            "ok": True,
+            "job_id": body.job_id,
+            "status": "pending",
+            "stage": "finalize",
+            "poll_url": f"/api/zerotier-private/jobs/{body.job_id}/status",
+        }
 
-        result_payload["mp4_url"] = f"/api/zerotier-private/jobs/{body.job_id}/mp4"
-        return result_payload
+    @router.get("/jobs/{job_id}/status")
+    async def zt_job_polling_status(job_id: str, user: dict = auth_dep):
+        """Phase 4.5b: poll endpoint for in-flight render-stills /
+        render-finalize jobs. Returns the current stage + status, plus the
+        full result payload when status='ready'."""
+        _gate_admin(user)
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        entry = _zt_jobs_status.get(job_id)
+        if not entry:
+            # Maybe the server restarted but the result.json is on disk
+            rp = ZT_OUTPUT_ROOT / job_id / "result.json"
+            if rp.exists():
+                try:
+                    return {
+                        "ok": True,
+                        "job_id": job_id,
+                        "status": "ready",
+                        "stage": "done",
+                        "result": json.loads(rp.read_text(encoding="utf-8")),
+                    }
+                except Exception:
+                    pass
+            raise HTTPException(404, "job_not_found")
+        # Don't include the strong-ref task in the response payload
+        public = {k: v for k, v in entry.items() if not k.startswith("_")}
+        return {"ok": True, "job_id": job_id, **public}
 
     @router.get("/jobs/{job_id}/stills/{filename}")
     async def zt_job_still(job_id: str, filename: str, user: dict = auth_dep):
