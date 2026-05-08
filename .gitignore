@@ -25,6 +25,7 @@ ViralShorts-App/project.json
 .vercel/
 skeleton_ai/output/
 zerotier_private/output/
+long_form/output/
 *.mp4
 *.exe
 *.pkg

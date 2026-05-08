@@ -9,18 +9,29 @@ Wires into backend.py the same way Skeleton AI does:
     ))
 
 Routes:
-  GET  /api/long-form/channels                  6 channel registry
-  GET  /api/long-form/channel/{key}             single channel canonical
-  POST /api/long-form/catalyst-insights          {channel_key} → shaped Catalyst data
-  POST /api/long-form/outline                   Grok outline pass (chapter list)
-  POST /api/long-form/outline/expand-chapter    Lazy per-chapter beat expansion
-  POST /api/long-form/render                    [stub for now] full pipeline kickoff
-  GET  /api/long-form/jobs/{job_id}             [stub for now] job poll
+  GET  /api/long-form/channels                       channel registry list
+  GET  /api/long-form/channel/{key}                  single channel canonical
+  POST /api/long-form/catalyst-insights              {channel_key} → shaped Catalyst data
+  POST /api/long-form/outline                        Grok outline pass (chapter list)
+  POST /api/long-form/outline/expand-chapter         Lazy per-chapter beat expansion
+
+  POST /api/long-form/render-start                   Kick a background render → job_id
+  GET  /api/long-form/jobs                           List recent renders for the panel
+  GET  /api/long-form/jobs/{job_id}                  Full state.json + status snapshot
+  GET  /api/long-form/jobs/{job_id}/state            Same as above (alias for resume flow)
+  GET  /api/long-form/jobs/{job_id}/status           Lightweight phase + percent poll
+  GET  /api/long-form/jobs/{job_id}/mp4              Stream final MP4 (capability via job_id)
+  GET  /api/long-form/jobs/{job_id}/thumbnail/{idx}  Serve thumbnail PNG (capability)
+  GET  /api/long-form/jobs/{job_id}/still/{scene}    Serve scene PNG (capability)
 
 The legacy /api/longform/* + /api/creative/* routes (28 endpoints) remain
-mounted alongside this — they back the existing v5 sessions that shipped
+mounted alongside this — they back the older v5 sessions that shipped
 Wirecard / Mongol 9H / Ottoman 9H. The new /api/long-form/* (hyphenated)
-becomes the canonical surface once parity is verified, then legacy retires.
+is the canonical surface; legacy retires after parity is verified.
+
+PR #120: render pipeline wired live. HR sleep-doc renders end-to-end via
+long_form.pipeline.run_sleep_doc_pipeline. PR #122 will register
+'v5_episode' (EM) in the same dispatcher.
 """
 from __future__ import annotations
 import os
@@ -28,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from long_form.prompts.channels import (
@@ -45,6 +57,8 @@ from long_form.catalyst_bridge import (
 )
 
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
+
+from long_form import pipeline as lf_pipeline
 
 # Reference videos thread into the Grok system prompt so generated outlines
 # mimic patterns from videos the user picked as inspiration. Best-effort.
@@ -330,33 +344,174 @@ def build_long_form_router(
             "beats": beats,
         }
 
-    @router.post("/render")
-    async def render_route(body: RenderRequest, user: dict = auth_dep):
-        _gate_admin(user)
-        """
-        Full long-form render. PHASE 2 — wires into the v5 pipeline.
+    # ─────────────────────────────────────────────────────────────────────
+    # Render endpoints (PR #120 — replaces the phase-2 stubs)
+    # ─────────────────────────────────────────────────────────────────────
 
-        For now we 501 with a clear message so the frontend can show
-        "render coming soon" without crashing. Once we burn fal money
-        on a verification render, this delegates to long_form.pipeline.run().
-        """
+    def _validate_job_id(job_id: str) -> None:
+        if not job_id or not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+
+    @router.post("/render-start")
+    async def render_start_route(body: RenderRequest, user: dict = auth_dep):
+        _gate_admin(user)
         try:
-            get_channel(body.channel_key)
+            channel = get_channel(body.channel_key)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        raise HTTPException(
-            501,
-            "render pipeline wires up in phase 2 (after fal balance refills). "
-            "For now the legacy /api/longform/session endpoints still work and "
-            "are what shipped Wirecard / Mongol 9H / Ottoman 9H."
-        )
+        if not isinstance(body.outline, dict) or not (body.outline.get("chapters") or []):
+            raise HTTPException(400, "outline must include a non-empty chapters list")
+        try:
+            job_id = lf_pipeline.start_render(channel, body.outline)
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"render_start_failed: {e}")
+        return {
+            "job_id": job_id,
+            "channel_key": body.channel_key,
+            "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
+            "poll_url": f"/api/long-form/jobs/{job_id}/status",
+            "state_url": f"/api/long-form/jobs/{job_id}/state",
+            "mp4_url_when_done": f"/api/long-form/jobs/{job_id}/mp4",
+        }
+
+    @router.get("/jobs")
+    async def list_jobs_route(user: dict = auth_dep, limit: int = 20):
+        _gate_admin(user)
+        rows = lf_pipeline.list_recent_jobs(limit=int(limit))
+        # Trim each row to the panel-card shape (frontend doesn't need the
+        # full chapters array on this view — it can fetch /jobs/{id}/state
+        # when the user clicks Resume).
+        out: list[dict] = []
+        for st in rows:
+            outline = st.get("outline") or {}
+            mp4_rel = st.get("mp4_path") or ""
+            mp4_present = bool(mp4_rel)
+            thumbs_count = int(st.get("thumbnails_generated", 0) or 0)
+            out.append({
+                "job_id": st.get("job_id"),
+                "channel_key": st.get("channel_key"),
+                "channel_label": st.get("channel_label"),
+                "pipeline_kind": st.get("pipeline_kind", ""),
+                "title": outline.get("title", ""),
+                "phase": st.get("phase", ""),
+                "percent": int(st.get("percent", 0) or 0),
+                "error": st.get("error", ""),
+                "created_at": st.get("created_at", 0),
+                "started_at": st.get("started_at", 0),
+                "finished_at": st.get("finished_at", 0),
+                "mp4_present": mp4_present,
+                "mp4_url": f"/api/long-form/jobs/{st.get('job_id')}/mp4" if mp4_present else "",
+                "mp4_duration_sec": float(st.get("mp4_duration_sec", 0) or 0),
+                "mp4_size_bytes": int(st.get("mp4_size_bytes", 0) or 0),
+                "thumbnail_url": (
+                    f"/api/long-form/jobs/{st.get('job_id')}/thumbnail/1"
+                    if thumbs_count > 0 else ""
+                ),
+            })
+        return {"jobs": out, "total": len(out)}
 
     @router.get("/jobs/{job_id}")
-    async def job_route(job_id: str, user: dict = auth_dep):
+    async def job_state_route(job_id: str, user: dict = auth_dep):
         _gate_admin(user)
-        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
-            raise HTTPException(400, "bad_job_id")
-        # Phase 2 — read result.json from long_form/output/{job_id}/.
-        raise HTTPException(404, "no jobs yet — render endpoint is phase 2")
+        _validate_job_id(job_id)
+        st = lf_pipeline.load_state(job_id)
+        if not st:
+            raise HTTPException(404, "no such job")
+        # Merge in the live status snapshot (phase + percent from registry,
+        # in case the on-disk state is stale between phase boundaries).
+        live = lf_pipeline.get_status(job_id) or {}
+        merged = dict(st)
+        for k in ("phase", "percent", "error", "scene_done", "scene_total",
+                  "narration_done", "narration_total", "chapter_done", "chapter_total"):
+            if k in live:
+                merged[k] = live[k]
+        # Surface URLs for media that exists.
+        if merged.get("mp4_path"):
+            merged["mp4_url"] = f"/api/long-form/jobs/{job_id}/mp4"
+        thumbs = int(merged.get("thumbnails_generated", 0) or 0)
+        merged["thumbnail_urls"] = [
+            f"/api/long-form/jobs/{job_id}/thumbnail/{i + 1}" for i in range(thumbs)
+        ]
+        return merged
+
+    @router.get("/jobs/{job_id}/state")
+    async def job_state_alias_route(job_id: str, user: dict = auth_dep):
+        # Resume flow uses /state — keep an alias so the frontend code
+        # mirrors the ZT private convention.
+        return await job_state_route(job_id, user=user)
+
+    @router.get("/jobs/{job_id}/status")
+    async def job_status_route(job_id: str, user: dict = auth_dep):
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        live = lf_pipeline.get_status(job_id)
+        if live is None:
+            # Fall back to disk state (process restart).
+            st = lf_pipeline.load_state(job_id)
+            if not st:
+                raise HTTPException(404, "no such job")
+            live = {
+                "phase": st.get("phase", "unknown"),
+                "percent": int(st.get("percent", 0) or 0),
+                "error": st.get("error", ""),
+            }
+        return {
+            "job_id": job_id,
+            "phase": live.get("phase", "unknown"),
+            "percent": int(live.get("percent", 0) or 0),
+            "error": live.get("error", ""),
+            "scene_done": int(live.get("scene_done", 0) or 0),
+            "scene_total": int(live.get("scene_total", 0) or 0),
+            "narration_done": int(live.get("narration_done", 0) or 0),
+            "narration_total": int(live.get("narration_total", 0) or 0),
+            "chapter_done": int(live.get("chapter_done", 0) or 0),
+            "chapter_total": int(live.get("chapter_total", 0) or 0),
+            "updated_at": float(live.get("updated_at", 0) or 0),
+        }
+
+    # Capability-token serving (no auth header required — gating is by knowledge
+    # of the random 12-hex job_id). Same pattern as ZT private's media endpoints.
+    # This is REQUIRED for <video> + <img> tags which can't send Authorization.
+
+    @router.get("/jobs/{job_id}/mp4")
+    async def job_mp4_route(job_id: str):
+        _validate_job_id(job_id)
+        path = lf_pipeline.job_mp4_path(job_id)
+        if not path or not path.exists():
+            raise HTTPException(404, "mp4_not_ready")
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=path.name,
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
+    @router.get("/jobs/{job_id}/thumbnail/{idx}")
+    async def job_thumbnail_route(job_id: str, idx: int):
+        _validate_job_id(job_id)
+        if idx < 1 or idx > 12:
+            raise HTTPException(400, "bad_index")
+        path = lf_pipeline.job_thumbnail_path(job_id, idx)
+        if not path or not path.exists():
+            raise HTTPException(404, "thumbnail_not_found")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=600"},
+        )
+
+    @router.get("/jobs/{job_id}/still/{scene_idx}")
+    async def job_still_route(job_id: str, scene_idx: int):
+        _validate_job_id(job_id)
+        if scene_idx < 0 or scene_idx > 9999:
+            raise HTTPException(400, "bad_scene_index")
+        path = lf_pipeline.job_still_path(job_id, scene_idx)
+        if not path or not path.exists():
+            raise HTTPException(404, "still_not_found")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=600"},
+        )
 
     return router
