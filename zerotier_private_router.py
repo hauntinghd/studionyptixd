@@ -53,10 +53,22 @@ class ZTScriptRequest(BaseModel):
 class ZTRenderRequest(BaseModel):
     script_json: str = Field(..., min_length=10, description="Grok-generated 8-beat script JSON (raw string)")
     final_filename: str | None = None
+    # Phase 3 — learning loop. Frontend includes its heuristic-v1 score so we
+    # can log prediction-vs-actual once Catalyst harvests outcomes.
+    predicted_score: float | None = None
+    predicted_like_rate: float | None = None
+    topic: str | None = None
 
 
 # Where rendered MP4s live. Mirrors skeleton_ai's pattern.
 ZT_OUTPUT_ROOT = Path(os.getenv("ZEROTIER_PRIVATE_OUTPUT_ROOT", "zerotier_private/output"))
+
+# Phase 3 — append-only JSONL log of every render's prediction. Each line is
+# a JSON object: {job_id, ts, title, predicted_score, predicted_like_rate}.
+# Cross-referenced with actual outcomes (views/likes from Catalyst's channel
+# sync) by GET /predictions. Lives outside ZT_OUTPUT_ROOT so log clean-ups
+# of past renders don't blow away the calibration history.
+ZT_PREDICTIONS_LOG = Path(os.getenv("ZEROTIER_PRIVATE_PREDICTIONS_LOG", "zerotier_private/predictions.jsonl"))
 
 
 def _safe_filename(raw: str | None, default: str) -> str:
@@ -66,6 +78,58 @@ def _safe_filename(raw: str | None, default: str) -> str:
     if not s.lower().endswith(".mp4"):
         s = s + ".mp4"
     return s[:96] or default
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase + collapse whitespace + strip punctuation for fuzzy match."""
+    s = str(title or "").lower()
+    s = re.sub(r"[^\w\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _title_word_overlap(a: str, b: str) -> float:
+    """Word-set overlap ratio in [0,1]. Symmetric Jaccard on words ≥4 chars."""
+    aw = set(w for w in _normalize_title(a).split() if len(w) >= 4)
+    bw = set(w for w in _normalize_title(b).split() if len(w) >= 4)
+    if not aw or not bw:
+        return 0.0
+    inter = aw & bw
+    union = aw | bw
+    return len(inter) / len(union) if union else 0.0
+
+
+def _append_prediction_log(record: dict) -> None:
+    """Atomic-ish append. The Fly volume is single-writer per machine; this
+    is good enough for the prediction log."""
+    try:
+        ZT_PREDICTIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with ZT_PREDICTIONS_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # log is best-effort; never block a render
+
+
+def _read_prediction_log(limit: int = 100) -> list[dict]:
+    """Read the last N predictions, newest first."""
+    if not ZT_PREDICTIONS_LOG.exists():
+        return []
+    try:
+        lines = ZT_PREDICTIONS_LOG.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    out: list[dict] = []
+    for raw in reversed(lines[-(limit * 2):]):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            out.append(json.loads(raw))
+        except Exception:
+            continue
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _build_zt_user_prompt(topic: str) -> str:
@@ -201,6 +265,9 @@ def build_zerotier_private_router(
         result_payload = {
             "job_id": job_id,
             "status": "done",
+            "topic": (body.topic or result.get("title") or "").strip(),
+            "predicted_score": body.predicted_score,
+            "predicted_like_rate": body.predicted_like_rate,
             **result,
         }
         try:
@@ -208,6 +275,23 @@ def build_zerotier_private_router(
                 json.dumps(result_payload, indent=2),
                 encoding="utf-8",
             )
+        except Exception:
+            pass
+
+        # Phase 3: append prediction record so we can cross-reference with
+        # actual YouTube outcomes once the user uploads + Catalyst harvests.
+        try:
+            _append_prediction_log({
+                "job_id": job_id,
+                "ts": int(__import__("time").time()),
+                "topic": (body.topic or "").strip(),
+                "title": result.get("title", ""),
+                "predicted_score": body.predicted_score,
+                "predicted_like_rate": body.predicted_like_rate,
+                "scene_count": result.get("scene_count"),
+                "duration_total_sec": result.get("duration_total_sec"),
+                "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
+            })
         except Exception:
             pass
 
@@ -246,5 +330,105 @@ def build_zerotier_private_router(
                     filename=candidate.name,
                 )
         raise HTTPException(404, "mp4_not_found")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Phase 3: predictions-vs-actuals learning surface.
+    #
+    # GET /predictions returns the last N logged predictions (from the
+    # JSONL log) joined against actual YouTube outcomes (views, likes,
+    # like-rate). The match is fuzzy: predictions log a `title` (the Grok
+    # output's title), and we look it up in the user's connection-store
+    # uploaded_videos by exact-normalized then word-overlap-≥0.6 fuzzy.
+    #
+    # The frontend "Calibration" panel displays these so the user can see
+    # which predictions hit and which missed. Future Phase 3.5 reads this
+    # log and reweights the heuristic v1 → v2 → ... or feeds Grok with
+    # actuals as training context.
+    # ────────────────────────────────────────────────────────────────────
+    @router.get("/predictions")
+    async def zt_predictions(user: dict = auth_dep, limit: int = 30):
+        _gate_admin(user)
+        limit = max(1, min(100, int(limit or 30)))
+        records = _read_prediction_log(limit=limit)
+        if not records:
+            return {"ok": True, "predictions": [], "match_summary": {}}
+
+        # Pull the user's ZeroTier uploaded_videos to attempt match.
+        # We'd ideally use the same _list_connected_youtube_channels_for_user
+        # the rest of the backend uses, but to keep this router decoupled we
+        # just read the connection store directly.
+        uploads: list[dict] = []
+        try:
+            from youtube import _load_youtube_connections, _youtube_bucket_for_user
+            user_id = str(user.get("id", "") or user.get("user_id", "") or "")
+            if user_id:
+                _load_youtube_connections()
+                bucket = _youtube_bucket_for_user(user_id)
+                channels = (bucket or {}).get("channels") or {}
+                # ZeroTier channel id is hard-coded for the private niche
+                ZT_ID = "UC9Gth_4MVet6rdPH7MHJf-g"
+                ch = channels.get(ZT_ID) or {}
+                snap = (ch.get("analytics_snapshot") or {})
+                uploads = list(snap.get("uploaded_videos") or [])
+        except Exception:
+            uploads = []
+
+        def _match(title: str) -> dict | None:
+            t_norm = _normalize_title(title)
+            if not t_norm:
+                return None
+            # Try exact-normalized first
+            for v in uploads:
+                if _normalize_title(str(v.get("title", "") or "")) == t_norm:
+                    return v
+            # Fuzzy fallback ≥0.6 word overlap
+            best = None
+            best_score = 0.0
+            for v in uploads:
+                s = _title_word_overlap(title, str(v.get("title", "") or ""))
+                if s > best_score and s >= 0.6:
+                    best_score = s
+                    best = v
+            return best
+
+        joined: list[dict] = []
+        hits = 0
+        for rec in records:
+            title = str(rec.get("title", "") or "").strip()
+            matched = _match(title)
+            actual_lr = None
+            actual_views = None
+            actual_likes = None
+            video_id = None
+            if matched:
+                hits += 1
+                video_id = str(matched.get("video_id", "") or "") or None
+                actual_views = int(float(matched.get("views", 0) or 0))
+                actual_likes = int(float(matched.get("likes", 0) or 0))
+                if actual_views >= 50:
+                    actual_lr = round((actual_likes / actual_views) * 100, 2)
+            joined.append({
+                **rec,
+                "matched": bool(matched),
+                "video_id": video_id,
+                "actual_views": actual_views,
+                "actual_likes": actual_likes,
+                "actual_like_rate": actual_lr,
+                "delta_lr": (
+                    round(actual_lr - float(rec.get("predicted_like_rate", 0) or 0), 2)
+                    if actual_lr is not None and rec.get("predicted_like_rate") is not None
+                    else None
+                ),
+            })
+
+        return {
+            "ok": True,
+            "predictions": joined,
+            "match_summary": {
+                "total": len(joined),
+                "matched": hits,
+                "unmatched": len(joined) - hits,
+            },
+        }
 
     return router
