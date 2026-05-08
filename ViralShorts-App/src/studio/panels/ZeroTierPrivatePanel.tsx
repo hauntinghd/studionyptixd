@@ -534,7 +534,53 @@ export default function ZeroTierPrivatePanel() {
         setBuildModalOpen(true);
     };
 
-    // Phase 4.5: stage 1 — generate stills only (preview before animation)
+    // Phase 4.5b: poll a job_id until status=ready or failed. Backend returns
+    // {job_id, status} immediately; we poll every 4s. Avoids proxy timeouts on
+    // long render jobs (proxies 504 a synchronous 60-130s call).
+    const pollJobStatus = useCallback(async (jobId: string, maxSeconds = 600): Promise<any> => {
+        const deadline = Date.now() + maxSeconds * 1000;
+        let lastErr: string = '';
+        while (Date.now() < deadline) {
+            try {
+                const r = await fetch(`${API}/api/zerotier-private/jobs/${jobId}/status`, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                });
+                // 502/504 happens on Fly cold-start during long polls — keep polling
+                if (r.status === 502 || r.status === 504) {
+                    await new Promise((res) => setTimeout(res, 4000));
+                    continue;
+                }
+                const text = await r.text();
+                let data: any = null;
+                try { data = JSON.parse(text); } catch {
+                    // proxy returned HTML — treat as transient and keep polling
+                    lastErr = `non-JSON response (${r.status}): ${text.slice(0, 100)}`;
+                    await new Promise((res) => setTimeout(res, 4000));
+                    continue;
+                }
+                if (!r.ok) {
+                    if (r.status === 404) {
+                        // Job not yet registered — backend just received the create, give it a moment
+                        await new Promise((res) => setTimeout(res, 2000));
+                        continue;
+                    }
+                    throw new Error(String(data?.detail || data?.error || `Poll failed (${r.status})`));
+                }
+                const status = String(data?.status || '');
+                if (status === 'ready') return data;
+                if (status === 'failed') throw new Error(String(data?.error || 'Background job failed'));
+                // pending — keep polling
+                await new Promise((res) => setTimeout(res, 4000));
+            } catch (e: any) {
+                lastErr = String(e?.message || e || 'Poll error');
+                // Network blip — wait + retry
+                await new Promise((res) => setTimeout(res, 4000));
+            }
+        }
+        throw new Error(`Timed out waiting for job after ${maxSeconds}s${lastErr ? `: ${lastErr}` : ''}`);
+    }, [accessToken]);
+
+    // Phase 4.5: stage 1 — generate stills only (background job + polling)
     const generateStills = useCallback(async () => {
         if (!accessToken || !buildScript.trim() || stillsLoading) return;
         setBuildError('');
@@ -558,17 +604,21 @@ export default function ZeroTierPrivatePanel() {
                 }),
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Stills failed (${r.status})`));
-            setStillsJobId(String(data?.job_id || ''));
-            const scenes = (data?.scenes || []) as ScenePreview[];
-            // Prepend API base to relative still_url paths
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Stills submit failed (${r.status})`));
+            const jobId = String(data?.job_id || '');
+            if (!jobId) throw new Error('Backend returned no job_id');
+            setStillsJobId(jobId);
+            // Poll until ready (max 5 min for stills stage)
+            const ready = await pollJobStatus(jobId, 300);
+            const result = ready?.result || {};
+            const scenes = (result?.scenes || []) as ScenePreview[];
             setScenePreviews(scenes.map((s) => ({ ...s, still_url: `${API}${s.still_url}` })));
         } catch (e: any) {
             setBuildError(String(e?.message || e || 'Stills generation failed'));
         } finally {
             setStillsLoading(false);
         }
-    }, [accessToken, buildScript, buildTopic, buildTopicScore, stillsLoading]);
+    }, [accessToken, buildScript, buildTopic, buildTopicScore, stillsLoading, pollJobStatus]);
 
     // Phase 4.5: regen one specific still
     const regenerateStill = useCallback(async (sceneIndex: number, customPrompt?: string) => {
@@ -602,7 +652,7 @@ export default function ZeroTierPrivatePanel() {
         }
     }, [accessToken, stillsJobId]);
 
-    // Phase 4.5: stage 3 — finalize (Pixverse + TTS + compose)
+    // Phase 4.5: stage 3 — finalize (Pixverse + TTS + compose, background job + polling)
     const finalizeRender = useCallback(async () => {
         if (!accessToken || !stillsJobId || finalizeLoading) return;
         setBuildError('');
@@ -618,21 +668,24 @@ export default function ZeroTierPrivatePanel() {
                 body: JSON.stringify({ job_id: stillsJobId }),
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Finalize failed (${r.status})`));
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Finalize submit failed (${r.status})`));
+            // Poll until ready (max 12 min — i2v + TTS + compose can take 5-10 min)
+            const ready = await pollJobStatus(stillsJobId, 720);
+            const result = ready?.result || {};
             setRenderResult({
-                job_id: String(data?.job_id || stillsJobId),
-                title: data?.title,
-                mp4_url: data?.mp4_url ? `${API}${data.mp4_url}` : undefined,
-                scene_count: data?.scene_count,
-                duration_total_sec: data?.duration_total_sec,
-                fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
+                job_id: String(result?.job_id || stillsJobId),
+                title: result?.title,
+                mp4_url: result?.mp4_url ? `${API}${result.mp4_url}` : undefined,
+                scene_count: result?.scene_count,
+                duration_total_sec: result?.duration_total_sec,
+                fal_cost_estimate_usd: result?.fal_cost_estimate_usd,
             });
         } catch (e: any) {
             setBuildError(String(e?.message || e || 'Finalize failed'));
         } finally {
             setFinalizeLoading(false);
         }
-    }, [accessToken, stillsJobId, finalizeLoading]);
+    }, [accessToken, stillsJobId, finalizeLoading, pollJobStatus]);
 
     const generateBuildScript = useCallback(async () => {
         if (!accessToken || !buildTopic.trim() || buildLoading) return;
