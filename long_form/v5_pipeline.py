@@ -576,16 +576,110 @@ async def run_v5_episode_pipeline(
             global_idx = ch_idx * scenes_per_chapter + local_idx
             scene_briefs.append((ch_idx, local_idx, global_idx, sb))
 
-    # ── Phase 2-5 — per-scene processing (parallel, scene-level) ──────────
+    # ── Phase 2 — STILLS ONLY (per-scene approval gate, PR #127) ──────────
+    # Renders just the seedream still for every scene. The expensive parts
+    # of v5 (LTX i2v + ElevenLabs VO + mmaudio SFX + 2-pass loudnorm + scene
+    # mux + final concat) DON'T run until Casey approves the still gallery
+    # and POSTs to /jobs/{id}/finalize. Spends only ~$1-3 fal here vs the
+    # ~$48 of the full v5 episode.
     update_status(job_id, phase="scenes", percent=12)
     state["phase"] = "scenes"
+    state["scene_briefs"] = [
+        # Persist so finalize + regenerate can rebuild the same plan.
+        {"chapter_index": ci, "local_idx": li, "global_idx": gi, "brief": sb}
+        for ci, li, gi, sb in scene_briefs
+    ]
     save_state(job_id, state)
 
+    total = len(scene_briefs)
+    stills_dir = job_dir / "stills"
+    stills_dir.mkdir(parents=True, exist_ok=True)
+
+    def _gen_one_still(triple):
+        ci, li, gi, sb = triple
+        out = stills_dir / f"scene_{gi:04d}.png"
+        _gen_em_still(sb["scene_prompt"], visual_style, out)
+        return gi
+
+    # Stills-only concurrency = 6 (each is one seedream call ~5-10s; lower
+    # API surface than the full per-scene pipeline so we can parallelize more).
+    STILLS_CONCURRENCY = 6
+
+    def _run_stills_pool() -> int:
+        done_n = 0
+        with ThreadPoolExecutor(max_workers=STILLS_CONCURRENCY) as ex:
+            futs = {ex.submit(_gen_one_still, t): t for t in scene_briefs}
+            for fut in as_completed(futs):
+                t = futs[fut]
+                gi = t[2]
+                try:
+                    fut.result()
+                    done_n += 1
+                    if done_n % 3 == 0 or done_n == total:
+                        pct = 12 + int(60 * done_n / max(1, total))
+                        update_status(job_id, phase="scenes", percent=pct,
+                                      scene_done=done_n, scene_total=total)
+                except Exception as e:
+                    print(f"[v5 stills] scene {gi} failed: {e}")
+        return done_n
+
+    done_n = await loop.run_in_executor(None, _run_stills_pool)
+    state["scenes_generated"] = done_n
+    state["percent"] = 72
+    save_state(job_id, state)
+    update_status(job_id, phase="scenes", percent=72,
+                  scene_done=done_n, scene_total=total)
+
+    # ── Pause for per-scene approval ──────────────────────────────────────
+    # finalize_v5_episode_pipeline (kicked by POST /jobs/{id}/finalize)
+    # runs the rest: per-scene LTX/EL/SFX/mux + thumbnails + concat.
+    state["phase"] = "awaiting_approval"
+    state["percent"] = 72
+    save_state(job_id, state)
+    update_status(job_id, phase="awaiting_approval", percent=72)
+    return
+
+
+async def finalize_v5_episode_pipeline(job_id: str) -> None:
+    """Continue a paused v5_episode render: per-scene LTX i2v + ElevenLabs
+    VO + silence-kill + mmaudio SFX + 2-pass loudnorm + scene mux + final
+    concat with fade-to-black. Loads state + chapters from disk so the
+    pipeline survives process restart between approval and finalize."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no state for job {job_id}")
+    if state.get("phase") not in ("awaiting_approval", "i2v", "vo", "sfx",
+                                  "compose", "thumbnails", "failed"):
+        raise LFRenderError(
+            f"job {job_id} is in phase {state.get('phase')!r}; "
+            "v5 finalize requires awaiting_approval (or rerun after failure)"
+        )
+
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    outline = state.get("outline") or {}
+    job_dir = _ensure_job_dir(job_id)
+    visual_style = channel.get("visual_style") or ""
+    fps = int(channel.get("fps") or 24)
     voice_id = (channel.get("voice_id_default") or "").strip()
     motion_hint = (channel.get("motion_prompt_default") or "").strip()
+
+    scene_brief_records = state.get("scene_briefs") or []
+    if not scene_brief_records:
+        raise LFRenderError("scene_briefs missing from state — cannot finalize")
+    # Reconstitute as the (ci, li, gi, brief) tuples the pool expects.
+    scene_briefs = [
+        (int(r["chapter_index"]), int(r["local_idx"]), int(r["global_idx"]), r["brief"])
+        for r in scene_brief_records
+    ]
     total = len(scene_briefs)
-    scene_mp4s_indexed: dict[int, Path] = {}
-    done_count = 0
+
+    loop = asyncio.get_running_loop()
+
+    # ── Per-scene assembly (i2v + VO + SFX + 2-pass + mux per scene) ──────
+    update_status(job_id, phase="scene_assembly", percent=73)
+    state["phase"] = "scene_assembly"
+    save_state(job_id, state)
 
     def _process_one(triple):
         ch_idx, local_idx, global_idx, sb = triple
@@ -596,47 +690,48 @@ async def run_v5_episode_pipeline(
             job_dir=job_dir,
         )
 
-    # Scene-level concurrency = 4 (matches build_episode_v5 SCENE_CONCURRENCY).
-    # Lower if fal soft-cap proves tighter; each scene = 4 fal calls
-    # (still + i2v + VO + SFX) so 4 concurrent scenes = ~16 in-flight.
+    # Same SCENE_CONCURRENCY as the original full-pipeline run (each scene
+    # = ~3 remaining fal calls now since the still already exists).
     SCENE_CONCURRENCY = 3
 
     def _run_pool() -> dict[int, Path]:
         out: dict[int, Path] = {}
+        done_n = 0
         with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY) as ex:
             futs = {ex.submit(_process_one, t): t for t in scene_briefs}
             for fut in as_completed(futs):
-                triple = futs[fut]
-                gi = triple[2]
+                t = futs[fut]
+                gi = t[2]
                 try:
                     gi_ret, mp4 = fut.result()
                     out[gi_ret] = mp4
+                    done_n += 1
+                    pct = 73 + int(15 * done_n / max(1, total))
+                    update_status(job_id, phase="scene_assembly", percent=pct,
+                                  scene_done=done_n, scene_total=total)
                 except Exception as e:
-                    print(f"[v5] scene {gi} failed: {e}")
-            return out
+                    print(f"[v5 finalize] scene {gi} failed: {e}")
+        return out
 
     scene_mp4s_indexed = await loop.run_in_executor(None, _run_pool)
-    # Walk in order so concat is correct.
     scene_mp4s = [scene_mp4s_indexed[gi] for _, _, gi, _ in scene_briefs if gi in scene_mp4s_indexed]
-    state["scenes_generated"] = len(scene_mp4s)
-    state["percent"] = 80
+    state["scene_mp4s_assembled"] = len(scene_mp4s)
+    state["percent"] = 88
     save_state(job_id, state)
-    update_status(job_id, phase="scenes", percent=80,
-                  scene_done=len(scene_mp4s), scene_total=total)
 
     # ── Phase 6 — thumbnails ──────────────────────────────────────────────
-    update_status(job_id, phase="thumbnails", percent=82)
+    update_status(job_id, phase="thumbnails", percent=89)
     state["phase"] = "thumbnails"
     save_state(job_id, state)
     thumbs = await loop.run_in_executor(
         None, lambda: _gen_thumbnails(channel, outline, job_dir / "thumbnails", count=3)
     )
     state["thumbnails_generated"] = len(thumbs)
-    state["percent"] = 86
+    state["percent"] = 92
     save_state(job_id, state)
 
-    # ── Phase 7 — final concat ────────────────────────────────────────────
-    update_status(job_id, phase="compose", percent=87)
+    # ── Phase 7 — final concat + fade ─────────────────────────────────────
+    update_status(job_id, phase="compose", percent=93)
     state["phase"] = "compose"
     save_state(job_id, state)
 
@@ -655,3 +750,32 @@ async def run_v5_episode_pipeline(
     state["finished_at"] = time.time()
     save_state(job_id, state)
     update_status(job_id, phase="done", percent=100)
+
+
+def regenerate_v5_still(job_id: str, scene_idx: int,
+                        new_prompt: str | None = None) -> Path:
+    """Regenerate one v5_episode still. Updates scene_briefs in state.json
+    if a new prompt is provided so future re-runs (and the eventual
+    finalize phase) use it."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no state for job {job_id}")
+    scene_briefs = state.get("scene_briefs") or []
+    target = next((r for r in scene_briefs if int(r.get("global_idx", -1)) == scene_idx), None)
+    if not target:
+        raise LFRenderError(f"scene_idx {scene_idx} not in scene_briefs")
+    brief = target.get("brief") or {}
+    prompt = (new_prompt or brief.get("scene_prompt") or "").strip()
+    if not prompt:
+        raise LFRenderError("prompt cannot be empty")
+    if new_prompt and new_prompt != brief.get("scene_prompt"):
+        target["brief"]["scene_prompt"] = new_prompt
+        state["scene_briefs"] = scene_briefs
+        save_state(job_id, state)
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    visual_style = channel.get("visual_style") or ""
+    out = _job_dir(job_id) / "stills" / f"scene_{scene_idx:04d}.png"
+    if out.exists():
+        out.unlink()
+    return _gen_em_still(prompt, visual_style, out)

@@ -168,6 +168,9 @@ const PHASE_LABELS: Record<string, string> = {
     starting: 'Starting',
     chapters: 'Writing chapters',
     scenes: 'Generating scenes',
+    awaiting_approval: 'Awaiting your approval',
+    finalizing: 'Finalizing',
+    scene_assembly: 'Assembling scenes (LTX + VO + SFX)',
     narration: 'Recording narration',
     ambient: 'Generating ambient bed',
     thumbnails: 'Generating thumbnails',
@@ -178,9 +181,19 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 const PHASE_ORDER = [
-    'queued', 'starting', 'chapters', 'scenes', 'narration',
-    'ambient', 'thumbnails', 'compose', 'done',
+    'queued', 'starting', 'chapters', 'scenes', 'awaiting_approval',
+    'scene_assembly', 'narration', 'ambient', 'thumbnails', 'compose', 'done',
 ];
+
+interface SceneGridRow {
+    scene_idx: number;
+    chapter_index: number;
+    local_idx: number;
+    scene_prompt: string;
+    narration?: string;
+    still_url: string;
+    still_present: boolean;
+}
 
 function formatDuration(sec: number): string {
     if (!sec || sec <= 0) return '—';
@@ -482,6 +495,13 @@ export default function LongFormPanel() {
                     fetchRecentJobs();
                     return;
                 }
+                if (live.phase === 'awaiting_approval') {
+                    // Stop polling — let the gate UI take over. The user
+                    // reviews stills + clicks Approve+Finalize, which kicks
+                    // a new poll loop via finalizeJob().
+                    fetchRecentJobs();
+                    return;
+                }
             } catch (e) {
                 /* network blip — retry */
             }
@@ -552,14 +572,115 @@ export default function LongFormPanel() {
             if (state.channel_key) setSelectedChannel(state.channel_key);
             if (state.outline) setOutline(state.outline);
             setTab('render');
-            // If still running, keep polling.
-            if (state.phase && state.phase !== 'done' && state.phase !== 'failed') {
+            // If still running (and not paused at the approval gate), keep
+            // polling. awaiting_approval stops polling — gate UI takes over.
+            if (
+                state.phase
+                && state.phase !== 'done'
+                && state.phase !== 'failed'
+                && state.phase !== 'awaiting_approval'
+            ) {
                 pollJob(jobId, 36000);
             }
         } catch (e) {
             setRenderError((e as Error).message);
         }
     }, [getFreshToken, fetchJsonResilient, pollJob]);
+
+    // ── Per-scene approval gate (PR #127) ───────────────────────────────
+    const [scenes, setScenes] = useState<SceneGridRow[]>([]);
+    const [scenesLoading, setScenesLoading] = useState(false);
+    const [regeneratingIdx, setRegeneratingIdx] = useState<number | null>(null);
+    const [finalizingBusy, setFinalizingBusy] = useState(false);
+
+    const loadScenes = useCallback(async (jobId: string) => {
+        if (!jobId) return;
+        setScenesLoading(true);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${jobId}/scenes`,
+                { headers: { Authorization: `Bearer ${tok}` } },
+            );
+            if (ok && Array.isArray(data?.scenes)) {
+                setScenes(data.scenes as SceneGridRow[]);
+            } else {
+                setScenes([]);
+            }
+        } catch {
+            setScenes([]);
+        } finally {
+            setScenesLoading(false);
+        }
+    }, [getFreshToken, fetchJsonResilient]);
+
+    // Auto-load the scene grid as soon as we hit awaiting_approval.
+    useEffect(() => {
+        if (activeJobId && jobStatus?.phase === 'awaiting_approval') {
+            loadScenes(activeJobId);
+        }
+    }, [activeJobId, jobStatus?.phase, loadScenes]);
+
+    const regenerateScene = useCallback(async (
+        sceneIdx: number,
+        newPrompt?: string,
+    ) => {
+        if (!activeJobId) return;
+        setRegeneratingIdx(sceneIdx);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${activeJobId}/regenerate-scene`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${tok}`,
+                    },
+                    body: JSON.stringify({
+                        scene_idx: sceneIdx,
+                        new_prompt: newPrompt || undefined,
+                    }),
+                },
+                { retries: 1 },
+            );
+            if (!ok) throw new Error(data?.detail || 'regenerate failed');
+            // Reload the scene row with the new still URL (cache-busted).
+            await loadScenes(activeJobId);
+        } catch (e) {
+            alert((e as Error).message);
+        } finally {
+            setRegeneratingIdx(null);
+        }
+    }, [activeJobId, getFreshToken, fetchJsonResilient, loadScenes]);
+
+    const finalizeJob = useCallback(async () => {
+        if (!activeJobId) return;
+        setFinalizingBusy(true);
+        setRenderError('');
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${activeJobId}/finalize`,
+                {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${tok}` },
+                },
+            );
+            if (!ok) throw new Error(data?.detail || 'finalize failed');
+            // Backend has kicked the finalize background task. Resume polling.
+            setJobStatus({
+                job_id: activeJobId,
+                phase: 'finalizing',
+                percent: 46,
+            });
+            pollJob(activeJobId, 36000);
+        } catch (e) {
+            setRenderError((e as Error).message);
+        } finally {
+            setFinalizingBusy(false);
+        }
+    }, [activeJobId, getFreshToken, fetchJsonResilient, pollJob]);
 
     // Stop polling on unmount so the loop doesn't keep running after the
     // user navigates away. The pollAbortRef guards against late setState.
@@ -648,6 +769,13 @@ export default function LongFormPanel() {
                     onStart={startRender}
                     onResume={resumeJob}
                     onRefreshRecent={fetchRecentJobs}
+                    scenes={scenes}
+                    scenesLoading={scenesLoading}
+                    regeneratingIdx={regeneratingIdx}
+                    finalizingBusy={finalizingBusy}
+                    onRegenerateScene={regenerateScene}
+                    onFinalize={finalizeJob}
+                    onReloadScenes={loadScenes}
                 />
             )}
         </div>
@@ -1166,6 +1294,8 @@ function RenderTab({
     selectedChannel, channels, outline,
     activeJobId, jobStatus, jobFullState, renderError, renderStarting,
     recentJobs, recentLoading, onStart, onResume, onRefreshRecent,
+    scenes, scenesLoading, regeneratingIdx, finalizingBusy,
+    onRegenerateScene, onFinalize, onReloadScenes,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1180,12 +1310,23 @@ function RenderTab({
     onStart: () => void;
     onResume: (jobId: string) => void;
     onRefreshRecent: () => void;
+    scenes: SceneGridRow[];
+    scenesLoading: boolean;
+    regeneratingIdx: number | null;
+    finalizingBusy: boolean;
+    onRegenerateScene: (sceneIdx: number, newPrompt?: string) => void;
+    onFinalize: () => void;
+    onReloadScenes: (jobId: string) => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
-    const isRunning = jobStatus && jobStatus.phase !== 'done' && jobStatus.phase !== 'failed';
+    const isRunning = jobStatus
+        && jobStatus.phase !== 'done'
+        && jobStatus.phase !== 'failed'
+        && jobStatus.phase !== 'awaiting_approval';
     const isDone = jobStatus?.phase === 'done';
     const isFailed = jobStatus?.phase === 'failed';
+    const isAwaitingApproval = jobStatus?.phase === 'awaiting_approval';
 
     return (
         <section className="flex flex-col gap-6">
@@ -1204,11 +1345,11 @@ function RenderTab({
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${channel.cost_estimate_usd}</div>
                     </div>
                     <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200">
-                        Render runs as a background job on the API. For 9-hour HR sleep
-                        docs this typically takes 2-4 hours wall-clock (most of it is
-                        fal MiniMax narration + scene image gen). You can close this
-                        tab and resume from the Recent Renders panel — it&apos;ll keep
-                        running in the background.
+                        Two-stage render: <strong>Stage 1 generates stills only (~$1-3 fal)</strong> →
+                        you review every scene → regenerate any off-style ones individually →
+                        <strong> Stage 2 burns the rest (~${(channel.cost_estimate_usd - 3).toFixed(0)} fal)</strong>{' '}
+                        on i2v + voice + SFX + compose. You can close this tab and
+                        resume from the Recent Renders panel — it&apos;ll keep running.
                     </div>
                     <button
                         onClick={onStart}
@@ -1218,7 +1359,7 @@ function RenderTab({
                         {renderStarting ? (
                             <><Loader2 className="h-4 w-4 animate-spin" /> Starting…</>
                         ) : (
-                            <><Film className="h-4 w-4" /> Render Long-Form (~${channel.cost_estimate_usd} fal)</>
+                            <><Film className="h-4 w-4" /> Generate Stills (~$1-3 fal — review before bulk)</>
                         )}
                     </button>
                     {renderError && (
@@ -1229,8 +1370,24 @@ function RenderTab({
                 </div>
             )}
 
+            {/* ── Per-scene approval gate (PR #127) ── */}
+            {activeJobId && isAwaitingApproval && channel && (
+                <SceneApprovalGate
+                    channel={channel}
+                    scenes={scenes}
+                    scenesLoading={scenesLoading}
+                    regeneratingIdx={regeneratingIdx}
+                    finalizingBusy={finalizingBusy}
+                    onRegenerateScene={onRegenerateScene}
+                    onFinalize={onFinalize}
+                    onReloadScenes={() => onReloadScenes(activeJobId)}
+                    finalizeCostEstimate={Math.max(1, channel.cost_estimate_usd - 3)}
+                    renderError={renderError}
+                />
+            )}
+
             {/* ── Active job progress / done / failed ── */}
-            {activeJobId && jobStatus && (
+            {activeJobId && jobStatus && !isAwaitingApproval && (
                 <ActiveJobCard
                     channel={channel || null}
                     outline={outline || null}
@@ -1261,6 +1418,197 @@ function RenderTab({
                 </div>
             )}
         </section>
+    );
+}
+
+function SceneApprovalGate({
+    channel, scenes, scenesLoading, regeneratingIdx, finalizingBusy,
+    onRegenerateScene, onFinalize, onReloadScenes, finalizeCostEstimate, renderError,
+}: {
+    channel: ChannelInfo;
+    scenes: SceneGridRow[];
+    scenesLoading: boolean;
+    regeneratingIdx: number | null;
+    finalizingBusy: boolean;
+    onRegenerateScene: (sceneIdx: number, newPrompt?: string) => void;
+    onFinalize: () => void;
+    onReloadScenes: () => void;
+    finalizeCostEstimate: number;
+    renderError: string;
+}) {
+    const presentCount = scenes.filter((s) => s.still_present).length;
+    const allPresent = scenes.length > 0 && presentCount === scenes.length;
+    return (
+        <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h2 className="text-lg font-semibold text-white">
+                        Review stills before bulk render
+                    </h2>
+                    <p className="text-xs text-zinc-500 mt-1">
+                        {scenes.length} scenes generated.
+                        Click Regenerate on any that are off-style. When all
+                        look right, hit Approve + Finalize to spend the rest
+                        of the fal budget on motion + voice + SFX + compose.
+                    </p>
+                </div>
+                <button
+                    onClick={onReloadScenes}
+                    className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
+                    disabled={scenesLoading}
+                >
+                    <RefreshCw className={`h-3 w-3 ${scenesLoading ? 'animate-spin' : ''}`} />
+                    Refresh
+                </button>
+            </div>
+
+            {scenesLoading && scenes.length === 0 ? (
+                <div className="rounded-md bg-zinc-950 border border-zinc-800 px-4 py-12 flex items-center justify-center gap-2 text-sm text-zinc-500">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading scene grid…
+                </div>
+            ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {scenes.map((s) => (
+                        <SceneTile
+                            key={s.scene_idx}
+                            scene={s}
+                            regenerating={regeneratingIdx === s.scene_idx}
+                            onRegenerate={onRegenerateScene}
+                        />
+                    ))}
+                </div>
+            )}
+
+            {renderError && (
+                <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-sm text-rose-200">
+                    {renderError}
+                </div>
+            )}
+
+            <div className="rounded-md bg-violet-500/10 border border-violet-500/30 px-4 py-3 text-xs text-violet-200">
+                <strong>Stage 2 will burn ~${finalizeCostEstimate} fal</strong>{' '}
+                on{' '}
+                {channel.pipeline_kind === 'v5_episode'
+                    ? 'LTX i2v animation, ElevenLabs narration, mmaudio SFX, 2-pass loudnorm, scene mux + concat with fade-out.'
+                    : 'fal MiniMax narration, mmaudio ambient bed, thumbnails, ffmpeg ken-burns + 2-pass loudnorm + final compose.'}{' '}
+                {presentCount}/{scenes.length} stills ready.
+            </div>
+
+            <button
+                onClick={onFinalize}
+                disabled={finalizingBusy || !allPresent}
+                className="rounded-md bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
+            >
+                {finalizingBusy ? (
+                    <><Loader2 className="h-4 w-4 animate-spin" /> Kicking finalize…</>
+                ) : !allPresent ? (
+                    <>Waiting for {scenes.length - presentCount} stills…</>
+                ) : (
+                    <><Check className="h-4 w-4" /> Approve all + Finalize (~${finalizeCostEstimate} fal)</>
+                )}
+            </button>
+        </div>
+    );
+}
+
+function SceneTile({
+    scene, regenerating, onRegenerate,
+}: {
+    scene: SceneGridRow;
+    regenerating: boolean;
+    onRegenerate: (sceneIdx: number, newPrompt?: string) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [draftPrompt, setDraftPrompt] = useState(scene.scene_prompt);
+
+    return (
+        <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
+            <div className="aspect-video bg-zinc-900 relative">
+                {scene.still_present && scene.still_url ? (
+                    <img
+                        src={scene.still_url}
+                        alt={`scene ${scene.scene_idx}`}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                    />
+                ) : (
+                    <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
+                        <ImageIcon className="h-8 w-8" />
+                    </div>
+                )}
+                {regenerating && (
+                    <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-violet-400" />
+                    </div>
+                )}
+                <div className="absolute top-1 left-1 rounded bg-zinc-900/80 px-1.5 py-0.5 text-[10px] text-zinc-300 font-mono">
+                    ch {scene.chapter_index} · #{scene.scene_idx}
+                </div>
+            </div>
+            <div className="p-2 flex flex-col gap-1.5">
+                {editing ? (
+                    <textarea
+                        value={draftPrompt}
+                        onChange={(e) => setDraftPrompt(e.target.value)}
+                        rows={4}
+                        className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 focus:outline-none focus:border-violet-500/60 font-mono"
+                        autoFocus
+                    />
+                ) : (
+                    <div
+                        className="text-[10px] text-zinc-400 line-clamp-3 cursor-pointer hover:text-zinc-300"
+                        title={scene.scene_prompt}
+                        onClick={() => setEditing(true)}
+                    >
+                        {scene.scene_prompt || <span className="italic text-zinc-600">no prompt</span>}
+                    </div>
+                )}
+                <div className="flex gap-1.5">
+                    {editing ? (
+                        <>
+                            <button
+                                onClick={() => {
+                                    onRegenerate(scene.scene_idx, draftPrompt);
+                                    setEditing(false);
+                                }}
+                                disabled={regenerating || !draftPrompt.trim()}
+                                className="flex-1 rounded bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 px-2 py-1 text-[10px] font-semibold text-white flex items-center justify-center gap-1"
+                            >
+                                <RefreshCw className="h-3 w-3" /> Regen w/ new prompt
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setDraftPrompt(scene.scene_prompt);
+                                    setEditing(false);
+                                }}
+                                className="rounded bg-zinc-800 hover:bg-zinc-700 px-2 py-1 text-[10px] text-zinc-300"
+                            >
+                                Cancel
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            <button
+                                onClick={() => onRegenerate(scene.scene_idx)}
+                                disabled={regenerating}
+                                className="flex-1 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-2 py-1 text-[10px] font-semibold text-zinc-200 flex items-center justify-center gap-1"
+                                title="Re-render with the same prompt"
+                            >
+                                <RefreshCw className="h-3 w-3" /> Regen
+                            </button>
+                            <button
+                                onClick={() => setEditing(true)}
+                                disabled={regenerating}
+                                className="rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-2 py-1 text-[10px] text-zinc-300"
+                                title="Edit prompt before regenerating"
+                            >
+                                Edit prompt
+                            </button>
+                        </>
+                    )}
+                </div>
+            </div>
+        </div>
     );
 }
 
