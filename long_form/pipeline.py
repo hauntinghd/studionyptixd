@@ -75,7 +75,11 @@ LF_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 SEEDREAM_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 ERNIE_URL = "https://fal.run/fal-ai/ernie-image"
 MINIMAX_TTS_URL = "https://fal.run/fal-ai/minimax/speech-02-hd"
-MMAUDIO_URL = "https://fal.run/fal-ai/mmaudio-v2"
+# mmaudio-v2 has TWO variants; we want the text-to-audio one for ambient
+# beds + per-scene SFX synthesis from prompt + duration. The plain
+# /mmaudio-v2 endpoint is video-to-audio (requires a video_url) and was
+# 422'ing every call from PR #120/#127 with "video_url: Field required".
+MMAUDIO_URL = "https://fal.run/fal-ai/mmaudio-v2/text-to-audio"
 
 # Per-job in-memory progress snapshot. Survives across HTTP requests but not
 # process restarts — that's fine because state.json on disk is the source of
@@ -927,11 +931,18 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
     state = load_state(job_id)
     if not state:
         raise LFRenderError(f"no state for job {job_id}")
-    if state.get("phase") not in ("awaiting_approval", "narration", "ambient",
-                                  "thumbnails", "compose", "failed"):
+    # Allowed: awaiting_approval (normal), failed (rerun), AND any of the
+    # finalize phases themselves so a stalled / restarted finalize can pick
+    # up where it left off (PR #128 — fal mmaudio-v2 422'd ambient calls
+    # which left jobs stuck mid-finalize).
+    if state.get("phase") not in (
+        "awaiting_approval", "narration", "ambient", "thumbnails",
+        "compose", "failed", "cancelled",
+    ):
         raise LFRenderError(
             f"job {job_id} is in phase {state.get('phase')!r}; "
-            "finalize requires awaiting_approval (or a re-run of a failed finalize)"
+            "finalize requires awaiting_approval (or resume from a stalled "
+            "finalize / failure)"
         )
 
     # Re-hydrate channel from registry by key.
@@ -1225,6 +1236,30 @@ def start_finalize(job_id: str) -> None:
     _lf_running_tasks.add(task)
     task.add_done_callback(_lf_running_tasks.discard)
     _lf_jobs_status.setdefault(job_id, {})["_task"] = task
+
+
+def cancel_render(job_id: str) -> dict:
+    """Cancel an in-flight render. Sets state.phase='cancelled' and tries
+    to cancel the asyncio task. Cooperative — the per-scene loops check
+    fal calls one at a time, so cancellation lands at the next scene
+    boundary rather than mid-scene. Already-completed scenes keep their
+    artifacts on disk so a future Resume / re-finalize can pick them up.
+
+    Returns {phase, was_cancelled} so the caller knows whether the task
+    was running or already terminated."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no such job {job_id}")
+    entry = _lf_jobs_status.get(job_id) or {}
+    task = entry.get("_task")
+    was_running = isinstance(task, asyncio.Task) and not task.done()
+    if was_running:
+        task.cancel()
+    state["phase"] = "cancelled"
+    state["cancelled_at"] = time.time()
+    save_state(job_id, state)
+    update_status(job_id, phase="cancelled", error="cancelled by user")
+    return {"phase": "cancelled", "was_running": was_running}
 
 
 def regenerate_still(job_id: str, scene_idx: int,

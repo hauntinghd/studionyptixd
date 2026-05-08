@@ -648,11 +648,18 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     state = load_state(job_id)
     if not state:
         raise LFRenderError(f"no state for job {job_id}")
-    if state.get("phase") not in ("awaiting_approval", "i2v", "vo", "sfx",
-                                  "compose", "thumbnails", "failed"):
+    # Allowed: awaiting_approval (normal), failed (rerun), AND any of the
+    # finalize phases themselves so a stalled / restarted finalize can pick
+    # up where it left off (PR #128 — fal mmaudio-v2 422'd every SFX call
+    # which left jobs stuck in scene_assembly with partial output).
+    if state.get("phase") not in (
+        "awaiting_approval", "scene_assembly", "i2v", "vo", "sfx",
+        "compose", "thumbnails", "failed", "cancelled",
+    ):
         raise LFRenderError(
             f"job {job_id} is in phase {state.get('phase')!r}; "
-            "v5 finalize requires awaiting_approval (or rerun after failure)"
+            "v5 finalize requires awaiting_approval (or resume from a "
+            "stalled finalize / failure)"
         )
 
     from long_form.prompts.channels import get_channel
