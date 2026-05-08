@@ -564,6 +564,20 @@ def build_long_form_router(
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
         }
 
+    @router.post("/jobs/{job_id}/cancel")
+    async def job_cancel_route(job_id: str, user: dict = auth_dep):
+        """Cancel an in-flight render. Cooperative cancellation — the
+        next per-scene boundary picks it up. Already-rendered stills /
+        clips / VOs / SFX stay on disk so the user can re-finalize
+        later from where it stopped."""
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        try:
+            result = lf_pipeline.cancel_render(job_id)
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"cancel_failed: {e}")
+        return {"job_id": job_id, **result}
+
     @router.get("/jobs/{job_id}/scenes")
     async def job_scenes_route(job_id: str, user: dict = auth_dep):
         """Return the scene grid for the per-scene approval gate.

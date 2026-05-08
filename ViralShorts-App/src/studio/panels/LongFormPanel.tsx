@@ -177,6 +177,7 @@ const PHASE_LABELS: Record<string, string> = {
     compose: 'Composing final video',
     done: 'Done',
     failed: 'Failed',
+    cancelled: 'Cancelled',
     unknown: 'Status unknown',
 };
 
@@ -682,6 +683,41 @@ export default function LongFormPanel() {
         }
     }, [activeJobId, getFreshToken, fetchJsonResilient, pollJob]);
 
+    // PR #128: cancel an in-flight render. Cooperative — backend cancels
+    // the asyncio task at the next per-scene boundary. Already-rendered
+    // assets stay on disk so user can resume / re-finalize later.
+    const [cancellingBusy, setCancellingBusy] = useState(false);
+    const cancelJob = useCallback(async () => {
+        if (!activeJobId) return;
+        if (!confirm('Cancel this render? Already-rendered scenes stay on disk so you can resume later.')) {
+            return;
+        }
+        setCancellingBusy(true);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${activeJobId}/cancel`,
+                {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${tok}` },
+                },
+            );
+            if (!ok) throw new Error(data?.detail || 'cancel failed');
+            pollAbortRef.current.cancelled = true;
+            setJobStatus({
+                job_id: activeJobId,
+                phase: 'cancelled',
+                percent: jobStatus?.percent || 0,
+                error: 'cancelled by user',
+            });
+            fetchRecentJobs();
+        } catch (e) {
+            setRenderError((e as Error).message);
+        } finally {
+            setCancellingBusy(false);
+        }
+    }, [activeJobId, getFreshToken, fetchJsonResilient, fetchRecentJobs, jobStatus?.percent]);
+
     // Stop polling on unmount so the loop doesn't keep running after the
     // user navigates away. The pollAbortRef guards against late setState.
     useEffect(() => {
@@ -776,6 +812,8 @@ export default function LongFormPanel() {
                     onRegenerateScene={regenerateScene}
                     onFinalize={finalizeJob}
                     onReloadScenes={loadScenes}
+                    cancellingBusy={cancellingBusy}
+                    onCancel={cancelJob}
                 />
             )}
         </div>
@@ -1296,6 +1334,7 @@ function RenderTab({
     recentJobs, recentLoading, onStart, onResume, onRefreshRecent,
     scenes, scenesLoading, regeneratingIdx, finalizingBusy,
     onRegenerateScene, onFinalize, onReloadScenes,
+    cancellingBusy, onCancel,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1317,6 +1356,8 @@ function RenderTab({
     onRegenerateScene: (sceneIdx: number, newPrompt?: string) => void;
     onFinalize: () => void;
     onReloadScenes: (jobId: string) => void;
+    cancellingBusy: boolean;
+    onCancel: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
@@ -1386,7 +1427,7 @@ function RenderTab({
                 />
             )}
 
-            {/* ── Active job progress / done / failed ── */}
+            {/* ── Active job progress / done / failed / cancelled ── */}
             {activeJobId && jobStatus && !isAwaitingApproval && (
                 <ActiveJobCard
                     channel={channel || null}
@@ -1397,6 +1438,8 @@ function RenderTab({
                     isDone={!!isDone}
                     isFailed={!!isFailed}
                     renderError={renderError}
+                    cancellingBusy={cancellingBusy}
+                    onCancel={onCancel}
                 />
             )}
 
@@ -1614,6 +1657,7 @@ function SceneTile({
 
 function ActiveJobCard({
     channel, outline, jobStatus, jobFullState, isRunning, isDone, isFailed, renderError,
+    cancellingBusy, onCancel,
 }: {
     channel: ChannelInfo | null;
     outline: Outline | null;
@@ -1623,6 +1667,8 @@ function ActiveJobCard({
     isDone: boolean;
     isFailed: boolean;
     renderError: string;
+    cancellingBusy: boolean;
+    onCancel: () => void;
 }) {
     const phaseLabel = PHASE_LABELS[jobStatus.phase] || jobStatus.phase;
     const phaseIdx = PHASE_ORDER.indexOf(jobStatus.phase);
@@ -1630,15 +1676,32 @@ function ActiveJobCard({
     const mp4Url = jobFullState?.mp4_url || '';
     const thumbs = jobFullState?.thumbnail_urls || [];
     const description = jobFullState?.outline?.description || outline?.description || '';
+    const isCancelled = jobStatus.phase === 'cancelled';
 
     return (
         <div className="flex flex-col gap-4">
             <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-white">
-                    {isDone ? 'Render complete' : isFailed ? 'Render failed' : 'Rendering…'}
+                    {isDone ? 'Render complete'
+                        : isFailed ? 'Render failed'
+                        : isCancelled ? 'Render cancelled'
+                        : 'Rendering…'}
                 </h2>
-                <div className="text-xs text-zinc-500">
-                    job {jobStatus.job_id}
+                <div className="flex items-center gap-3">
+                    {isRunning && (
+                        <button
+                            onClick={onCancel}
+                            disabled={cancellingBusy}
+                            className="rounded-md bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/40 px-3 py-1 text-xs font-semibold text-rose-200 disabled:opacity-50 flex items-center gap-1.5"
+                            title="Cooperative cancel — stops at the next per-scene boundary. Already-rendered scenes stay on disk."
+                        >
+                            {cancellingBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                            Stop render
+                        </button>
+                    )}
+                    <div className="text-xs text-zinc-500">
+                        job {jobStatus.job_id}
+                    </div>
                 </div>
             </div>
 
