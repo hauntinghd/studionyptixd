@@ -23,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DOCKERHUB_IMAGE: docker.io/nyptid/nyptid-studio-api
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,13 +48,36 @@ jobs:
       # Auto-deploy the freshly-built image to Fly.io so backend changes
       # actually go live without a manual `flyctl deploy`. Requires the
       # FLY_API_TOKEN repo secret (generate via `flyctl tokens create deploy`).
-      # Skips on non-master branches and when the secret is missing.
+      #
+      # PRIOR BUG (fixed in this commit): the previous guard
+      #   if: ${{ github.ref == 'refs/heads/master' && env.FLY_API_TOKEN != '' }}
+      # silently skipped both Setup flyctl AND Deploy to Fly.io because
+      # secret-derived job-level env vars don't reliably populate the
+      # `env` context inside `if:` expressions. This caused PR #117 / #118 /
+      # #119 / #120 / #121 to all push fresh images to Docker Hub but never
+      # update Fly — Fly stayed pinned to whatever Casey last `flyctl deploy`'d
+      # manually. Replaced with a step-output check so the condition
+      # evaluates against an explicit shell-tested value, and moved the
+      # FLY_API_TOKEN env into the deploy step (so flyctl picks it up) rather
+      # than the job (where it just polluted the if-context).
+      - name: Check Fly token availability
+        id: fly_token_check
+        run: |
+          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::FLY_API_TOKEN secret is unset — Fly deploy will be skipped."
+          else
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup flyctl
-        if: ${{ github.ref == 'refs/heads/master' && env.FLY_API_TOKEN != '' }}
+        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy to Fly.io
-        if: ${{ github.ref == 'refs/heads/master' && env.FLY_API_TOKEN != '' }}
+        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           flyctl deploy \
             --image ${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }} \
