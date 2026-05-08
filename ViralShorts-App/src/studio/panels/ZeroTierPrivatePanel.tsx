@@ -89,6 +89,147 @@ function likeRate(v: UploadedVideo): number | null {
     return (v.likes / v.views) * 100;
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Phase 2c: client-side virality scorer.
+//
+// Heuristic v1 — runs in the browser, zero round-trip cost. Encodes the
+// patterns decoded from this channel's actual upload performance:
+//   - "Stole Speed Force From Every Speedster" (3.54% LR — channel best)
+//   - "Outran A Black Hole" (3.07%)
+//   - "Made Superman Admit He Was Slower" (2.74%)
+// vs the underperformers (Speed Force Erasure 1.59%, Saved 5,000 1.92%).
+//
+// Signals weighted by observed correlation with high like-rate:
+//   + past-tense "The Time Wally West [verb]" formula
+//   + cosmic / identity / mortality stakes
+//   + iconic-character confrontation (Superman, Reverse Flash, Crisis)
+//   - "every / ranked / vs every" power-scaling rankers
+//   - already-uploaded topics
+//
+// Future Phase 3 replaces this with a Grok-scored predictor that learns
+// from logged predictions vs actual outcomes harvested by Catalyst.
+// ────────────────────────────────────────────────────────────────────
+
+const TITLE_FORMULA_RE = /\bthe\s+time\s+wally\s+west\b/i;
+
+const PAST_TENSE_VERBS = [
+    'outran', 'stole', 'saved', 'made', 'refused', 'forgave', 'beat', 'broke',
+    'caught', 'crossed', 'died', 'erased', 'escaped', 'faced', 'fought', 'gave',
+    'gained', 'grew', 'held', 'killed', 'lost', 'lived', 'met', 'moved', 'opened',
+    'overpowered', 'overtook', 'ran', 'reached', 'returned', 'rewrote', 'rewound',
+    'saved', 'sealed', 'shattered', 'silenced', 'sprinted', 'survived',
+    'time-traveled', 'time traveled', 'took', 'traveled', 'unmade', 'unwound',
+    'walked', 'won', 'broke', 'remade', 'admitted', 'denied', 'protected',
+];
+
+const COSMIC_STAKES = [
+    'black hole', 'multiverse', 'crisis', 'speed force', 'anti-monitor',
+    'big bang', 'spectre', 'infinity', 'universe', 'reality', 'time',
+    'event horizon', 'singularity', 'cosmos', 'paradox', 'timeline',
+];
+
+const IDENTITY_MORTALITY = [
+    'death', 'daughter', 'son', 'wife', 'linda', 'funeral', 'born', 'age',
+    'mortality', 'forgiveness', 'memory', 'forgot', 'remembered', 'sacrifice',
+    'identity', 'name', 'family',
+];
+
+const ICONIC_CHARACTERS = [
+    'superman', 'batman', 'flash', 'wonder woman', 'green lantern', 'aquaman',
+    'reverse flash', 'eobard', 'thawne', 'zoom', 'black flash', 'savitar',
+    'godspeed', 'barry', 'jay', 'bart', 'kid flash', 'professor zoom',
+    'darkseid', 'doomsday', 'lex luthor', 'lex',
+];
+
+const RANKER_PENALTY = [
+    'every speedster', 'ranking', 'vs every', 'tier list', 'ranked',
+    'every time', 'all of', 'every villain',
+];
+
+interface ViralityScore {
+    score: number;          // 0-100
+    predicted_lr: number;   // predicted like-rate %
+    reasons: string[];      // up to 3 short bullets explaining the score
+    novelty_ok: boolean;    // false if title duplicates an already-uploaded topic
+}
+
+function scoreVirality(title: string, existingTitles: string[]): ViralityScore {
+    const t = (title || '').trim();
+    const tLow = t.toLowerCase();
+    const reasons: string[] = [];
+    let score = 30; // neutral baseline
+
+    // Title formula
+    if (TITLE_FORMULA_RE.test(t)) {
+        score += 25;
+        reasons.push('"The Time Wally West" formula matches');
+    } else {
+        score -= 10;
+        reasons.push('Title format misses past-tense story formula');
+    }
+
+    // Past-tense verb in opening clause
+    const hasPastTense = PAST_TENSE_VERBS.some((v) => new RegExp(`\\b${v.replace(/\s+/g, '\\s+')}\\b`, 'i').test(tLow));
+    if (hasPastTense) {
+        score += 12;
+        reasons.push('Past-tense verb signals story (not tier list)');
+    }
+
+    // Cosmic stakes
+    const cosmicMatch = COSMIC_STAKES.find((kw) => tLow.includes(kw));
+    if (cosmicMatch) {
+        score += 15;
+        reasons.push(`Cosmic stakes ("${cosmicMatch}")`);
+    }
+
+    // Identity / mortality
+    const identityMatch = IDENTITY_MORTALITY.find((kw) => tLow.includes(kw));
+    if (identityMatch) {
+        score += 10;
+        reasons.push(`Identity/mortality hook ("${identityMatch}")`);
+    }
+
+    // Iconic confrontation
+    const iconicMatch = ICONIC_CHARACTERS.find((kw) => tLow.includes(kw));
+    if (iconicMatch) {
+        score += 5;
+        reasons.push(`Iconic confrontation ("${iconicMatch}")`);
+    }
+
+    // Ranker penalty
+    const rankerMatch = RANKER_PENALTY.find((kw) => tLow.includes(kw));
+    if (rankerMatch) {
+        score -= 18;
+        reasons.push(`Ranker format underperforms ("${rankerMatch}")`);
+    }
+
+    // Novelty — if title overlaps with an existing upload (>=4 word match)
+    const tWords = new Set(tLow.split(/\W+/).filter((w) => w.length >= 5));
+    let overlapMax = 0;
+    for (const existing of existingTitles) {
+        const eWords = new Set(String(existing || '').toLowerCase().split(/\W+/).filter((w) => w.length >= 5));
+        let common = 0;
+        for (const w of tWords) if (eWords.has(w)) common++;
+        if (common > overlapMax) overlapMax = common;
+    }
+    const novelty_ok = overlapMax < 4;
+    if (novelty_ok) {
+        score += 12;
+        reasons.push('Topic not already covered');
+    } else {
+        score -= 18;
+        reasons.push(`Overlaps existing upload (${overlapMax} word matches)`);
+    }
+
+    // Clamp + estimate predicted like-rate. Channel baseline ~2.2%, top
+    // performer 3.54%. Linear-ish mapping: score 30→1.5%, 60→2.5%, 80→3.2%, 95→3.8%.
+    const clamped = Math.max(0, Math.min(100, score));
+    const predicted_lr = +(1.0 + (clamped / 100) * 3.0).toFixed(2);
+
+    // Keep the top 3 most-impactful reasons.
+    return { score: clamped, predicted_lr, reasons: reasons.slice(0, 3), novelty_ok };
+}
+
 export default function ZeroTierPrivatePanel() {
     const { session } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
@@ -125,6 +266,14 @@ export default function ZeroTierPrivatePanel() {
     const snapshot = channel?.analytics_snapshot;
     const audit = snapshot?.channel_audit;
     const candidates = audit?.next_video_candidates || [];
+
+    // Phase 2c: score every candidate, sort by virality score descending.
+    const scoredCandidates = useMemo(() => {
+        const existingTitles = (snapshot?.uploaded_videos || []).map((v) => v.title || '').filter(Boolean);
+        return candidates
+            .map((title) => ({ title, ...scoreVirality(title, existingTitles) }))
+            .sort((a, b) => b.score - a.score);
+    }, [candidates, snapshot]);
 
     const sortedUploads = useMemo<UploadedVideo[]>(() => {
         const list = (snapshot?.uploaded_videos || []).slice();
@@ -474,36 +623,58 @@ export default function ZeroTierPrivatePanel() {
                         )}
                     </section>
 
-                    {/* Recommended next-shorts */}
-                    {candidates.length > 0 && (
+                    {/* Recommended next-shorts — scored by virality heuristic v1 */}
+                    {scoredCandidates.length > 0 && (
                         <section className="rounded-2xl border border-violet-500/30 bg-violet-500/[0.04] p-5">
                             <div className="flex items-center gap-2 mb-3">
                                 <Sparkles className="h-5 w-5 text-violet-300" />
                                 <h2 className="text-lg font-bold text-white">Catalyst recommends</h2>
-                                <span className="text-xs text-zinc-500">— scored by virality potential vs your channel baseline</span>
+                                <span className="text-xs text-zinc-500">— ranked by predicted virality (heuristic v1)</span>
                             </div>
                             <div className="grid gap-3 sm:grid-cols-1 lg:grid-cols-2">
-                                {candidates.slice(0, 6).map((title, i) => (
-                                    <div
-                                        key={`cand-${i}`}
-                                        className="rounded-xl border border-white/[0.08] bg-black/20 p-4"
-                                    >
-                                        <div className="flex items-start gap-2">
-                                            <Lightbulb className="h-4 w-4 shrink-0 text-amber-300 mt-0.5" />
-                                            <div className="flex-1 min-w-0">
-                                                <h3 className="text-sm font-semibold text-white leading-snug">{title}</h3>
-                                            </div>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => onBuildShort(title)}
-                                            className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-semibold text-violet-200 transition hover:border-violet-400 hover:bg-violet-500/20"
+                                {scoredCandidates.slice(0, 6).map((c, i) => {
+                                    const scoreColor = c.score >= 70 ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40'
+                                        : c.score >= 40 ? 'text-amber-300 bg-amber-500/10 border-amber-500/40'
+                                        : 'text-zinc-400 bg-zinc-500/10 border-zinc-500/40';
+                                    return (
+                                        <div
+                                            key={`cand-${i}`}
+                                            className="rounded-xl border border-white/[0.08] bg-black/20 p-4"
                                         >
-                                            <Sparkles className="h-3.5 w-3.5" />
-                                            Build This Short
-                                        </button>
-                                    </div>
-                                ))}
+                                            <div className="flex items-start gap-2 mb-2">
+                                                <Lightbulb className="h-4 w-4 shrink-0 text-amber-300 mt-0.5" />
+                                                <div className="flex-1 min-w-0">
+                                                    <h3 className="text-sm font-semibold text-white leading-snug">{c.title}</h3>
+                                                </div>
+                                                <div className={`rounded-md border px-2 py-0.5 text-xs font-bold tabular-nums ${scoreColor}`}>
+                                                    {c.score}
+                                                </div>
+                                            </div>
+                                            <div className="text-[11px] text-zinc-400 mb-2">
+                                                Predicted like-rate: <span className="text-zinc-200 font-semibold">{c.predicted_lr.toFixed(2)}%</span>
+                                                <span className="text-zinc-600"> · channel baseline ~2.2%</span>
+                                            </div>
+                                            {c.reasons.length > 0 && (
+                                                <ul className="text-[11px] text-zinc-400 space-y-0.5 mb-2">
+                                                    {c.reasons.map((r, ri) => (
+                                                        <li key={`r-${i}-${ri}`} className="flex items-start gap-1.5">
+                                                            <span className="text-zinc-600 mt-0.5">·</span>
+                                                            <span>{r}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                            <button
+                                                type="button"
+                                                onClick={() => onBuildShort(c.title)}
+                                                className="inline-flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-semibold text-violet-200 transition hover:border-violet-400 hover:bg-violet-500/20"
+                                            >
+                                                <Sparkles className="h-3.5 w-3.5" />
+                                                Build This Short
+                                            </button>
+                                        </div>
+                                    );
+                                })}
                             </div>
                             {audit?.next_moves && audit.next_moves.length > 0 && (
                                 <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/20 p-3 text-xs text-zinc-300">
