@@ -32,6 +32,10 @@ COPY skeleton_ai ./skeleton_ai
 # Long-form pipeline package — Casey 2026-05-05 rebuild (6 channels +
 # Catalyst-fed outlines). Same recursion gotcha as skeleton_ai.
 COPY long_form ./long_form
+# ZeroTier (Private) niche pipeline package — Casey 2026-05-08 (Phase 2b).
+# zerotier_private_router.py imports from zerotier_private.pipeline; without
+# this COPY the router fails to mount and /api/zerotier-private/* returns 404.
+COPY zerotier_private ./zerotier_private
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
