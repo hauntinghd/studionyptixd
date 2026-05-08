@@ -686,7 +686,10 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     # ── Per-scene assembly (i2v + VO + SFX + 2-pass + mux per scene) ──────
     update_status(job_id, phase="scene_assembly", percent=73)
     state["phase"] = "scene_assembly"
-    save_state(job_id, state)
+    state["percent"] = 73                # PR #129 — was leaving disk state at the
+    save_state(job_id, state)            # stale 72 from awaiting_approval, so a
+                                         # mid-pool process restart left Resume
+                                         # looking at percent=72 forever.
 
     def _process_one(triple):
         ch_idx, local_idx, global_idx, sb = triple
@@ -704,6 +707,7 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     def _run_pool() -> dict[int, Path]:
         out: dict[int, Path] = {}
         done_n = 0
+        failed_scenes: list[int] = []
         with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY) as ex:
             futs = {ex.submit(_process_one, t): t for t in scene_briefs}
             for fut in as_completed(futs):
@@ -716,8 +720,26 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
                     pct = 73 + int(15 * done_n / max(1, total))
                     update_status(job_id, phase="scene_assembly", percent=pct,
                                   scene_done=done_n, scene_total=total)
+                    # PR #129 — persist percent + scene_done to disk every
+                    # 3 scenes so a process restart can resume from the
+                    # correct progress bar (vs the previous behaviour where
+                    # disk state stayed at 72 until the entire pool drained).
+                    if done_n % 3 == 0 or done_n == total:
+                        st_live = load_state(job_id) or state
+                        st_live["percent"] = pct
+                        st_live["scene_assembly_done"] = done_n
+                        st_live["scene_assembly_total"] = total
+                        st_live["scene_assembly_failed"] = list(failed_scenes)
+                        save_state(job_id, st_live)
                 except Exception as e:
+                    failed_scenes.append(gi)
                     print(f"[v5 finalize] scene {gi} failed: {e}")
+        # Final flush so disk state ends accurate.
+        st_live = load_state(job_id) or state
+        st_live["scene_assembly_done"] = done_n
+        st_live["scene_assembly_total"] = total
+        st_live["scene_assembly_failed"] = list(failed_scenes)
+        save_state(job_id, st_live)
         return out
 
     scene_mp4s_indexed = await loop.run_in_executor(None, _run_pool)
