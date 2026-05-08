@@ -1,27 +1,28 @@
 /**
- * LongFormPanel — Long-form (10-540 minute) generator (built 2026-05-05).
+ * LongFormPanel — Long-form (10-540 minute) generator.
  *
- * 3-tab UX mirroring Skeleton AI's CreatePanel:
- *   1. Channel — pick from 6 channels; each shows canonical signature (style,
- *                duration, voice, cost). Catalyst-derived signals (top titles,
- *                breakouts, hook formulas) surface immediately for the picked
- *                channel so the user sees what works on THIS channel before
- *                writing a topic.
- *   2. Outline — topic input + Grok chapter outline (uses Catalyst signals as
- *                system-prompt context so framing matches channel performance).
+ * 3-tab UX:
+ *   1. Channel — pick from registry; Catalyst signals + locked title pattern
+ *                surface immediately for the picked channel so the user sees
+ *                what works on THIS channel before writing a topic.
+ *   2. Outline — topic input + Grok outline (PR #119: enforces channel's
+ *                decoded winner pattern via title_template + description_tail).
  *                Editable.
- *   3. Render  — kicks off the v5 pipeline (phase 2 — wires once fal balance
- *                refills). For now shows a clear "render coming soon" state.
+ *   3. Render  — LIVE (PR #120 + #121): kicks a background-job render via
+ *                /api/long-form/render-start, polls /jobs/{id}/status, plays
+ *                the final MP4 inline. Recent renders gallery + Resume Project
+ *                flow mirror the ZT Private pattern.
  *
- * Backend: /api/long-form/{channels,catalyst-insights,outline,render}.
- *          Catalyst Hub data threads through /api/long-form/catalyst-insights.
+ * Backend: /api/long-form/{channels,catalyst-insights,outline,render-start,
+ *          jobs,jobs/{id},jobs/{id}/{status,state,mp4,thumbnail/{idx},still/{n}}}
  */
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
-    BookOpen, BrainCircuit, Briefcase, Building2, Clock, Eye, FileText,
-    Film, Headphones, Loader2, Music, Search, Sparkles, TrendingUp, Wand2,
+    BookOpen, BrainCircuit, Briefcase, Building2, Check, Clock, Download, Eye, FileText,
+    Film, Headphones, Image as ImageIcon, Loader2, Music, Play, RefreshCw, RotateCcw,
+    Search, Sparkles, TrendingUp, Wand2, AlertTriangle,
 } from 'lucide-react';
-import { AuthContext } from '../shared';
+import { API, AuthContext } from '../shared';
 
 type LongFormTab = 'channel' | 'outline' | 'render';
 
@@ -102,8 +103,114 @@ const CHANNEL_ICON: Record<string, typeof BookOpen> = {
     history_rewind: BookOpen,
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Render-tab types (PR #121 wires these — backend shapes from PR #120)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface RenderJobStatus {
+    job_id: string;
+    phase: string;
+    percent: number;
+    error?: string;
+    scene_done?: number;
+    scene_total?: number;
+    narration_done?: number;
+    narration_total?: number;
+    chapter_done?: number;
+    chapter_total?: number;
+    updated_at?: number;
+}
+
+interface RecentJobRow {
+    job_id: string;
+    channel_key: string;
+    channel_label?: string;
+    pipeline_kind?: string;
+    title?: string;
+    phase: string;
+    percent: number;
+    error?: string;
+    created_at?: number;
+    started_at?: number;
+    finished_at?: number;
+    mp4_present: boolean;
+    mp4_url?: string;
+    mp4_duration_sec?: number;
+    mp4_size_bytes?: number;
+    thumbnail_url?: string;
+}
+
+interface JobFullState {
+    job_id: string;
+    channel_key?: string;
+    channel_label?: string;
+    pipeline_kind?: string;
+    outline?: Outline;
+    phase?: string;
+    percent?: number;
+    error?: string;
+    mp4_url?: string;
+    mp4_path?: string;
+    mp4_duration_sec?: number;
+    mp4_size_bytes?: number;
+    narration_duration_sec?: number;
+    scenes_generated?: number;
+    thumbnails_generated?: number;
+    thumbnail_urls?: string[];
+    started_at?: number;
+    finished_at?: number;
+    created_at?: number;
+    [k: string]: any;
+}
+
+const PHASE_LABELS: Record<string, string> = {
+    queued: 'Queued',
+    starting: 'Starting',
+    chapters: 'Writing chapters',
+    scenes: 'Generating scenes',
+    narration: 'Recording narration',
+    ambient: 'Generating ambient bed',
+    thumbnails: 'Generating thumbnails',
+    compose: 'Composing final video',
+    done: 'Done',
+    failed: 'Failed',
+    unknown: 'Status unknown',
+};
+
+const PHASE_ORDER = [
+    'queued', 'starting', 'chapters', 'scenes', 'narration',
+    'ambient', 'thumbnails', 'compose', 'done',
+];
+
+function formatDuration(sec: number): string {
+    if (!sec || sec <= 0) return '—';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
+function formatBytes(b: number): string {
+    if (!b || b <= 0) return '—';
+    if (b > 1e9) return `${(b / 1e9).toFixed(2)} GB`;
+    if (b > 1e6) return `${(b / 1e6).toFixed(1)} MB`;
+    if (b > 1e3) return `${(b / 1e3).toFixed(1)} KB`;
+    return `${b} B`;
+}
+
+function formatRelativeTime(epoch: number): string {
+    if (!epoch || epoch <= 0) return '—';
+    const ms = Date.now() / 1000 - epoch;
+    if (ms < 60) return 'just now';
+    if (ms < 3600) return `${Math.floor(ms / 60)}m ago`;
+    if (ms < 86400) return `${Math.floor(ms / 3600)}h ago`;
+    return `${Math.floor(ms / 86400)}d ago`;
+}
+
 export default function LongFormPanel() {
-    const { session } = useContext(AuthContext);
+    const { session, supabase } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
 
     const [tab, setTab] = useState<LongFormTab>('channel');
@@ -120,6 +227,71 @@ export default function LongFormPanel() {
     const [outline, setOutline] = useState<Outline | null>(null);
     const [outliningBusy, setOutliningBusy] = useState(false);
     const [outlineError, setOutlineError] = useState('');
+
+    // PR #121: render-tab state
+    const [activeJobId, setActiveJobId] = useState<string>('');
+    const [jobStatus, setJobStatus] = useState<RenderJobStatus | null>(null);
+    const [jobFullState, setJobFullState] = useState<JobFullState | null>(null);
+    const [renderError, setRenderError] = useState('');
+    const [renderStarting, setRenderStarting] = useState(false);
+    const [recentJobs, setRecentJobs] = useState<RecentJobRow[]>([]);
+    const [recentLoading, setRecentLoading] = useState(false);
+    const pollAbortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+
+    // Get a fresh Supabase token for every POST/poll iteration so a token
+    // expiring during a multi-hour render doesn't abort the polling loop.
+    // Mirrors ZT private's getFreshToken pattern (Phase 4.5d fix).
+    const getFreshToken = useCallback(async (): Promise<string> => {
+        if (!supabase) return accessToken;
+        try {
+            const { data } = await supabase.auth.getSession();
+            return data?.session?.access_token || accessToken;
+        } catch {
+            return accessToken;
+        }
+    }, [supabase, accessToken]);
+
+    // Cold-start resilience helper. Fly machines return HTML 502 during cold
+    // starts; r.json() throws unhelpfully. Retry 3× with exponential backoff
+    // before surfacing. Used for all single-shot calls (kickoff, /state lookup).
+    const fetchJsonResilient = useCallback(async (
+        url: string,
+        init: RequestInit,
+        { retries = 3, retryDelayMs = 2500 }: { retries?: number; retryDelayMs?: number } = {},
+    ): Promise<{ ok: boolean; status: number; data: any }> => {
+        let lastErr: string = '';
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const r = await fetch(url, init);
+                if ((r.status === 502 || r.status === 504) && attempt < retries) {
+                    lastErr = `cold-start ${r.status}`;
+                    await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                    continue;
+                }
+                const text = await r.text();
+                let data: any = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch {
+                    if (attempt < retries) {
+                        lastErr = `non-JSON response (${r.status}): ${text.slice(0, 80)}`;
+                        await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                        continue;
+                    }
+                    return { ok: false, status: r.status, data: { detail: lastErr || `Server returned non-JSON (${r.status})` } };
+                }
+                return { ok: r.ok, status: r.status, data };
+            } catch (e: any) {
+                lastErr = String(e?.message || e || 'Network error');
+                if (attempt < retries) {
+                    await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new Error(lastErr || 'Request failed after retries');
+    }, []);
 
     // Load channel registry + connected-channel snapshot on auth.
     useEffect(() => {
@@ -200,6 +372,171 @@ export default function LongFormPanel() {
         }
     }, [selectedChannel, topic, targetMinutes, useCatalystContext, accessToken]);
 
+    // ── Recent Renders gallery ──────────────────────────────────────────
+    const fetchRecentJobs = useCallback(async () => {
+        if (!accessToken) return;
+        setRecentLoading(true);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(`${API}/api/long-form/jobs?limit=20`, {
+                headers: { Authorization: `Bearer ${tok}` },
+            });
+            if (ok && Array.isArray(data?.jobs)) {
+                setRecentJobs(data.jobs as RecentJobRow[]);
+            }
+        } catch {
+            /* ignore — Recent panel can show empty without blocking the page */
+        } finally {
+            setRecentLoading(false);
+        }
+    }, [accessToken, getFreshToken, fetchJsonResilient]);
+
+    useEffect(() => {
+        if (accessToken) fetchRecentJobs();
+    }, [accessToken, fetchRecentJobs]);
+
+    // ── Poll loop for the active job ────────────────────────────────────
+    // Mirrors ZT private's pollJobStatus: 4s interval, getFreshToken per
+    // iteration so a Supabase token expiring during a multi-hour render
+    // doesn't kill the loop, consecutive401 tolerance, hard cap so we
+    // don't spin forever on a stuck pipeline.
+    const pollJob = useCallback(async (jobId: string, maxSeconds: number = 36000) => {
+        pollAbortRef.current = { cancelled: false };
+        const startedAt = Date.now();
+        let consecutive401 = 0;
+        while (!pollAbortRef.current.cancelled) {
+            if ((Date.now() - startedAt) / 1000 > maxSeconds) {
+                setRenderError(`Render exceeded ${maxSeconds}s without finishing — check the backend logs.`);
+                return;
+            }
+            try {
+                const tok = await getFreshToken();
+                const { ok, status, data } = await fetchJsonResilient(
+                    `${API}/api/long-form/jobs/${jobId}/status`,
+                    { headers: { Authorization: `Bearer ${tok}` } },
+                );
+                if (status === 401) {
+                    consecutive401 += 1;
+                    if (consecutive401 >= 5) {
+                        setRenderError('Authentication expired during render — sign in again to resume.');
+                        return;
+                    }
+                    await new Promise((res) => setTimeout(res, 4000));
+                    continue;
+                }
+                if (!ok) {
+                    // 404 or 500 — keep trying for a few iterations in case
+                    // it's a transient backend issue.
+                    consecutive401 = 0;
+                    await new Promise((res) => setTimeout(res, 4000));
+                    continue;
+                }
+                consecutive401 = 0;
+                const live = data as RenderJobStatus;
+                setJobStatus(live);
+                if (live.phase === 'done') {
+                    // Fetch full state for MP4 + thumbnail URLs.
+                    try {
+                        const stateResp = await fetchJsonResilient(
+                            `${API}/api/long-form/jobs/${jobId}/state`,
+                            { headers: { Authorization: `Bearer ${tok}` } },
+                        );
+                        if (stateResp.ok) setJobFullState(stateResp.data as JobFullState);
+                    } catch { /* ignore */ }
+                    // Also refresh the Recent Renders panel.
+                    fetchRecentJobs();
+                    return;
+                }
+                if (live.phase === 'failed') {
+                    setRenderError(live.error || 'Render failed — check backend logs.');
+                    fetchRecentJobs();
+                    return;
+                }
+            } catch (e) {
+                /* network blip — retry */
+            }
+            await new Promise((res) => setTimeout(res, 4000));
+        }
+    }, [getFreshToken, fetchJsonResilient, fetchRecentJobs]);
+
+    // ── Kick a new render ───────────────────────────────────────────────
+    const startRender = useCallback(async () => {
+        if (!selectedChannel || !outline) {
+            alert('Pick a channel + generate an outline first.');
+            return;
+        }
+        setRenderStarting(true);
+        setRenderError('');
+        setJobStatus(null);
+        setJobFullState(null);
+        try {
+            const tok = await getFreshToken();
+            const { ok, status, data } = await fetchJsonResilient(`${API}/api/long-form/render-start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+                body: JSON.stringify({ channel_key: selectedChannel, outline }),
+            });
+            if (!ok) {
+                throw new Error(
+                    `render-start failed (${status}): ${data?.detail || JSON.stringify(data).slice(0, 200)}`,
+                );
+            }
+            const jobId = data?.job_id as string;
+            if (!jobId) throw new Error('render-start returned no job_id');
+            setActiveJobId(jobId);
+            setJobStatus({ job_id: jobId, phase: 'queued', percent: 0 });
+            // Refresh the Recent panel + start polling.
+            fetchRecentJobs();
+            pollJob(jobId, 36000);  // 10h cap (Khmer 9hr render headroom)
+        } catch (e) {
+            setRenderError((e as Error).message);
+        } finally {
+            setRenderStarting(false);
+        }
+    }, [selectedChannel, outline, getFreshToken, fetchJsonResilient, pollJob, fetchRecentJobs]);
+
+    // ── Resume an in-progress / past render from the Recent panel ───────
+    const resumeJob = useCallback(async (jobId: string) => {
+        if (!jobId) return;
+        setActiveJobId(jobId);
+        setRenderError('');
+        setJobStatus(null);
+        setJobFullState(null);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${jobId}/state`,
+                { headers: { Authorization: `Bearer ${tok}` } },
+            );
+            if (!ok) throw new Error(`resume failed: ${data?.detail || 'unknown'}`);
+            const state = data as JobFullState;
+            setJobFullState(state);
+            setJobStatus({
+                job_id: jobId,
+                phase: state.phase || 'unknown',
+                percent: state.percent || 0,
+                error: state.error,
+            });
+            // Re-hydrate selected channel + outline so the user can edit
+            // the outline + kick a follow-up render off the same plan.
+            if (state.channel_key) setSelectedChannel(state.channel_key);
+            if (state.outline) setOutline(state.outline);
+            setTab('render');
+            // If still running, keep polling.
+            if (state.phase && state.phase !== 'done' && state.phase !== 'failed') {
+                pollJob(jobId, 36000);
+            }
+        } catch (e) {
+            setRenderError((e as Error).message);
+        }
+    }, [getFreshToken, fetchJsonResilient, pollJob]);
+
+    // Stop polling on unmount so the loop doesn't keep running after the
+    // user navigates away. The pollAbortRef guards against late setState.
+    useEffect(() => {
+        return () => { pollAbortRef.current.cancelled = true; };
+    }, []);
+
     const longFormChannels = channels.filter((c) => (c.format || 'long_form') === 'long_form');
     const shortsChannels = channels.filter((c) => c.format === 'shorts');
 
@@ -252,6 +589,16 @@ export default function LongFormPanel() {
                     selectedChannel={selectedChannel}
                     channels={channels}
                     outline={outline}
+                    activeJobId={activeJobId}
+                    jobStatus={jobStatus}
+                    jobFullState={jobFullState}
+                    renderError={renderError}
+                    renderStarting={renderStarting}
+                    recentJobs={recentJobs}
+                    recentLoading={recentLoading}
+                    onStart={startRender}
+                    onResume={resumeJob}
+                    onRefreshRecent={fetchRecentJobs}
                 />
             )}
         </div>
@@ -767,53 +1114,418 @@ function OutlineEditor({
 
 function RenderTab({
     selectedChannel, channels, outline,
+    activeJobId, jobStatus, jobFullState, renderError, renderStarting,
+    recentJobs, recentLoading, onStart, onResume, onRefreshRecent,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
     outline: Outline | null;
+    activeJobId: string;
+    jobStatus: RenderJobStatus | null;
+    jobFullState: JobFullState | null;
+    renderError: string;
+    renderStarting: boolean;
+    recentJobs: RecentJobRow[];
+    recentLoading: boolean;
+    onStart: () => void;
+    onResume: (jobId: string) => void;
+    onRefreshRecent: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
-    if (!channel) {
-        return (
-            <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
-                Pick a channel on the Channel tab first.
-            </div>
-        );
-    }
-    if (!outline) {
-        return (
-            <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
-                Generate an outline on the Outline tab first.
-            </div>
-        );
-    }
-    const totalMinutes = outline.chapters.reduce((s, c) => s + c.minutes, 0);
+    const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
+    const isRunning = jobStatus && jobStatus.phase !== 'done' && jobStatus.phase !== 'failed';
+    const isDone = jobStatus?.phase === 'done';
+    const isFailed = jobStatus?.phase === 'failed';
+
     return (
-        <section className="flex flex-col gap-4">
-            <h2 className="text-lg font-semibold text-white">Confirm + Render</h2>
-            <div className="rounded-md border border-zinc-800 bg-zinc-950 p-4 flex flex-col gap-2">
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Channel:</span> {channel.label}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Title:</span> {outline.title}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Chapters:</span> {outline.chapters.length}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Length:</span> {totalMinutes >= 60 ? `${(totalMinutes / 60).toFixed(1)}h` : `${totalMinutes}m`}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Image model:</span> {channel.image_model_default}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">i2v model:</span> {channel.i2v_model_default}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
-                <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${channel.cost_estimate_usd}</div>
-            </div>
-            <div className="rounded-md bg-violet-500/10 border border-violet-500/30 px-4 py-3 text-sm text-violet-200">
-                <strong>Render pipeline ships next session.</strong> The outline + channel
-                config is saved — when fal balance refills, this button kicks off the v5
-                pipeline (per-channel image model → i2v → voice → silence-kill compose).
-                The legacy /api/longform/session endpoints still work today and are what
-                shipped Wirecard / Mongol 9H / Ottoman 9H.
-            </div>
-            <button
-                disabled
-                className="rounded-md bg-zinc-800 text-zinc-500 px-4 py-2.5 text-sm font-semibold cursor-not-allowed"
-            >
-                Render Long-Form (phase 2)
-            </button>
+        <section className="flex flex-col gap-6">
+            {/* ── Confirm + start (when no active job, channel + outline picked) ── */}
+            {!activeJobId && channel && outline && (
+                <div className="flex flex-col gap-4">
+                    <h2 className="text-lg font-semibold text-white">Confirm + Render</h2>
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-4 flex flex-col gap-2">
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Channel:</span> {channel.label}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Title:</span> {outline.title}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Chapters:</span> {outline.chapters.length}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Length:</span> {totalMinutes >= 60 ? `${(totalMinutes / 60).toFixed(1)}h` : `${totalMinutes}m`}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Pipeline:</span> {channel.pipeline_kind || 'sleep_doc'}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Image model:</span> {channel.image_model_default}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${channel.cost_estimate_usd}</div>
+                    </div>
+                    <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200">
+                        Render runs as a background job on the API. For 9-hour HR sleep
+                        docs this typically takes 2-4 hours wall-clock (most of it is
+                        fal MiniMax narration + scene image gen). You can close this
+                        tab and resume from the Recent Renders panel — it&apos;ll keep
+                        running in the background.
+                    </div>
+                    <button
+                        onClick={onStart}
+                        disabled={renderStarting}
+                        className="rounded-md bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
+                    >
+                        {renderStarting ? (
+                            <><Loader2 className="h-4 w-4 animate-spin" /> Starting…</>
+                        ) : (
+                            <><Film className="h-4 w-4" /> Render Long-Form (~${channel.cost_estimate_usd} fal)</>
+                        )}
+                    </button>
+                    {renderError && (
+                        <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-sm text-rose-200">
+                            {renderError}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ── Active job progress / done / failed ── */}
+            {activeJobId && jobStatus && (
+                <ActiveJobCard
+                    channel={channel || null}
+                    outline={outline || null}
+                    jobStatus={jobStatus}
+                    jobFullState={jobFullState}
+                    isRunning={!!isRunning}
+                    isDone={!!isDone}
+                    isFailed={!!isFailed}
+                    renderError={renderError}
+                />
+            )}
+
+            {/* ── Recent Renders gallery (always shown so user can resume any past job) ── */}
+            <RecentRendersPanel
+                recentJobs={recentJobs}
+                recentLoading={recentLoading}
+                onResume={onResume}
+                onRefresh={onRefreshRecent}
+                activeJobId={activeJobId}
+            />
+
+            {/* ── Hint when nothing is selected ── */}
+            {!activeJobId && (!channel || !outline) && (
+                <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
+                    {!channel
+                        ? 'Pick a channel on the Channel tab first.'
+                        : 'Generate an outline on the Outline tab first — or resume a past render below.'}
+                </div>
+            )}
         </section>
+    );
+}
+
+function ActiveJobCard({
+    channel, outline, jobStatus, jobFullState, isRunning, isDone, isFailed, renderError,
+}: {
+    channel: ChannelInfo | null;
+    outline: Outline | null;
+    jobStatus: RenderJobStatus;
+    jobFullState: JobFullState | null;
+    isRunning: boolean;
+    isDone: boolean;
+    isFailed: boolean;
+    renderError: string;
+}) {
+    const phaseLabel = PHASE_LABELS[jobStatus.phase] || jobStatus.phase;
+    const phaseIdx = PHASE_ORDER.indexOf(jobStatus.phase);
+    const title = (jobFullState?.outline?.title) || outline?.title || '(no title)';
+    const mp4Url = jobFullState?.mp4_url || '';
+    const thumbs = jobFullState?.thumbnail_urls || [];
+    const description = jobFullState?.outline?.description || outline?.description || '';
+
+    return (
+        <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-white">
+                    {isDone ? 'Render complete' : isFailed ? 'Render failed' : 'Rendering…'}
+                </h2>
+                <div className="text-xs text-zinc-500">
+                    job {jobStatus.job_id}
+                </div>
+            </div>
+
+            <div className="rounded-md border border-zinc-800 bg-zinc-950 p-4 flex flex-col gap-3">
+                <div className="text-sm text-white font-semibold">{title}</div>
+                {channel && (
+                    <div className="text-xs text-zinc-400">
+                        {channel.label} · {channel.pipeline_kind || 'sleep_doc'} pipeline · ~${channel.cost_estimate_usd} fal
+                    </div>
+                )}
+
+                {/* Progress bar */}
+                <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                        <span className="text-zinc-300 flex items-center gap-1.5">
+                            {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                            {isDone && <Check className="h-3.5 w-3.5 text-emerald-400" />}
+                            {isFailed && <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />}
+                            {phaseLabel}
+                        </span>
+                        <span className="text-zinc-500">{jobStatus.percent}%</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                        <div
+                            className={`h-full transition-all duration-500 ${
+                                isFailed ? 'bg-rose-500' : isDone ? 'bg-emerald-500' : 'bg-violet-500'
+                            }`}
+                            style={{ width: `${Math.max(2, jobStatus.percent)}%` }}
+                        />
+                    </div>
+                    {/* Per-phase counters */}
+                    {jobStatus.phase === 'chapters' && jobStatus.chapter_total ? (
+                        <div className="text-[10px] text-zinc-500">
+                            chapter {jobStatus.chapter_done}/{jobStatus.chapter_total}
+                        </div>
+                    ) : jobStatus.phase === 'scenes' && jobStatus.scene_total ? (
+                        <div className="text-[10px] text-zinc-500">
+                            scene {jobStatus.scene_done}/{jobStatus.scene_total}
+                        </div>
+                    ) : jobStatus.phase === 'narration' && jobStatus.narration_total ? (
+                        <div className="text-[10px] text-zinc-500">
+                            chapter {jobStatus.narration_done}/{jobStatus.narration_total} narrated
+                        </div>
+                    ) : null}
+                </div>
+
+                {/* Phase ladder */}
+                <div className="flex items-center justify-between text-[10px] text-zinc-600">
+                    {PHASE_ORDER.map((p, i) => (
+                        <span
+                            key={p}
+                            className={`flex-1 text-center px-1 ${
+                                i < phaseIdx ? 'text-emerald-400' : i === phaseIdx ? 'text-violet-300 font-semibold' : ''
+                            }`}
+                        >
+                            {p}
+                        </span>
+                    ))}
+                </div>
+
+                {/* Error if failed */}
+                {(isFailed || renderError) && (
+                    <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200">
+                        {jobStatus.error || renderError}
+                    </div>
+                )}
+
+                {/* MP4 + downloads when done */}
+                {isDone && mp4Url && (
+                    <div className="flex flex-col gap-3">
+                        <video
+                            src={mp4Url}
+                            controls
+                            playsInline
+                            className="w-full rounded-md bg-black"
+                            style={{ maxHeight: 480 }}
+                        />
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2">
+                                <div className="text-zinc-500 text-[10px] uppercase tracking-wide">Duration</div>
+                                <div className="text-zinc-200 font-mono">
+                                    {formatDuration(jobFullState?.mp4_duration_sec || 0)}
+                                </div>
+                            </div>
+                            <div className="rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2">
+                                <div className="text-zinc-500 text-[10px] uppercase tracking-wide">File size</div>
+                                <div className="text-zinc-200 font-mono">
+                                    {formatBytes(jobFullState?.mp4_size_bytes || 0)}
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <a
+                                href={mp4Url}
+                                download
+                                className="flex-1 rounded-md bg-violet-500 hover:bg-violet-600 px-3 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1.5"
+                            >
+                                <Download className="h-3.5 w-3.5" /> Download MP4
+                            </a>
+                            <a
+                                href={mp4Url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="rounded-md bg-zinc-800 hover:bg-zinc-700 px-3 py-2 text-xs font-semibold text-zinc-200 flex items-center justify-center gap-1.5"
+                            >
+                                <Play className="h-3.5 w-3.5" /> Open in tab
+                            </a>
+                        </div>
+                    </div>
+                )}
+
+                {/* Thumbnails when generated (visible during/after) */}
+                {thumbs.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">
+                            Thumbnail candidates
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                            {thumbs.map((url, i) => (
+                                <a
+                                    key={i}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="block rounded-md overflow-hidden border border-zinc-800 hover:border-violet-500/60 transition-colors"
+                                >
+                                    <img
+                                        src={url}
+                                        alt={`thumbnail ${i + 1}`}
+                                        className="w-full aspect-video object-cover bg-zinc-900"
+                                        loading="lazy"
+                                    />
+                                </a>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Upload metadata when done */}
+                {isDone && description && (
+                    <div className="flex flex-col gap-2">
+                        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide flex items-center justify-between">
+                            <span>YouTube description</span>
+                            <button
+                                onClick={() => {
+                                    navigator.clipboard.writeText(description);
+                                }}
+                                className="text-violet-400 hover:text-violet-300 normal-case tracking-normal"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                        <pre className="rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2 text-[11px] text-zinc-300 whitespace-pre-wrap font-mono max-h-40 overflow-y-auto">
+                            {description}
+                        </pre>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function RecentRendersPanel({
+    recentJobs, recentLoading, onResume, onRefresh, activeJobId,
+}: {
+    recentJobs: RecentJobRow[];
+    recentLoading: boolean;
+    onResume: (jobId: string) => void;
+    onRefresh: () => void;
+    activeJobId: string;
+}) {
+    return (
+        <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-white">Recent renders</h3>
+                <button
+                    onClick={onRefresh}
+                    className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
+                    disabled={recentLoading}
+                >
+                    <RefreshCw className={`h-3 w-3 ${recentLoading ? 'animate-spin' : ''}`} /> Refresh
+                </button>
+            </div>
+            {recentJobs.length === 0 ? (
+                <div className="rounded-md bg-zinc-950 border border-zinc-800 px-4 py-6 text-center text-xs text-zinc-500">
+                    {recentLoading ? 'Loading…' : 'No renders yet — pick a channel + topic and hit Render.'}
+                </div>
+            ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {recentJobs.map((job) => (
+                        <RecentJobCard
+                            key={job.job_id}
+                            job={job}
+                            isActive={job.job_id === activeJobId}
+                            onResume={onResume}
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function RecentJobCard({
+    job, isActive, onResume,
+}: {
+    job: RecentJobRow;
+    isActive: boolean;
+    onResume: (jobId: string) => void;
+}) {
+    const phaseLabel = PHASE_LABELS[job.phase] || job.phase;
+    const isDone = job.phase === 'done';
+    const isFailed = job.phase === 'failed';
+    const isRunning = !isDone && !isFailed;
+
+    return (
+        <div
+            className={`rounded-md border ${
+                isActive
+                    ? 'border-violet-500/60 bg-violet-500/5'
+                    : 'border-zinc-800 bg-zinc-950'
+            } p-3 flex flex-col gap-2`}
+        >
+            {/* Thumbnail */}
+            {job.thumbnail_url ? (
+                <img
+                    src={job.thumbnail_url}
+                    alt=""
+                    className="w-full aspect-video object-cover rounded bg-zinc-900"
+                    loading="lazy"
+                />
+            ) : (
+                <div className="w-full aspect-video rounded bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-700">
+                    <ImageIcon className="h-8 w-8" />
+                </div>
+            )}
+
+            {/* Title + channel */}
+            <div className="text-xs font-semibold text-white truncate" title={job.title}>
+                {job.title || '(no title)'}
+            </div>
+            <div className="text-[10px] text-zinc-500 flex items-center gap-1.5">
+                {job.channel_label && <span>{job.channel_label}</span>}
+                {job.channel_label && <span>·</span>}
+                <span>{formatRelativeTime(job.created_at || job.started_at || 0)}</span>
+            </div>
+
+            {/* Status pill */}
+            <div className="flex items-center gap-1.5 text-[10px]">
+                {isDone && (
+                    <span className="rounded bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-emerald-300 flex items-center gap-1">
+                        <Check className="h-2.5 w-2.5" /> Done · {formatDuration(job.mp4_duration_sec || 0)} · {formatBytes(job.mp4_size_bytes || 0)}
+                    </span>
+                )}
+                {isFailed && (
+                    <span className="rounded bg-rose-500/10 border border-rose-500/30 px-1.5 py-0.5 text-rose-300 flex items-center gap-1">
+                        <AlertTriangle className="h-2.5 w-2.5" /> Failed
+                    </span>
+                )}
+                {isRunning && (
+                    <span className="rounded bg-violet-500/10 border border-violet-500/30 px-1.5 py-0.5 text-violet-300 flex items-center gap-1">
+                        <Loader2 className="h-2.5 w-2.5 animate-spin" /> {phaseLabel} · {job.percent}%
+                    </span>
+                )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2 mt-1">
+                <button
+                    onClick={() => onResume(job.job_id)}
+                    className="flex-1 rounded-md bg-zinc-800 hover:bg-zinc-700 px-2.5 py-1.5 text-[10px] font-semibold text-zinc-200 flex items-center justify-center gap-1"
+                    title={`Resume / inspect job ${job.job_id}`}
+                >
+                    <RotateCcw className="h-3 w-3" /> {isRunning ? 'Resume' : 'Open'}
+                </button>
+                {isDone && job.mp4_url && (
+                    <a
+                        href={job.mp4_url}
+                        download
+                        className="rounded-md bg-violet-500 hover:bg-violet-600 px-2.5 py-1.5 text-[10px] font-semibold text-white flex items-center justify-center gap-1"
+                    >
+                        <Download className="h-3 w-3" /> MP4
+                    </a>
+                )}
+            </div>
+        </div>
     );
 }
