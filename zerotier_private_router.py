@@ -779,13 +779,23 @@ def build_zerotier_private_router(
         ws = ZT_OUTPUT_ROOT / job_id
         if not ws.exists():
             raise HTTPException(404, "job_not_found")
-        for candidate in ws.glob("*.mp4"):
-            if candidate.is_file() and candidate.stat().st_size > 1024:
-                return FileResponse(
-                    str(candidate),
-                    media_type="video/mp4",
-                    filename=candidate.name,
-                )
+        # Prefer the FINAL muxed MP4 ("ZeroTier_<jobid>.mp4") over any
+        # intermediate files (silent_combined.mp4 — video-only, no narration).
+        # The previous glob-and-pick-first behavior could serve the silent
+        # intermediate, which is what Casey hit ('zero sound design or VO').
+        preferred = ws / f"ZeroTier_{job_id}.mp4"
+        if preferred.is_file() and preferred.stat().st_size > 1024:
+            return FileResponse(str(preferred), media_type="video/mp4", filename=preferred.name)
+        # Fall back to any non-intermediate .mp4 in the root
+        EXCLUDE = {"silent_combined.mp4"}
+        candidates = sorted(
+            (p for p in ws.glob("*.mp4")
+             if p.is_file() and p.name not in EXCLUDE and p.stat().st_size > 1024),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return FileResponse(str(candidates[0]), media_type="video/mp4", filename=candidates[0].name)
         raise HTTPException(404, "mp4_not_found")
 
     # ────────────────────────────────────────────────────────────────────
@@ -854,7 +864,7 @@ def build_zerotier_private_router(
                 ),
                 "mp4_url": (
                     f"/api/zerotier-private/jobs/{job_id}/mp4"
-                    if (d / f"ZeroTier_{job_id}.mp4").exists() or any(d.glob("*.mp4"))
+                    if (d / f"ZeroTier_{job_id}.mp4").exists()
                     else None
                 ),
                 "updated_at": mtime,
@@ -931,7 +941,7 @@ def build_zerotier_private_router(
             "script_json": script_text,
             "mp4_url": (
                 f"/api/zerotier-private/jobs/{job_id}/mp4"
-                if any(ws.glob("*.mp4")) else None
+                if (ws / f"ZeroTier_{job_id}.mp4").exists() else None
             ),
             "duration_total_sec": result.get("duration_total_sec"),
             "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
