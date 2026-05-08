@@ -19,6 +19,12 @@ agent-transcripts/
 terminals/
 /build/
 /dist/
+ViralShorts-App/dist/
+ViralShorts-App/.vercel/
+ViralShorts-App/project.json
+.vercel/
+skeleton_ai/output/
+zerotier_private/output/
 *.mp4
 *.exe
 *.pkg

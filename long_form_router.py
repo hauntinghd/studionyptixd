@@ -30,7 +30,12 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from long_form.prompts.channels import CHANNELS, list_channels, get_channel
+from long_form.prompts.channels import (
+    CHANNELS,
+    list_channels,
+    get_channel,
+    channel_outline_prompt_extras,
+)
 from long_form.scripting import generate_outline, expand_chapter
 from long_form.catalyst_bridge import (
     CHANNEL_KEY_TO_ID,
@@ -263,19 +268,41 @@ def build_long_form_router(
         combined_context = "\n\n".join(combined_context_parts)
 
         target_minutes = body.target_minutes or channel["default_minutes"]
+
+        # PR #119: enforce per-channel decoded winner title pattern + 'avoid'
+        # phrases + description tail. Empty string for channels without a
+        # template (Lacuna / Hidden Cortex / PB Live / Lo-Fi Radio) so the
+        # outline pass falls back to the existing free-form title generation.
+        title_template_block = channel_outline_prompt_extras(body.channel_key)
+
         outline = generate_outline(
             grok,
             channel["system_prompt"],
             topic=body.topic,
             target_minutes=int(target_minutes),
             catalyst_context=combined_context,
+            title_template_block=title_template_block,
         )
+
+        # Always append the channel's description_tail to outline.description
+        # so the YouTube upload metadata carries the proven CTR signal
+        # (HR's 'Human Voiced, No Ads', EM's 'Loophole Files investigation'
+        # subscribe line) — even when Grok's free-form description omits it.
+        desc_tail = (channel.get("description_tail") or "").strip()
+        if desc_tail and isinstance(outline, dict):
+            existing = (outline.get("description") or "").rstrip()
+            if existing and desc_tail not in existing:
+                outline["description"] = existing + "\n\n" + desc_tail.lstrip()
+            elif not existing:
+                outline["description"] = desc_tail.lstrip()
+
         return {
             "channel_key": body.channel_key,
             "topic": body.topic,
             "target_minutes": int(target_minutes),
             "catalyst_context_used": bool(catalyst_text),
             "references_used": bool(refs_text),
+            "title_template_enforced": bool(title_template_block),
             "outline": outline,
         }
 

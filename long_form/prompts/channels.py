@@ -5,6 +5,15 @@ Each entry locks the channel's signature so Grok / seedream / i2v all see
 the SAME context and produce on-brand output. Adding a 7th channel = add
 a key here + update the frontend channel picker.
 
+Per-channel renderable fields used downstream:
+  system_prompt          — Grok system prompt for outline + chapter expansion
+  visual_style           — appended to image-gen prompts
+  title_template         — REQUIRED title shape (winner-pattern decoded from
+                           competitor analysis); outline pass enforces this
+  description_tail       — appended to YouTube description (e.g. HR's
+                           proven 'Human Voiced, No Ads' signal worth 2,090 v/d)
+  thumbnail_style_prompt — passed to seedream when generating cover art
+
 Sourced from:
   project_channel_lanes_locked.md (2026-05-01)
   project_em_grammar_locked.md (2026-05-01)
@@ -12,6 +21,7 @@ Sourced from:
   project_v5_pipeline_locked.md (2026-04-24)
   feedback_hr_premium_fal_tts.md (HR voice rule)
   feedback_all_channels_photoreal_premium.md (photoreal default for non-skeleton)
+  D:/recaps/history_rewind/competitor_decode_2026-05-07.md (HR title-format winners)
 """
 from __future__ import annotations
 from typing import Any
@@ -146,6 +156,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "voice_provider_default": "elevenlabs",
         "voice_id_default": "",
         "cost_estimate_usd": 50.76,                   # locked v5 number
+        "pipeline_kind": "v5_episode",                # routes to v5 sub-pipeline
         "system_prompt": (
             "You write 20-minute photoreal financial-fraud / corporate-empire "
             "documentary scripts for the Empire Magnates channel. Tone: "
@@ -162,6 +173,40 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "tailored clothing. Coldfusion color grade — deep blacks, neutral "
             "midtones, restrained saturation."
         ),
+        # Title pattern decoded from Lume's gold-standard "The Trader Who
+        # Legally Stole $440M From Citibank in 18 Seconds" — the
+        # 'Loophole / Legally Stole' magic-words pattern in
+        # project_fern_lume_formulas.md. Profession + Verb + $ amount + Target
+        # compresses the entire hook into 8-12 words and triggers high CTR
+        # at small-channel scale (Casey's <100k tier).
+        "title_template": (
+            "The {profession} Who Legally {verb} ${amount} From {target}"
+        ),
+        "title_examples": [
+            "The Trader Who Legally Stole $440M From Citibank",
+            "The Auditor Who Legally Drained $1.6B From Wirecard",
+            "The CEO Who Legally Vanished $12B From Sanjay Shah's Treasury Empire",
+        ],
+        "title_avoid": [
+            "Rise and Fall",      # zero-velocity pattern
+            "Full Documentary",   # zero-velocity pattern
+            "The Story of",       # generic
+            "Inside the",         # generic
+        ],
+        "description_tail": (
+            "\n\nA Loophole Files investigation. "
+            "Subscribe for new fraud + financial-empire deep dives weekly."
+        ),
+        "thumbnail_style_prompt": (
+            "Photoreal cinematic 16:9 thumbnail. A red-porcelain stylized "
+            "mannequin executive figure (smooth red ceramic head, real "
+            "tailored navy suit) standing alone in a richly-lit boardroom or "
+            "trading floor, looking at the camera. Coldfusion color grade — "
+            "deep blacks, neutral midtones, restrained saturation. "
+            "BOLD WHITE SANS-SERIF text overlay top: '$[AMOUNT]' in huge type, "
+            "secondary line below: '[TARGET COMPANY]' in smaller red caps. "
+            "High click-through-rate documentary-thriller cover. No watermarks."
+        ),
     },
     "history_rewind": {
         "key": "history_rewind",
@@ -176,19 +221,69 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "i2v_model_default": "ken_burns",              # zoom/pan stills, no real i2v
         "voice_provider_default": "fal_minimax",
         "voice_id_default": "",
-        "cost_estimate_usd": 35.0,                    # fal MiniMax 9hr block
+        # Real cost: fal MiniMax (~478k chars × $0.10/1k = $47.80)
+        # + 540 ernie-image scenes × $0.03 = $16.20
+        # + 18 chapter LLM passes ($9) + outline/ambient/thumbnails ($0.40)
+        # ≈ $73 all-in. Old $35 estimate excluded fal MiniMax.
+        "cost_estimate_usd": 73.0,
+        "pipeline_kind": "sleep_doc",                 # routes to sleep-doc sub-pipeline
         "system_prompt": (
             "You write 9-hour sleep documentary scripts for the History "
             "Rewind channel. Tone: gentle, slow, methodical — designed for "
             "falling asleep to. Each chapter (~30 min) walks one era or "
             "dynasty in calm chronological order with specific names, dates, "
             "and outcomes. NO startling moments, NO loud transitions. ~120 "
-            "wpm calm narration. Total ~65000 narrated words."
+            "wpm calm narration. Total ~65000 narrated words. Open with a "
+            "soft 'Drift off to sleep with...' line, never a cliffhanger or "
+            "cold-open hook."
         ),
         "visual_style": (
             "Cinematic 30fps Ken-Burns stills (no full i2v). Ancient world "
             "photoreal — period-correct architecture, costume, props, soft "
             "warm lighting. Slow zoom + pan only, no fast motion."
+        ),
+        # Title pattern decoded from competitor_decode_2026-05-07.md:
+        # 'History for Sleep' suffix = 93 hits, avg 543 v/d (vs Casey's
+        # 'Rise and Fall ... Full Documentary | N Hours' = 2 hits avg 16 v/d).
+        # Joe's Sleepy History 1.3M-view monster, History at Night 917K,
+        # Bedtime History 611K all use this pattern. Pair with a topic
+        # noun-phrase like the empire/dynasty + a dark-secret hook.
+        "title_template": (
+            "The {empire_or_topic} — {hook_noun_phrase} | History for Sleep | 9 Hours"
+        ),
+        "title_examples": [
+            "The Khmer Empire — Angkor's Dark Secret | History for Sleep | 9 Hours",
+            "The Phoenicians — The Sea Empire That Wrote the World | History for Sleep | 9 Hours",
+            "The Inca Empire — The Last Days of the Sun Kings | History for Sleep | 9 Hours",
+        ],
+        "title_avoid": [
+            "Rise and Fall",      # 2 hits in 264-video corpus, avg 16 v/d
+            "Full Documentary",   # 0 winners in corpus
+            "The Story of",       # generic, low signal
+            "Complete History",   # generic
+        ],
+        # 'Human Voiced, No Ads' — proven 2,090 v/d signal in
+        # competitor_decode_2026-05-07.md (n=30 hits). Goes in description
+        # tail since the title_template is already capped at 9 Hours suffix.
+        "description_tail": (
+            "\n\nHuman Voiced, No Ads. "
+            "Drift off to sleep with the full story — told slowly, "
+            "from beginning to end."
+        ),
+        # Thumbnail style decoded from ASMR Historian 9h winners + History at
+        # Night 900K-view covers + Joe's Sleepy History 1.3M monster:
+        # dark moody single-figure (robed/torch-lit), 3-word caps overlay,
+        # corner '9 HOURS' badge. NOT golden-hour establishing shots
+        # (Casey's old pattern, 0 winners).
+        "thumbnail_style_prompt": (
+            "Cinematic 16:9 sleep-documentary thumbnail. ONE dominant "
+            "photoreal figure (robed historical figure or silhouetted "
+            "ruler) center-left, dark moody torch-lit composition, deep "
+            "shadows, occult or imperial symbol behind them. ASMR Historian "
+            "/ History at Night style. Bold yellow-white sans-serif 3-word "
+            "title caps overlay (e.g. 'KHMER EMPIRE' or 'ANGKOR SECRETS') "
+            "filling top third. Small bright '9 HOURS' badge top-right "
+            "corner. High contrast, no watermarks. Sleep-doc cover."
         ),
     },
 
@@ -269,7 +364,13 @@ CHANNELS: dict[str, dict[str, Any]] = {
 
 def list_channels(format_filter: str | None = None) -> list[dict[str, Any]]:
     """Return channels in UI render order. format_filter='long_form' or 'shorts' to
-    restrict; None returns both."""
+    restrict; None returns both.
+
+    Surfaces (in addition to base config) the title_template, title_examples,
+    description_tail snippet, and pipeline_kind so the frontend Render tab
+    can show the user exactly what title shape Grok will produce + which
+    sub-pipeline will run — no guessing.
+    """
     out = []
     for v in CHANNELS.values():
         fmt = v.get("format", "long_form")
@@ -288,6 +389,14 @@ def list_channels(format_filter: str | None = None) -> list[dict[str, Any]]:
             "i2v_model_default": v["i2v_model_default"],
             "voice_provider_default": v["voice_provider_default"],
             "cost_estimate_usd": v["cost_estimate_usd"],
+            # Per-PR-#119 hardening fields (new for HR + EM, empty/absent
+            # for older entries — frontend renders only when present).
+            "pipeline_kind": v.get("pipeline_kind", ""),
+            "title_template": v.get("title_template", ""),
+            "title_examples": list(v.get("title_examples") or []),
+            "title_avoid": list(v.get("title_avoid") or []),
+            "description_tail": v.get("description_tail", ""),
+            "thumbnail_style_prompt": v.get("thumbnail_style_prompt", ""),
         })
     return out
 
@@ -296,3 +405,42 @@ def get_channel(key: str) -> dict[str, Any]:
     if key not in CHANNELS:
         raise ValueError(f"unknown channel {key!r}. valid: {sorted(CHANNELS.keys())}")
     return CHANNELS[key]
+
+
+def channel_outline_prompt_extras(key: str) -> str:
+    """Format the title_template + title_avoid + title_examples block as a
+    system-prompt addendum to inject into long_form.scripting.generate_outline.
+
+    Returns "" when the channel has no template configured (back-compat for
+    Lacuna / Hidden Cortex / PB Live / Lo-Fi Radio which don't yet have
+    decoded winner patterns).
+    """
+    rec = CHANNELS.get(key) or {}
+    tpl = (rec.get("title_template") or "").strip()
+    if not tpl:
+        return ""
+    lines = [
+        "TITLE FORMAT — STRICT REQUIREMENT (decoded from competitor analysis "
+        "+ this channel's own performance data; deviation reduces velocity 30x):",
+        f"  Required pattern: {tpl}",
+    ]
+    examples = rec.get("title_examples") or []
+    if examples:
+        lines.append("  Working examples (match this exact shape):")
+        for ex in examples[:3]:
+            lines.append(f"    - {ex}")
+    avoid = rec.get("title_avoid") or []
+    if avoid:
+        lines.append(
+            "  NEVER use these phrases in the title (zero-velocity patterns): "
+            + ", ".join(f'"{a}"' for a in avoid[:6])
+        )
+    desc_tail = (rec.get("description_tail") or "").strip()
+    if desc_tail:
+        # Compact whitespace for prompt context
+        compact = " ".join(desc_tail.split())
+        lines.append(
+            "DESCRIPTION TAIL — append this to the YouTube description verbatim "
+            f"(proven CTR signal): {compact}"
+        )
+    return "\n".join(lines)
