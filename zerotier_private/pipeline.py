@@ -219,6 +219,203 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
     raise ZTRenderError(f"pixverse timeout for {scene['id']} after 240s")
 
 
+# ────────────────────────────────────────────────────────────────────
+# Sound design — per-scene mmaudio-v2 SFX heuristics ported from
+# Empire Magnates v5. Pattern: keyword-match the scene's visual prompt
+# to a domain-specific ambient descriptor, generate SFX via mmaudio,
+# mix under narration with 2-pass loudnorm to -14 LUFS broadcast.
+# ────────────────────────────────────────────────────────────────────
+SFX_HEURISTICS_ZT: list[tuple[tuple[str, ...], str]] = [
+    (("speed force", "lightning", "running", "sprinting", "blur", "vibrate", "racing"),
+     "electric crackle, energy hum, kinetic motion whoosh, dramatic low strings"),
+    (("death", "dying", "spectre", "ghost", "soul", "afterlife", "grave", "funeral", "casket"),
+     "ethereal whisper, ambient pad, distant wind, mortality bed, somber strings"),
+    (("crisis", "anti-monitor", "multiverse", "infinite earths", "reality"),
+     "cosmic rumble, glass breaking, reality fracturing, dramatic chaotic strings"),
+    (("black hole", "event horizon", "singularity", "cosmos", "universe", "void"),
+     "deep space hum, low cosmic rumble, gravitational drone, time dilation pad"),
+    (("apartment", "kitchen", "couch", "living room", "interior", "doorway"),
+     "interior room tone, soft hum, distant city ambience, intimate setting"),
+    (("city", "manhattan", "street", "skyline", "rooftop", "asphalt"),
+     "urban ambience, distant traffic, wind, atmospheric city bed"),
+    (("fight", "punch", "battle", "clash", "collision", "lunge", "explode"),
+     "impact hits, action thud, kinetic energy strikes, dramatic action underscore"),
+    (("daughter", "linda", "wife", "family", "embrace", "love", "wedding", "born"),
+     "warm strings, gentle ambient, hopeful arc, intimate emotional bed, soft pad"),
+    (("forgive", "memory", "regret", "sacrifice", "remember", "tear"),
+     "soft cello, warm pad, contemplative reverb, emotional bed"),
+    (("hospital", "birth", "newborn", "baby"),
+     "warm room ambience, gentle string motif, hopeful underscore, soft pad"),
+    (("courtroom", "trial", "verdict"),
+     "courtroom ambience, distant murmur, tense procedural underscore"),
+    (("chess", "thinking", "calculate", "decision"),
+     "tense thinking pad, soft ticking clock, contemplative low strings"),
+    (("crowd", "stadium", "rally", "audience"),
+     "crowd murmur, distant cheers, atmospheric ambience"),
+    (("mirror", "reflection", "doppelganger", "twin"),
+     "ethereal pad, reverb, eerie ambient, dramatic tension"),
+    (("storm", "rain", "thunder"),
+     "rainfall, distant thunder, atmospheric storm bed, dramatic low strings"),
+]
+
+DEFAULT_SFX_ZT = (
+    "Cinematic comic-book underscore, dramatic low strings, atmospheric "
+    "energy, hopeful tension, hero motif, no melody dominance, no vocals"
+)
+
+
+def _derive_sfx_prompt(scene: dict) -> str:
+    """Pick a per-scene SFX prompt by keyword-matching the visual prompt
+    + motion description against ZT-specific heuristics."""
+    haystack = (
+        str(scene.get("visual_prompt", "") or "") + " " +
+        str(scene.get("motion_prompt", "") or "") + " " +
+        str(scene.get("narration", "") or "")
+    ).lower()
+    for keywords, descriptor in SFX_HEURISTICS_ZT:
+        if any(k in haystack for k in keywords):
+            return descriptor + ". No dialogue, ambient bed only, music score."
+    return DEFAULT_SFX_ZT + ". No dialogue, ambient bed only."
+
+
+def _gen_scene_sfx(scene: dict, clip_path: Path, sfx_dir: Path) -> Path:
+    """mmaudio-v2 per-scene SFX bed. Takes the silent video clip + a
+    keyword-derived ambient prompt, returns the SFX as an MP3 file."""
+    sid = scene["id"]
+    out = sfx_dir / f"{sid}.mp3"
+    if out.exists() and out.stat().st_size > 1024:
+        return out
+    duration = float(scene.get("duration", 4.0) or 4.0)
+    prompt = _derive_sfx_prompt(scene)
+    upload_url = fal_client.upload_file(str(clip_path))
+    result = fal_client.subscribe(
+        "fal-ai/mmaudio-v2",
+        arguments={
+            "video_url": upload_url,
+            "prompt": prompt[:1500],
+            "duration": round(duration, 1),
+            "cfg_strength": 4.5,
+            "num_inference_steps": 25,
+        },
+    )
+    sfx_video_url = (result.get("video") or {}).get("url") or result.get("video_url")
+    if not sfx_video_url:
+        raise ZTRenderError(f"no video in mmaudio result for {sid}: {result}")
+    tmp = sfx_dir / f"{sid}_tmp.mp4"
+    _save_url(sfx_video_url, tmp)
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(tmp), "-vn",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        str(out),
+    ], check=True, capture_output=True)
+    try:
+        tmp.unlink()
+    except Exception:
+        pass
+    return out
+
+
+def _two_pass_loudnorm(in_path: Path, out_path: Path) -> None:
+    """Broadcast-grade -14 LUFS normalize. First pass measures, second
+    applies the linear correction. Falls back to single-pass on parse fail."""
+    measure = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(in_path), "-af",
+         "loudnorm=I=-14:LRA=7:TP=-2:print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    candidates = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", measure.stderr)
+    if not candidates:
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(in_path),
+            "-af", "loudnorm=I=-14:LRA=7:TP=-2",
+            "-c:a", "libmp3lame", "-b:a", "192k", str(out_path),
+        ], check=True, capture_output=True)
+        return
+    s = json.loads(candidates[-1])
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(in_path),
+        "-af",
+        f"loudnorm=I=-14:LRA=7:TP=-2:"
+        f"measured_I={s['input_i']}:measured_LRA={s['input_lra']}:"
+        f"measured_TP={s['input_tp']}:measured_thresh={s['input_thresh']}:"
+        f"offset={s['target_offset']}:linear=true:print_format=summary",
+        "-c:a", "libmp3lame", "-b:a", "192k", str(out_path),
+    ], check=True, capture_output=True)
+
+
+def _build_full_audio_track(
+    scenes: list[dict],
+    clips_dir: Path,
+    sfx_dir: Path,
+    vo_path: Path,
+    workspace: Path,
+) -> Path:
+    """Generate per-scene SFX in parallel, concat into a single SFX track,
+    mix narration on top at static levels (VO 1.0, SFX 0.22 ≈ -13 dB),
+    apply 2-pass loudnorm to -14 LUFS broadcast standard."""
+    sfx_dir.mkdir(exist_ok=True)
+
+    # Per-scene mmaudio in parallel (3 concurrent — fal soft-cap considerate)
+    sfx_paths_by_sid: dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {}
+        for scene in scenes:
+            clip_path = clips_dir / f"{scene['id']}.mp4"
+            if not clip_path.exists():
+                continue
+            futs[ex.submit(_gen_scene_sfx, scene, clip_path, sfx_dir)] = scene["id"]
+        for fut in as_completed(futs):
+            sid = futs[fut]
+            try:
+                sfx_paths_by_sid[sid] = fut.result()
+            except Exception as e:
+                # SFX is enhancement, not critical — log + continue without it
+                # for that one scene (silence in that scene's bed).
+                print(f"  [sfx:fail] {sid}: {e}", flush=True)
+
+    # Concat in scene order (insert silence for missing scenes so timing aligns)
+    sfx_concat = workspace / "sfx_concat.mp3"
+    sfx_list = workspace / "sfx_list.txt"
+    with open(sfx_list, "w", encoding="utf-8") as f:
+        for scene in scenes:
+            p = sfx_paths_by_sid.get(scene["id"])
+            if p and p.exists():
+                f.write(f"file '{p.as_posix()}'\n")
+            # else: this scene has no SFX, skip (slight desync — acceptable
+            # since amix duration=longest pads with VO anyway)
+    if not sfx_paths_by_sid:
+        # No SFX generated at all — fall back to just the narration track,
+        # don't fail the render.
+        return vo_path
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(sfx_list),
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        str(sfx_concat),
+    ], check=True, capture_output=True)
+
+    # Mix: VO (1.0, full volume) + SFX (0.22 ≈ -13 dB underscore)
+    mixed = workspace / "mixed_audio.mp3"
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(vo_path),
+        "-i", str(sfx_concat),
+        "-filter_complex",
+        "[0:a]volume=1.0[vo];"
+        "[1:a]volume=0.22[sfx];"
+        "[vo][sfx]amix=inputs=2:duration=longest:dropout_transition=2[mixed]",
+        "-map", "[mixed]",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        str(mixed),
+    ], check=True, capture_output=True)
+
+    # 2-pass loudnorm to -14 LUFS broadcast standard
+    final_audio = workspace / "final_audio.mp3"
+    _two_pass_loudnorm(mixed, final_audio)
+    return final_audio
+
+
 def _gen_vo(scenes: list[dict], vo_dir: Path) -> Path:
     out = vo_dir / "narration.mp3"
     if out.exists() and out.stat().st_size > 1024:
@@ -457,11 +654,21 @@ def render_finalize(
             clips[futs[fut]] = fut.result()
 
     vo = _gen_vo(scenes, vo_dir)
+    # Phase 4.6: per-scene mmaudio SFX bed mixed under narration with
+    # 2-pass loudnorm. Falls back to vo-only if any of the SFX steps
+    # fail (sound design is enhancement, not blocker).
+    sfx_dir = workspace / "sfx"
+    try:
+        audio_track = _build_full_audio_track(scenes, clips_dir, sfx_dir, vo, workspace)
+    except Exception as e:
+        print(f"  [sfx-mix:fail] falling back to vo-only: {e}", flush=True)
+        audio_track = vo
+
     final_mp4 = workspace / final_filename
-    _compose(scenes, clips, vo, workspace, final_mp4)
+    _compose(scenes, clips, audio_track, workspace, final_mp4)
 
     fal_cost_est = round(
-        len(scenes) * 0.225 + 0.10, 2  # Pixverse + MiniMax (stills already paid)
+        len(scenes) * 0.225 + 0.10 + len(scenes) * 0.05, 2  # Pixverse + MiniMax + mmaudio (stills already paid)
     )
 
     return {
@@ -511,14 +718,21 @@ def render_zerotier_short(
             clips[futs[fut]] = fut.result()
 
     vo = _gen_vo(scenes, vo_dir)
+    # Phase 4.6: per-scene mmaudio SFX + loudnorm. See render_finalize for
+    # the same logic.
+    sfx_dir = workspace / "sfx"
+    try:
+        audio_track = _build_full_audio_track(scenes, clips_dir, sfx_dir, vo, workspace)
+    except Exception as e:
+        print(f"  [sfx-mix:fail] falling back to vo-only: {e}", flush=True)
+        audio_track = vo
 
     final_mp4 = workspace / final_filename
-    _compose(scenes, clips, vo, workspace, final_mp4)
+    _compose(scenes, clips, audio_track, workspace, final_mp4)
 
-    # Cost estimate: ~$0.04 seedream still + ~$0.225 Pixverse clip + $0.10
-    # MiniMax (TTS, ~600 chars). Roughly $2.20 for 8 scenes.
+    # Cost estimate: $0.04 seedream + $0.225 Pixverse + $0.10 MiniMax + $0.05 mmaudio per scene
     fal_cost_est = round(
-        len(scenes) * 0.04 + len(scenes) * 0.225 + 0.10, 2
+        len(scenes) * 0.04 + len(scenes) * 0.225 + 0.10 + len(scenes) * 0.05, 2
     )
 
     return {
