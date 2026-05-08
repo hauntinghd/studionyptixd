@@ -42,7 +42,13 @@ from pydantic import BaseModel, Field
 
 from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
-from zerotier_private.pipeline import render_zerotier_short, ZTRenderError
+from zerotier_private.pipeline import (
+    render_zerotier_short,
+    render_stills_only,
+    regenerate_one_still,
+    render_finalize,
+    ZTRenderError,
+)
 
 
 class ZTScriptRequest(BaseModel):
@@ -62,6 +68,25 @@ class ZTRenderRequest(BaseModel):
     predicted_score: float | None = None
     predicted_like_rate: float | None = None
     topic: str | None = None
+
+
+# Phase 4.5: per-scene approval flow
+class ZTStillsOnlyRequest(BaseModel):
+    script_json: str = Field(..., min_length=10)
+    topic: str | None = None
+    predicted_score: float | None = None
+    predicted_like_rate: float | None = None
+
+
+class ZTRegenStillRequest(BaseModel):
+    job_id: str
+    scene_index: int = Field(ge=0, le=20)
+    custom_prompt: str | None = None
+
+
+class ZTFinalizeRequest(BaseModel):
+    job_id: str
+    final_filename: str | None = None
 
 
 # Where rendered MP4s live. Mirrors skeleton_ai's pattern.
@@ -469,6 +494,193 @@ def build_zerotier_private_router(
             return json.loads(result_path.read_text(encoding="utf-8"))
         except Exception as e:
             raise HTTPException(500, f"result_parse_failed: {e}")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Phase 4.5: per-scene approval flow.
+    #
+    # Stage 1: POST /render-stills
+    #   - Generates 8 seedream stills in parallel (~$0.32, 60s).
+    #   - Returns {job_id, scenes: [{scene_index, scene_id, caption,
+    #     narration, duration, still_url, visual_prompt_preview}]}
+    #   - User reviews stills before committing to i2v + compose.
+    #
+    # Stage 2 (per-scene as needed): POST /render-still-one
+    #   - Regenerates a single still given {job_id, scene_index, optional
+    #     custom_prompt to override the visual description}. Caches the
+    #     other 7. ~$0.04 per regen.
+    #
+    # Stage 3: POST /render-finalize
+    #   - Given a job_id with all 8 stills approved, runs Pixverse i2v +
+    #     MiniMax narration + ffmpeg compose. ~$1.86, 5-7 min.
+    #   - Returns the final MP4.
+    #
+    # Stills are served via GET /jobs/{job_id}/stills/{filename}.
+    # ────────────────────────────────────────────────────────────────────
+    @router.post("/render-stills")
+    async def zt_render_stills(body: ZTStillsOnlyRequest, user: dict = auth_dep):
+        _gate_admin(user)
+
+        # Validate JSON parses
+        try:
+            parsed = json.loads(body.script_json)
+        except Exception as e:
+            raise HTTPException(400, f"script_json must be valid JSON: {e}")
+        if not isinstance(parsed, dict) or not parsed.get("scenes"):
+            raise HTTPException(400, "script_json must be an object with a non-empty 'scenes' array")
+
+        job_id = uuid.uuid4().hex[:12]
+        workspace = ZT_OUTPUT_ROOT / job_id
+        workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            (workspace / "script.json").write_text(body.script_json, encoding="utf-8")
+        except Exception:
+            pass
+
+        try:
+            result = render_stills_only(
+                script_json=parsed,
+                workspace=workspace,
+            )
+        except ZTRenderError as e:
+            raise HTTPException(500, f"stills_failed: {e}")
+        except Exception as e:
+            raise HTTPException(500, f"stills_failed: {type(e).__name__}: {e}")
+
+        # Persist a partial result.json so /jobs/{id} can return progress.
+        partial = {
+            "job_id": job_id,
+            "stage": "stills_done",
+            "topic": (body.topic or result.get("title") or "").strip(),
+            "predicted_score": body.predicted_score,
+            "predicted_like_rate": body.predicted_like_rate,
+            **result,
+        }
+        try:
+            (workspace / "result.json").write_text(
+                json.dumps(partial, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        # Annotate scene rows with absolute still URLs so frontend can render previews.
+        scenes_with_url = []
+        for s in result.get("scenes", []):
+            scenes_with_url.append({
+                **s,
+                "still_url": f"/api/zerotier-private/jobs/{job_id}/stills/{s['still_filename']}",
+            })
+
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "title": result.get("title"),
+            "scene_count": result.get("scene_count"),
+            "scenes": scenes_with_url,
+            "fal_cost_so_far_usd": result.get("fal_cost_estimate_usd_so_far", 0.32),
+        }
+
+    @router.post("/render-still-one")
+    async def zt_render_still_one(body: ZTRegenStillRequest, user: dict = auth_dep):
+        _gate_admin(user)
+        if not body.job_id.replace("_", "").isalnum() or len(body.job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        workspace = ZT_OUTPUT_ROOT / body.job_id
+        if not workspace.exists():
+            raise HTTPException(404, "job_not_found")
+        try:
+            result = regenerate_one_still(
+                workspace=workspace,
+                scene_index=body.scene_index,
+                custom_prompt=body.custom_prompt,
+            )
+        except ZTRenderError as e:
+            raise HTTPException(400, f"regen_failed: {e}")
+        except Exception as e:
+            raise HTTPException(500, f"regen_failed: {type(e).__name__}: {e}")
+        return {
+            "ok": True,
+            "job_id": body.job_id,
+            **result,
+            "still_url": f"/api/zerotier-private/jobs/{body.job_id}/stills/{result['still_filename']}",
+        }
+
+    @router.post("/render-finalize")
+    async def zt_render_finalize(body: ZTFinalizeRequest, user: dict = auth_dep):
+        _gate_admin(user)
+        if not body.job_id.replace("_", "").isalnum() or len(body.job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        workspace = ZT_OUTPUT_ROOT / body.job_id
+        if not workspace.exists():
+            raise HTTPException(404, "job_not_found")
+
+        final_filename = _safe_filename(
+            body.final_filename or f"ZeroTier_{body.job_id}.mp4",
+            default=f"ZeroTier_{body.job_id}.mp4",
+        )
+
+        try:
+            result = render_finalize(
+                workspace=workspace,
+                final_filename=final_filename,
+            )
+        except ZTRenderError as e:
+            raise HTTPException(500, f"finalize_failed: {e}")
+        except Exception as e:
+            raise HTTPException(500, f"finalize_failed: {type(e).__name__}: {e}")
+
+        # Read existing partial result.json if present (preserves prediction
+        # metadata from stills stage), merge with finalize result.
+        prior = {}
+        try:
+            prior = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        result_payload = {
+            **prior,
+            "job_id": body.job_id,
+            "stage": "done",
+            "status": "done",
+            **result,
+        }
+        try:
+            (workspace / "result.json").write_text(
+                json.dumps(result_payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        # Phase 3: append prediction record
+        try:
+            _append_prediction_log({
+                "job_id": body.job_id,
+                "ts": int(__import__("time").time()),
+                "topic": str(prior.get("topic", "") or "").strip(),
+                "title": result.get("title", ""),
+                "predicted_score": prior.get("predicted_score"),
+                "predicted_like_rate": prior.get("predicted_like_rate"),
+                "scene_count": result.get("scene_count"),
+                "duration_total_sec": result.get("duration_total_sec"),
+                "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
+            })
+        except Exception:
+            pass
+
+        result_payload["mp4_url"] = f"/api/zerotier-private/jobs/{body.job_id}/mp4"
+        return result_payload
+
+    @router.get("/jobs/{job_id}/stills/{filename}")
+    async def zt_job_still(job_id: str, filename: str, user: dict = auth_dep):
+        _gate_admin(user)
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        if not filename.endswith(".png") or "/" in filename or ".." in filename:
+            raise HTTPException(400, "bad_filename")
+        path = ZT_OUTPUT_ROOT / job_id / "stills" / filename
+        if not path.exists():
+            raise HTTPException(404, "not_found")
+        return FileResponse(str(path), media_type="image/png")
 
     @router.get("/jobs/{job_id}/mp4")
     async def zt_job_mp4(job_id: str, user: dict = auth_dep):

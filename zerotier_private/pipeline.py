@@ -320,13 +320,167 @@ def _compose(scenes: list[dict], clips: list[Path], vo: Path,
     return out_path
 
 
+def render_stills_only(
+    *,
+    script_json: Any,
+    workspace: Path,
+) -> dict:
+    """Phase 4.5a: render stills only. Returns scene metadata + per-scene
+    still paths so the user can preview + approve before animation burns
+    Pixverse credits.
+
+    Stills cache by scene_id, so a regen of one scene only re-pays for that
+    scene (the others stay cached).
+    """
+    _ensure_fal()
+    workspace = Path(workspace)
+    stills_dir = workspace / "stills"
+    stills_dir.mkdir(parents=True, exist_ok=True)
+
+    scenes, title = _normalize_scenes(script_json)
+
+    # Persist the normalized scenes so finalize can read them later.
+    scenes_path = workspace / "scenes.json"
+    scenes_path.write_text(
+        json.dumps({"title": title, "scenes": scenes}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    stills: list[Path] = [None] * len(scenes)  # type: ignore
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(_gen_still, s, stills_dir): i for i, s in enumerate(scenes)}
+        for fut in as_completed(futs):
+            stills[futs[fut]] = fut.result()
+
+    return {
+        "title": title,
+        "scene_count": len(scenes),
+        "scenes": [
+            {
+                "scene_index": i,
+                "scene_id": s["id"],
+                "caption": s["caption"],
+                "narration": s["narration"],
+                "duration": s["duration"],
+                "visual_prompt_preview": (s["visual_prompt"][:200] + ("…" if len(s["visual_prompt"]) > 200 else "")),
+                "still_filename": stills[i].name,
+            }
+            for i, s in enumerate(scenes)
+        ],
+        "fal_cost_estimate_usd_so_far": round(len(scenes) * 0.04, 2),
+    }
+
+
+def regenerate_one_still(
+    *,
+    workspace: Path,
+    scene_index: int,
+    custom_prompt: str | None = None,
+) -> dict:
+    """Phase 4.5a: regenerate a SINGLE still for an existing job. Reads the
+    persisted scenes.json, optionally overrides the visual_prompt with the
+    user's edit, deletes the cached still, and re-renders.
+    """
+    _ensure_fal()
+    workspace = Path(workspace)
+    scenes_path = workspace / "scenes.json"
+    if not scenes_path.exists():
+        raise ZTRenderError(f"scenes.json not found in {workspace}; run render-stills first")
+    raw = json.loads(scenes_path.read_text(encoding="utf-8"))
+    scenes = raw.get("scenes") or []
+    if scene_index < 0 or scene_index >= len(scenes):
+        raise ZTRenderError(f"scene_index {scene_index} out of range (have {len(scenes)} scenes)")
+
+    scene = dict(scenes[scene_index])
+    if custom_prompt and custom_prompt.strip():
+        scene["visual_prompt"] = (
+            f"{COMIC_STYLE}Vertical 9:16 frame. {custom_prompt.strip()[:3000]}"
+        )
+        # Update persisted scenes.json so subsequent renders use the new prompt.
+        scenes[scene_index]["visual_prompt"] = scene["visual_prompt"]
+        scenes_path.write_text(
+            json.dumps({"title": raw.get("title", ""), "scenes": scenes}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    stills_dir = workspace / "stills"
+    stills_dir.mkdir(parents=True, exist_ok=True)
+    out = stills_dir / f"{scene['id']}.png"
+    if out.exists():
+        out.unlink()  # force regen
+    new_path = _gen_still(scene, stills_dir)
+    return {
+        "scene_index": scene_index,
+        "scene_id": scene["id"],
+        "still_filename": new_path.name,
+        "fal_cost_estimate_usd": 0.04,
+    }
+
+
+def render_finalize(
+    *,
+    workspace: Path,
+    final_filename: str = "ZeroTier_short.mp4",
+) -> dict:
+    """Phase 4.5a: given an existing job with all 8 stills approved, run
+    the i2v + TTS + compose stages to produce the final MP4.
+
+    Reads scenes.json + stills/ from the workspace.
+    """
+    _ensure_fal()
+    workspace = Path(workspace)
+    scenes_path = workspace / "scenes.json"
+    if not scenes_path.exists():
+        raise ZTRenderError(f"scenes.json not found in {workspace}; run render-stills first")
+    raw = json.loads(scenes_path.read_text(encoding="utf-8"))
+    scenes = raw.get("scenes") or []
+    title = raw.get("title", "ZeroTier short")
+    stills_dir = workspace / "stills"
+    clips_dir = workspace / "clips"
+    vo_dir = workspace / "vo"
+    clips_dir.mkdir(exist_ok=True)
+    vo_dir.mkdir(exist_ok=True)
+
+    # Verify all stills exist
+    stills: list[Path] = []
+    for s in scenes:
+        p = stills_dir / f"{s['id']}.png"
+        if not p.exists():
+            raise ZTRenderError(f"still missing for scene {s['id']} — generate first")
+        stills.append(p)
+
+    # i2v in parallel
+    clips: list[Path] = [None] * len(scenes)  # type: ignore
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(_gen_clip_pixverse, scenes[i], stills[i], clips_dir): i for i in range(len(scenes))}
+        for fut in as_completed(futs):
+            clips[futs[fut]] = fut.result()
+
+    vo = _gen_vo(scenes, vo_dir)
+    final_mp4 = workspace / final_filename
+    _compose(scenes, clips, vo, workspace, final_mp4)
+
+    fal_cost_est = round(
+        len(scenes) * 0.225 + 0.10, 2  # Pixverse + MiniMax (stills already paid)
+    )
+
+    return {
+        "mp4_path": str(final_mp4),
+        "title": title,
+        "scene_count": len(scenes),
+        "duration_total_sec": round(sum(s["duration"] for s in scenes), 1),
+        "fal_cost_estimate_usd": fal_cost_est,
+        "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
+    }
+
+
 def render_zerotier_short(
     *,
     script_json: Any,
     workspace: Path,
     final_filename: str = "ZeroTier_short.mp4",
 ) -> dict:
-    """Run the full canonical ZeroTier render pipeline.
+    """Run the full canonical ZeroTier render pipeline (monolithic).
 
     Returns a dict with keys: mp4_path (Path), title, duration_total_sec,
     scene_count, fal_cost_estimate_usd.
