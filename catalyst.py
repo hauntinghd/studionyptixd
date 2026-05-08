@@ -1426,6 +1426,8 @@ async def _build_catalyst_hub_payload(
                     "published_at": str((row or {}).get("published_at", "") or "").strip(),
                     "thumbnail_url": str((row or {}).get("thumbnail_url", "") or "").strip(),
                     "views": int(float((row or {}).get("views", 0) or 0) or 0),
+                    "likes": int(float((row or {}).get("likes", 0) or 0) or 0),
+                    "comments": int(float((row or {}).get("comments", 0) or 0) or 0),
                     "average_view_percentage": round(float((row or {}).get("average_view_percentage", 0.0) or 0.0), 2),
                     "impression_click_through_rate": round(float((row or {}).get("impression_click_through_rate", 0.0) or 0.0), 2),
                     "duration_sec": int(float((row or {}).get("duration_sec", 0) or 0) or 0),
