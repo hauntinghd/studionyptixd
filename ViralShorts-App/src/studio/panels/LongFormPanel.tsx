@@ -573,8 +573,41 @@ export default function LongFormPanel() {
             if (state.channel_key) setSelectedChannel(state.channel_key);
             if (state.outline) setOutline(state.outline);
             setTab('render');
-            // If still running (and not paused at the approval gate), keep
-            // polling. awaiting_approval stops polling — gate UI takes over.
+
+            // PR #129: if the job was running but its asyncio task got
+            // killed (Fly redeploy / process restart / cancel), the disk
+            // state shows phase=scene_assembly but no work is happening.
+            // Auto-re-kick finalize so Casey doesn't have to click an
+            // extra Resume Finalize button. The backend's allow-list
+            // includes scene_assembly / cancelled / failed (PR #128) and
+            // every per-helper is idempotent (existing files reused).
+            const stuckPhases = [
+                'scene_assembly', 'narration', 'ambient', 'thumbnails',
+                'compose', 'cancelled', 'failed', 'finalizing', 'starting',
+            ];
+            if (state.phase && stuckPhases.includes(state.phase)) {
+                try {
+                    const finalizeResp = await fetchJsonResilient(
+                        `${API}/api/long-form/jobs/${jobId}/finalize`,
+                        {
+                            method: 'POST',
+                            headers: { Authorization: `Bearer ${tok}` },
+                        },
+                    );
+                    if (finalizeResp.ok) {
+                        setJobStatus({
+                            job_id: jobId,
+                            phase: 'finalizing',
+                            percent: state.percent || 73,
+                        });
+                    }
+                } catch {
+                    /* fall through to plain poll */
+                }
+                pollJob(jobId, 36000);
+                return;
+            }
+            // Other live phases (chapters / scenes) — just poll.
             if (
                 state.phase
                 && state.phase !== 'done'
