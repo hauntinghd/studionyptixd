@@ -17,7 +17,7 @@
  *     candidate title prefilled (Phase 2 wires the zerotier_private template).
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
+import { AlertTriangle, Film, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
 import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
@@ -303,6 +303,23 @@ export default function ZeroTierPrivatePanel() {
     }
     const [predictions, setPredictions] = useState<PredictionRow[]>([]);
 
+    // Phase 4.5c: list of past jobs the user can resume
+    interface RecentJob {
+        job_id: string;
+        title?: string;
+        topic?: string;
+        stage?: string;
+        scene_count?: number;
+        predicted_score?: number;
+        predicted_like_rate?: number;
+        duration_total_sec?: number;
+        fal_cost_estimate_usd?: number;
+        thumbnail_url?: string | null;
+        mp4_url?: string | null;
+        updated_at?: number;
+    }
+    const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
+
     const channel = useMemo(() => {
         const channels = payload?.channels || [];
         return channels.find((c) => c.channel_id === ZEROTIER_CHANNEL_ID) || payload?.selected_channel || channels[0];
@@ -438,9 +455,66 @@ export default function ZeroTierPrivatePanel() {
         }
     }, [accessToken]);
 
+    // Phase 4.5c: fetch list of past renders (for resume + history view)
+    const fetchRecentJobs = useCallback(async () => {
+        if (!accessToken) return;
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/jobs?limit=12`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            const data = await r.json();
+            if (r.ok) {
+                setRecentJobs(Array.isArray(data?.jobs) ? data.jobs : []);
+            }
+        } catch {
+            // non-blocking
+        }
+    }, [accessToken]);
+
     useEffect(() => {
         void fetchPredictions();
-    }, [fetchPredictions, payload]);
+        void fetchRecentJobs();
+    }, [fetchPredictions, fetchRecentJobs, payload]);
+
+    // Phase 4.5c: resume a past job — re-hydrate the modal with its persisted
+    // scenes + stills + script. User can regenerate any still or jump straight
+    // to finalize without re-rendering anything.
+    const resumeJob = useCallback(async (jobId: string) => {
+        if (!accessToken) return;
+        setBuildError('');
+        setBuildModalOpen(true);
+        setBuildLoading(false);
+        setStillsLoading(false);
+        setFinalizeLoading(false);
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/jobs/${jobId}/state`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Resume failed (${r.status})`));
+            setBuildTopic(data?.topic || data?.title || '');
+            setBuildScript(String(data?.script_json || '').trim());
+            setStillsJobId(jobId);
+            const scenes = (data?.scenes || []) as ScenePreview[];
+            setScenePreviews(scenes.map((s) => ({ ...s, still_url: `${API}${s.still_url}` })));
+            // If there's a finished MP4, populate renderResult so the user
+            // sees the open-MP4 link without needing to re-render.
+            if (data?.mp4_url) {
+                setRenderResult({
+                    job_id: jobId,
+                    title: data?.title,
+                    mp4_url: `${API}${data.mp4_url}`,
+                    scene_count: data?.scene_count,
+                    duration_total_sec: data?.duration_total_sec,
+                    fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
+                });
+            } else {
+                setRenderResult(null);
+            }
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Resume failed'));
+        }
+    }, [accessToken]);
 
     // OAuth-return flow: when the URL contains ?youtube_channel_id=... the
     // user just came back from Google OAuth. Force a Catalyst refresh (not
@@ -846,6 +920,72 @@ export default function ZeroTierPrivatePanel() {
                             </div>
                         )}
                     </section>
+
+                    {/* Phase 4.5c: Recent renders — resume a project you started earlier */}
+                    {recentJobs.length > 0 && (
+                        <section className="rounded-2xl border border-emerald-500/30 bg-emerald-500/[0.04] p-5">
+                            <div className="flex items-center gap-2 mb-3">
+                                <Film className="h-5 w-5 text-emerald-300" />
+                                <h2 className="text-lg font-bold text-white">Recent renders</h2>
+                                <span className="text-xs text-zinc-500">— click any to resume</span>
+                            </div>
+                            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                {recentJobs.map((j) => {
+                                    const stageLabel = j.stage === 'done' || j.mp4_url ? 'Final MP4 ready'
+                                        : j.stage === 'stills_done' ? 'Stills ready (resume to animate)'
+                                        : 'In progress';
+                                    const stageColor = j.stage === 'done' || j.mp4_url ? 'text-emerald-300 bg-emerald-500/10'
+                                        : j.stage === 'stills_done' ? 'text-amber-300 bg-amber-500/10'
+                                        : 'text-zinc-400 bg-zinc-500/10';
+                                    return (
+                                        <button
+                                            key={j.job_id}
+                                            type="button"
+                                            onClick={() => resumeJob(j.job_id)}
+                                            className="text-left rounded-xl border border-white/[0.08] bg-black/30 overflow-hidden transition hover:border-emerald-500/50 hover:shadow-lg hover:shadow-emerald-900/20"
+                                        >
+                                            <div className="relative aspect-[9/16] bg-black">
+                                                {j.thumbnail_url ? (
+                                                    <img
+                                                        src={`${API}${j.thumbnail_url}`}
+                                                        alt={j.title || j.job_id}
+                                                        loading="lazy"
+                                                        className="absolute inset-0 w-full h-full object-cover"
+                                                    />
+                                                ) : (
+                                                    <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-600">
+                                                        no thumbnail
+                                                    </div>
+                                                )}
+                                                <div className={`absolute top-1 left-1 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] ${stageColor}`}>
+                                                    {stageLabel}
+                                                </div>
+                                                {j.mp4_url && (
+                                                    <div className="absolute top-1 right-1 rounded bg-emerald-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                                                        MP4
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="p-2.5">
+                                                <h3 className="text-xs font-semibold text-white leading-snug line-clamp-2 mb-1">
+                                                    {j.title || j.topic || j.job_id}
+                                                </h3>
+                                                <div className="flex items-center justify-between gap-2 text-[10px] text-zinc-500">
+                                                    <span>{j.scene_count || 0} scenes</span>
+                                                    {typeof j.predicted_score === 'number' && (
+                                                        <span className="text-zinc-300">score {Math.round(j.predicted_score)}</span>
+                                                    )}
+                                                    {typeof j.fal_cost_estimate_usd === 'number' && (
+                                                        <span>${j.fal_cost_estimate_usd.toFixed(2)}</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </section>
+                    )}
 
                     {/* Phase 4: AI-generated topic ideas — fully autonomous, learns from your channel */}
                     <section className="rounded-2xl border border-violet-500/40 bg-violet-500/[0.06] p-5">

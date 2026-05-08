@@ -744,8 +744,11 @@ def build_zerotier_private_router(
         return {"ok": True, "job_id": job_id, **public}
 
     @router.get("/jobs/{job_id}/stills/{filename}")
-    async def zt_job_still(job_id: str, filename: str, user: dict = auth_dep):
-        _gate_admin(user)
+    async def zt_job_still(job_id: str, filename: str):
+        # Auth-less by design: <img src> can't send Authorization headers, so
+        # we gate on the random 12-hex job_id (~3e14 entropy) which acts as an
+        # opaque capability token. The user already has the job_id only via
+        # the auth-gated render-stills response.
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
         if not filename.endswith(".png") or "/" in filename or ".." in filename:
@@ -756,12 +759,11 @@ def build_zerotier_private_router(
         return FileResponse(str(path), media_type="image/png")
 
     @router.get("/jobs/{job_id}/mp4")
-    async def zt_job_mp4(job_id: str, user: dict = auth_dep):
-        _gate_admin(user)
+    async def zt_job_mp4(job_id: str):
+        # Auth-less for the same reason as /stills/{filename} — browsers
+        # can't send Authorization on direct media downloads / video tag.
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
-        # The MP4 filename comes from result.json's "mp4_path" — but to keep
-        # this endpoint simple, scan the workspace for any .mp4 at the root.
         ws = ZT_OUTPUT_ROOT / job_id
         if not ws.exists():
             raise HTTPException(404, "job_not_found")
@@ -773,6 +775,155 @@ def build_zerotier_private_router(
                     filename=candidate.name,
                 )
         raise HTTPException(404, "mp4_not_found")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Phase 4.5c: list past jobs so user can resume a project they left.
+    # Reads result.json from each workspace directory.
+    # ────────────────────────────────────────────────────────────────────
+    @router.get("/jobs")
+    async def zt_list_jobs(user: dict = auth_dep, limit: int = 30):
+        _gate_admin(user)
+        limit = max(1, min(100, int(limit or 30)))
+        if not ZT_OUTPUT_ROOT.exists():
+            return {"ok": True, "jobs": []}
+        rows: list[dict] = []
+        # Iterate per-job workspace dirs, newest first by mtime
+        try:
+            dirs = sorted(
+                [p for p in ZT_OUTPUT_ROOT.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            dirs = []
+        for d in dirs[:limit * 2]:
+            job_id = d.name
+            if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+                continue
+            rj = d / "result.json"
+            if not rj.exists():
+                continue
+            try:
+                data = json.loads(rj.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            scenes_meta = data.get("scenes") or []
+            # Find the first still filename for thumbnail preview
+            stills_dir = d / "stills"
+            first_still = None
+            if scenes_meta and isinstance(scenes_meta, list):
+                first = scenes_meta[0]
+                if isinstance(first, dict):
+                    fn = first.get("still_filename") or (first.get("scene_id") and f"{first['scene_id']}.png")
+                    if fn and (stills_dir / fn).exists():
+                        first_still = fn
+            if not first_still:
+                # Fallback: first PNG in the stills dir
+                if stills_dir.exists():
+                    for p in sorted(stills_dir.glob("*.png")):
+                        if p.is_file():
+                            first_still = p.name
+                            break
+            stage = data.get("stage") or ("done" if data.get("mp4_url") else "stills_done")
+            mtime = d.stat().st_mtime
+            rows.append({
+                "job_id": job_id,
+                "title": data.get("title", ""),
+                "topic": data.get("topic", ""),
+                "stage": stage,
+                "scene_count": data.get("scene_count", len(scenes_meta)),
+                "predicted_score": data.get("predicted_score"),
+                "predicted_like_rate": data.get("predicted_like_rate"),
+                "duration_total_sec": data.get("duration_total_sec"),
+                "fal_cost_estimate_usd": data.get("fal_cost_estimate_usd"),
+                "thumbnail_url": (
+                    f"/api/zerotier-private/jobs/{job_id}/stills/{first_still}"
+                    if first_still else None
+                ),
+                "mp4_url": (
+                    f"/api/zerotier-private/jobs/{job_id}/mp4"
+                    if (d / f"ZeroTier_{job_id}.mp4").exists() or any(d.glob("*.mp4"))
+                    else None
+                ),
+                "updated_at": mtime,
+            })
+            if len(rows) >= limit:
+                break
+        return {"ok": True, "jobs": rows}
+
+    @router.get("/jobs/{job_id}/state")
+    async def zt_job_state(job_id: str, user: dict = auth_dep):
+        """Resume-a-job endpoint: returns enough state to re-hydrate the
+        modal — the original script_json, the persisted scenes (with full
+        still URLs), and any final MP4 URL."""
+        _gate_admin(user)
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        ws = ZT_OUTPUT_ROOT / job_id
+        if not ws.exists():
+            raise HTTPException(404, "job_not_found")
+
+        result_path = ws / "result.json"
+        scenes_path = ws / "scenes.json"
+        script_path = ws / "script.json"
+        result = {}
+        scenes_data = {}
+        script_text = ""
+        try:
+            if result_path.exists():
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            if scenes_path.exists():
+                scenes_data = json.loads(scenes_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            if script_path.exists():
+                script_text = script_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+        # Build scene rows with still URLs
+        scenes_with_url: list[dict] = []
+        normalized_scenes = scenes_data.get("scenes") or []
+        for i, s in enumerate(normalized_scenes):
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("id", "") or "")
+            still_filename = f"{sid}.png"
+            still_path = ws / "stills" / still_filename
+            if not still_path.exists():
+                continue
+            scenes_with_url.append({
+                "scene_index": i,
+                "scene_id": sid,
+                "caption": s.get("caption", ""),
+                "narration": s.get("narration", ""),
+                "duration": float(s.get("duration", 4.0)),
+                "still_url": f"/api/zerotier-private/jobs/{job_id}/stills/{still_filename}",
+                "visual_prompt_preview": (s.get("visual_prompt", "")[:200] + ("…" if len(s.get("visual_prompt", "")) > 200 else "")),
+            })
+
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "title": result.get("title") or scenes_data.get("title", ""),
+            "topic": result.get("topic", ""),
+            "stage": result.get("stage", "stills_done"),
+            "predicted_score": result.get("predicted_score"),
+            "predicted_like_rate": result.get("predicted_like_rate"),
+            "scene_count": result.get("scene_count", len(normalized_scenes)),
+            "scenes": scenes_with_url,
+            "script_json": script_text,
+            "mp4_url": (
+                f"/api/zerotier-private/jobs/{job_id}/mp4"
+                if any(ws.glob("*.mp4")) else None
+            ),
+            "duration_total_sec": result.get("duration_total_sec"),
+            "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
+        }
 
     # ────────────────────────────────────────────────────────────────────
     # Phase 3: predictions-vs-actuals learning surface.
