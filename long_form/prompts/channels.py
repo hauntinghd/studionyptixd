@@ -42,6 +42,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "voice_provider_default": "elevenlabs",
         "voice_id_default": "",                       # falls back to Brian
         "cost_estimate_usd": 120.0,                   # $61 base / $120-160 all-in
+        "pipeline_kind": "v5_episode",                # cinematic LTX + EL + silence-kill
         "system_prompt": (
             "You write 60-minute LEMMiNO-style sci-fi/horror documentary scripts "
             "for the We Are Lacuna channel. Tone: cold, clinical, methodical "
@@ -56,6 +57,36 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "+ amber accent palette, fog and atmospheric haze, no human faces "
             "(silhouettes and over-shoulder only). LEMMiNO color grade with "
             "deep shadows and milky highlights."
+        ),
+        # Title pattern decoded from LEMMiNO's top performers (Bigfoot, MH370,
+        # Voynich Manuscript, Bermuda Triangle, Black Knight Satellite). Short,
+        # declarative, mystery-noun first. The channel's framing is
+        # 'investigation' so we suffix with that to brand-mark.
+        "title_template": (
+            "The {Subject} — {Hook} | A Lacuna Investigation"
+        ),
+        "title_examples": [
+            "The Dyatlov Pass — Nine Hikers, One Mountain, No Survivors | A Lacuna Investigation",
+            "The Voynich Manuscript — A Book Nobody Can Read | A Lacuna Investigation",
+            "Area 51 — What's Actually Inside | A Lacuna Investigation",
+        ],
+        "title_avoid": [
+            "Top 10",                # clickbait, kills LEMMiNO grade
+            "You won't believe",     # tabloid voice
+            "Watch what happens",    # listicle voice
+            "Will Make You",         # listicle voice
+        ],
+        "description_tail": (
+            "\n\nA Lacuna investigation. Subscribe for new mysteries weekly. "
+            "Original research, archival sources cited in pinned comment."
+        ),
+        "thumbnail_style_prompt": (
+            "Cinematic 16:9 documentary thumbnail, LEMMiNO-grade. ONE dominant "
+            "subject (object, location, or silhouetted figure) center frame, "
+            "dimly lit, cold blue + amber accent palette, atmospheric fog and "
+            "haze, deep shadows. Bold sans-serif title overlay top — 2-4 words "
+            "in caps. NO faces, NO smiling humans, NO clickbait arrows. "
+            "Editorial-grade documentary cover."
         ),
     },
     "hidden_cortex": {
@@ -72,6 +103,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "voice_provider_default": "elevenlabs",
         "voice_id_default": "",
         "cost_estimate_usd": 35.0,
+        "pipeline_kind": "v5_episode",                # cinematic essay-style episodes
         "system_prompt": (
             "You write 20-30 minute educational mind/consciousness documentaries "
             "for the Hidden Cortex channel. Tone: curious, scholarly but "
@@ -84,6 +116,40 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "Photoreal cinematic 30fps. Brain/neuron macro shots, lab equipment, "
             "vintage academic settings, soft warm lighting on archival textures. "
             "Avoid stock-shutterstock look — go cinematic editorial."
+        ),
+        # Title pattern decoded from Vsauce / Why Files / Inside Job top hits.
+        # Two dominant variants:
+        #   (a) named-effect declarative: "The {Effect} Effect"
+        #   (b) curious-question: "What Happens When/If {Phenomenon}"
+        # We default to (a) because named-effect titles compound (each video
+        # builds the channel's vocabulary) and have stronger CTR baseline at
+        # small-channel scale per the corpus_v2_104 analysis.
+        "title_template": (
+            "The {Effect} Effect: Why {Phenomenon}"
+        ),
+        "title_examples": [
+            "The Halo Effect: Why We Trust Beautiful People Without Knowing Them",
+            "The Bystander Effect: Why Nobody Calls the Cops",
+            "The Dunning-Kruger Effect: Why Idiots Think They're Geniuses",
+        ],
+        "title_avoid": [
+            "Top 5",                  # listicle, weak CTR for science
+            "Mind-blowing",           # generic clickbait
+            "Will Change Your Life",  # tabloid voice
+            "10 Things You Didn't Know",  # legacy listicle
+        ],
+        "description_tail": (
+            "\n\nHidden Cortex — the science of mind, no fluff. "
+            "Studies cited in description below. Subscribe for weekly deep dives."
+        ),
+        "thumbnail_style_prompt": (
+            "Cinematic 16:9 editorial-science thumbnail. Macro shot of brain "
+            "tissue, neurons firing, or vintage neuroscience equipment "
+            "(EEG cap, MRI scanner cross-section, lab notebook with "
+            "diagrams). Soft warm tungsten lighting on archival textures, "
+            "shallow depth of field. Bold serif title overlay 2-4 caps "
+            "words. NO talking-head shots, NO stock-photography people. "
+            "Vsauce/Why Files editorial grade."
         ),
     },
     "pb_live": {
@@ -100,6 +166,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "voice_provider_default": "elevenlabs",
         "voice_id_default": "",
         "cost_estimate_usd": 45.0,
+        "pipeline_kind": "v5_episode",                # forensic cinematic with SFX
         "system_prompt": (
             "You write 25-35 minute true-crime and intelligence-operation "
             "documentaries for the PB Live channel. Tone: investigative "
@@ -112,6 +179,41 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "Photoreal cinematic 30fps. Surveillance camera grain, manila "
             "case files, redacted documents, dimly lit interrogation rooms. "
             "Forensic-grade detail. No editorial cartoons."
+        ),
+        # Title pattern decoded from Coldfusion + Cold Case Files + Inside Job
+        # top performers (Operation MK-Ultra, Operation Mockingbird, Berlin
+        # Tunnel, Northwoods). Operation-name first when applicable, otherwise
+        # subject:hook colon-form. Agency designation lifts CTR significantly
+        # (CIA/FBI/NSA/KGB/MI6/Stasi all dominate the search/recommendation
+        # signal for true-crime + intel niches per the IP/copyright memory).
+        "title_template": (
+            "{Operation_or_Case}: How the {Agency} {Action}"
+        ),
+        "title_examples": [
+            "Operation Mockingbird: How the CIA Bought the American Press",
+            "The Berlin Tunnel: How the CIA Tapped the KGB for 11 Months",
+            "MK-Ultra: How the CIA Drugged 7,000 American Citizens",
+        ],
+        "title_avoid": [
+            "Most Disturbing",          # tabloid voice
+            "Top 10 Cases",             # listicle
+            "What They Don't Want",     # conspiracy clickbait
+            "EXPOSED",                  # tabloid caps
+            "Crazy True Story",         # weak framing
+        ],
+        "description_tail": (
+            "\n\nPB Live — investigative documentaries on declassified "
+            "operations and unsolved cases. Sources cited in description. "
+            "Subscribe for new case files weekly."
+        ),
+        "thumbnail_style_prompt": (
+            "Cinematic 16:9 forensic-grade thumbnail. Manila case file with "
+            "bold redacted sections + black-and-white surveillance photo "
+            "or document close-up. Top-secret stamp + classification banner. "
+            "Cold tungsten + amber underglow, deep blacks, 1970s-90s "
+            "documentary aesthetic. Bold sans-serif 2-4 caps title overlay. "
+            "NO smiling faces, NO crime-scene gore, NO clickbait arrows. "
+            "Cold Case Files / Coldfusion editorial grade."
         ),
     },
     "lofi_radio": {
