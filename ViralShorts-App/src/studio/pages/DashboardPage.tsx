@@ -14,6 +14,7 @@ const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
+const ZeroTierPrivatePanel = lazy(() => import('../panels/ZeroTierPrivatePanel'));
 
 const PanelFallback = () => (
     <div className="flex h-[40vh] items-center justify-center gap-2 text-sm text-gray-500">
@@ -167,6 +168,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
         if (tab === 'waitlist' && isAdmin) return lazyPanel(<WaitlistPanel />);
+        // ZeroTier (Private) niche gets its own Catalyst-powered surface.
+        if (selectedNiche === 'zerotier_private' && isAdmin) return lazyPanel(<ZeroTierPrivatePanel />);
         return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
 
