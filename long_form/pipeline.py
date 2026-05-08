@@ -1220,18 +1220,33 @@ async def _run_finalize(job_id: str) -> None:
 
 
 def start_finalize(job_id: str) -> None:
-    """Public API — resume a job paused at awaiting_approval through the
-    rest of its pipeline (narration / i2v / VO / SFX / compose etc.). The
-    caller's poll loop picks up the new phase + percent values immediately."""
+    """Public API — resume a job paused at awaiting_approval (normal flow)
+    OR stalled mid-finalize (scene_assembly / narration / ambient / etc)
+    OR cancelled / failed. The inner finalize runners handle each phase
+    idempotently; start_finalize just kicks the asyncio task again so a
+    previously-killed task gets re-run.
+
+    Phase allowlist mirrors finalize_v5_episode_pipeline +
+    finalize_sleep_doc_pipeline (PR #128 expansion). Was previously only
+    accepting awaiting_approval/failed and rejecting Resume on a stalled
+    scene_assembly with HTTP 400 Bad Request."""
     state = load_state(job_id)
     if not state:
         raise LFRenderError(f"no such job {job_id}")
-    if state.get("phase") not in ("awaiting_approval", "failed"):
+    allowed = (
+        "awaiting_approval", "failed", "cancelled",
+        # Mid-finalize phases — task may have died (Fly redeploy, machine
+        # restart, OOM); re-kicking is safe because every per-helper is
+        # idempotent (file-exists checks reuse already-rendered output).
+        "scene_assembly", "narration", "ambient", "thumbnails", "compose",
+        "i2v", "vo", "sfx", "finalizing",
+    )
+    if state.get("phase") not in allowed:
         raise LFRenderError(
             f"job {job_id} is in phase {state.get('phase')!r}; "
-            "finalize requires awaiting_approval (or a re-run after failure)"
+            f"finalize requires one of {sorted(allowed)}"
         )
-    update_status(job_id, phase="finalizing", percent=46)
+    update_status(job_id, phase="finalizing", percent=int(state.get("percent") or 73))
     task = asyncio.create_task(_run_finalize(job_id))
     _lf_running_tasks.add(task)
     task.add_done_callback(_lf_running_tasks.discard)
