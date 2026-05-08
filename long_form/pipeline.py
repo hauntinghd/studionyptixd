@@ -990,10 +990,30 @@ async def run_sleep_doc_pipeline(
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Mapping from channel.pipeline_kind → async runner.
-# PR #122 will register "v5_episode" pointing at a v5 runner.
+# Registered: 'sleep_doc' (HR — PR #120), 'v5_episode' (EM — PR #123).
 SUB_PIPELINES: dict[str, Callable[..., Awaitable[None]]] = {
     "sleep_doc": run_sleep_doc_pipeline,
 }
+
+
+def _register_v5_episode() -> None:
+    """Lazy-register v5_episode so importing pipeline.py doesn't pull in
+    the EL/i2v dependency chain at module load time. v5_pipeline.py imports
+    helpers from pipeline.py, so this back-edge has to be deferred."""
+    try:
+        from long_form.v5_pipeline import run_v5_episode_pipeline
+        SUB_PIPELINES["v5_episode"] = run_v5_episode_pipeline
+    except Exception as exc:  # noqa: BLE001
+        # Don't crash the API on import failure — sleep_doc still works
+        # standalone, and EM renders will surface a clear error via
+        # _run_render's "pipeline_kind not registered" path.
+        import logging
+        logging.getLogger(__name__).warning(
+            "v5_episode pipeline registration deferred: %s", exc
+        )
+
+
+_register_v5_episode()
 
 
 async def _run_render(job_id: str, channel: dict, outline: dict) -> None:
