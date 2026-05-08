@@ -231,8 +231,23 @@ function scoreVirality(title: string, existingTitles: string[]): ViralityScore {
 }
 
 export default function ZeroTierPrivatePanel() {
-    const { session } = useContext(AuthContext);
+    const { session, supabase } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
+
+    // Always-fresh token getter for long-running polls. Supabase auto-refreshes
+    // on getSession() if the token is near expiry, so we can survive a 5-12min
+    // background-job poll even after the original closure-captured token has
+    // expired (was the cause of the "Authentication required" timeout Casey
+    // hit on /render-finalize after 720s).
+    const getFreshToken = useCallback(async (): Promise<string> => {
+        if (!supabase) return accessToken;
+        try {
+            const { data } = await supabase.auth.getSession();
+            return data?.session?.access_token || accessToken;
+        } catch {
+            return accessToken;
+        }
+    }, [supabase, accessToken]);
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
@@ -611,19 +626,37 @@ export default function ZeroTierPrivatePanel() {
     // Phase 4.5b: poll a job_id until status=ready or failed. Backend returns
     // {job_id, status} immediately; we poll every 4s. Avoids proxy timeouts on
     // long render jobs (proxies 504 a synchronous 60-130s call).
+    //
+    // Phase 4.5d: getFreshToken() on every poll iteration so a Supabase token
+    // expiry mid-poll (the 720s timeout Casey hit on finalize) auto-refreshes
+    // instead of leaving the loop stuck with a dead token.
     const pollJobStatus = useCallback(async (jobId: string, maxSeconds = 600): Promise<any> => {
         const deadline = Date.now() + maxSeconds * 1000;
         let lastErr: string = '';
+        let consecutive401 = 0;
         while (Date.now() < deadline) {
             try {
+                const tok = await getFreshToken();
                 const r = await fetch(`${API}/api/zerotier-private/jobs/${jobId}/status`, {
-                    headers: { Authorization: `Bearer ${accessToken}` },
+                    headers: { Authorization: `Bearer ${tok}` },
                 });
                 // 502/504 happens on Fly cold-start during long polls — keep polling
                 if (r.status === 502 || r.status === 504) {
                     await new Promise((res) => setTimeout(res, 4000));
                     continue;
                 }
+                if (r.status === 401) {
+                    // Token expired mid-poll. getFreshToken() should auto-refresh
+                    // on the next iteration; bail after 5 consecutive 401s.
+                    consecutive401 += 1;
+                    lastErr = 'Authentication required';
+                    if (consecutive401 >= 5) {
+                        throw new Error('Auth refresh failed 5 times — please refresh the page and try Resume from Recent renders');
+                    }
+                    await new Promise((res) => setTimeout(res, 4000));
+                    continue;
+                }
+                consecutive401 = 0;
                 const text = await r.text();
                 let data: any = null;
                 try { data = JSON.parse(text); } catch {
@@ -634,7 +667,6 @@ export default function ZeroTierPrivatePanel() {
                 }
                 if (!r.ok) {
                     if (r.status === 404) {
-                        // Job not yet registered — backend just received the create, give it a moment
                         await new Promise((res) => setTimeout(res, 2000));
                         continue;
                     }
@@ -643,16 +675,15 @@ export default function ZeroTierPrivatePanel() {
                 const status = String(data?.status || '');
                 if (status === 'ready') return data;
                 if (status === 'failed') throw new Error(String(data?.error || 'Background job failed'));
-                // pending — keep polling
                 await new Promise((res) => setTimeout(res, 4000));
             } catch (e: any) {
                 lastErr = String(e?.message || e || 'Poll error');
-                // Network blip — wait + retry
+                if (lastErr.includes('Auth refresh failed')) throw e;
                 await new Promise((res) => setTimeout(res, 4000));
             }
         }
-        throw new Error(`Timed out waiting for job after ${maxSeconds}s${lastErr ? `: ${lastErr}` : ''}`);
-    }, [accessToken]);
+        throw new Error(`Timed out waiting for job after ${maxSeconds}s. The render may still be running on the backend — check 'Recent renders' for the result.${lastErr ? ` Last error: ${lastErr}` : ''}`);
+    }, [getFreshToken]);
 
     // Phase 4.5: stage 1 — generate stills only (background job + polling)
     const generateStills = useCallback(async () => {

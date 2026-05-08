@@ -91,15 +91,27 @@ class ZTFinalizeRequest(BaseModel):
     final_filename: str | None = None
 
 
-# Where rendered MP4s live. Mirrors skeleton_ai's pattern.
-ZT_OUTPUT_ROOT = Path(os.getenv("ZEROTIER_PRIVATE_OUTPUT_ROOT", "zerotier_private/output"))
+# Where rendered MP4s + stills live. CRITICAL: must be on the persistent
+# volume (/var/data on Fly) so renders survive backend deploys. The Fly
+# machine reboots on every image push, which wipes the ephemeral container
+# filesystem (/app and below) but preserves /var/data. The default below
+# falls back to a relative path for local dev where /var/data doesn't exist.
+def _zt_output_root_default() -> str:
+    if os.path.isdir("/var/data"):
+        return "/var/data/zerotier_private/output"
+    return "zerotier_private/output"
+ZT_OUTPUT_ROOT = Path(os.getenv("ZEROTIER_PRIVATE_OUTPUT_ROOT", _zt_output_root_default()))
 
 # Phase 3 — append-only JSONL log of every render's prediction. Each line is
 # a JSON object: {job_id, ts, title, predicted_score, predicted_like_rate}.
 # Cross-referenced with actual outcomes (views/likes from Catalyst's channel
-# sync) by GET /predictions. Lives outside ZT_OUTPUT_ROOT so log clean-ups
-# of past renders don't blow away the calibration history.
-ZT_PREDICTIONS_LOG = Path(os.getenv("ZEROTIER_PRIVATE_PREDICTIONS_LOG", "zerotier_private/predictions.jsonl"))
+# sync) by GET /predictions. Same persistent-volume requirement as
+# ZT_OUTPUT_ROOT — lives at /var/data on Fly so it survives deploys.
+def _zt_predictions_log_default() -> str:
+    if os.path.isdir("/var/data"):
+        return "/var/data/zerotier_private/predictions.jsonl"
+    return "zerotier_private/predictions.jsonl"
+ZT_PREDICTIONS_LOG = Path(os.getenv("ZEROTIER_PRIVATE_PREDICTIONS_LOG", _zt_predictions_log_default()))
 
 # Phase 4.5b — background job state. Keys: job_id. Values: {
 #   stage: "stills" | "finalize",
