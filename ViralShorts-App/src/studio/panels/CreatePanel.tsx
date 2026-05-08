@@ -128,7 +128,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
     // mid-flight via AbortController.
     const startGenerateScenes = useCallback(async () => {
         if (!script.trim()) {
-            alert('Add or generate a skeleton script first.');
+            alert('Add or generate a script first.');
             return;
         }
         if (!accessToken) {
@@ -217,7 +217,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
 
     const startGenerate = useCallback(async () => {
         if (!script.trim()) {
-            alert('Add or generate a skeleton script in Step 1 before generating.');
+            alert('Add or generate a script on the Script tab before generating.');
             return;
         }
         if (!accessToken) {
@@ -419,7 +419,7 @@ function ScriptTab({
             <textarea
                 value={script}
                 onChange={(e) => setScript(e.target.value)}
-                placeholder="Enter your skeleton narration script..."
+                placeholder="Enter your battle narration script..."
                 rows={14}
                 className="w-full rounded-md bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 resize-y"
             />
@@ -547,7 +547,7 @@ function ScenesTab({
 
             {!scriptValid && (
                 <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
-                    Please add or generate a skeleton script in Step 1 before generating scenes.
+                    Please add or generate a script on the Script tab before generating scenes.
                 </div>
             )}
 
