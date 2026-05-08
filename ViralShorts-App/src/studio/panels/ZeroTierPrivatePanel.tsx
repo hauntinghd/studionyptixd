@@ -153,6 +153,21 @@ export default function ZeroTierPrivatePanel() {
         setError('');
         setRefreshing(true);
         try {
+            // Step 1: force a fresh YouTube fetch + persist for ALL connected
+            // channels (this is where the OAuth-authenticated path actually
+            // pulls likes/comments/CTR and writes them into the connection
+            // store). /api/catalyst/hub/refresh alone does NOT trigger this —
+            // it only rebuilds the hub payload from already-cached state.
+            const ytRes = await fetch(`${API}/api/youtube/channels?sync=true`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            // Don't hard-fail if this returns non-200 — Catalyst hub refresh
+            // can still rebuild from cached state and partial data.
+            if (!ytRes.ok) {
+                console.warn(`[ZT] /api/youtube/channels?sync=true returned ${ytRes.status} — continuing to hub refresh anyway`);
+            }
+            // Step 2: rebuild the Catalyst hub payload from the freshly-synced
+            // connection-store data.
             const r = await fetch(`${API}/api/catalyst/hub/refresh`, {
                 method: 'POST',
                 headers: {
