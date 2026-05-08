@@ -34,6 +34,7 @@ long_form.pipeline.run_sleep_doc_pipeline. PR #122 will register
 'v5_episode' (EM) in the same dispatcher.
 """
 from __future__ import annotations
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -513,5 +514,130 @@ def build_long_form_router(
             media_type="image/png",
             headers={"Cache-Control": "private, max-age=600"},
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # PR #127: per-scene approval gate endpoints
+    # ─────────────────────────────────────────────────────────────────────
+
+    class RegenerateSceneRequest(BaseModel):
+        scene_idx: int
+        new_prompt: str | None = None
+
+    @router.post("/jobs/{job_id}/regenerate-scene")
+    async def job_regenerate_scene_route(
+        job_id: str,
+        body: RegenerateSceneRequest,
+        user: dict = auth_dep,
+    ):
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        if body.scene_idx < 0 or body.scene_idx > 9999:
+            raise HTTPException(400, "bad_scene_index")
+        try:
+            new_path = lf_pipeline.regenerate_still(
+                job_id, body.scene_idx, body.new_prompt
+            )
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"regenerate_failed: {e}")
+        # Cache-bust the served still by appending a version query param.
+        version = int(new_path.stat().st_mtime)
+        return {
+            "job_id": job_id,
+            "scene_idx": body.scene_idx,
+            "still_url": (
+                f"/api/long-form/jobs/{job_id}/still/{body.scene_idx}?v={version}"
+            ),
+            "new_prompt_used": bool(body.new_prompt),
+        }
+
+    @router.post("/jobs/{job_id}/finalize")
+    async def job_finalize_route(job_id: str, user: dict = auth_dep):
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        try:
+            lf_pipeline.start_finalize(job_id)
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"finalize_failed: {e}")
+        return {
+            "job_id": job_id,
+            "phase": "finalizing",
+            "poll_url": f"/api/long-form/jobs/{job_id}/status",
+        }
+
+    @router.get("/jobs/{job_id}/scenes")
+    async def job_scenes_route(job_id: str, user: dict = auth_dep):
+        """Return the scene grid for the per-scene approval gate.
+
+        Each scene entry includes its prompt + chapter context + still URL
+        (capability-token via job_id) + a cache-bust version derived from
+        the still file mtime so regenerated stills surface immediately."""
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        state = lf_pipeline.load_state(job_id)
+        if not state:
+            raise HTTPException(404, "no such job")
+        rows: list[dict] = []
+        kind = (state.get("pipeline_kind") or "sleep_doc").strip()
+
+        if kind == "v5_episode":
+            for r in state.get("scene_briefs") or []:
+                gi = int(r.get("global_idx", -1))
+                if gi < 0:
+                    continue
+                still = lf_pipeline.job_still_path(job_id, gi)
+                version = int(still.stat().st_mtime) if (still and still.exists()) else 0
+                brief = r.get("brief") or {}
+                rows.append({
+                    "scene_idx": gi,
+                    "chapter_index": int(r.get("chapter_index", 0)),
+                    "local_idx": int(r.get("local_idx", 0)),
+                    "scene_prompt": brief.get("scene_prompt", ""),
+                    "narration": brief.get("narration", ""),
+                    "still_url": (
+                        f"/api/long-form/jobs/{job_id}/still/{gi}?v={version}"
+                        if version else ""
+                    ),
+                    "still_present": bool(still and still.exists()),
+                })
+        else:
+            # sleep_doc — derive scene grid from chapters.json since this
+            # pipeline doesn't persist scene_briefs (storage minimization).
+            try:
+                chapters_path = (
+                    lf_pipeline.LF_OUTPUT_ROOT / job_id / "chapters.json"
+                )
+                if chapters_path.exists():
+                    chapters_data = json.loads(chapters_path.read_text(encoding="utf-8"))
+                    chapters = chapters_data.get("chapters") or []
+                    spc = int(state.get("scenes_per_chapter", 30))
+                    for ch in chapters:
+                        ch_idx = int(ch.get("chapter_index", 0))
+                        prompts = ch.get("scene_prompts") or []
+                        for li, p in enumerate(prompts):
+                            gi = ch_idx * spc + li
+                            still = lf_pipeline.job_still_path(job_id, gi)
+                            version = int(still.stat().st_mtime) if (still and still.exists()) else 0
+                            rows.append({
+                                "scene_idx": gi,
+                                "chapter_index": ch_idx,
+                                "local_idx": li,
+                                "scene_prompt": p,
+                                "narration": "",
+                                "still_url": (
+                                    f"/api/long-form/jobs/{job_id}/still/{gi}?v={version}"
+                                    if version else ""
+                                ),
+                                "still_present": bool(still and still.exists()),
+                            })
+            except Exception as e:
+                raise HTTPException(500, f"scenes_load_failed: {e}")
+
+        return {
+            "job_id": job_id,
+            "pipeline_kind": kind,
+            "phase": state.get("phase", ""),
+            "scenes": rows,
+            "total": len(rows),
+        }
 
     return router

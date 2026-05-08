@@ -909,12 +909,59 @@ async def run_sleep_doc_pipeline(
     state["percent"] = 45
     save_state(job_id, state)
 
+    # PR #127 PER-SCENE GATE: pause here. Phase 3+ run via finalize_sleep_doc()
+    # called from POST /api/long-form/jobs/{id}/finalize after Casey reviews +
+    # approves the still gallery. The next ~$48-58 of fal spend (narration +
+    # ambient + compose) only fires once he OKs.
+    state["phase"] = "awaiting_approval"
+    state["percent"] = 45
+    save_state(job_id, state)
+    update_status(job_id, phase="awaiting_approval", percent=45)
+    return
+
+
+async def finalize_sleep_doc_pipeline(job_id: str) -> None:
+    """Continue a paused sleep_doc render through narration → ambient →
+    thumbnails → compose. Loads channel + outline + chapters from disk so
+    the pipeline survives process restart between approval and finalize."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no state for job {job_id}")
+    if state.get("phase") not in ("awaiting_approval", "narration", "ambient",
+                                  "thumbnails", "compose", "failed"):
+        raise LFRenderError(
+            f"job {job_id} is in phase {state.get('phase')!r}; "
+            "finalize requires awaiting_approval (or a re-run of a failed finalize)"
+        )
+
+    # Re-hydrate channel from registry by key.
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    outline = state.get("outline") or {}
+
+    job_dir = _ensure_job_dir(job_id)
+    chapters_path = _chapters_path(job_id)
+    if not chapters_path.exists():
+        raise LFRenderError(f"chapters.json missing for job {job_id} — cannot finalize")
+    chapters_data = json.loads(chapters_path.read_text(encoding="utf-8"))
+    chapters = chapters_data["chapters"]
+
+    loop = asyncio.get_running_loop()
+    audio_dir = job_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the (possibly regenerated) stills list. Sorted by scene index so
+    # the slideshow concat preserves narrative order.
+    stills_dir = job_dir / "stills"
+    stills = _list_scenes_sorted(stills_dir)
+    if not stills:
+        raise LFRenderError("no stills present at finalize time — re-run the stills phase")
+
     # ── Phase 3 — narration (fal MiniMax per chapter, then concat) ────────
     update_status(job_id, phase="narration", percent=46)
     state["phase"] = "narration"
     save_state(job_id, state)
 
-    audio_dir = job_dir / "audio"
     chapter_mp3s: list[Path] = []
     voice_id = channel.get("voice_id_default") or "English_Trustworthy_Man"
 
@@ -989,11 +1036,71 @@ async def run_sleep_doc_pipeline(
 # Sub-pipeline registry + outer task wrapper
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Mapping from channel.pipeline_kind → async runner.
-# Registered: 'sleep_doc' (HR — PR #120), 'v5_episode' (EM — PR #123).
+# Mapping from channel.pipeline_kind → async runner. Registered:
+#   'sleep_doc' (HR — PR #120) → run_sleep_doc_pipeline (stills phase only post-PR #127)
+#   'v5_episode' (EM/Lacuna/PB Live/Hidden Cortex — PR #123)
+# After PR #127, runners stop after the stills phase and set
+# state.phase='awaiting_approval'. The finalize phase runs via
+# FINALIZE_PIPELINES[kind] kicked from POST /jobs/{id}/finalize.
 SUB_PIPELINES: dict[str, Callable[..., Awaitable[None]]] = {
     "sleep_doc": run_sleep_doc_pipeline,
 }
+
+FINALIZE_PIPELINES: dict[str, Callable[..., Awaitable[None]]] = {
+    "sleep_doc": finalize_sleep_doc_pipeline,
+}
+
+# Per-pipeline still-regeneration functions for the per-scene approval gate.
+# Each takes (job_id, scene_idx, new_prompt: str | None) and synchronously
+# regenerates that one still (typically 5-15s).
+REGENERATE_FUNCTIONS: dict[str, Callable[..., Path]] = {
+    "sleep_doc": None,   # set below
+    "v5_episode": None,  # set below
+}
+
+
+def regenerate_sleep_doc_still(job_id: str, scene_idx: int,
+                               new_prompt: str | None = None) -> Path:
+    """Regenerate one sleep_doc still. If new_prompt is provided, persist it
+    back to chapters.json so future re-renders use it. Returns the new still
+    path."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no state for job {job_id}")
+    chapters_path = _chapters_path(job_id)
+    if not chapters_path.exists():
+        raise LFRenderError("chapters.json missing — cannot regenerate")
+    chapters_data = json.loads(chapters_path.read_text(encoding="utf-8"))
+    chapters = chapters_data["chapters"]
+    scenes_per_chapter = int(state.get("scenes_per_chapter", 30))
+    ch_idx = scene_idx // scenes_per_chapter
+    local_idx = scene_idx % scenes_per_chapter
+    if ch_idx >= len(chapters):
+        raise LFRenderError(f"scene_idx {scene_idx} out of range (ch {ch_idx})")
+    ch = chapters[ch_idx]
+    prompts = ch.get("scene_prompts") or []
+    if local_idx >= len(prompts):
+        raise LFRenderError(f"scene_idx {scene_idx} out of range (local {local_idx})")
+    prompt = (new_prompt or prompts[local_idx]).strip()
+    if not prompt:
+        raise LFRenderError("prompt cannot be empty")
+    if new_prompt and new_prompt != prompts[local_idx]:
+        chapters[ch_idx]["scene_prompts"][local_idx] = new_prompt
+        chapters_data["chapters"] = chapters
+        chapters_path.write_text(
+            json.dumps(chapters_data, indent=2, ensure_ascii=True), encoding="utf-8"
+        )
+    job_dir = _job_dir(job_id)
+    out = job_dir / "stills" / f"scene_{scene_idx:04d}.png"
+    if out.exists():
+        out.unlink()
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    image_model = channel.get("image_model_default", "ernie")
+    return _gen_scene_image(prompt, out, image_model=image_model)
+
+
+REGENERATE_FUNCTIONS["sleep_doc"] = regenerate_sleep_doc_still
 
 
 def _register_v5_episode() -> None:
@@ -1001,8 +1108,14 @@ def _register_v5_episode() -> None:
     the EL/i2v dependency chain at module load time. v5_pipeline.py imports
     helpers from pipeline.py, so this back-edge has to be deferred."""
     try:
-        from long_form.v5_pipeline import run_v5_episode_pipeline
+        from long_form.v5_pipeline import (
+            run_v5_episode_pipeline,
+            finalize_v5_episode_pipeline,
+            regenerate_v5_still,
+        )
         SUB_PIPELINES["v5_episode"] = run_v5_episode_pipeline
+        FINALIZE_PIPELINES["v5_episode"] = finalize_v5_episode_pipeline
+        REGENERATE_FUNCTIONS["v5_episode"] = regenerate_v5_still
     except Exception as exc:  # noqa: BLE001
         # Don't crash the API on import failure — sleep_doc still works
         # standalone, and EM renders will surface a clear error via
@@ -1039,8 +1152,12 @@ async def _run_render(job_id: str, channel: dict, outline: dict) -> None:
 
 
 def start_render(channel: dict, outline: dict) -> str:
-    """Public API — kick a render. Returns job_id immediately; renders run
-    in the asyncio background. Caller polls /jobs/{id}/status."""
+    """Public API — kick the stills phase of a render. Returns job_id
+    immediately; pipeline runs in the asyncio background and pauses at
+    state.phase='awaiting_approval' after generating all stills. Casey
+    reviews + regenerates as needed, then POST /finalize resumes the rest.
+
+    Caller polls /jobs/{id}/status — phase=='awaiting_approval' is the gate."""
     if not isinstance(outline, dict) or not outline.get("chapters"):
         raise LFRenderError("outline must include a non-empty 'chapters' list")
     job_id = _new_job_id()
@@ -1064,6 +1181,66 @@ def start_render(channel: dict, outline: dict) -> str:
     task.add_done_callback(_lf_running_tasks.discard)
     _lf_jobs_status[job_id]["_task"] = task
     return job_id
+
+
+async def _run_finalize(job_id: str) -> None:
+    """Outer wrapper for the finalize phase. Loads state to determine the
+    pipeline_kind, then calls the right finalize runner."""
+    state = load_state(job_id)
+    if not state:
+        update_status(job_id, phase="failed", error="no state for job")
+        return
+    pipeline_kind = (state.get("pipeline_kind") or "sleep_doc").strip()
+    runner = FINALIZE_PIPELINES.get(pipeline_kind)
+    if runner is None:
+        st = state
+        st.update({"phase": "failed", "error": f"finalize for pipeline_kind={pipeline_kind!r} not registered"})
+        save_state(job_id, st)
+        update_status(job_id, phase="failed", error=st["error"])
+        return
+    try:
+        await runner(job_id)
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        st = load_state(job_id) or {}
+        st.update({"phase": "failed", "error": msg, "failed_at": time.time()})
+        save_state(job_id, st)
+        update_status(job_id, phase="failed", error=msg)
+
+
+def start_finalize(job_id: str) -> None:
+    """Public API — resume a job paused at awaiting_approval through the
+    rest of its pipeline (narration / i2v / VO / SFX / compose etc.). The
+    caller's poll loop picks up the new phase + percent values immediately."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no such job {job_id}")
+    if state.get("phase") not in ("awaiting_approval", "failed"):
+        raise LFRenderError(
+            f"job {job_id} is in phase {state.get('phase')!r}; "
+            "finalize requires awaiting_approval (or a re-run after failure)"
+        )
+    update_status(job_id, phase="finalizing", percent=46)
+    task = asyncio.create_task(_run_finalize(job_id))
+    _lf_running_tasks.add(task)
+    task.add_done_callback(_lf_running_tasks.discard)
+    _lf_jobs_status.setdefault(job_id, {})["_task"] = task
+
+
+def regenerate_still(job_id: str, scene_idx: int,
+                     new_prompt: str | None = None) -> Path:
+    """Public API — regenerate one still. Synchronous (typical call ~5-15s
+    of fal seedream/ernie time). Returns the new still path so the caller
+    can serve it back via the capability-token /still/{idx} endpoint with
+    a cache-bust hint."""
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no such job {job_id}")
+    pipeline_kind = (state.get("pipeline_kind") or "sleep_doc").strip()
+    fn = REGENERATE_FUNCTIONS.get(pipeline_kind)
+    if fn is None:
+        raise LFRenderError(f"regenerate for pipeline_kind={pipeline_kind!r} not registered")
+    return fn(job_id, scene_idx, new_prompt)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
