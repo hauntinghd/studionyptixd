@@ -23828,6 +23828,21 @@ except Exception as _skeleton_ai_err:
     log.warning(f"Skeleton AI router NOT mounted: {_skeleton_ai_err}")
 
 
+# ZeroTier (Private) niche — owner-only DC speedster fan-fic short-form
+# pipeline (Casey 2026-05-08). Phase 2a ships /script only; render pipeline
+# + virality scoring + learning loop are subsequent phases. Admin-gated via
+# _is_admin_user.
+try:
+    from zerotier_private_router import build_zerotier_private_router
+    app.include_router(build_zerotier_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ))
+    log.info("ZeroTier (Private) router mounted at /api/zerotier-private (admin-gated)")
+except Exception as _zt_private_err:
+    log.warning(f"ZeroTier (Private) router NOT mounted: {_zt_private_err}")
+
+
 # Catalyst Reference Videos (Casey 2026-05-06 — "guarantee virality" lever).
 # Per-user library of viral / "winning" YouTube videos the user pastes in.
 # yt-dlp pulls metadata; Phase 2 will add Whisper transcript + vision pattern
