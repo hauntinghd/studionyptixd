@@ -56,8 +56,25 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const laneAccess = ownerOverride ? OWNER_ALL_ACCESS : studioLaneAccess;
     const [tab, setTab] = useState<DashboardTab>('create');
     const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
-    const [selectedNiche, setSelectedNiche] = useState<string | null>(null);
+    // Hydrate selectedNiche from `?niche=X` URL param so that returning from
+    // an external flow (e.g. YouTube OAuth) lands the user back on the niche
+    // surface they kicked off from instead of the niche gallery root.
+    const [selectedNiche, setSelectedNiche] = useState<string | null>(() => {
+        if (typeof window === 'undefined') return null;
+        try {
+            const p = new URL(window.location.href).searchParams.get('niche');
+            return p ? String(p).trim() || null : null;
+        } catch { return null; }
+    });
     const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
+
+    // If we hydrated a niche from the URL, auto-open the create workspace so
+    // the user lands directly inside the niche panel rather than seeing the
+    // gallery first. Runs once on mount.
+    useEffect(() => {
+        if (selectedNiche) setCreateWorkspaceOpen(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     const walletCredits = Number(topupCreditsRemaining || 0);
     const includedCredits = Number(monthlyCreditsRemaining || 0);
     const greeting = useMemo(() => {

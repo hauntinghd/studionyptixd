@@ -179,6 +179,33 @@ export default function ZeroTierPrivatePanel() {
         void fetchHub();
     }, [fetchHub]);
 
+    // OAuth-return flow: when the URL contains ?youtube_channel_id=... the
+    // user just came back from Google OAuth. Force a Catalyst refresh (not
+    // just a hub fetch) so the new refresh token is exercised and the panel
+    // populates with full likes/comments/CTR data. Then strip the query
+    // params from the URL so refreshing the page doesn't re-trigger.
+    const oauthReturnHandledRef = useRef(false);
+    useEffect(() => {
+        if (oauthReturnHandledRef.current) return;
+        if (typeof window === 'undefined') return;
+        try {
+            const url = new URL(window.location.href);
+            const channelParam = url.searchParams.get('youtube_channel_id');
+            if (!channelParam || channelParam !== ZEROTIER_CHANNEL_ID) return;
+            oauthReturnHandledRef.current = true;
+            // Strip the OAuth-return params so a manual reload doesn't loop.
+            url.searchParams.delete('youtube_channel_id');
+            url.searchParams.delete('niche');
+            window.history.replaceState({}, '', url.toString());
+            // Wait until accessToken is available, then trigger refresh.
+            if (accessToken) {
+                void handleRefresh();
+            }
+        } catch {
+            // no-op
+        }
+    }, [accessToken, handleRefresh]);
+
     const onConnectZeroTier = useCallback(() => {
         if (!accessToken || connecting) return;
         setConnecting(true);
