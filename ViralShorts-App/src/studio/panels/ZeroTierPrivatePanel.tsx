@@ -249,6 +249,52 @@ export default function ZeroTierPrivatePanel() {
         }
     }, [supabase, accessToken]);
 
+    // Resilient fetch+JSON helper. Fly cold-starts return 502 with an HTML
+    // body which throws on r.json(); retry up to N times with backoff before
+    // surfacing the error. Used for all single-shot calls (initial POSTs,
+    // /state lookups, etc.) — long-running polls have their own retry logic.
+    const fetchJsonResilient = useCallback(async (
+        url: string,
+        init: RequestInit,
+        { retries = 3, retryDelayMs = 2500 }: { retries?: number; retryDelayMs?: number } = {},
+    ): Promise<{ ok: boolean; status: number; data: any }> => {
+        let lastErr: string = '';
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const r = await fetch(url, init);
+                // 502/504 → likely Fly cold-start; backoff + retry
+                if ((r.status === 502 || r.status === 504) && attempt < retries) {
+                    lastErr = `cold-start ${r.status}`;
+                    await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                    continue;
+                }
+                const text = await r.text();
+                let data: any = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch {
+                    // Non-JSON body (HTML error page, etc.). Treat as transient
+                    // if we have retries left, hard-fail otherwise.
+                    if (attempt < retries) {
+                        lastErr = `non-JSON response (${r.status}): ${text.slice(0, 80)}`;
+                        await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                        continue;
+                    }
+                    return { ok: false, status: r.status, data: { detail: lastErr || `Server returned non-JSON (${r.status})` } };
+                }
+                return { ok: r.ok, status: r.status, data };
+            } catch (e: any) {
+                lastErr = String(e?.message || e || 'Network error');
+                if (attempt < retries) {
+                    await new Promise((res) => setTimeout(res, retryDelayMs * Math.pow(1.5, attempt)));
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new Error(lastErr || 'Request failed after retries');
+    }, []);
+
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [connecting, setConnecting] = useState(false);
@@ -502,18 +548,16 @@ export default function ZeroTierPrivatePanel() {
         setStillsLoading(false);
         setFinalizeLoading(false);
         try {
-            const r = await fetch(`${API}/api/zerotier-private/jobs/${jobId}/state`, {
-                headers: { Authorization: `Bearer ${accessToken}` },
+            const tok = await getFreshToken();
+            const { ok, status, data } = await fetchJsonResilient(`${API}/api/zerotier-private/jobs/${jobId}/state`, {
+                headers: { Authorization: `Bearer ${tok}` },
             });
-            const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Resume failed (${r.status})`));
+            if (!ok) throw new Error(String(data?.detail || data?.error || `Resume failed (${status})`));
             setBuildTopic(data?.topic || data?.title || '');
             setBuildScript(String(data?.script_json || '').trim());
             setStillsJobId(jobId);
             const scenes = (data?.scenes || []) as ScenePreview[];
             setScenePreviews(scenes.map((s) => ({ ...s, still_url: `${API}${s.still_url}` })));
-            // If there's a finished MP4, populate renderResult so the user
-            // sees the open-MP4 link without needing to re-render.
             if (data?.mp4_url) {
                 setRenderResult({
                     job_id: jobId,
@@ -529,7 +573,7 @@ export default function ZeroTierPrivatePanel() {
         } catch (e: any) {
             setBuildError(String(e?.message || e || 'Resume failed'));
         }
-    }, [accessToken]);
+    }, [accessToken, getFreshToken, fetchJsonResilient]);
 
     // OAuth-return flow: when the URL contains ?youtube_channel_id=... the
     // user just came back from Google OAuth. Force a Catalyst refresh (not
@@ -695,10 +739,11 @@ export default function ZeroTierPrivatePanel() {
         try {
             let scriptForBackend = buildScript.trim();
             try { scriptForBackend = JSON.stringify(JSON.parse(scriptForBackend)); } catch {}
-            const r = await fetch(`${API}/api/zerotier-private/render-stills`, {
+            const tok = await getFreshToken();
+            const { ok, status, data } = await fetchJsonResilient(`${API}/api/zerotier-private/render-stills`, {
                 method: 'POST',
                 headers: {
-                    Authorization: `Bearer ${accessToken}`,
+                    Authorization: `Bearer ${tok}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
@@ -708,12 +753,10 @@ export default function ZeroTierPrivatePanel() {
                     predicted_like_rate: buildTopicScore?.predicted_lr ?? null,
                 }),
             });
-            const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Stills submit failed (${r.status})`));
+            if (!ok) throw new Error(String(data?.detail || data?.error || `Stills submit failed (${status})`));
             const jobId = String(data?.job_id || '');
             if (!jobId) throw new Error('Backend returned no job_id');
             setStillsJobId(jobId);
-            // Poll until ready (max 5 min for stills stage)
             const ready = await pollJobStatus(jobId, 300);
             const result = ready?.result || {};
             const scenes = (result?.scenes || []) as ScenePreview[];
@@ -723,7 +766,7 @@ export default function ZeroTierPrivatePanel() {
         } finally {
             setStillsLoading(false);
         }
-    }, [accessToken, buildScript, buildTopic, buildTopicScore, stillsLoading, pollJobStatus]);
+    }, [accessToken, buildScript, buildTopic, buildTopicScore, stillsLoading, pollJobStatus, getFreshToken, fetchJsonResilient]);
 
     // Phase 4.5: regen one specific still
     const regenerateStill = useCallback(async (sceneIndex: number, customPrompt?: string) => {
@@ -764,17 +807,16 @@ export default function ZeroTierPrivatePanel() {
         setRenderResult(null);
         setFinalizeLoading(true);
         try {
-            const r = await fetch(`${API}/api/zerotier-private/render-finalize`, {
+            const tok = await getFreshToken();
+            const { ok, status, data } = await fetchJsonResilient(`${API}/api/zerotier-private/render-finalize`, {
                 method: 'POST',
                 headers: {
-                    Authorization: `Bearer ${accessToken}`,
+                    Authorization: `Bearer ${tok}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ job_id: stillsJobId }),
             });
-            const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Finalize submit failed (${r.status})`));
-            // Poll until ready (max 12 min — i2v + TTS + compose can take 5-10 min)
+            if (!ok) throw new Error(String(data?.detail || data?.error || `Finalize submit failed (${status})`));
             const ready = await pollJobStatus(stillsJobId, 720);
             const result = ready?.result || {};
             setRenderResult({
@@ -790,7 +832,7 @@ export default function ZeroTierPrivatePanel() {
         } finally {
             setFinalizeLoading(false);
         }
-    }, [accessToken, stillsJobId, finalizeLoading, pollJobStatus]);
+    }, [accessToken, stillsJobId, finalizeLoading, pollJobStatus, getFreshToken, fetchJsonResilient]);
 
     const generateBuildScript = useCallback(async () => {
         if (!accessToken || !buildTopic.trim() || buildLoading) return;
