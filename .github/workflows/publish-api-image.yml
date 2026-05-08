@@ -9,7 +9,7 @@ on:
     paths:
       - Dockerfile
       - requirements.txt
-      - "*.py"
+      - "**/*.py"      # recursive so zerotier_private/, skeleton_ai/, long_form/ subpackage edits trigger the rebuild
       - client_secrets.json
       - ops/run_render_service.sh
       - ViralShorts-App/**
