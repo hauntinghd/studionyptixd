@@ -23,7 +23,7 @@
  */
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
-    AlertTriangle, ArrowRight, Lightbulb, Loader2, RefreshCw,
+    AlertTriangle, ArrowRight, Lightbulb, Link2, Loader2, RefreshCw,
     Sparkles, TrendingUp, Youtube,
 } from 'lucide-react';
 import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
@@ -376,14 +376,30 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
                         Catalyst-fed alt-battles surface for {channelTitle} — admin only.
                     </p>
                 </div>
-                <button
-                    onClick={refresh}
-                    disabled={refreshing}
-                    className="rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 flex items-center gap-1.5 disabled:opacity-50"
-                >
-                    <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
-                    {refreshing ? 'Syncing…' : 'Sync channel'}
-                </button>
+                <div className="flex items-center gap-2">
+                    {/* Always-visible re-OAuth button. When the snapshot is
+                        stale (e.g. Casey's Cryptic Science showed 1 of 19
+                        uploads after he deleted videos and the bucket
+                        didn't refresh), clicking this re-runs the Google
+                        OAuth flow and rehydrates the bucket on return. */}
+                    <button
+                        onClick={connectChannel}
+                        disabled={connecting}
+                        title="Re-run Google OAuth to refresh this channel's analytics snapshot"
+                        className="rounded-md bg-violet-500/10 hover:bg-violet-500/20 border border-violet-500/30 px-3 py-1.5 text-xs font-semibold text-violet-200 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                        <Link2 className="h-3 w-3" />
+                        {connecting ? 'Opening Google…' : 'Re-auth channel'}
+                    </button>
+                    <button
+                        onClick={refresh}
+                        disabled={refreshing}
+                        className="rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                        <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
+                        {refreshing ? 'Syncing…' : 'Sync channel'}
+                    </button>
+                </div>
             </header>
 
             {error && (
