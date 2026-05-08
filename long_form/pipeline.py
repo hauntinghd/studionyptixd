@@ -582,27 +582,40 @@ def _gen_ambient(out_path: Path, *, prompt: str = DEFAULT_AMBIENT_PROMPT, durati
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _gen_thumbnails(channel: dict, outline: dict, thumbs_dir: Path, count: int = 3) -> list[Path]:
+    """Generate N thumbnail candidates. PR #132: bumped resolution to
+    1920x1080 (was 1280x720) for higher-fidelity covers + dropped the
+    'Wide establishing shot' variant (which produced thumbnails with
+    too-small subjects on Casey's Peter Thiel render — the #1 tile he
+    rejected). Variants are now all subject-prominent compositions."""
     base_prompt = (channel.get("thumbnail_style_prompt") or channel.get("visual_style") or "").strip()
     title = (outline.get("title") or "").strip()
     out_paths: list[Path] = []
+    # Subject-prominent variants only (no wide-establishing shots).
+    variant_hints = [
+        "Medium portrait composition, subject filling 40-50% of frame, dramatic key light.",
+        "Low-angle dramatic composition, subject silhouetted against backlight, heroic stance.",
+        "Tight chest-up close-up, subject filling 60% of frame, shallow depth of field.",
+    ]
     for i in range(count):
         out = thumbs_dir / f"thumb_{i + 1}.png"
         if out.exists() and out.stat().st_size > 1024:
             out_paths.append(out)
             continue
-        # Add a per-iteration subject hint so the 3 thumbs aren't identical.
-        variant_hints = [
-            "Wide establishing shot, subject center-right.",
-            "Medium portrait composition, subject center.",
-            "Low-angle dramatic composition, subject silhouetted.",
-        ]
         full_prompt = (
             f"{base_prompt}\n\nDocumentary title context: {title}.\n\n"
             f"Composition variant: {variant_hints[i % len(variant_hints)]}"
         )
         data = _fal_post(
             SEEDREAM_URL,
-            {"prompt": full_prompt, "image_size": {"width": 1280, "height": 720}},
+            {
+                "prompt": full_prompt,
+                "image_size": {"width": 1920, "height": 1080},
+                "negative_prompt": (
+                    "real human face, photographic skin, photorealistic person, "
+                    "real eyes, real mouth, ordinary human, model, actor, "
+                    "wide establishing shot, tiny subject, distant subject"
+                ),
+            },
             timeout_s=180,
         )
         images = data.get("images") or []

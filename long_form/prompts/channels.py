@@ -252,12 +252,21 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "format": "long_form",
         "channel_id": "UCA_cn0-EW2UbBsyEA0TahNA",
         "default_minutes": 20,
-        "fps": 24,
+        # PR #132: bumped fps 24→60 to match the v5_pipeline_locked memo
+        # ('LTX 60fps' is the canonical recipe). Final compose forces 1080p60.
+        "fps": 60,
         "image_model_default": "seedream_45",
         "i2v_model_default": "ltx_13b",               # locked winner per memory
-        "voice_provider_default": "elevenlabs",
-        "voice_id_default": "",
-        "cost_estimate_usd": 50.76,                   # locked v5 number
+        # PR #132: switched from ElevenLabs eleven_turbo_v2_5 (Casey rejected:
+        # 'fully off from what we normally use') to fal MiniMax speech-02-hd
+        # — same premium tier HR uses per feedback_hr_premium_fal_tts.md.
+        "voice_provider_default": "fal_minimax",
+        "voice_id_default": "English_Trustworthy_Man",
+        # Bumped from $50.76 to ~$72: LTX 13B (~$0.30/clip × ~36 = $11) +
+        # fal MiniMax (~$5) + 1080p60 medium-preset libx264 same cost +
+        # higher-res seedream same cost. Casey explicitly OK'd higher spend
+        # for AAA quality.
+        "cost_estimate_usd": 72.0,
         "pipeline_kind": "v5_episode",                # routes to v5 sub-pipeline
         "system_prompt": (
             "You write 20-minute photoreal financial-fraud / corporate-empire "
@@ -300,14 +309,22 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "Subscribe for new fraud + financial-empire deep dives weekly."
         ),
         "thumbnail_style_prompt": (
-            "Photoreal cinematic 16:9 thumbnail. A red-porcelain stylized "
-            "mannequin executive figure (smooth red ceramic head, real "
-            "tailored navy suit) standing alone in a richly-lit boardroom or "
-            "trading floor, looking at the camera. Coldfusion color grade — "
-            "deep blacks, neutral midtones, restrained saturation. "
+            "ABSOLUTE CAST RULE: the only character in this thumbnail is a "
+            "smooth red-porcelain stylized mannequin (red ceramic head, no "
+            "facial features beyond subtle sculpted brow, real tailored navy "
+            "suit). ZERO real human faces. ZERO photographic-skin people. "
+            "ZERO additional characters.\n\n"
+            "Photoreal cinematic 16:9 thumbnail. The lone red-porcelain "
+            "mannequin executive stands center-frame or center-right at "
+            "MEDIUM-PORTRAIT scale (subject fills ~40-55% of frame height — "
+            "NOT a wide establishing shot), looking at the camera, in a "
+            "richly-lit boardroom, trading floor, or vault. Coldfusion color "
+            "grade — deep blacks, neutral midtones, restrained saturation, "
+            "single warm key light + cold backlight. "
             "BOLD WHITE SANS-SERIF text overlay top: '$[AMOUNT]' in huge type, "
             "secondary line below: '[TARGET COMPANY]' in smaller red caps. "
-            "High click-through-rate documentary-thriller cover. No watermarks."
+            "High click-through documentary-thriller cover. No watermarks, "
+            "no logos other than overlay text."
         ),
     },
     "history_rewind": {
