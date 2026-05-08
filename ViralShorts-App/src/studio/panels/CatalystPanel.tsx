@@ -155,10 +155,13 @@ type CatalystHubPayload = {
 };
 
 const WORKSPACE_LABELS: Record<string, string> = {
-    skeleton: 'Skeleton AI',
+    alt_battles: 'Alt-History Battles',
+    zerotier_private: 'ZeroTier (Private)',
+    dilemma: 'Moral Dilemma',
+    scary: 'Scary Stories',
+    history: 'Historical Epic',
     story: 'AI Stories',
     motivation: 'Motivation',
-    daytrading: 'Day Trading',
     chatstory: 'Chat Story',
     documentary: 'Long Form Documentary',
     recap: 'Long Form Recap',

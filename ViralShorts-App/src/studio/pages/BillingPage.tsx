@@ -89,7 +89,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     `${durationMinutes} minute max job length`,
                     `${String(limits.max_resolution || '720p').toUpperCase()} output cap`,
                     planId === 'free'
-                        ? 'Create workspace with AI Stories, Motivation, Skeleton AI, and Day Trading'
+                        ? 'Create workspace with Alt-History Battles, Moral Dilemma, Scary Stories, and Historical Epic'
                         : 'Create workspace + Chat Story template access',
                 ],
             };
