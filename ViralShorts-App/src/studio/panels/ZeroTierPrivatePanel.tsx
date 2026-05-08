@@ -248,6 +248,8 @@ export default function ZeroTierPrivatePanel() {
     const [buildScript, setBuildScript] = useState('');
     const [buildError, setBuildError] = useState('');
     const [buildLoading, setBuildLoading] = useState(false);
+    // Manual topic input (always available, doesn't require Catalyst candidates)
+    const [manualTopic, setManualTopic] = useState('');
     // Phase 2b: render state
     const [renderLoading, setRenderLoading] = useState(false);
     const [renderResult, setRenderResult] = useState<null | {
@@ -285,13 +287,24 @@ export default function ZeroTierPrivatePanel() {
     const audit = snapshot?.channel_audit;
     const candidates = audit?.next_video_candidates || [];
 
-    // Phase 2c: score every candidate, sort by virality score descending.
-    const scoredCandidates = useMemo(() => {
-        const existingTitles = (snapshot?.uploaded_videos || []).map((v) => v.title || '').filter(Boolean);
-        return candidates
+    const existingTitles = useMemo(
+        () => (snapshot?.uploaded_videos || []).map((v) => v.title || '').filter(Boolean),
+        [snapshot],
+    );
+
+    // Phase 2c: score every Catalyst-recommended candidate, sort descending.
+    const scoredCandidates = useMemo(
+        () => candidates
             .map((title) => ({ title, ...scoreVirality(title, existingTitles) }))
-            .sort((a, b) => b.score - a.score);
-    }, [candidates, snapshot]);
+            .sort((a, b) => b.score - a.score),
+        [candidates, existingTitles],
+    );
+
+    // Live score for the manual-topic input (so user sees the score as they type)
+    const manualScore = useMemo(
+        () => manualTopic.trim() ? scoreVirality(manualTopic.trim(), existingTitles) : null,
+        [manualTopic, existingTitles],
+    );
 
     const sortedUploads = useMemo<UploadedVideo[]>(() => {
         const list = (snapshot?.uploaded_videos || []).slice();
@@ -667,6 +680,54 @@ export default function ZeroTierPrivatePanel() {
                                 </button>
                             </div>
                         )}
+                    </section>
+
+                    {/* Manual topic input — always available, doesn't need Catalyst candidates */}
+                    <section className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.04] p-5">
+                        <div className="flex items-center gap-2 mb-3">
+                            <Sparkles className="h-5 w-5 text-amber-300" />
+                            <h2 className="text-lg font-bold text-white">Build a short from your own topic</h2>
+                            <span className="text-xs text-zinc-500">
+                                — heuristic-v1 scores live as you type
+                            </span>
+                        </div>
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+                            <div className="flex-1">
+                                <input
+                                    type="text"
+                                    value={manualTopic}
+                                    onChange={(e) => setManualTopic(e.target.value)}
+                                    placeholder="The Time Wally West Outran the Spectre"
+                                    className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/50"
+                                />
+                                {manualScore && (
+                                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                                        <div className={`rounded-md border px-2 py-0.5 font-bold tabular-nums ${
+                                            manualScore.score >= 70 ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40'
+                                            : manualScore.score >= 40 ? 'text-amber-300 bg-amber-500/10 border-amber-500/40'
+                                            : 'text-zinc-400 bg-zinc-500/10 border-zinc-500/40'
+                                        }`}>
+                                            Score {manualScore.score}/100
+                                        </div>
+                                        <span className="text-zinc-300">
+                                            Predicted LR: <span className="font-semibold">{manualScore.predicted_lr.toFixed(2)}%</span>
+                                        </span>
+                                        {manualScore.reasons[0] && (
+                                            <span className="text-zinc-500 truncate">— {manualScore.reasons[0]}</span>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => onBuildShort(manualTopic.trim(), manualScore || undefined)}
+                                disabled={!manualTopic.trim()}
+                                className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-amber-400 disabled:opacity-50"
+                            >
+                                <Sparkles className="h-4 w-4" />
+                                Build This Short
+                            </button>
+                        </div>
                     </section>
 
                     {/* Recommended next-shorts — scored by virality heuristic v1 */}
