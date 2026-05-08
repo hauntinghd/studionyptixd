@@ -1,5 +1,10 @@
 /**
- * CreatePanel — Skeleton AI short-form generator (rebuilt 2026-05-05).
+ * CreatePanel — Alt-History Battles short-form generator (rebuilt 2026-05-08).
+ *
+ * Niche taxonomy refactor 2026-05-08: this panel was originally Skeleton AI;
+ * Casey replaced it with the Alternate History Battles niche (counterfactual
+ * matchups: Napoleon vs Alexander, Mongols vs Romans, etc.). The skeleton_ai
+ * backend module is reused — it now serves alt-battles content.
  *
  * 3-tab Korpi-shaped UX:
  *   1. Script  — narration textarea + "Generate w/ AI" modal (Idea List /
@@ -11,16 +16,17 @@
  *                font + final "Generate Video" button.
  *
  * Backend: /api/skeleton-ai/{categories,script,voices,generate,jobs/<id>}
- * Spec:    project_skeleton_spec_canonical.md (mint green BG, anatomical
- *          white skull with hollow dark sockets + dot pupils, real opaque
- *          clothing, ~12 narration beats per 60s, 2-tier captions).
+ *          (URL kept for stability — internally serves alt-battles now).
+ * Visual:  Kings-and-Generals / Total War / Ridley Scott painterly cinematic
+ *          battle illustration. Period-correct gear. NOT photoreal. NOT
+ *          modern. Period-correct historical painterly cinematic.
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
 import { AuthContext } from '../shared';
 
 type Tab = 'script' | 'scenes' | 'audio';
-type IdeaCategory = 'human_limits' | 'marvel_vs_dc' | 'ancient_history' | 'futuristic_socrates';
+type IdeaCategory = 'classical_clash' | 'medieval_clash' | 'gunpowder_clash' | 'wildcard_clash';
 type ImageModel = 'seedream_45' | 'flux_2_pro' | 'imagen4' | 'recraft_v4_pro' | 'nano_banana_pro' | 'ernie_image' | 'nano_banana_free';
 type Tier = 'standard' | 'premium';
 
@@ -270,7 +276,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
             <header className="flex items-center justify-between">
-                <h1 className="text-2xl font-bold text-white">Skeleton AI</h1>
+                <h1 className="text-2xl font-bold text-white">Alt-History Battles</h1>
                 <div className="text-xs text-zinc-400">
                     Standard short = 5 AC · Premium short = 7 AC
                 </div>
@@ -393,7 +399,7 @@ function ScriptTab({
     return (
         <section className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">Skeleton AI Script</h2>
+                <h2 className="text-lg font-semibold text-white">Alt-History Battles Script</h2>
             </div>
             <div className="flex items-center justify-between">
                 <label className="text-sm text-zinc-300">Narration Script</label>
@@ -858,7 +864,7 @@ function IdeaModal({
 }) {
     const [modalTab, setModalTab] = useState<'idea_list' | 'custom_topic' | 'remix'>('idea_list');
     const [categories, setCategories] = useState<CategoryInfo[]>([]);
-    const [selectedCat, setSelectedCat] = useState<IdeaCategory>('human_limits');
+    const [selectedCat, setSelectedCat] = useState<IdeaCategory>('classical_clash');
     const [customTopic, setCustomTopic] = useState('');
     const [remixUrl, setRemixUrl] = useState('');
     const [remixPlatform, setRemixPlatform] = useState<'youtube' | 'facebook' | 'tiktok' | 'instagram'>('youtube');
@@ -921,7 +927,7 @@ function IdeaModal({
                 <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-bold text-white flex items-center gap-2">
                         <Sparkles className="h-5 w-5 text-violet-400" />
-                        Generate Skeleton Script with AI
+                        Generate Battle Script with AI
                     </h3>
                     <button onClick={onClose} className="text-zinc-400 hover:text-white">
                         <X className="h-5 w-5" />

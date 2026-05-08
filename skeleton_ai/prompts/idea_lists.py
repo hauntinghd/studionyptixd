@@ -1,11 +1,13 @@
 """
 Idea-list categories shown to user in the script-gen modal.
 
-4 categories per Casey 2026-05-05:
-  1. Human Limits          — body/brain failure over time
-  2. Marvel vs DC          — comic narration mix
-  3. Ancient History Mix   — random topics in ancient settings (no Socrates)
-  4. Futuristic Socrates   — occasional rotation
+Refactored 2026-05-08: Skeleton AI niche → Alternate History Battles niche.
+
+4 categories per Casey 2026-05-08:
+  1. classical_clash    — ancient-world counterfactuals (Rome vs Greece vs Persia)
+  2. medieval_clash     — medieval-era counterfactuals (Mongols vs Crusaders, Vikings vs Samurai)
+  3. gunpowder_clash    — early-modern counterfactuals (Napoleon vs Aztecs, Conquistadors vs Mongols)
+  4. wildcard_clash     — cross-era + mythological wildcards (Spartans vs Marines, Achilles vs Lancelot)
 
 Each category has a Grok system prompt + a list of seed ideas to surface
 in the modal. Grok generates fresh ideas on demand using the system prompt
@@ -13,85 +15,94 @@ as context.
 """
 
 CATEGORIES = {
-    "human_limits": {
-        "label": "Human Limits",
-        "tagline": "Body and brain failure over time",
+    "classical_clash": {
+        "label": "Classical Clash",
+        "tagline": "Ancient-world counterfactuals (Rome / Greece / Persia / Egypt / Carthage)",
         "system_prompt": (
             "You write 60-second YouTube Shorts narration scripts in the "
-            "Cryptic Science / Skeleton AI style. Topic category: HUMAN LIMITS — "
-            "scripts about how the human body and brain decay, fail, or peak "
-            "across a lifetime. Use specific numbers and ages. Format: "
-            "'[X] vs [Y]. [Question about limits].' Build escalation across "
-            "10-12 narration beats (~5 sec each, ~150 wpm). End with engagement "
-            "bait: 'Which would you rather have?' or similar."
+            "Alternate History Battles style. Topic category: CLASSICAL CLASH — "
+            "counterfactual ancient-world matchups (Roman legion vs Macedonian "
+            "phalanx, Spartan hoplites vs Persian Immortals, Carthaginian war "
+            "elephants vs Roman triarii, Egyptian charioteers vs Hittite "
+            "infantry). Cite real military doctrine, period-correct weapons, "
+            "real generals. Format: '[Force A] vs [Force B] — Who Actually "
+            "Wins?' Build 10-12 beats covering: army size, tech tier, "
+            "formation, terrain, opening volley, tactical reveal, turning "
+            "point, verdict, caveat. End with: 'Comments: who wins?'"
         ),
         "seed_ideas": [
-            "What aging really does to your bones year by year",
-            "The age your brain peaks vs when it declines",
-            "How many heartbeats you actually have",
-            "Why your eyes fail at 40 (not 60)",
-            "Reaction time at 20 vs 50",
+            "Roman legion vs Macedonian phalanx at full strength",
+            "300 Spartans vs 1000 Persian Immortals on neutral ground",
+            "Hannibal's war elephants vs Caesar's legions in Gaul",
+            "Egyptian charioteers vs Hittite infantry at Kadesh rematch",
+            "Greek triremes vs Carthaginian quinqueremes in open sea",
         ],
     },
-    "marvel_vs_dc": {
-        "label": "Marvel vs DC",
-        "tagline": "Comic narration mix — power, money, lore",
+    "medieval_clash": {
+        "label": "Medieval Clash",
+        "tagline": "Medieval-era counterfactuals (Mongols / Crusaders / Vikings / Samurai)",
         "system_prompt": (
             "You write 60-second YouTube Shorts narration scripts in the "
-            "Cryptic Science / Skeleton AI style. Topic category: MARVEL VS DC — "
-            "scripts comparing characters, abilities, finances, or storylines "
-            "across the two comic universes. Use specific lore, dollar amounts, "
-            "fight stats. Format: '[Character A] vs [Character B]. Who [verb]?' "
-            "Build escalation across 10-12 beats. End with: 'Who would win? "
-            "Comments below.'"
+            "Alternate History Battles style. Topic category: MEDIEVAL CLASH — "
+            "counterfactual medieval-era matchups (Mongol horse archers vs "
+            "Crusader knights, Vikings vs Samurai, English longbows vs "
+            "Mamluk cavalry, Teutonic Knights vs Aztec Eagle Warriors). Cite "
+            "real military doctrine, period-correct armor and weapons, real "
+            "leaders (Genghis, Saladin, Edward III, Yoritomo). Format: "
+            "'[Force A] vs [Force B] — Who Actually Wins?' Build 10-12 beats. "
+            "End with: 'Comments: who wins?'"
         ),
         "seed_ideas": [
-            "Tony Stark vs Bruce Wayne net worth",
-            "Iron Man vs Batman who's smarter",
-            "Wolverine vs Deadpool fight to the death",
-            "Doctor Strange vs Zatanna magic showdown",
-            "Hulk vs Doomsday raw strength",
+            "Mongol horse archers vs European knights at full strength",
+            "Vikings vs Samurai on neutral coastline",
+            "English longbowmen at Agincourt vs Mamluk cavalry",
+            "Teutonic Knights vs Aztec Eagle Warriors",
+            "Saladin's army vs Richard the Lionheart at peak strength",
         ],
     },
-    "ancient_history": {
-        "label": "Ancient History Mix",
-        "tagline": "Roman, Egyptian, Greek, Chinese — careers, finances, life",
+    "gunpowder_clash": {
+        "label": "Gunpowder Clash",
+        "tagline": "Early-modern counterfactuals (Napoleon / Conquistadors / Civil War)",
         "system_prompt": (
             "You write 60-second YouTube Shorts narration scripts in the "
-            "Cryptic Science / Skeleton AI style. Topic category: ANCIENT "
-            "HISTORY MIX — scripts comparing professions, salaries, life "
-            "outcomes from ancient settings (Rome, Egypt, Greece, China, "
-            "Mesopotamia). DO NOT default to Socrates. Use real historical "
-            "figures or roles. Convert ancient currencies to USD-equivalent. "
-            "Format: '[Role A] vs [Role B]. Who made more?' Build 10-12 beats. "
-            "End with: 'Who would you rather be?'"
+            "Alternate History Battles style. Topic category: GUNPOWDER "
+            "CLASH — counterfactual early-modern matchups (Napoleon's Grand "
+            "Army vs Aztec armies at full strength, Conquistadors vs Inca, "
+            "Confederate cavalry vs Imperial Japan riflemen, Spanish tercios "
+            "vs Ottoman janissaries). Cite real doctrine, period weapons "
+            "(musket, cannon, bayonet), real commanders. Format: '[Force A] "
+            "vs [Force B] — Who Actually Wins?' Build 10-12 beats covering "
+            "army size, weapons tier, formations, terrain, verdict. End with: "
+            "'Comments: who wins?'"
         ),
         "seed_ideas": [
-            "Roman centurion vs gladiator pay over a career",
-            "Pyramid worker vs scribe salary",
-            "Spartan soldier vs Persian immortal",
-            "Caravan trader vs farmer in ancient China",
-            "Greek philosopher vs trireme captain",
+            "Napoleon's Grand Army vs Aztec army at full strength",
+            "Conquistadors vs Inca Empire at Cajamarca rematch",
+            "Spanish tercios vs Ottoman janissaries on the Danube",
+            "Confederate cavalry vs Imperial Japanese infantry",
+            "Wellington's redcoats at Waterloo vs Mongol horde",
         ],
     },
-    "futuristic_socrates": {
-        "label": "Futuristic Socrates",
-        "tagline": "Sci-fi setting + Socratic dialogue (occasional rotation)",
+    "wildcard_clash": {
+        "label": "Wildcard Clash",
+        "tagline": "Cross-era + mythological matchups (Spartans vs Marines / Achilles vs Lancelot)",
         "system_prompt": (
             "You write 60-second YouTube Shorts narration scripts in the "
-            "Cryptic Science / Skeleton AI style. Topic category: FUTURISTIC "
-            "SOCRATES — scripts set in 2050+ sci-fi futures with Socratic "
-            "questioning style ('What if you knew that...?'). Mix tech "
-            "professions with philosophical framing. Format: '[Role A] vs "
-            "[Role B]. Who actually wins?' Build 10-12 beats with sci-fi "
-            "specifics. End with: 'Which future would you choose?'"
+            "Alternate History Battles style. Topic category: WILDCARD "
+            "CLASH — cross-era counterfactuals and mythological matchups "
+            "(300 Spartans vs modern Marines, Achilles vs Lancelot, Mongol "
+            "horde vs Roman legion, Genghis Khan vs Caesar one-on-one, "
+            "samurai with bushido vs Templar with chivalry). Cite real "
+            "doctrine on both sides, fairly weight tech vs training. "
+            "Format: '[Force A] vs [Force B] — Who Actually Wins?' Build "
+            "10-12 beats. End with: 'Comments: who wins?'"
         ),
         "seed_ideas": [
-            "Mars colonist vs space miner pay",
-            "AI engineer 2050 vs surgeon 2050",
-            "Quantum trader vs gene editor net worth",
-            "Mind-uploader vs body-augmenter lifespan",
-            "Drone pilot vs starship navigator career",
+            "300 Spartans vs modern US Marine platoon at full strength",
+            "Achilles vs Lancelot in single combat",
+            "Mongol horde vs Roman legion at peak Pax Romana",
+            "Genghis Khan vs Julius Caesar one-on-one",
+            "Templar knight vs samurai under bushido code",
         ],
     },
 }
