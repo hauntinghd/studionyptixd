@@ -1277,6 +1277,86 @@ def cancel_render(job_id: str) -> dict:
     return {"phase": "cancelled", "was_running": was_running}
 
 
+def regenerate_thumbnail(
+    job_id: str,
+    idx: int,
+    custom_prompt: str | None = None,
+) -> Path:
+    """Regenerate a single thumbnail (idx 1-based) for the panel's
+    'Regenerate' button. Re-runs seedream with either a fresh variant
+    hint (when custom_prompt is None) or with the user-supplied prompt
+    verbatim (overrides the channel thumbnail_style + variant hint).
+
+    Returns the new file path. Caller should serve with cache-bust
+    ?v=<mtime> so the <img> reloads."""
+    import random as _random
+
+    state = load_state(job_id)
+    if not state:
+        raise LFRenderError(f"no such job {job_id}")
+    if idx < 1 or idx > 12:
+        raise LFRenderError(f"thumbnail idx {idx} out of range (1..12)")
+
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    outline = state.get("outline") or {}
+
+    thumbs_dir = _job_dir(job_id) / "thumbnails"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    out = thumbs_dir / f"thumb_{idx}.png"
+    if out.exists():
+        out.unlink()
+
+    base_prompt = (
+        channel.get("thumbnail_style_prompt")
+        or channel.get("visual_style")
+        or ""
+    ).strip()
+    title = (outline.get("title") or "").strip()
+
+    if custom_prompt and custom_prompt.strip():
+        full_prompt = custom_prompt.strip()
+    else:
+        # Wider variant pool than the original 3 in _gen_thumbnails so
+        # regenerating a bad tile actually gives Casey something different.
+        variants = [
+            "Medium portrait composition, subject center, mid-shot, dramatic lighting.",
+            "Low-angle dramatic composition, subject silhouetted against backlight.",
+            "Tight close-up, subject filling frame, shallow depth of field.",
+            "Over-the-shoulder composition, subject's back to camera, environmental context.",
+            "Rule-of-thirds, subject left-third, large title text right.",
+            "Subject center-frame heroic pose, cinematic 35mm composition.",
+            "Profile shot, subject side-on, dramatic chiaroscuro lighting.",
+        ]
+        variant = _random.choice(variants)
+        full_prompt = (
+            f"{base_prompt}\n\nDocumentary title context: {title}.\n\n"
+            f"Composition variant: {variant}"
+        )
+
+    data = _fal_post(
+        SEEDREAM_URL,
+        {"prompt": full_prompt, "image_size": {"width": 1280, "height": 720}},
+        timeout_s=180,
+    )
+    images = data.get("images") or []
+    if not images:
+        raise LFRenderError(f"thumbnail gen returned no images: {data}")
+    img_url = images[0].get("url", "")
+    if not img_url:
+        raise LFRenderError(f"thumbnail gen response missing url: {data}")
+    _download(img_url, out, timeout_s=120)
+
+    # Update state.thumbnails_generated so /jobs/{id} reports the right count
+    # if this regeneration adds a new index beyond what was originally generated.
+    existing = int(state.get("thumbnails_generated", 0) or 0)
+    if idx > existing:
+        state["thumbnails_generated"] = idx
+        save_state(job_id, state)
+
+    return out
+
+
 def regenerate_still(job_id: str, scene_idx: int,
                      new_prompt: str | None = None) -> Path:
     """Public API — regenerate one still. Synchronous (typical call ~5-15s

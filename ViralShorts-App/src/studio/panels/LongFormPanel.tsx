@@ -716,6 +716,45 @@ export default function LongFormPanel() {
         }
     }, [activeJobId, getFreshToken, fetchJsonResilient, pollJob]);
 
+    // PR #131: regenerate one thumbnail tile via seedream. Returns
+    // cache-busted URL so the <img> reloads. Custom prompt optional.
+    const [regeneratingThumbIdx, setRegeneratingThumbIdx] = useState<number | null>(null);
+    const regenerateThumbnail = useCallback(async (
+        idx: number,
+        customPrompt?: string,
+    ) => {
+        if (!activeJobId) return;
+        setRegeneratingThumbIdx(idx);
+        try {
+            const tok = await getFreshToken();
+            const { ok, data } = await fetchJsonResilient(
+                `${API}/api/long-form/jobs/${activeJobId}/regenerate-thumbnail/${idx}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${tok}`,
+                    },
+                    body: JSON.stringify({ custom_prompt: customPrompt || undefined }),
+                },
+                { retries: 1 },
+            );
+            if (!ok) throw new Error(data?.detail || 'thumbnail regenerate failed');
+            // Update the URL with the cache-bust version so the img reloads.
+            const newUrl = data?.thumbnail_url as string;
+            if (newUrl && jobFullState) {
+                const nextThumbs = [...(jobFullState.thumbnail_urls || [])];
+                while (nextThumbs.length < idx) nextThumbs.push('');
+                nextThumbs[idx - 1] = newUrl;
+                setJobFullState({ ...jobFullState, thumbnail_urls: nextThumbs });
+            }
+        } catch (e) {
+            alert((e as Error).message);
+        } finally {
+            setRegeneratingThumbIdx(null);
+        }
+    }, [activeJobId, getFreshToken, fetchJsonResilient, jobFullState]);
+
     // PR #128: cancel an in-flight render. Cooperative — backend cancels
     // the asyncio task at the next per-scene boundary. Already-rendered
     // assets stay on disk so user can resume / re-finalize later.
@@ -847,6 +886,8 @@ export default function LongFormPanel() {
                     onReloadScenes={loadScenes}
                     cancellingBusy={cancellingBusy}
                     onCancel={cancelJob}
+                    onRegenerateThumbnail={regenerateThumbnail}
+                    regeneratingThumbIdx={regeneratingThumbIdx}
                 />
             )}
         </div>
@@ -1368,6 +1409,7 @@ function RenderTab({
     scenes, scenesLoading, regeneratingIdx, finalizingBusy,
     onRegenerateScene, onFinalize, onReloadScenes,
     cancellingBusy, onCancel,
+    onRegenerateThumbnail, regeneratingThumbIdx,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1391,6 +1433,8 @@ function RenderTab({
     onReloadScenes: (jobId: string) => void;
     cancellingBusy: boolean;
     onCancel: () => void;
+    onRegenerateThumbnail: (idx: number, customPrompt?: string) => void;
+    regeneratingThumbIdx: number | null;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
@@ -1473,6 +1517,8 @@ function RenderTab({
                     renderError={renderError}
                     cancellingBusy={cancellingBusy}
                     onCancel={onCancel}
+                    onRegenerateThumbnail={onRegenerateThumbnail}
+                    regeneratingThumbIdx={regeneratingThumbIdx}
                 />
             )}
 
@@ -1688,9 +1734,99 @@ function SceneTile({
     );
 }
 
+function ThumbnailTile({
+    idx, url, regenerating, onRegenerate,
+}: {
+    idx: number;
+    url: string;
+    regenerating: boolean;
+    onRegenerate: (idx: number, customPrompt?: string) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [draftPrompt, setDraftPrompt] = useState('');
+    return (
+        <div className="rounded-md overflow-hidden border border-zinc-800 hover:border-violet-500/60 transition-colors flex flex-col bg-zinc-950">
+            <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="block relative"
+            >
+                <img
+                    src={url}
+                    alt={`thumbnail ${idx}`}
+                    className="w-full aspect-video object-cover bg-zinc-900"
+                    loading="lazy"
+                />
+                {regenerating && (
+                    <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-violet-400" />
+                    </div>
+                )}
+                <div className="absolute top-1 left-1 rounded bg-zinc-900/80 px-1.5 py-0.5 text-[10px] text-zinc-300 font-mono">
+                    #{idx}
+                </div>
+            </a>
+            <div className="p-1.5 flex flex-col gap-1.5 border-t border-zinc-800">
+                {editing ? (
+                    <>
+                        <textarea
+                            value={draftPrompt}
+                            onChange={(e) => setDraftPrompt(e.target.value)}
+                            placeholder="Custom prompt overrides the channel's thumbnail style + variant…"
+                            rows={4}
+                            className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 focus:outline-none focus:border-violet-500/60 font-mono"
+                            autoFocus
+                        />
+                        <div className="flex gap-1.5">
+                            <button
+                                onClick={() => {
+                                    onRegenerate(idx, draftPrompt);
+                                    setEditing(false);
+                                    setDraftPrompt('');
+                                }}
+                                disabled={regenerating || !draftPrompt.trim()}
+                                className="flex-1 rounded bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 px-2 py-1 text-[10px] font-semibold text-white flex items-center justify-center gap-1"
+                            >
+                                <RefreshCw className="h-3 w-3" /> Regen w/ prompt
+                            </button>
+                            <button
+                                onClick={() => { setEditing(false); setDraftPrompt(''); }}
+                                className="rounded bg-zinc-800 hover:bg-zinc-700 px-2 py-1 text-[10px] text-zinc-300"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </>
+                ) : (
+                    <div className="flex gap-1.5">
+                        <button
+                            onClick={() => onRegenerate(idx)}
+                            disabled={regenerating}
+                            className="flex-1 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-2 py-1 text-[10px] font-semibold text-zinc-200 flex items-center justify-center gap-1"
+                            title="Re-render with a different random variant hint"
+                        >
+                            <RefreshCw className="h-3 w-3" /> Regen
+                        </button>
+                        <button
+                            onClick={() => setEditing(true)}
+                            disabled={regenerating}
+                            className="rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-2 py-1 text-[10px] text-zinc-300"
+                            title="Write a custom prompt for this thumbnail"
+                        >
+                            Edit
+                        </button>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 function ActiveJobCard({
     channel, outline, jobStatus, jobFullState, isRunning, isDone, isFailed, renderError,
     cancellingBusy, onCancel,
+    onRegenerateThumbnail, regeneratingThumbIdx,
 }: {
     channel: ChannelInfo | null;
     outline: Outline | null;
@@ -1702,6 +1838,8 @@ function ActiveJobCard({
     renderError: string;
     cancellingBusy: boolean;
     onCancel: () => void;
+    onRegenerateThumbnail: (idx: number, customPrompt?: string) => void;
+    regeneratingThumbIdx: number | null;
 }) {
     const phaseLabel = PHASE_LABELS[jobStatus.phase] || jobStatus.phase;
     const phaseIdx = PHASE_ORDER.indexOf(jobStatus.phase);
@@ -1850,24 +1988,17 @@ function ActiveJobCard({
                 {thumbs.length > 0 && (
                     <div className="flex flex-col gap-2">
                         <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">
-                            Thumbnail candidates
+                            Thumbnail candidates — click Regen if any look off
                         </div>
                         <div className="grid grid-cols-3 gap-2">
                             {thumbs.map((url, i) => (
-                                <a
+                                <ThumbnailTile
                                     key={i}
-                                    href={url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="block rounded-md overflow-hidden border border-zinc-800 hover:border-violet-500/60 transition-colors"
-                                >
-                                    <img
-                                        src={url}
-                                        alt={`thumbnail ${i + 1}`}
-                                        className="w-full aspect-video object-cover bg-zinc-900"
-                                        loading="lazy"
-                                    />
-                                </a>
+                                    idx={i + 1}
+                                    url={url}
+                                    regenerating={regeneratingThumbIdx === i + 1}
+                                    onRegenerate={onRegenerateThumbnail}
+                                />
                             ))}
                         </div>
                     </div>
