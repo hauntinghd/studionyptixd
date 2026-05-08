@@ -23843,6 +23843,20 @@ except Exception as _zt_private_err:
     log.warning(f"ZeroTier (Private) router NOT mounted: {_zt_private_err}")
 
 
+# Alt-History (Private) — admin-only Catalyst-fed surface for the
+# Cryptic Science channel (alt-battles uploads). Topic generator only;
+# render path stays on /api/skeleton-ai/* (existing alt-battles pipeline).
+try:
+    from alt_history_private_router import build_alt_history_private_router
+    app.include_router(build_alt_history_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ))
+    log.info("Alt-History (Private) router mounted at /api/alt-history-private (admin-gated)")
+except Exception as _alt_priv_err:
+    log.warning(f"Alt-History (Private) router NOT mounted: {_alt_priv_err}")
+
+
 # Catalyst Reference Videos (Casey 2026-05-06 — "guarantee virality" lever).
 # Per-user library of viral / "winning" YouTube videos the user pastes in.
 # yt-dlp pulls metadata; Phase 2 will add Whisper transcript + vision pattern

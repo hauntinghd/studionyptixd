@@ -15,6 +15,7 @@ const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 const ZeroTierPrivatePanel = lazy(() => import('../panels/ZeroTierPrivatePanel'));
+const AltHistoryPrivatePanel = lazy(() => import('../panels/AltHistoryPrivatePanel'));
 
 const PanelFallback = () => (
     <div className="flex h-[40vh] items-center justify-center gap-2 text-sm text-gray-500">
@@ -187,6 +188,20 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (tab === 'waitlist' && isAdmin) return lazyPanel(<WaitlistPanel />);
         // ZeroTier (Private) niche gets its own Catalyst-powered surface.
         if (selectedNiche === 'zerotier_private' && isAdmin) return lazyPanel(<ZeroTierPrivatePanel />);
+        // Alt-History (Private) — same Catalyst-fed UX as ZT Private but
+        // for Cryptic Science (where alt-battles uploads land). Delegates
+        // the actual render to alt_battles CreatePanel via onPickNiche so
+        // the topic is prefilled.
+        if (selectedNiche === 'alt_history_private' && isAdmin) {
+            return lazyPanel(<AltHistoryPrivatePanel onPickNiche={(n, opts) => {
+                setSelectedNiche(n);
+                if (opts?.topic) {
+                    const u = new URL(window.location.href);
+                    u.searchParams.set('topic', opts.topic);
+                    window.history.replaceState({}, '', u.toString());
+                }
+            }} />);
+        }
         return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
 
@@ -348,6 +363,7 @@ function NicheGallery({ onPick, isOwner }: { onPick: (nicheId: string) => void; 
         { id: 'scary', title: 'Scary Stories', desc: 'Horror & true-crime atmosphere', icon: '👻', badge: 'Trending' },
         { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', icon: '⚔️', badge: 'Trending' },
         { id: 'zerotier_private', title: 'ZeroTier (Private)', desc: 'DC speedster comic-book shorts — owner only', icon: '⚡', badge: 'Private', ownerOnly: true },
+        { id: 'alt_history_private', title: 'Alt-History (Private)', desc: 'Catalyst-fed alt-battles for Cryptic Science — owner only', icon: '🛡️', badge: 'Private', ownerOnly: true },
     ].filter((n) => !n.ownerOnly || isOwner);
     return (
         <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4">
