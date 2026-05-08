@@ -244,6 +244,7 @@ export default function ZeroTierPrivatePanel() {
     // Build-This-Short modal state
     const [buildModalOpen, setBuildModalOpen] = useState(false);
     const [buildTopic, setBuildTopic] = useState('');
+    const [buildTopicScore, setBuildTopicScore] = useState<ViralityScore | null>(null);
     const [buildScript, setBuildScript] = useState('');
     const [buildError, setBuildError] = useState('');
     const [buildLoading, setBuildLoading] = useState(false);
@@ -257,6 +258,23 @@ export default function ZeroTierPrivatePanel() {
         duration_total_sec?: number;
         fal_cost_estimate_usd?: number;
     }>(null);
+
+    // Phase 3: predictions calibration data
+    interface PredictionRow {
+        job_id?: string;
+        ts?: number;
+        title?: string;
+        topic?: string;
+        predicted_score?: number;
+        predicted_like_rate?: number;
+        matched?: boolean;
+        video_id?: string | null;
+        actual_views?: number | null;
+        actual_likes?: number | null;
+        actual_like_rate?: number | null;
+        delta_lr?: number | null;
+    }
+    const [predictions, setPredictions] = useState<PredictionRow[]>([]);
 
     const channel = useMemo(() => {
         const channels = payload?.channels || [];
@@ -358,6 +376,26 @@ export default function ZeroTierPrivatePanel() {
         void fetchHub();
     }, [fetchHub]);
 
+    // Phase 3: fetch predictions log on mount + after every Sync
+    const fetchPredictions = useCallback(async () => {
+        if (!accessToken) return;
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/predictions?limit=20`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            const data = await r.json();
+            if (r.ok) {
+                setPredictions(Array.isArray(data?.predictions) ? data.predictions : []);
+            }
+        } catch {
+            // non-blocking — predictions are nice-to-have
+        }
+    }, [accessToken]);
+
+    useEffect(() => {
+        void fetchPredictions();
+    }, [fetchPredictions, payload]);
+
     // OAuth-return flow: when the URL contains ?youtube_channel_id=... the
     // user just came back from Google OAuth. Force a Catalyst refresh (not
     // just a hub fetch) so the new refresh token is exercised and the panel
@@ -414,9 +452,10 @@ export default function ZeroTierPrivatePanel() {
         /refresh token|reconnect|missing google/i.test(channel.last_sync_error || '')
     );
 
-    const onBuildShort = (title: string) => {
-        // Open the build modal pre-loaded with the candidate topic.
+    const onBuildShort = (title: string, score?: ViralityScore) => {
+        // Open the build modal pre-loaded with the candidate topic + score.
         setBuildTopic(title);
+        setBuildTopicScore(score || null);
         setBuildScript('');
         setBuildError('');
         setRenderResult(null);
@@ -482,7 +521,14 @@ export default function ZeroTierPrivatePanel() {
                     Authorization: `Bearer ${accessToken}`,
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ script_json: scriptForBackend }),
+                body: JSON.stringify({
+                    script_json: scriptForBackend,
+                    topic: buildTopic.trim(),
+                    // Phase 3: log the heuristic-v1 score so backend can
+                    // cross-reference with actual outcomes later.
+                    predicted_score: buildTopicScore?.score ?? null,
+                    predicted_like_rate: buildTopicScore?.predicted_lr ?? null,
+                }),
                 // Render takes 5-10 min. Browser fetch has no built-in timeout
                 // so this just waits. AbortController could be added for a Stop
                 // button later.
@@ -666,7 +712,7 @@ export default function ZeroTierPrivatePanel() {
                                             )}
                                             <button
                                                 type="button"
-                                                onClick={() => onBuildShort(c.title)}
+                                                onClick={() => onBuildShort(c.title, c)}
                                                 className="inline-flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-semibold text-violet-200 transition hover:border-violet-400 hover:bg-violet-500/20"
                                             >
                                                 <Sparkles className="h-3.5 w-3.5" />
@@ -686,6 +732,80 @@ export default function ZeroTierPrivatePanel() {
                                     </ul>
                                 </div>
                             )}
+                        </section>
+                    )}
+
+                    {/* Phase 3: Predictions calibration — predicted vs actual */}
+                    {predictions.length > 0 && (
+                        <section className="rounded-2xl border border-cyan-500/30 bg-cyan-500/[0.04] p-5">
+                            <div className="flex items-center gap-2 mb-3">
+                                <TrendingUp className="h-5 w-5 text-cyan-300" />
+                                <h2 className="text-lg font-bold text-white">Catalyst learning</h2>
+                                <span className="text-xs text-zinc-500">
+                                    — heuristic v1 predictions vs actual YouTube outcomes
+                                </span>
+                            </div>
+                            {(() => {
+                                const matched = predictions.filter((p) => p.matched && typeof p.delta_lr === 'number');
+                                if (!matched.length) {
+                                    return (
+                                        <div className="text-xs text-zinc-400">
+                                            {predictions.length} prediction{predictions.length === 1 ? '' : 's'} logged.
+                                            Once Catalyst harvests the actual YouTube outcome (24-48h after upload),
+                                            calibration deltas will appear here.
+                                        </div>
+                                    );
+                                }
+                                const avgDelta = matched.reduce((s, p) => s + (p.delta_lr || 0), 0) / matched.length;
+                                const direction = avgDelta > 0.2 ? 'under-predicting' : avgDelta < -0.2 ? 'over-predicting' : 'well-calibrated';
+                                const dirColor = direction === 'well-calibrated' ? 'text-emerald-300'
+                                    : direction === 'under-predicting' ? 'text-amber-300' : 'text-red-300';
+                                return (
+                                    <div className="text-xs text-zinc-400 mb-3">
+                                        <span className="text-zinc-300">{matched.length}</span> matched against actual outcomes ·
+                                        avg Δ <span className={`font-semibold ${dirColor}`}>{avgDelta >= 0 ? '+' : ''}{avgDelta.toFixed(2)}%</span> ·
+                                        <span className={`font-semibold ${dirColor}`}> {direction}</span>
+                                    </div>
+                                );
+                            })()}
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-xs">
+                                    <thead>
+                                        <tr className="text-left text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                                            <th className="px-2 py-1.5">Title</th>
+                                            <th className="px-2 py-1.5 text-right">Score</th>
+                                            <th className="px-2 py-1.5 text-right">Predicted LR</th>
+                                            <th className="px-2 py-1.5 text-right">Actual LR</th>
+                                            <th className="px-2 py-1.5 text-right">Δ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {predictions.slice(0, 12).map((p, i) => {
+                                            const delta = typeof p.delta_lr === 'number' ? p.delta_lr : null;
+                                            const dColor = delta === null ? 'text-zinc-500'
+                                                : Math.abs(delta) <= 0.5 ? 'text-emerald-300'
+                                                : Math.abs(delta) <= 1.0 ? 'text-amber-300' : 'text-red-300';
+                                            return (
+                                                <tr key={p.job_id || `pred-${i}`} className="border-t border-white/[0.06]">
+                                                    <td className="px-2 py-1.5 text-white truncate max-w-md">{p.title || p.topic || '—'}</td>
+                                                    <td className="px-2 py-1.5 text-right text-zinc-300 tabular-nums">
+                                                        {typeof p.predicted_score === 'number' ? Math.round(p.predicted_score) : '—'}
+                                                    </td>
+                                                    <td className="px-2 py-1.5 text-right text-zinc-300 tabular-nums">
+                                                        {typeof p.predicted_like_rate === 'number' ? `${p.predicted_like_rate.toFixed(2)}%` : '—'}
+                                                    </td>
+                                                    <td className="px-2 py-1.5 text-right text-zinc-300 tabular-nums">
+                                                        {typeof p.actual_like_rate === 'number' ? `${p.actual_like_rate.toFixed(2)}%` : (p.matched ? '—' : <span className="text-zinc-500 italic">unmatched</span>)}
+                                                    </td>
+                                                    <td className={`px-2 py-1.5 text-right font-semibold tabular-nums ${dColor}`}>
+                                                        {delta === null ? '—' : `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}%`}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
                         </section>
                     )}
 
