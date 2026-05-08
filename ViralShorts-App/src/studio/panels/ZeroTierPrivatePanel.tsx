@@ -106,6 +106,16 @@ export default function ZeroTierPrivatePanel() {
     const [buildScript, setBuildScript] = useState('');
     const [buildError, setBuildError] = useState('');
     const [buildLoading, setBuildLoading] = useState(false);
+    // Phase 2b: render state
+    const [renderLoading, setRenderLoading] = useState(false);
+    const [renderResult, setRenderResult] = useState<null | {
+        job_id: string;
+        title?: string;
+        mp4_url?: string;
+        scene_count?: number;
+        duration_total_sec?: number;
+        fal_cost_estimate_usd?: number;
+    }>(null);
 
     const channel = useMemo(() => {
         const channels = payload?.channels || [];
@@ -256,13 +266,11 @@ export default function ZeroTierPrivatePanel() {
     );
 
     const onBuildShort = (title: string) => {
-        // Phase 2a: open the build modal pre-loaded with the candidate topic.
-        // Frontend calls /api/zerotier-private/script which uses the dedicated
-        // zerotier_private TEMPLATE_SYSTEM_PROMPT (Conflict Arc + "The Time
-        // Wally West [past-tense]" formula + cel-shaded comic visuals).
+        // Open the build modal pre-loaded with the candidate topic.
         setBuildTopic(title);
         setBuildScript('');
         setBuildError('');
+        setRenderResult(null);
         setBuildModalOpen(true);
     };
 
@@ -299,9 +307,53 @@ export default function ZeroTierPrivatePanel() {
     }, [accessToken, buildTopic, buildLoading]);
 
     const closeBuildModal = useCallback(() => {
-        if (buildLoading) return; // don't close mid-stream
+        if (buildLoading || renderLoading) return; // don't close mid-stream/mid-render
         setBuildModalOpen(false);
-    }, [buildLoading]);
+    }, [buildLoading, renderLoading]);
+
+    const renderBuildShort = useCallback(async () => {
+        if (!accessToken || !buildScript.trim() || renderLoading) return;
+        setBuildError('');
+        setRenderResult(null);
+        setRenderLoading(true);
+        try {
+            // The script content the user is looking at is already pretty-printed
+            // JSON. Re-stringify it (round-trips through JSON.parse to catch
+            // edits the user may have made + normalize formatting).
+            let scriptForBackend = buildScript.trim();
+            try {
+                const parsed = JSON.parse(scriptForBackend);
+                scriptForBackend = JSON.stringify(parsed);
+            } catch {
+                // not valid JSON — let the backend reject it
+            }
+            const r = await fetch(`${API}/api/zerotier-private/render`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ script_json: scriptForBackend }),
+                // Render takes 5-10 min. Browser fetch has no built-in timeout
+                // so this just waits. AbortController could be added for a Stop
+                // button later.
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Render failed (${r.status})`));
+            setRenderResult({
+                job_id: String(data?.job_id || ''),
+                title: data?.title,
+                mp4_url: data?.mp4_url ? `${API}${data.mp4_url}` : undefined,
+                scene_count: data?.scene_count,
+                duration_total_sec: data?.duration_total_sec,
+                fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
+            });
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Render failed'));
+        } finally {
+            setRenderLoading(false);
+        }
+    }, [accessToken, buildScript, renderLoading]);
 
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-6xl mx-auto">
@@ -590,11 +642,11 @@ export default function ZeroTierPrivatePanel() {
                             </button>
                         </div>
 
-                        <div className="mt-3 flex items-center gap-2">
+                        <div className="mt-3 flex items-center gap-2 flex-wrap">
                             <button
                                 type="button"
                                 onClick={generateBuildScript}
-                                disabled={buildLoading || !buildTopic.trim()}
+                                disabled={buildLoading || renderLoading || !buildTopic.trim()}
                                 className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50"
                             >
                                 {buildLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -602,14 +654,39 @@ export default function ZeroTierPrivatePanel() {
                             </button>
                             <button
                                 type="button"
-                                disabled
-                                title="Phase 2b — render pipeline wires next"
-                                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-500 cursor-not-allowed"
+                                onClick={renderBuildShort}
+                                disabled={!buildScript.trim() || renderLoading || buildLoading}
+                                title="Renders the full short via canonical pipeline. Takes 5-10 minutes."
+                                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                             >
-                                <Sparkles className="h-4 w-4" />
-                                Render This Short (Phase 2b)
+                                {renderLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                {renderLoading ? 'Rendering (5-10 min)…' : 'Render This Short (~$2)'}
                             </button>
                         </div>
+
+                        {renderResult?.mp4_url && (
+                            <div className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-100">
+                                <div className="font-semibold uppercase tracking-[0.18em] text-emerald-300 mb-1">
+                                    ✓ Render complete
+                                </div>
+                                <div className="space-y-1">
+                                    {renderResult.title && <div><span className="text-emerald-300/80">Title:</span> {renderResult.title}</div>}
+                                    {typeof renderResult.scene_count === 'number' && <div><span className="text-emerald-300/80">Scenes:</span> {renderResult.scene_count}</div>}
+                                    {typeof renderResult.duration_total_sec === 'number' && <div><span className="text-emerald-300/80">Duration:</span> {renderResult.duration_total_sec.toFixed(1)}s</div>}
+                                    {typeof renderResult.fal_cost_estimate_usd === 'number' && <div><span className="text-emerald-300/80">fal cost (est):</span> ${renderResult.fal_cost_estimate_usd.toFixed(2)}</div>}
+                                    <div className="pt-2">
+                                        <a
+                                            href={renderResult.mp4_url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
+                                        >
+                                            Open MP4 in new tab
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
                         {buildError && (
                             <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
@@ -620,12 +697,20 @@ export default function ZeroTierPrivatePanel() {
 
                         {buildScript && (
                             <div className="mt-3 rounded-lg border border-white/[0.08] bg-black/30 p-3">
-                                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400 mb-2">
-                                    Grok output (zerotier_private template)
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                                        Grok output (zerotier_private template) — editable
+                                    </div>
+                                    <span className="text-[10px] text-zinc-500">{buildScript.length} chars</span>
                                 </div>
-                                <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-snug text-zinc-200">
-                                    {buildScript}
-                                </pre>
+                                <textarea
+                                    value={buildScript}
+                                    onChange={(e) => setBuildScript(e.target.value)}
+                                    disabled={renderLoading}
+                                    rows={18}
+                                    className="w-full overflow-x-auto whitespace-pre font-mono text-[11px] leading-snug text-zinc-200 bg-black/50 border border-white/[0.06] rounded px-2 py-2 disabled:opacity-60"
+                                    spellCheck={false}
+                                />
                             </div>
                         )}
                     </div>
