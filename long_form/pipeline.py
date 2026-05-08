@@ -97,6 +97,157 @@ class LFRenderError(RuntimeError):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Real fal.ai pricing — verified against Casey's other scripts in /recaps/
+# (wirecard_ltx, parmalat, olympus, zt shorts) + project memos
+# (project_ltx_i2v_winner.md, channel registry costs).
+# Updated 2026-05-08. If fal changes pricing, edit this dict in one place.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FAL_PRICING_USD: dict[str, float] = {
+    # Per-scene image gen
+    "seedream_v45_per_image": 0.04,        # 1920x1080 still or thumbnail
+    "ernie_per_image": 0.03,               # cheaper, used by sleep_doc
+
+    # Per-scene i2v animation
+    "ltx_13b_distilled_per_clip": 0.04,    # 5sec 720p — confirmed in
+                                           # E:/recaps/empire_magnates/wirecard/wirecard_ltx.py
+                                           # ('Budget: ${len(scenes) * 0.04:.2f}')
+    "kling_v21_pro_per_clip": 0.30,        # premium tier (Lacuna fallback)
+    "pixverse_v6_per_clip": 0.225,         # ZT shorts default
+
+    # Per-call audio gen
+    "mmaudio_v2_per_call": 0.05,           # text-to-audio variant
+    "fal_minimax_per_1k_chars": 0.10,      # speech-02-hd
+    "elevenlabs_per_1k_chars": 0.10,       # turbo / multilingual
+
+    # Per-Grok call (any-llm Sonnet 4.5, ~16k tokens out per chapter)
+    "grok_chapter_expand": 0.50,           # rough avg per chapter
+    "grok_outline": 0.20,                  # one-shot outline
+
+    # Cushion percentage for retries / overage
+    "cushion_pct": 0.15,                   # 15% buffer over computed total
+}
+
+
+def compute_render_cost(
+    channel: dict,
+    outline: dict | None = None,
+    *,
+    scenes_per_chapter_override: int | None = None,
+) -> dict:
+    """Estimate render cost using ACTUAL fal.ai pricing + the outline's
+    chapter list. PR #137 replaces the hardcoded channel.cost_estimate_usd
+    ceiling with a per-render dynamic calculation.
+
+    Returns a dict shaped for the frontend kickoff/gate display:
+        {
+            "stage_1_usd": float,        # chapters + stills + thumbnails
+            "stage_2_usd": float,        # i2v + VO + SFX (or narration + ambient for sleep_doc)
+            "total_usd": float,          # stage_1 + stage_2 + cushion
+            "breakdown": {step: usd},    # itemized
+            "n_scenes": int,
+            "pipeline_kind": str,
+        }
+
+    Falls back to channel.cost_estimate_usd / 2 split if outline is None
+    (e.g. cost shown on the channel-pick tab before user generates outline).
+    """
+    pipeline_kind = (channel.get("pipeline_kind") or "").strip()
+    chapters_list = list((outline or {}).get("chapters") or [])
+    n_chapters = max(1, len(chapters_list))
+
+    # Cushion factor wraps everything at the end.
+    def with_cushion(x: float) -> float:
+        return round(x * (1 + FAL_PRICING_USD["cushion_pct"]), 2)
+
+    # ── v5_episode (EM, Lacuna, PB Live, Hidden Cortex) ──────────────────
+    if pipeline_kind == "v5_episode":
+        scenes_per_chapter = scenes_per_chapter_override or 12
+        n_scenes = n_chapters * scenes_per_chapter
+        # Estimate VO chars: ~200 per scene (one or two sentences)
+        total_vo_chars = n_scenes * 200
+
+        breakdown = {
+            "chapters_grok": n_chapters * FAL_PRICING_USD["grok_chapter_expand"],
+            "stills_seedream": n_scenes * FAL_PRICING_USD["seedream_v45_per_image"],
+            "thumbnails_seedream": 3 * FAL_PRICING_USD["seedream_v45_per_image"],
+            "ltx_i2v_clips": n_scenes * FAL_PRICING_USD["ltx_13b_distilled_per_clip"],
+            "mmaudio_sfx_per_scene": n_scenes * FAL_PRICING_USD["mmaudio_v2_per_call"],
+            "fal_minimax_vo": (total_vo_chars / 1000) * FAL_PRICING_USD["fal_minimax_per_1k_chars"],
+        }
+        stage_1 = (
+            breakdown["chapters_grok"]
+            + breakdown["stills_seedream"]
+            + breakdown["thumbnails_seedream"]
+        )
+        stage_2 = (
+            breakdown["ltx_i2v_clips"]
+            + breakdown["mmaudio_sfx_per_scene"]
+            + breakdown["fal_minimax_vo"]
+        )
+        return {
+            "stage_1_usd": with_cushion(stage_1),
+            "stage_2_usd": with_cushion(stage_2),
+            "total_usd": with_cushion(stage_1 + stage_2),
+            "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
+            "n_scenes": n_scenes,
+            "n_chapters": n_chapters,
+            "pipeline_kind": pipeline_kind,
+        }
+
+    # ── sleep_doc (HR 9hr) ────────────────────────────────────────────────
+    if pipeline_kind == "sleep_doc":
+        scenes_per_chapter = scenes_per_chapter_override or 30
+        n_scenes = n_chapters * scenes_per_chapter
+        # Estimate total narration chars from target duration.
+        target_sec = float((outline or {}).get("target_duration_sec", 0) or 0)
+        if target_sec <= 0:
+            # Fall back to channel.default_minutes
+            target_sec = float(channel.get("default_minutes", 540) or 540) * 60
+        # ~120 wpm calm narration, ~5 chars/word
+        total_words = (target_sec / 60.0) * 120
+        total_vo_chars = total_words * 5
+
+        breakdown = {
+            "chapters_grok": n_chapters * FAL_PRICING_USD["grok_chapter_expand"],
+            "stills_ernie": n_scenes * FAL_PRICING_USD["ernie_per_image"],
+            "thumbnails_seedream": 3 * FAL_PRICING_USD["seedream_v45_per_image"],
+            "fal_minimax_narration": (total_vo_chars / 1000) * FAL_PRICING_USD["fal_minimax_per_1k_chars"],
+            "mmaudio_ambient_bed": 1 * FAL_PRICING_USD["mmaudio_v2_per_call"],
+        }
+        stage_1 = (
+            breakdown["chapters_grok"]
+            + breakdown["stills_ernie"]
+            + breakdown["thumbnails_seedream"]
+        )
+        stage_2 = (
+            breakdown["fal_minimax_narration"]
+            + breakdown["mmaudio_ambient_bed"]
+        )
+        return {
+            "stage_1_usd": with_cushion(stage_1),
+            "stage_2_usd": with_cushion(stage_2),
+            "total_usd": with_cushion(stage_1 + stage_2),
+            "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
+            "n_scenes": n_scenes,
+            "n_chapters": n_chapters,
+            "pipeline_kind": pipeline_kind,
+        }
+
+    # Unknown pipeline_kind — preserve channel registry fallback.
+    fallback = float(channel.get("cost_estimate_usd", 0) or 0)
+    return {
+        "stage_1_usd": round(fallback * 0.7, 2),
+        "stage_2_usd": round(fallback * 0.3, 2),
+        "total_usd": round(fallback, 2),
+        "breakdown": {"channel_registry_fallback": fallback},
+        "n_scenes": 0,
+        "n_chapters": n_chapters,
+        "pipeline_kind": pipeline_kind or "unknown",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Job ID + path helpers
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -311,6 +311,13 @@ def build_long_form_router(
             elif not existing:
                 outline["description"] = desc_tail.lstrip()
 
+        # PR #137: compute REAL fal cost estimate from the outline structure
+        # so the frontend can show '$X' instead of the stale channel ceiling.
+        try:
+            cost_est = lf_pipeline.compute_render_cost(channel, outline)
+        except Exception:
+            cost_est = None
+
         return {
             "channel_key": body.channel_key,
             "topic": body.topic,
@@ -319,6 +326,7 @@ def build_long_form_router(
             "references_used": bool(refs_text),
             "title_template_enforced": bool(title_template_block),
             "outline": outline,
+            "cost_estimate": cost_est,
         }
 
     @router.post("/outline/expand-chapter")
@@ -433,6 +441,16 @@ def build_long_form_router(
         merged["thumbnail_urls"] = [
             f"/api/long-form/jobs/{job_id}/thumbnail/{i + 1}" for i in range(thumbs)
         ]
+        # PR #137: include the dynamic cost estimate so the gate UI shows
+        # the real Stage 2 number instead of the stale channel ceiling.
+        try:
+            channel_for_cost = get_channel(merged.get("channel_key", "")) if merged.get("channel_key") else None
+            if channel_for_cost:
+                merged["cost_estimate"] = lf_pipeline.compute_render_cost(
+                    channel_for_cost, merged.get("outline") or {}
+                )
+        except Exception:
+            pass
         return merged
 
     @router.get("/jobs/{job_id}/state")
