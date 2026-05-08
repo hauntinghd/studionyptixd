@@ -66,14 +66,35 @@ from long_form.pipeline import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
-    """Generate a still via seedream v4.5 with the EM channel's visual_style
-    appended. Higher fidelity than ernie-image (~$0.04 vs $0.03/image, 4× quality)."""
+    """Generate a still via seedream v4.5 at 1920x1080. Strengthens the
+    visual_style enforcement so seedream doesn't drop in real human
+    faces alongside the porcelain mannequins (Casey's Peter Thiel
+    render had 1 of 3 sample frames showing a real face beside the
+    porcelain — channel grammar violation)."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    full_prompt = f"{prompt}\n\nStyle: {visual_style}".strip()
+    # PR #132: hard guard against real-face drift. seedream sometimes
+    # interprets "executive" / "trader" / "Thiel" as a real human face;
+    # prepend an explicit cast rule that overrides those defaults.
+    cast_rule = (
+        "ABSOLUTE CAST RULE: every human in this image is a smooth red-porcelain "
+        "stylized mannequin (smooth red ceramic head, no facial features beyond "
+        "subtle sculpted eyebrows, real opaque tailored business attire). "
+        "ZERO real human faces. ZERO photographic-skin characters. NO mixed "
+        "human + porcelain casts. If the prompt names a real person (Thiel, "
+        "Sanjay Shah, etc.), render them AS the red-porcelain mannequin."
+    )
+    full_prompt = f"{cast_rule}\n\n{prompt}\n\nStyle: {visual_style}".strip()
     data = _fal_post(
         SEEDREAM_URL,
-        {"prompt": full_prompt, "image_size": {"width": 1920, "height": 1080}},
+        {
+            "prompt": full_prompt,
+            "image_size": {"width": 1920, "height": 1080},
+            "negative_prompt": (
+                "real human face, photographic skin, photorealistic person, "
+                "real eyes, real mouth, ordinary human, model, actor, realistic head"
+            ),
+        },
         timeout_s=240,
     )
     images = data.get("images") or []
@@ -90,45 +111,117 @@ def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
 # Phase 3 — i2v (LTX 13B via skeleton_ai.i2v_engine, fallback chain)
 # ─────────────────────────────────────────────────────────────────────────────
 
+LTX_13B_I2V_URL = "https://fal.run/fal-ai/ltx-video-13b-098-distilled/image-to-video"
+
+
 def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
                  *, duration_sec: int = 5) -> Path:
-    """Animate the still via skeleton_ai.i2v_engine (LTX 13B → Seedance → Pixverse).
+    """Animate the still via LTX 13B (the v5_pipeline_locked recipe winner —
+    'not even a competition, fucking flawless' per Casey's 2026-04-24 bakeoff).
 
-    EM v5 is locked to 16:9 aspect and ~5s clips per scene per
-    project_v5_pipeline_locked.md. Each scene clip stretches to its
-    VO duration during scene assembly (Phase 5)."""
+    PR #132: switched from skeleton_ai.i2v_engine's Seedance/Pixverse
+    fallback chain (which produced 720p output and weaker motion) to direct
+    LTX 13B 1080p calls per the channel.i2v_model_default='ltx_13b' lock.
+
+    EM v5 locked to 16:9 1920x1080 aspect, ~5s clips per scene. Each scene
+    clip stretches to its VO duration during scene assembly (Phase 5)."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    # Lazy import — keeps long_form/v5_pipeline.py importable without fal_client
-    # available at module load.
-    from skeleton_ai.i2v_engine import generate as gen_i2v
-    return gen_i2v(
-        still_path,
-        motion_prompt or "subtle parallax, slow camera push-in, gentle ambient motion",
-        out_path,
-        tier="standard",
-        duration_sec=duration_sec,
-        aspect_ratio="16:9",
-    )
+
+    # Upload still to fal storage so LTX can image-condition. Lazy import
+    # so v5_pipeline imports cleanly when fal_client missing.
+    import fal_client
+    fal_key = (os.environ.get("FAL_AI_KEY") or "").strip()
+    if not fal_key:
+        raise LFRenderError("FAL_AI_KEY missing — cannot upload still for LTX")
+    os.environ["FAL_KEY"] = fal_key
+    image_url = fal_client.upload_file(str(still_path))
+
+    payload = {
+        "image_url": image_url,
+        "prompt": (motion_prompt or "subtle parallax, slow camera push-in, "
+                   "gentle ambient motion, no scene cuts, photoreal documentary").strip(),
+        "negative_prompt": (
+            "low quality, deformation, identity drift, glowing eyes, "
+            "warping, jitter, multiple subjects appearing, cartoon, anime"
+        ),
+        "num_frames": 121,                # 5 sec at 24fps
+        "frame_rate": 24,
+        "resolution": "1080p",            # 1920x1080 native
+        "aspect_ratio": "16:9",
+        "expand_prompt": False,
+    }
+    data = _fal_post(LTX_13B_I2V_URL, payload, timeout_s=600, attempts=2)
+    video = data.get("video") or {}
+    url = video.get("url") or data.get("video_url")
+    if not url:
+        raise LFRenderError(f"LTX 13B response missing video url: {str(data)[:300]}")
+    _download(url, out_path, timeout_s=180)
+    return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4 — VO (ElevenLabs Brian default)
 # ─────────────────────────────────────────────────────────────────────────────
 
+MINIMAX_TTS_URL_EM = "https://fal.run/fal-ai/minimax/speech-02-hd"
+
+
 def _gen_em_vo(text: str, out_path: Path, *, voice_id: str = "",
                speed: float = 1.0) -> Path:
-    """Synthesize one VO chunk via ElevenLabs. Caller is expected to chunk
-    long chapter narration into per-scene sentences before calling.
+    """Synthesize one VO chunk via fal MiniMax speech-02-hd.
 
-    EM uses ElevenLabs (vs HR's fal MiniMax) per the channel registry —
-    Lume-emulating long-form has been on EL since the v5 lock 2026-04-24.
+    PR #132: switched from ElevenLabs eleven_turbo_v2_5 (Casey:
+    'fully off from what we normally use') to fal MiniMax — the
+    same premium tier HR uses per feedback_hr_premium_fal_tts.md.
+    Default voice = English_Trustworthy_Man.
     """
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    from skeleton_ai.voice_elevenlabs import ElevenLabsClient
-    client = ElevenLabsClient()
-    return client.synthesize(text, out_path, voice_id=voice_id or None, speed=speed)
+    text = (text or "").strip()
+    if not text:
+        raise LFRenderError("VO text is empty")
+    payload = {
+        "text": text,
+        "voice_setting": {
+            "voice_id": voice_id or "English_Trustworthy_Man",
+            "speed": speed,
+            "vol": 1.0,
+            "pitch": 0,
+        },
+        "output_format": "mp3",
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
+        },
+    }
+    # MiniMax has a per-call ~5000-char limit. Long chapters from Grok
+    # may exceed that, so chunk + concat.
+    if len(text) <= 5000:
+        data = _fal_post(MINIMAX_TTS_URL_EM, payload, timeout_s=300)
+        url = (data.get("audio") or {}).get("url") or data.get("audio_url")
+        if not url:
+            raise LFRenderError(f"MiniMax response missing audio url: {data}")
+        _download(url, out_path, timeout_s=180)
+        return out_path
+    # Long-form fallback: chunk + ffmpeg concat
+    parts = _chunk_text(text, max_chars=4500)
+    part_paths: list[Path] = []
+    for i, part in enumerate(parts):
+        chunk_payload = dict(payload, text=part)
+        data = _fal_post(MINIMAX_TTS_URL_EM, chunk_payload, timeout_s=300)
+        url = (data.get("audio") or {}).get("url") or data.get("audio_url")
+        if not url:
+            raise LFRenderError(f"MiniMax chunk {i} missing audio url: {data}")
+        pp = out_path.with_name(f"{out_path.stem}_p{i:02d}.mp3")
+        _download(url, pp, timeout_s=180)
+        part_paths.append(pp)
+    _ffmpeg_concat_audio(part_paths, out_path)
+    for pp in part_paths:
+        pp.unlink(missing_ok=True)
+    return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,17 +549,29 @@ def _final_concat_v5(scene_mp4s: list[Path], out_path: Path,
     if r.returncode != 0:
         raise LFRenderError(f"v5 concat-demuxer failed: {r.stderr[-400:]}")
 
-    # Step 2: re-encode with fade-to-black + faststart.
+    # Step 2: re-encode with hard 1920x1080 + target fps + fade-to-black +
+    # faststart. PR #132 forces output resolution + frame rate regardless
+    # of source clip resolution. If a scene's i2v failed to LTX and fell
+    # back to a 720p clip, this upscales it cleanly via Lanczos. fps filter
+    # frame-doubles 24fps source clips to 60fps when target is 60.
     total = _ffprobe_dur(tmp)
     if total <= 0:
         raise LFRenderError("v5 concat produced zero-duration file")
     fade_start = max(0.0, total - fade_out_sec)
+    vfilter = (
+        "scale=1920:1080:flags=lanczos:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
+        f"fps={fps},"
+        f"fade=t=out:st={fade_start:.3f}:d={fade_out_sec:.3f}"
+    )
     cmd2 = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
         "-i", str(tmp),
-        "-vf", f"fade=t=out:st={fade_start:.3f}:d={fade_out_sec:.3f}",
+        "-vf", vfilter,
         "-af", f"afade=t=out:st={fade_start:.3f}:d={fade_out_sec:.3f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        # Bump quality for 1080p60: medium preset (vs veryfast) + tighter
+        # CRF since we're targeting a higher-fidelity output.
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
         "-r", str(fps),
