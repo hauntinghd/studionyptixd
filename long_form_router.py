@@ -564,6 +564,39 @@ def build_long_form_router(
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
         }
 
+    class RegenerateThumbnailRequest(BaseModel):
+        custom_prompt: str | None = None
+
+    @router.post("/jobs/{job_id}/regenerate-thumbnail/{idx}")
+    async def job_regenerate_thumbnail_route(
+        job_id: str,
+        idx: int,
+        body: RegenerateThumbnailRequest = RegenerateThumbnailRequest(),
+        user: dict = auth_dep,
+    ):
+        """Regenerate one thumbnail tile via seedream. Optional custom_prompt
+        body overrides the channel's thumbnail_style + variant hint entirely.
+        Returns cache-busted URL so the <img> reloads."""
+        _gate_admin(user)
+        _validate_job_id(job_id)
+        if idx < 1 or idx > 12:
+            raise HTTPException(400, "bad_thumbnail_idx")
+        try:
+            new_path = lf_pipeline.regenerate_thumbnail(
+                job_id, idx, body.custom_prompt
+            )
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"regenerate_thumbnail_failed: {e}")
+        version = int(new_path.stat().st_mtime)
+        return {
+            "job_id": job_id,
+            "idx": idx,
+            "thumbnail_url": (
+                f"/api/long-form/jobs/{job_id}/thumbnail/{idx}?v={version}"
+            ),
+            "custom_prompt_used": bool(body.custom_prompt),
+        }
+
     @router.post("/jobs/{job_id}/cancel")
     async def job_cancel_route(job_id: str, user: dict = auth_dep):
         """Cancel an in-flight render. Cooperative cancellation — the
