@@ -294,21 +294,51 @@ export default function LongFormPanel() {
     }, []);
 
     // Load channel registry + connected-channel snapshot on auth.
-    useEffect(() => {
+    // PR #126: surface errors instead of silently swallowing them. The prior
+    // implementation set channels=[] on any non-array response, which meant
+    // a 401/403/cold-start/network failure looked identical to an empty
+    // registry — Casey saw "0 long-form · 0 shorts" with no diagnostic.
+    const [channelLoadError, setChannelLoadError] = useState('');
+    const loadChannels = useCallback(async () => {
         if (!accessToken) return;
-        fetch('/api/long-form/channels', {
-            headers: { Authorization: `Bearer ${accessToken}` },
-        })
-            .then((r) => r.json())
-            .then((d) => Array.isArray(d.channels) && setChannels(d.channels))
-            .catch(() => setChannels([]));
-        fetch('/api/long-form/connected-channels', {
-            headers: { Authorization: `Bearer ${accessToken}` },
-        })
-            .then((r) => r.json())
-            .then((d) => Array.isArray(d.channels) && setConnected(d.channels))
-            .catch(() => setConnected([]));
-    }, [accessToken]);
+        setChannelLoadError('');
+        try {
+            const tok = await getFreshToken();
+            const [chRes, connRes] = await Promise.all([
+                fetchJsonResilient(`${API}/api/long-form/channels`, {
+                    headers: { Authorization: `Bearer ${tok}` },
+                }),
+                fetchJsonResilient(`${API}/api/long-form/connected-channels`, {
+                    headers: { Authorization: `Bearer ${tok}` },
+                }),
+            ]);
+            if (chRes.ok && Array.isArray(chRes.data?.channels)) {
+                setChannels(chRes.data.channels);
+            } else if (chRes.status === 401) {
+                setChannelLoadError(
+                    'Authentication failed loading channels. Sign out and back in.'
+                );
+            } else if (chRes.status === 403) {
+                setChannelLoadError(
+                    'Long-Form is admin-only. The signed-in account is not an admin.'
+                );
+            } else {
+                setChannelLoadError(
+                    `Could not load channel registry (${chRes.status}): `
+                    + (chRes.data?.detail || 'unknown error')
+                );
+            }
+            if (connRes.ok && Array.isArray(connRes.data?.channels)) {
+                setConnected(connRes.data.channels);
+            }
+        } catch (e) {
+            setChannelLoadError((e as Error).message || 'Network error loading channels');
+        }
+    }, [accessToken, getFreshToken, fetchJsonResilient]);
+
+    useEffect(() => {
+        if (accessToken) loadChannels();
+    }, [accessToken, loadChannels]);
 
     // When a channel is picked, default targetMinutes + fetch Catalyst insights.
     const onPickChannel = useCallback((key: string) => {
@@ -544,10 +574,29 @@ export default function LongFormPanel() {
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
             <header className="flex items-center justify-between">
                 <h1 className="text-2xl font-bold text-white">Long-Form</h1>
-                <div className="text-xs text-zinc-400">
-                    {longFormChannels.length} long-form · {shortsChannels.length} shorts · {connected.length} OAuth-connected · Catalyst-fed
+                <div className="flex items-center gap-3 text-xs text-zinc-400">
+                    <span>
+                        {longFormChannels.length} long-form · {shortsChannels.length} shorts · {connected.length} OAuth-connected · Catalyst-fed
+                    </span>
+                    <button
+                        onClick={loadChannels}
+                        className="text-violet-400 hover:text-violet-300 flex items-center gap-1"
+                        title="Reload channel registry"
+                    >
+                        <RefreshCw className="h-3 w-3" /> Refresh
+                    </button>
                 </div>
             </header>
+
+            {channelLoadError && (
+                <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-sm text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                    <div className="flex-1">
+                        <div className="font-semibold">Channels failed to load</div>
+                        <div className="text-xs text-rose-300/80 mt-0.5">{channelLoadError}</div>
+                    </div>
+                </div>
+            )}
 
             <TabRow tab={tab} setTab={setTab} />
 
@@ -712,10 +761,11 @@ function ChannelTab({
             <div>
                 <h2 className="text-lg font-semibold text-white mb-1">Long-form channels</h2>
                 <p className="text-sm text-zinc-400 mb-4">
-                    The 6 channels with locked long-form grammar (visual style, voice,
-                    target length). Catalyst Hub data feeds the outline generator on the
-                    next tab. Channels marked <span className="text-amber-300">harvest pending</span>{' '}
-                    were just OAuth'd — Catalyst auto-tick will fill them within a minute.
+                    Channels with locked long-form grammar (visual style, voice,
+                    target length, decoded title-format winners). Catalyst Hub data feeds
+                    the outline generator on the next tab. Channels marked{' '}
+                    <span className="text-amber-300">harvest pending</span> were just
+                    OAuth'd — Catalyst auto-tick will fill them within a minute.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                     {longFormChannels.map(renderCard)}
