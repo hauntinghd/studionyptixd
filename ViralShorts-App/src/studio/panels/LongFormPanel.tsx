@@ -716,6 +716,19 @@ export default function LongFormPanel() {
         }
     }, [activeJobId, getFreshToken, fetchJsonResilient, pollJob]);
 
+    // PR #133: clear active-job state so the kickoff button reappears.
+    // Use case: existing job finished (done/failed/cancelled) and user
+    // wants to render a fresh one with the same topic + channel.
+    const startNewRender = useCallback(() => {
+        pollAbortRef.current.cancelled = true;
+        setActiveJobId('');
+        setJobStatus(null);
+        setJobFullState(null);
+        setScenes([]);
+        setRenderError('');
+        setTab('render');
+    }, []);
+
     // PR #131: regenerate one thumbnail tile via seedream. Returns
     // cache-busted URL so the <img> reloads. Custom prompt optional.
     const [regeneratingThumbIdx, setRegeneratingThumbIdx] = useState<number | null>(null);
@@ -888,6 +901,7 @@ export default function LongFormPanel() {
                     onCancel={cancelJob}
                     onRegenerateThumbnail={regenerateThumbnail}
                     regeneratingThumbIdx={regeneratingThumbIdx}
+                    onStartNew={startNewRender}
                 />
             )}
         </div>
@@ -1410,6 +1424,7 @@ function RenderTab({
     onRegenerateScene, onFinalize, onReloadScenes,
     cancellingBusy, onCancel,
     onRegenerateThumbnail, regeneratingThumbIdx,
+    onStartNew,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1435,6 +1450,7 @@ function RenderTab({
     onCancel: () => void;
     onRegenerateThumbnail: (idx: number, customPrompt?: string) => void;
     regeneratingThumbIdx: number | null;
+    onStartNew: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
@@ -1519,6 +1535,7 @@ function RenderTab({
                     onCancel={onCancel}
                     onRegenerateThumbnail={onRegenerateThumbnail}
                     regeneratingThumbIdx={regeneratingThumbIdx}
+                    onStartNew={onStartNew}
                 />
             )}
 
@@ -1827,6 +1844,7 @@ function ActiveJobCard({
     channel, outline, jobStatus, jobFullState, isRunning, isDone, isFailed, renderError,
     cancellingBusy, onCancel,
     onRegenerateThumbnail, regeneratingThumbIdx,
+    onStartNew,
 }: {
     channel: ChannelInfo | null;
     outline: Outline | null;
@@ -1840,6 +1858,7 @@ function ActiveJobCard({
     onCancel: () => void;
     onRegenerateThumbnail: (idx: number, customPrompt?: string) => void;
     regeneratingThumbIdx: number | null;
+    onStartNew: () => void;
 }) {
     const phaseLabel = PHASE_LABELS[jobStatus.phase] || jobStatus.phase;
     const phaseIdx = PHASE_ORDER.indexOf(jobStatus.phase);
@@ -1859,6 +1878,15 @@ function ActiveJobCard({
                         : 'Rendering…'}
                 </h2>
                 <div className="flex items-center gap-3">
+                    {(isDone || isFailed || isCancelled) && (
+                        <button
+                            onClick={onStartNew}
+                            className="rounded-md bg-violet-500/15 hover:bg-violet-500/30 border border-violet-500/50 px-3 py-1 text-xs font-semibold text-violet-200 flex items-center gap-1.5"
+                            title="Clear this job + return to the kickoff button so you can render a new one with the same outline (or pick a fresh topic)"
+                        >
+                            <Film className="h-3 w-3" /> Start new render
+                        </button>
+                    )}
                     {isRunning && (
                         <button
                             onClick={onCancel}
