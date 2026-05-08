@@ -1908,13 +1908,29 @@ def _youtube_connection_public_view(record: dict) -> dict:
     analytics_snapshot = dict(data.get("analytics_snapshot") or {})
     last_sync_error = str(data.get("last_sync_error", "") or "")
     last_outcome_sync_error = str(data.get("last_outcome_sync_error", "") or "")
+    has_refresh_token = bool(str(data.get("refresh_token", "") or "").strip())
+    last_synced_at = float(data.get("last_synced_at", 0.0) or 0.0)
+    token_expires_at = float(data.get("token_expires_at", 0.0) or 0.0)
+    linked_at = float(data.get("linked_at", 0.0) or 0.0)
+    now = time.time()
+    # Channel is "currently functional" if it has a fresh access token OR was
+    # successfully synced very recently. Tighten the reconnect alarm so we
+    # don't flag a working channel that simply didn't get a NEW refresh_token
+    # on its latest re-authorization (Google sometimes only returns the
+    # refresh_token on the first consent and reuses it implicitly afterward).
+    access_token_fresh = token_expires_at > 0 and token_expires_at > now
+    sync_recent = last_synced_at > 0 and (now - last_synced_at) < 86400  # 24h
+    sync_error_present = bool(last_sync_error or last_outcome_sync_error)
+    channel_currently_functional = (access_token_fresh or sync_recent) and not sync_error_present
     needs_reconnect = bool(
         _google_oauth_error_suggests_reconnect_required(last_sync_error)
         or _google_oauth_error_suggests_reconnect_required(last_outcome_sync_error)
         or (
-            # No refresh token stored — the previous session was lost or never persisted.
-            not str(data.get("refresh_token", "") or "").strip()
-            and float(data.get("linked_at", 0.0) or 0.0) > 0
+            # No refresh token stored AND the channel isn't currently
+            # functional — i.e. token has expired and we can't refresh.
+            not has_refresh_token
+            and linked_at > 0
+            and not channel_currently_functional
         )
     )
     return {
@@ -1948,6 +1964,8 @@ def _youtube_connection_public_view(record: dict) -> dict:
                     "published_at": str((row or {}).get("published_at", "") or "").strip(),
                     "thumbnail_url": str((row or {}).get("thumbnail_url", "") or "").strip(),
                     "views": int(float((row or {}).get("views", 0) or 0) or 0),
+                    "likes": int(float((row or {}).get("likes", 0) or 0) or 0),
+                    "comments": int(float((row or {}).get("comments", 0) or 0) or 0),
                     "average_view_percentage": round(float((row or {}).get("average_view_percentage", 0.0) or 0.0), 2),
                     "impression_click_through_rate": round(float((row or {}).get("impression_click_through_rate", 0.0) or 0.0), 2),
                     "duration_sec": int(float((row or {}).get("duration_sec", 0) or 0) or 0),
