@@ -17,7 +17,7 @@
  *     candidate title prefilled (Phase 2 wires the zerotier_private template).
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
+import { AlertTriangle, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
 import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
@@ -257,8 +257,10 @@ export default function ZeroTierPrivatePanel() {
     const [genTopics, setGenTopics] = useState<string[]>([]);
     const [genError, setGenError] = useState('');
     const [genBaseline, setGenBaseline] = useState<{ channel_top_lr?: number; channel_avg_lr?: number; uploads_considered?: number } | null>(null);
-    // Phase 2b: render state
-    const [renderLoading, setRenderLoading] = useState(false);
+    // Phase 2b: kept for the legacy 'monolithic render' path. Phase 4.5
+    // splits this into stills + finalize stages, but the renderResult shape
+    // is reused for both.
+    const [renderLoading] = useState(false);  // legacy flag, always false
     const [renderResult, setRenderResult] = useState<null | {
         job_id: string;
         title?: string;
@@ -267,6 +269,22 @@ export default function ZeroTierPrivatePanel() {
         duration_total_sec?: number;
         fal_cost_estimate_usd?: number;
     }>(null);
+
+    // Phase 4.5: per-scene approval flow
+    interface ScenePreview {
+        scene_index: number;
+        scene_id: string;
+        caption: string;
+        narration: string;
+        duration: number;
+        still_url: string;
+        visual_prompt_preview?: string;
+        regenerating?: boolean;
+    }
+    const [stillsLoading, setStillsLoading] = useState(false);
+    const [scenePreviews, setScenePreviews] = useState<ScenePreview[]>([]);
+    const [stillsJobId, setStillsJobId] = useState<string>('');
+    const [finalizeLoading, setFinalizeLoading] = useState(false);
 
     // Phase 3: predictions calibration data
     interface PredictionRow {
@@ -511,8 +529,110 @@ export default function ZeroTierPrivatePanel() {
         setBuildScript('');
         setBuildError('');
         setRenderResult(null);
+        setScenePreviews([]);
+        setStillsJobId('');
         setBuildModalOpen(true);
     };
+
+    // Phase 4.5: stage 1 — generate stills only (preview before animation)
+    const generateStills = useCallback(async () => {
+        if (!accessToken || !buildScript.trim() || stillsLoading) return;
+        setBuildError('');
+        setScenePreviews([]);
+        setStillsJobId('');
+        setStillsLoading(true);
+        try {
+            let scriptForBackend = buildScript.trim();
+            try { scriptForBackend = JSON.stringify(JSON.parse(scriptForBackend)); } catch {}
+            const r = await fetch(`${API}/api/zerotier-private/render-stills`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    script_json: scriptForBackend,
+                    topic: buildTopic.trim(),
+                    predicted_score: buildTopicScore?.score ?? null,
+                    predicted_like_rate: buildTopicScore?.predicted_lr ?? null,
+                }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Stills failed (${r.status})`));
+            setStillsJobId(String(data?.job_id || ''));
+            const scenes = (data?.scenes || []) as ScenePreview[];
+            // Prepend API base to relative still_url paths
+            setScenePreviews(scenes.map((s) => ({ ...s, still_url: `${API}${s.still_url}` })));
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Stills generation failed'));
+        } finally {
+            setStillsLoading(false);
+        }
+    }, [accessToken, buildScript, buildTopic, buildTopicScore, stillsLoading]);
+
+    // Phase 4.5: regen one specific still
+    const regenerateStill = useCallback(async (sceneIndex: number, customPrompt?: string) => {
+        if (!accessToken || !stillsJobId) return;
+        setScenePreviews((prev) => prev.map((s) => s.scene_index === sceneIndex ? { ...s, regenerating: true } : s));
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/render-still-one`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    job_id: stillsJobId,
+                    scene_index: sceneIndex,
+                    custom_prompt: customPrompt || null,
+                }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Regen failed (${r.status})`));
+            // Cache-bust the URL so browser fetches the new image
+            const cacheBustedUrl = `${API}${data.still_url}?t=${Date.now()}`;
+            setScenePreviews((prev) => prev.map((s) =>
+                s.scene_index === sceneIndex
+                    ? { ...s, still_url: cacheBustedUrl, regenerating: false }
+                    : s
+            ));
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Still regen failed'));
+            setScenePreviews((prev) => prev.map((s) => s.scene_index === sceneIndex ? { ...s, regenerating: false } : s));
+        }
+    }, [accessToken, stillsJobId]);
+
+    // Phase 4.5: stage 3 — finalize (Pixverse + TTS + compose)
+    const finalizeRender = useCallback(async () => {
+        if (!accessToken || !stillsJobId || finalizeLoading) return;
+        setBuildError('');
+        setRenderResult(null);
+        setFinalizeLoading(true);
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/render-finalize`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ job_id: stillsJobId }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Finalize failed (${r.status})`));
+            setRenderResult({
+                job_id: String(data?.job_id || stillsJobId),
+                title: data?.title,
+                mp4_url: data?.mp4_url ? `${API}${data.mp4_url}` : undefined,
+                scene_count: data?.scene_count,
+                duration_total_sec: data?.duration_total_sec,
+                fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
+            });
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Finalize failed'));
+        } finally {
+            setFinalizeLoading(false);
+        }
+    }, [accessToken, stillsJobId, finalizeLoading]);
 
     const generateBuildScript = useCallback(async () => {
         if (!accessToken || !buildTopic.trim() || buildLoading) return;
@@ -547,60 +667,13 @@ export default function ZeroTierPrivatePanel() {
     }, [accessToken, buildTopic, buildLoading]);
 
     const closeBuildModal = useCallback(() => {
-        if (buildLoading || renderLoading) return; // don't close mid-stream/mid-render
+        if (buildLoading || renderLoading || stillsLoading || finalizeLoading) return; // don't close mid-flight
         setBuildModalOpen(false);
-    }, [buildLoading, renderLoading]);
+    }, [buildLoading, renderLoading, stillsLoading, finalizeLoading]);
 
-    const renderBuildShort = useCallback(async () => {
-        if (!accessToken || !buildScript.trim() || renderLoading) return;
-        setBuildError('');
-        setRenderResult(null);
-        setRenderLoading(true);
-        try {
-            // The script content the user is looking at is already pretty-printed
-            // JSON. Re-stringify it (round-trips through JSON.parse to catch
-            // edits the user may have made + normalize formatting).
-            let scriptForBackend = buildScript.trim();
-            try {
-                const parsed = JSON.parse(scriptForBackend);
-                scriptForBackend = JSON.stringify(parsed);
-            } catch {
-                // not valid JSON — let the backend reject it
-            }
-            const r = await fetch(`${API}/api/zerotier-private/render`, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    script_json: scriptForBackend,
-                    topic: buildTopic.trim(),
-                    // Phase 3: log the heuristic-v1 score so backend can
-                    // cross-reference with actual outcomes later.
-                    predicted_score: buildTopicScore?.score ?? null,
-                    predicted_like_rate: buildTopicScore?.predicted_lr ?? null,
-                }),
-                // Render takes 5-10 min. Browser fetch has no built-in timeout
-                // so this just waits. AbortController could be added for a Stop
-                // button later.
-            });
-            const data = await r.json();
-            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Render failed (${r.status})`));
-            setRenderResult({
-                job_id: String(data?.job_id || ''),
-                title: data?.title,
-                mp4_url: data?.mp4_url ? `${API}${data.mp4_url}` : undefined,
-                scene_count: data?.scene_count,
-                duration_total_sec: data?.duration_total_sec,
-                fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
-            });
-        } catch (e: any) {
-            setBuildError(String(e?.message || e || 'Render failed'));
-        } finally {
-            setRenderLoading(false);
-        }
-    }, [accessToken, buildScript, renderLoading]);
+    // (Phase 2b's monolithic renderBuildShort retired — Phase 4.5 splits it
+    // into render-stills + render-finalize so the user can preview + approve
+    // stills before paying for animation.)
 
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-6xl mx-auto">
@@ -1122,7 +1195,7 @@ export default function ZeroTierPrivatePanel() {
                             <button
                                 type="button"
                                 onClick={generateBuildScript}
-                                disabled={buildLoading || renderLoading || !buildTopic.trim()}
+                                disabled={buildLoading || stillsLoading || finalizeLoading || !buildTopic.trim()}
                                 className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50"
                             >
                                 {buildLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -1130,15 +1203,80 @@ export default function ZeroTierPrivatePanel() {
                             </button>
                             <button
                                 type="button"
-                                onClick={renderBuildShort}
-                                disabled={!buildScript.trim() || renderLoading || buildLoading}
-                                title="Renders the full short via canonical pipeline. Takes 5-10 minutes."
-                                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                                onClick={generateStills}
+                                disabled={!buildScript.trim() || stillsLoading || buildLoading || finalizeLoading}
+                                title="Stage 1 of 2: render 8 stills only (~$0.32, ~60s). You preview + approve before animation."
+                                className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
                             >
-                                {renderLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                                {renderLoading ? 'Rendering (5-10 min)…' : 'Render This Short (~$2)'}
+                                {stillsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageIcon className="h-4 w-4" />}
+                                {stillsLoading ? 'Rendering 8 stills…' : (scenePreviews.length ? 'Re-render All Stills' : 'Generate Stills (~$0.32)')}
                             </button>
                         </div>
+
+                        {/* Phase 4.5: per-scene still gallery + regenerate buttons */}
+                        {scenePreviews.length > 0 && (
+                            <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-500/[0.04] p-3">
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                                        Stage 1 — review {scenePreviews.length} stills before animating
+                                    </div>
+                                    <span className="text-[10px] text-zinc-500">
+                                        Job: {stillsJobId.slice(0, 8)}…
+                                    </span>
+                                </div>
+                                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                                    {scenePreviews.map((s) => (
+                                        <div key={s.scene_id} className="rounded-lg border border-white/[0.08] bg-black/30 p-2">
+                                            <div className="relative aspect-[9/16] rounded overflow-hidden bg-black mb-2">
+                                                <img
+                                                    src={s.still_url}
+                                                    alt={`Scene ${s.scene_index + 1}: ${s.caption}`}
+                                                    className="absolute inset-0 w-full h-full object-cover"
+                                                    loading="lazy"
+                                                />
+                                                {s.regenerating && (
+                                                    <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+                                                        <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
+                                                    </div>
+                                                )}
+                                                <div className="absolute top-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300">
+                                                    #{s.scene_index + 1}
+                                                </div>
+                                            </div>
+                                            <div className="text-[11px] font-semibold text-zinc-200 mb-1 leading-snug">
+                                                "{s.caption}"
+                                            </div>
+                                            <div className="text-[10px] text-zinc-500 mb-2 line-clamp-2 leading-snug">
+                                                {s.narration}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => regenerateStill(s.scene_index)}
+                                                disabled={s.regenerating || finalizeLoading}
+                                                className="w-full inline-flex items-center justify-center gap-1.5 rounded border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200 transition hover:bg-cyan-500/20 disabled:opacity-50"
+                                            >
+                                                {s.regenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                                {s.regenerating ? 'Regenerating…' : 'Regenerate'}
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-3 flex items-center justify-between gap-2">
+                                    <div className="text-xs text-zinc-400">
+                                        Stage 2: animate via Pixverse (~$1.86, 5-7 min) → MiniMax narration → final MP4.
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={finalizeRender}
+                                        disabled={finalizeLoading || stillsLoading || scenePreviews.some((s) => s.regenerating)}
+                                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50 shrink-0"
+                                    >
+                                        {finalizeLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                        {finalizeLoading ? 'Animating + composing (5-7 min)…' : 'Approve + Animate + Compose Final MP4'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
 
                         {renderResult?.mp4_url && (
                             <div className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-100">
