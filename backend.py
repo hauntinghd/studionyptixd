@@ -23857,6 +23857,20 @@ except Exception as _alt_priv_err:
     log.warning(f"Alt-History (Private) router NOT mounted: {_alt_priv_err}")
 
 
+# History Rewind (Private) — admin-only Catalyst-fed surface for HR
+# channel (UCHmwsIGud6CeZ3CIs5cuaUA, 9hr sleep docs). Topic generator
+# only; render path stays on /api/long-form/* (existing sleep_doc pipeline).
+try:
+    from history_rewind_private_router import build_history_rewind_private_router
+    app.include_router(build_history_rewind_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ))
+    log.info("History Rewind (Private) router mounted at /api/history-rewind-private (admin-gated)")
+except Exception as _hr_priv_err:
+    log.warning(f"History Rewind (Private) router NOT mounted: {_hr_priv_err}")
+
+
 # Catalyst Reference Videos (Casey 2026-05-06 — "guarantee virality" lever).
 # Per-user library of viral / "winning" YouTube videos the user pastes in.
 # yt-dlp pulls metadata; Phase 2 will add Whisper transcript + vision pattern

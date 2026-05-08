@@ -16,6 +16,7 @@ const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 const ZeroTierPrivatePanel = lazy(() => import('../panels/ZeroTierPrivatePanel'));
 const AltHistoryPrivatePanel = lazy(() => import('../panels/AltHistoryPrivatePanel'));
+const HistoryRewindPrivatePanel = lazy(() => import('../panels/HistoryRewindPrivatePanel'));
 
 const PanelFallback = () => (
     <div className="flex h-[40vh] items-center justify-center gap-2 text-sm text-gray-500">
@@ -202,6 +203,19 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 }
             }} />);
         }
+        // History Rewind (Private) — Catalyst-fed sleep-doc topic surface
+        // for the HR channel. Render delegates to the existing Long-Form
+        // panel (sleep_doc pipeline). On "Build with this topic" we flip
+        // to the longform tab — HistoryRewindPrivatePanel has already
+        // stashed topic + channel-key in sessionStorage so LongFormPanel
+        // hydrates them on mount.
+        if (selectedNiche === 'history_rewind_private' && isAdmin) {
+            return lazyPanel(<HistoryRewindPrivatePanel onLongformHandoff={() => {
+                setTab('longform');
+                setSelectedNiche(null);
+                setCreateWorkspaceOpen(false);
+            }} />);
+        }
         return <CreatePanel initialTemplate={selectedNiche ?? undefined} />;
     })();
 
@@ -364,6 +378,7 @@ function NicheGallery({ onPick, isOwner }: { onPick: (nicheId: string) => void; 
         { id: 'history', title: 'Historical Epic', desc: 'Ridley-Scott-scale visuals', icon: '⚔️', badge: 'Trending' },
         { id: 'zerotier_private', title: 'ZeroTier (Private)', desc: 'DC speedster comic-book shorts — owner only', icon: '⚡', badge: 'Private', ownerOnly: true },
         { id: 'alt_history_private', title: 'Alt-History (Private)', desc: 'Catalyst-fed alt-battles for Cryptic Science — owner only', icon: '🛡️', badge: 'Private', ownerOnly: true },
+        { id: 'history_rewind_private', title: 'History Rewind (Private)', desc: '9-hour sleep-doc topics for History Rewind — owner only', icon: '📜', badge: 'Private', ownerOnly: true },
     ].filter((n) => !n.ownerOnly || isOwner);
     return (
         <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4">

@@ -370,6 +370,37 @@ export default function LongFormPanel() {
         if (accessToken) loadChannels();
     }, [accessToken, loadChannels]);
 
+    // PR #140 — sessionStorage handoff from private niche panels
+    // (HistoryRewindPrivatePanel, etc.). When the user clicks "Build with
+    // this topic" there, the panel stashes:
+    //   sessionStorage['longform_pending_topic']   = "Khmer Empire — Angkor's Dark Secret | History for Sleep | 9 Hours"
+    //   sessionStorage['longform_pending_channel'] = "history_rewind"
+    // and then the Dashboard flips to the longform tab. We hydrate those
+    // keys here once the channel registry is loaded, so Casey lands on
+    // the Outline tab with topic + channel pre-filled.
+    const [pendingHydrationDone, setPendingHydrationDone] = useState(false);
+    useEffect(() => {
+        if (pendingHydrationDone) return;
+        if (channels.length === 0) return;  // wait for registry
+        let pendingTopic = '';
+        let pendingChannel = '';
+        try {
+            pendingTopic = sessionStorage.getItem('longform_pending_topic') || '';
+            pendingChannel = sessionStorage.getItem('longform_pending_channel') || '';
+        } catch { /* sessionStorage may be blocked */ }
+        if (pendingTopic && pendingChannel && channels.find((c) => c.key === pendingChannel)) {
+            onPickChannel(pendingChannel);
+            setTopic(pendingTopic);
+            setTab('outline');
+            try {
+                sessionStorage.removeItem('longform_pending_topic');
+                sessionStorage.removeItem('longform_pending_channel');
+            } catch { /* noop */ }
+        }
+        setPendingHydrationDone(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [channels]);
+
     // When a channel is picked, default targetMinutes + fetch Catalyst insights.
     const onPickChannel = useCallback((key: string) => {
         setSelectedChannel(key);
