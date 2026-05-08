@@ -50,6 +50,10 @@ class ZTScriptRequest(BaseModel):
     stream: bool = False
 
 
+class ZTGenerateTopicsRequest(BaseModel):
+    count: int = Field(default=8, ge=3, le=15, description="How many topic candidates to generate")
+
+
 class ZTRenderRequest(BaseModel):
     script_json: str = Field(..., min_length=10, description="Grok-generated 8-beat script JSON (raw string)")
     final_filename: str | None = None
@@ -172,6 +176,160 @@ def build_zerotier_private_router(
             return
         if not is_admin_user(user):
             raise HTTPException(403, "ZeroTier (Private) is owner-only.")
+
+    # ────────────────────────────────────────────────────────────────────
+    # POST /generate-topics — autonomous topic generation
+    #
+    # Pulls the user's ZeroTier channel data (winners + losers + already-
+    # uploaded titles), encodes the validated formula + competitor patterns
+    # decoded from CreationsComic (329K subs, 7.70% top LR) and TheManDeeDubs
+    # (1.89M subs, 8.20% top LR), and asks Grok for N fresh "The Time Wally
+    # West [past-tense]" topic ideas optimized for predicted virality.
+    #
+    # Returns: {topics: [string, ...], channel_baseline: {top_lr, avg_lr}}.
+    # ────────────────────────────────────────────────────────────────────
+    @router.post("/generate-topics")
+    async def generate_zt_topics(body: ZTGenerateTopicsRequest, user: dict = auth_dep):
+        _gate_admin(user)
+
+        # Pull channel uploads from the connection store (same path as
+        # /predictions). If the channel isn't synced, the prompt falls back
+        # to the channel-wide patterns alone.
+        uploads: list[dict] = []
+        try:
+            from youtube import _load_youtube_connections, _youtube_bucket_for_user
+            user_id = str(user.get("id", "") or user.get("user_id", "") or "")
+            if user_id:
+                _load_youtube_connections()
+                bucket = _youtube_bucket_for_user(user_id)
+                channels = (bucket or {}).get("channels") or {}
+                ZT_ID = "UC9Gth_4MVet6rdPH7MHJf-g"
+                ch = channels.get(ZT_ID) or {}
+                snap = (ch.get("analytics_snapshot") or {})
+                uploads = list(snap.get("uploaded_videos") or [])
+        except Exception:
+            uploads = []
+
+        # Compute like-rates + sort
+        scored: list[tuple[str, float]] = []
+        for v in uploads:
+            views = int(float((v or {}).get("views", 0) or 0))
+            likes = int(float((v or {}).get("likes", 0) or 0))
+            title = str((v or {}).get("title", "") or "").strip()
+            if not title or views < 50:
+                continue
+            lr = (likes / views) * 100 if views > 0 else 0.0
+            scored.append((title, round(lr, 2)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # Drop bot-spike outliers (anomalously high views with < 0.3% LR — the
+        # Wally vs Death pattern). Keep them out of "winners" and "losers" lists.
+        valid = [(t, lr) for t, lr in scored if lr >= 0.5 or len(scored) <= 5]
+        winners = valid[:5]
+        losers = valid[-3:] if len(valid) >= 8 else valid[-min(3, len(valid)):]
+
+        already_uploaded = [t for t, _ in scored]
+
+        # Compose the dynamic-context user prompt. The system prompt remains
+        # the locked zerotier_private TEMPLATE_SYSTEM_PROMPT (Conflict Arc +
+        # title formula + comic visuals + JSON schema) but we override the
+        # output: instead of a single 8-beat script, request a topic LIST.
+        winners_block = "\n".join([f"  - \"{t}\" — {lr:.2f}% like-rate" for t, lr in winners]) or "  (none yet)"
+        losers_block = "\n".join([f"  - \"{t}\" — {lr:.2f}% like-rate" for t, lr in losers]) or "  (none yet)"
+        already_block = "\n".join([f"  - {t}" for t in already_uploaded]) or "  (none)"
+
+        topic_user_prompt = (
+            f"You are generating fresh short-video topic ideas for a small DC speedster fan-fiction "
+            f"channel called ZeroTier. Use the locked formula encoded in the system prompt above.\n\n"
+            f"=== This channel's actual data ===\n\n"
+            f"TOP PERFORMERS (what works — highest like-rate):\n{winners_block}\n\n"
+            f"UNDER-PERFORMERS (what to avoid):\n{losers_block}\n\n"
+            f"ALREADY UPLOADED (do NOT propose these or close variants):\n{already_block}\n\n"
+            f"=== Public competitor patterns ===\n\n"
+            f"From CreationsComic (329K subs, 7.70% top like-rate) and TheManDeeDubs (1.89M, "
+            f"8.20% top): the highest-engagement DC fan-fiction shorts hit on (1) outsmart-not-"
+            f"overpower payoffs, (2) family-bond reveals, (3) parallel-universe identity flips, "
+            f"(4) iconic-character non-physical confrontations.\n\n"
+            f"=== Your task ===\n\n"
+            f"Generate {body.count} FRESH short-video topic titles that:\n"
+            f"  - Strictly follow the format \"The Time Wally West [past-tense verb]\"\n"
+            f"  - Hit cosmic / identity / mortality / time-loss stakes (NOT raw power scaling)\n"
+            f"  - Use impersonal forces or iconic characters as antagonists (NOT generic villains)\n"
+            f"  - Carry an emotional COMEBACK beat (sacrifice / forgiveness / identity loss)\n"
+            f"  - Are NOT in the already-uploaded list above\n"
+            f"  - Are NOT minor variants of already-uploaded titles\n"
+            f"  - Vary across different stakes archetypes (don't propose 8 time-travel ideas)\n\n"
+            f"Output ONLY a JSON object with a single 'topics' key — array of strings, no scenes,"
+            f" no descriptions:\n"
+            f"  {{\"topics\": [\"The Time Wally West [verb] ...\", ...]}}\n\n"
+            f"No commentary, no markdown."
+        )
+
+        system_prompt = TEMPLATE_SYSTEM_PROMPTS.get("zerotier_private", "").strip()
+        if not system_prompt:
+            raise HTTPException(503, "zerotier_private template prompt missing")
+
+        try:
+            grok = GrokClient()
+        except GrokAuthError as e:
+            raise HTTPException(503, f"grok_auth_failed: {e}")
+
+        try:
+            text = grok.complete(system_prompt, topic_user_prompt, max_tokens=1500, temperature=0.95)
+        except GrokAuthError as e:
+            raise HTTPException(503, f"grok_auth_failed: {e}")
+
+        # Parse the response. Grok sometimes wraps in ```json fences.
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        topics: list[str] = []
+        try:
+            parsed = json.loads(cleaned)
+            raw_topics = parsed.get("topics") if isinstance(parsed, dict) else parsed
+            if isinstance(raw_topics, list):
+                topics = [str(t).strip() for t in raw_topics if str(t).strip()]
+        except Exception:
+            # Fallback: extract lines that look like titles
+            for line in cleaned.splitlines():
+                m = re.search(r'"(The Time Wally West [^"]+)"', line)
+                if m:
+                    topics.append(m.group(1).strip())
+
+        # Dedupe + drop topics that match already-uploaded too closely
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for t in topics:
+            key = re.sub(r"\s+", " ", t.lower()).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            # Skip titles that overlap an existing upload (≥4 word matches)
+            t_words = set(w for w in re.split(r"\W+", key) if len(w) >= 5)
+            duplicate = False
+            for existing in already_uploaded:
+                e_words = set(w for w in re.split(r"\W+", existing.lower()) if len(w) >= 5)
+                if len(t_words & e_words) >= 4:
+                    duplicate = True
+                    break
+            if not duplicate:
+                deduped.append(t)
+
+        baseline = {
+            "channel_top_lr": winners[0][1] if winners else 0.0,
+            "channel_avg_lr": (
+                round(sum(lr for _, lr in valid) / len(valid), 2) if valid else 0.0
+            ),
+            "uploads_considered": len(valid),
+        }
+
+        return {
+            "ok": True,
+            "topics": deduped[:body.count],
+            "raw_count": len(topics),
+            "baseline": baseline,
+        }
 
     # ────────────────────────────────────────────────────────────────────
     # POST /script — generate the 8-beat Conflict Arc script

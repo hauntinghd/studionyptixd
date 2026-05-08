@@ -250,6 +250,13 @@ export default function ZeroTierPrivatePanel() {
     const [buildLoading, setBuildLoading] = useState(false);
     // Manual topic input (always available, doesn't require Catalyst candidates)
     const [manualTopic, setManualTopic] = useState('');
+
+    // Phase 4: autonomous topic generation — Grok-generated topics from your
+    // own channel data + competitor patterns, no manual input required.
+    const [genLoading, setGenLoading] = useState(false);
+    const [genTopics, setGenTopics] = useState<string[]>([]);
+    const [genError, setGenError] = useState('');
+    const [genBaseline, setGenBaseline] = useState<{ channel_top_lr?: number; channel_avg_lr?: number; uploads_considered?: number } | null>(null);
     // Phase 2b: render state
     const [renderLoading, setRenderLoading] = useState(false);
     const [renderResult, setRenderResult] = useState<null | {
@@ -304,6 +311,14 @@ export default function ZeroTierPrivatePanel() {
     const manualScore = useMemo(
         () => manualTopic.trim() ? scoreVirality(manualTopic.trim(), existingTitles) : null,
         [manualTopic, existingTitles],
+    );
+
+    // Score every Grok-generated topic on the client (heuristic v1)
+    const scoredGenTopics = useMemo(
+        () => genTopics
+            .map((title) => ({ title, ...scoreVirality(title, existingTitles) }))
+            .sort((a, b) => b.score - a.score),
+        [genTopics, existingTitles],
     );
 
     const sortedUploads = useMemo<UploadedVideo[]>(() => {
@@ -435,6 +450,30 @@ export default function ZeroTierPrivatePanel() {
             // no-op
         }
     }, [accessToken, handleRefresh]);
+
+    const generateTopicIdeas = useCallback(async () => {
+        if (!accessToken || genLoading) return;
+        setGenError('');
+        setGenLoading(true);
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/generate-topics`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ count: 8 }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Failed (${r.status})`));
+            setGenTopics(Array.isArray(data?.topics) ? data.topics : []);
+            setGenBaseline(data?.baseline || null);
+        } catch (e: any) {
+            setGenError(String(e?.message || e || 'Topic generation failed'));
+        } finally {
+            setGenLoading(false);
+        }
+    }, [accessToken, genLoading]);
 
     const onConnectZeroTier = useCallback(() => {
         if (!accessToken || connecting) return;
@@ -682,7 +721,92 @@ export default function ZeroTierPrivatePanel() {
                         )}
                     </section>
 
-                    {/* Manual topic input — always available, doesn't need Catalyst candidates */}
+                    {/* Phase 4: AI-generated topic ideas — fully autonomous, learns from your channel */}
+                    <section className="rounded-2xl border border-violet-500/40 bg-violet-500/[0.06] p-5">
+                        <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <Sparkles className="h-5 w-5 text-violet-300" />
+                                    <h2 className="text-lg font-bold text-white">AI topic generator</h2>
+                                </div>
+                                <p className="text-xs text-zinc-400 mt-1">
+                                    Grok reads your channel's actual top performers, under-performers,
+                                    + decoded competitor patterns (CreationsComic, TheManDeeDubs)
+                                    and proposes fresh "The Time Wally West" topics. No typing required.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={generateTopicIdeas}
+                                disabled={genLoading}
+                                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50 shrink-0"
+                            >
+                                {genLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                {genLoading ? 'Generating ideas…' : (genTopics.length ? 'Regenerate Ideas' : 'Generate Topic Ideas')}
+                            </button>
+                        </div>
+
+                        {genError && (
+                            <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                                <span>{genError}</span>
+                            </div>
+                        )}
+
+                        {genBaseline && (
+                            <div className="mb-3 text-xs text-zinc-400">
+                                Channel baseline: <span className="text-zinc-200 font-semibold">{(genBaseline.channel_top_lr || 0).toFixed(2)}%</span> top LR ·
+                                <span className="text-zinc-200 font-semibold"> {(genBaseline.channel_avg_lr || 0).toFixed(2)}%</span> avg
+                                <span className="text-zinc-600"> · {genBaseline.uploads_considered || 0} uploads considered</span>
+                            </div>
+                        )}
+
+                        {scoredGenTopics.length > 0 && (
+                            <div className="grid gap-3 sm:grid-cols-1 lg:grid-cols-2">
+                                {scoredGenTopics.map((c, i) => {
+                                    const sColor = c.score >= 70 ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40'
+                                        : c.score >= 40 ? 'text-amber-300 bg-amber-500/10 border-amber-500/40'
+                                        : 'text-zinc-400 bg-zinc-500/10 border-zinc-500/40';
+                                    return (
+                                        <div key={`gen-${i}`} className="rounded-xl border border-white/[0.08] bg-black/30 p-4">
+                                            <div className="flex items-start gap-2 mb-2">
+                                                <Sparkles className="h-4 w-4 shrink-0 text-violet-300 mt-0.5" />
+                                                <div className="flex-1 min-w-0">
+                                                    <h3 className="text-sm font-semibold text-white leading-snug">{c.title}</h3>
+                                                </div>
+                                                <div className={`rounded-md border px-2 py-0.5 text-xs font-bold tabular-nums ${sColor}`}>
+                                                    {c.score}
+                                                </div>
+                                            </div>
+                                            <div className="text-[11px] text-zinc-400 mb-2">
+                                                Predicted LR: <span className="text-zinc-200 font-semibold">{c.predicted_lr.toFixed(2)}%</span>
+                                            </div>
+                                            {c.reasons.length > 0 && (
+                                                <ul className="text-[11px] text-zinc-400 space-y-0.5 mb-2">
+                                                    {c.reasons.slice(0, 2).map((r, ri) => (
+                                                        <li key={`gr-${i}-${ri}`} className="flex items-start gap-1.5">
+                                                            <span className="text-zinc-600 mt-0.5">·</span>
+                                                            <span>{r}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                            <button
+                                                type="button"
+                                                onClick={() => onBuildShort(c.title, c)}
+                                                className="inline-flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-semibold text-violet-200 transition hover:border-violet-400 hover:bg-violet-500/20"
+                                            >
+                                                <Sparkles className="h-3.5 w-3.5" />
+                                                Build This Short
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </section>
+
+                    {/* Manual topic input — fallback for when you have your own idea */}
                     <section className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.04] p-5">
                         <div className="flex items-center gap-2 mb-3">
                             <Sparkles className="h-5 w-5 text-amber-300" />
