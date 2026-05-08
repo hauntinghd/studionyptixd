@@ -17,7 +17,7 @@
  *     candidate title prefilled (Phase 2 wires the zerotier_private template).
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, Youtube, Zap } from 'lucide-react';
+import { AlertTriangle, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
 import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
@@ -99,6 +99,13 @@ export default function ZeroTierPrivatePanel() {
     const [error, setError] = useState('');
     const [payload, setPayload] = useState<CatalystHubPayload | null>(null);
     const retriedRef = useRef(false);
+
+    // Build-This-Short modal state
+    const [buildModalOpen, setBuildModalOpen] = useState(false);
+    const [buildTopic, setBuildTopic] = useState('');
+    const [buildScript, setBuildScript] = useState('');
+    const [buildError, setBuildError] = useState('');
+    const [buildLoading, setBuildLoading] = useState(false);
 
     const channel = useMemo(() => {
         const channels = payload?.channels || [];
@@ -249,17 +256,52 @@ export default function ZeroTierPrivatePanel() {
     );
 
     const onBuildShort = (title: string) => {
-        // Phase 1: hand off to existing build flow with the title prefilled.
-        // Phase 2: wire to the dedicated zerotier_private template prompt.
-        const url = new URL(window.location.href);
-        url.searchParams.set('niche', 'zerotier_private');
-        url.searchParams.set('topic', title);
-        window.history.replaceState({}, '', url.toString());
-        // Scroll to top to make it obvious something happened; future iteration
-        // will instead navigate the user into the Create flow with this prefill.
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        alert(`v1: routing to Create flow with topic prefill is a follow-up. Topic noted: "${title}"`);
+        // Phase 2a: open the build modal pre-loaded with the candidate topic.
+        // Frontend calls /api/zerotier-private/script which uses the dedicated
+        // zerotier_private TEMPLATE_SYSTEM_PROMPT (Conflict Arc + "The Time
+        // Wally West [past-tense]" formula + cel-shaded comic visuals).
+        setBuildTopic(title);
+        setBuildScript('');
+        setBuildError('');
+        setBuildModalOpen(true);
     };
+
+    const generateBuildScript = useCallback(async () => {
+        if (!accessToken || !buildTopic.trim() || buildLoading) return;
+        setBuildError('');
+        setBuildScript('');
+        setBuildLoading(true);
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/script`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ topic: buildTopic.trim(), stream: false }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(String(data?.detail || data?.error || `Failed (${r.status})`));
+            // Backend returns { script_json: "<JSON-as-text>", topic }. Try to
+            // pretty-print it; fall back to raw text if parse fails.
+            const raw = String(data?.script_json || '').trim();
+            try {
+                const parsed = JSON.parse(raw);
+                setBuildScript(JSON.stringify(parsed, null, 2));
+            } catch {
+                setBuildScript(raw);
+            }
+        } catch (e: any) {
+            setBuildError(String(e?.message || e || 'Script generation failed'));
+        } finally {
+            setBuildLoading(false);
+        }
+    }, [accessToken, buildTopic, buildLoading]);
+
+    const closeBuildModal = useCallback(() => {
+        if (buildLoading) return; // don't close mid-stream
+        setBuildModalOpen(false);
+    }, [buildLoading]);
 
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-6xl mx-auto">
@@ -512,6 +554,82 @@ export default function ZeroTierPrivatePanel() {
                         </section>
                     )}
                 </>
+            )}
+
+            {/* Build-This-Short modal — Phase 2a: script generation */}
+            {buildModalOpen && (
+                <div
+                    className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
+                    onClick={closeBuildModal}
+                >
+                    <div
+                        className="bg-zinc-950 border border-zinc-800 rounded-lg p-6 max-w-3xl w-full max-h-[85vh] overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between mb-3 gap-3">
+                            <div>
+                                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">
+                                    <Sparkles className="h-3.5 w-3.5" />
+                                    Build This Short
+                                </div>
+                                <h3 className="mt-1 text-lg font-bold text-white leading-snug">{buildTopic}</h3>
+                                <p className="mt-1 text-xs text-zinc-400">
+                                    Generates an 8-scene Conflict Arc script using the locked
+                                    ZeroTier (Private) template — past-tense title, cosmic stakes,
+                                    cel-shaded comic visuals, MiniMax narration. Render pipeline
+                                    wires in next phase.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeBuildModal}
+                                disabled={buildLoading}
+                                className="text-zinc-400 hover:text-white disabled:opacity-50"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="mt-3 flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={generateBuildScript}
+                                disabled={buildLoading || !buildTopic.trim()}
+                                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50"
+                            >
+                                {buildLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                {buildLoading ? 'Generating with Grok…' : (buildScript ? 'Regenerate Script' : 'Generate Script')}
+                            </button>
+                            <button
+                                type="button"
+                                disabled
+                                title="Phase 2b — render pipeline wires next"
+                                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-500 cursor-not-allowed"
+                            >
+                                <Sparkles className="h-4 w-4" />
+                                Render This Short (Phase 2b)
+                            </button>
+                        </div>
+
+                        {buildError && (
+                            <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                                <span>{buildError}</span>
+                            </div>
+                        )}
+
+                        {buildScript && (
+                            <div className="mt-3 rounded-lg border border-white/[0.08] bg-black/30 p-3">
+                                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400 mb-2">
+                                    Grok output (zerotier_private template)
+                                </div>
+                                <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-snug text-zinc-200">
+                                    {buildScript}
+                                </pre>
+                            </div>
+                        )}
+                    </div>
+                </div>
             )}
         </div>
     );
