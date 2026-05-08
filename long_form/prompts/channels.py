@@ -262,11 +262,19 @@ CHANNELS: dict[str, dict[str, Any]] = {
         # — same premium tier HR uses per feedback_hr_premium_fal_tts.md.
         "voice_provider_default": "fal_minimax",
         "voice_id_default": "English_Trustworthy_Man",
-        # Bumped from $50.76 to ~$72: LTX 13B (~$0.30/clip × ~36 = $11) +
-        # fal MiniMax (~$5) + 1080p60 medium-preset libx264 same cost +
-        # higher-res seedream same cost. Casey explicitly OK'd higher spend
-        # for AAA quality.
-        "cost_estimate_usd": 72.0,
+        # Real per-episode cost (PR #136 corrected from PR #132's $72
+        # ceiling which was based on a wrong LTX price assumption):
+        #   - 36 LTX 13B distilled @ $0.04/clip ........... $1.44
+        #   - 36 mmaudio SFX @ ~$0.05/call ................. $1.80
+        #   - 36 fal MiniMax VO (~200 chars ea, $0.10/1k) .. $0.72
+        #   - 36 seedream stills @ ~$0.04 .................. $1.44
+        #   - 3 seedream thumbnails ........................ $0.12
+        #   - 18 chapter Grok any-llm calls ................ $9.00
+        #   - Misc retries / cushion ....................... $1.50
+        #   = ~$15.50 per EM episode total (Stage 1 ~$11, Stage 2 ~$4.50)
+        # Was $72 in PR #132 because I priced LTX at $0.30/clip; the
+        # distilled variant is $0.04/clip per project_ltx_i2v_winner.md.
+        "cost_estimate_usd": 16.0,
         "pipeline_kind": "v5_episode",                # routes to v5 sub-pipeline
         "system_prompt": (
             "You write 20-minute photoreal financial-fraud / corporate-empire "
