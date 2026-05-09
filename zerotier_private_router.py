@@ -91,6 +91,21 @@ class ZTFinalizeRequest(BaseModel):
     final_filename: str | None = None
 
 
+# Phase 5 — YouTube metadata generation. After a render is done, Grok
+# returns description + tags tuned to the title + scene narration. Casey
+# copy-pastes them into YouTube Studio (no auto-upload yet).
+class ZTGenerateMetadataRequest(BaseModel):
+    job_id: str = Field(..., min_length=1)
+    # Optional override knobs. If omitted, the route reads from result.json
+    # and scenes.json on disk for the job.
+    title: str | None = None
+    topic: str | None = None
+    style: str | None = Field(
+        default=None,
+        description="Optional flavour hint, e.g. 'mystery' / 'cosmic' / 'family'",
+    )
+
+
 # Where rendered MP4s + stills live. CRITICAL: must be on the persistent
 # volume (/var/data on Fly) so renders survive backend deploys. The Fly
 # machine reboots on every image push, which wipes the ephemeral container
@@ -945,6 +960,9 @@ def build_zerotier_private_router(
             ),
             "duration_total_sec": result.get("duration_total_sec"),
             "fal_cost_estimate_usd": result.get("fal_cost_estimate_usd"),
+            # PR #142 — pass through previously-generated YouTube metadata
+            # so the resume flow can re-display it instead of re-firing Grok.
+            "youtube_metadata": result.get("youtube_metadata"),
         }
 
     # ────────────────────────────────────────────────────────────────────
@@ -1045,6 +1063,173 @@ def build_zerotier_private_router(
                 "matched": hits,
                 "unmatched": len(joined) - hits,
             },
+        }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Phase 5: YouTube upload metadata generator.
+    #
+    # POST /generate-metadata reads a finished job's title + scenes from
+    # disk and asks Grok to produce a tuned YouTube description + tag
+    # list. Casey copy-pastes these straight into YouTube Studio (no
+    # auto-upload yet).
+    #
+    # Returns: {title, description, tags: [string, ...]}
+    #
+    # The metadata is also persisted into result.json so it survives a
+    # page reload and shows up in /jobs/{id}/state.
+    # ────────────────────────────────────────────────────────────────────
+    @router.post("/generate-metadata")
+    async def zt_generate_metadata(body: ZTGenerateMetadataRequest, user: dict = auth_dep):
+        _gate_admin(user)
+        if not body.job_id.replace("_", "").isalnum() or len(body.job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        ws = ZT_OUTPUT_ROOT / body.job_id
+        if not ws.exists():
+            raise HTTPException(404, "job_not_found")
+
+        # Read result.json + scenes.json from disk
+        result: dict = {}
+        scenes_data: dict = {}
+        try:
+            rp = ws / "result.json"
+            if rp.exists():
+                result = json.loads(rp.read_text(encoding="utf-8"))
+        except Exception:
+            result = {}
+        try:
+            sp = ws / "scenes.json"
+            if sp.exists():
+                scenes_data = json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            scenes_data = {}
+
+        title = (body.title or result.get("title") or scenes_data.get("title") or "").strip()
+        topic = (body.topic or result.get("topic") or "").strip()
+        if not title:
+            raise HTTPException(400, "no_title — render not complete or result.json missing")
+
+        # Pull scene narrations to give Grok the actual story beats
+        scenes_list = scenes_data.get("scenes") or result.get("scenes") or []
+        narrations: list[str] = []
+        for s in scenes_list:
+            if not isinstance(s, dict):
+                continue
+            n = str(s.get("narration", "") or "").strip()
+            if n:
+                narrations.append(n)
+        beats_block = "\n".join(f"  {i+1}. {n}" for i, n in enumerate(narrations[:8])) or "  (no narration recovered from disk)"
+
+        style_hint = (body.style or "").strip()
+
+        # Locked metadata system prompt — calibrated to ZeroTier's voice
+        # (DC speedster fan-fic / Wally West / cosmic + family beats).
+        # The description must be 3 short paragraphs (~250-400 chars total),
+        # YouTube-Shorts-friendly, no emoji-spam, ends with a comment-bait
+        # question. Tags are 12-15 lowercase comma-friendly strings, mixing
+        # broad ("dc comics") with specific ("wally west speedster shorts").
+        meta_system = (
+            "You generate YouTube Shorts metadata for the ZeroTier channel — a "
+            "DC speedster fan-fiction shorts channel built around Wally West "
+            "(Kid Flash / The Flash). Every video uses the title formula 'The "
+            "Time Wally West [past-tense verb]' and follows an 8-beat Conflict "
+            "Arc: hook → rising → conflict → comeback → rising → payoff.\n\n"
+            "Output STRICT JSON ONLY (no markdown fences, no commentary):\n"
+            "  {\n"
+            "    \"description\": \"<3 short paragraphs, 250-400 chars total, "
+            "YouTube-Shorts-friendly, no emoji spam. Paragraph 1 = hook from "
+            "the title. Paragraph 2 = 1-line stakes recap. Paragraph 3 = "
+            "comment-bait question + 3 short hashtags.>\",\n"
+            "    \"tags\": [\"<lowercase tag>\", ...]   // 12-15 entries; mix "
+            "broad (\"dc comics\", \"wally west\", \"the flash\") with specific "
+            "(\"wally west speedster shorts\", \"<topic-specific>\")\n"
+            "  }\n"
+            "Don't propose alternate titles — the title is already locked. "
+            "Don't invent details outside the scene narration. Use REAL DC "
+            "names (Wally West, Barry Allen, Bart Allen, Iris West, Linda "
+            "Park, Speed Force, Reverse-Flash, Zoom, Savitar) when the "
+            "narration mentions them."
+        )
+
+        meta_user = (
+            f"Title (LOCKED — do not change): {title}\n"
+            f"Topic seed: {topic or '(not set)'}\n"
+            + (f"Tone hint: {style_hint}\n" if style_hint else "")
+            + "\n"
+            "Scene narration beats (in order):\n"
+            f"{beats_block}\n\n"
+            "Generate the YouTube description + tags JSON now. Description "
+            "must NOT repeat the title verbatim more than once. Tags must "
+            "all be lowercase, no '#' prefix."
+        )
+
+        try:
+            grok = GrokClient()
+        except GrokAuthError as e:
+            raise HTTPException(503, f"grok_auth_failed: {e}")
+
+        try:
+            text = grok.complete(meta_system, meta_user, max_tokens=1200, temperature=0.8)
+        except GrokAuthError as e:
+            raise HTTPException(503, f"grok_auth_failed: {e}")
+
+        # Strip markdown fences if Grok wraps despite the instruction
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+
+        description = ""
+        tags: list[str] = []
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                description = str(parsed.get("description", "") or "").strip()
+                raw_tags = parsed.get("tags") or []
+                if isinstance(raw_tags, list):
+                    tags = [
+                        str(t).strip().lstrip("#").lower()
+                        for t in raw_tags
+                        if isinstance(t, (str, int, float)) and str(t).strip()
+                    ]
+        except Exception:
+            # Best-effort fallback: try to recover SOMETHING usable
+            description = cleaned[:600]
+            tags = []
+
+        # Tag housekeeping — dedupe, drop empty, cap to 15
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for t in tags:
+            k = t.strip().lower()
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            deduped.append(k)
+        tags = deduped[:15]
+
+        # Persist into result.json so it survives reload + appears in /state
+        metadata_payload = {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "generated_at": int(time.time()),
+        }
+        try:
+            existing = dict(result or {})
+            existing["youtube_metadata"] = metadata_payload
+            (ws / "result.json").write_text(
+                json.dumps(existing, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "job_id": body.job_id,
+            "title": title,
+            "description": description,
+            "tags": tags,
         }
 
     return router
