@@ -329,7 +329,17 @@ export default function ZeroTierPrivatePanel() {
         scene_count?: number;
         duration_total_sec?: number;
         fal_cost_estimate_usd?: number;
+        // PR #142 — YouTube metadata. Populated by /generate-metadata
+        // after a successful finalize, or hydrated from result.json
+        // when resuming a finished job.
+        description?: string;
+        tags?: string[];
     }>(null);
+    // PR #142 — YouTube metadata generator state
+    const [metadataLoading, setMetadataLoading] = useState(false);
+    const [metadataError, setMetadataError] = useState<string>('');
+    // Toast-y "Copied!" indicator keyed by which field was copied
+    const [copiedField, setCopiedField] = useState<'title' | 'description' | 'tags' | ''>('');
 
     // Phase 4.5: per-scene approval flow
     interface ScenePreview {
@@ -559,6 +569,13 @@ export default function ZeroTierPrivatePanel() {
             const scenes = (data?.scenes || []) as ScenePreview[];
             setScenePreviews(scenes.map((s) => ({ ...s, still_url: `${API}${s.still_url}` })));
             if (data?.mp4_url) {
+                // PR #142 — hydrate previously-saved YouTube metadata
+                // from disk so a resumed finished job shows the same
+                // description + tags Casey saw at finalize time, instead
+                // of re-firing Grok (which would burn fal-budget +
+                // produce a different output every time).
+                const meta = (data?.youtube_metadata || data?.result?.youtube_metadata) as
+                    { description?: string; tags?: string[] } | undefined;
                 setRenderResult({
                     job_id: jobId,
                     title: data?.title,
@@ -566,6 +583,8 @@ export default function ZeroTierPrivatePanel() {
                     scene_count: data?.scene_count,
                     duration_total_sec: data?.duration_total_sec,
                     fal_cost_estimate_usd: data?.fal_cost_estimate_usd,
+                    description: meta?.description,
+                    tags: Array.isArray(meta?.tags) ? meta.tags : undefined,
                 });
             } else {
                 setRenderResult(null);
@@ -819,20 +838,103 @@ export default function ZeroTierPrivatePanel() {
             if (!ok) throw new Error(String(data?.detail || data?.error || `Finalize submit failed (${status})`));
             const ready = await pollJobStatus(stillsJobId, 720);
             const result = ready?.result || {};
+            const finishedJobId = String(result?.job_id || stillsJobId);
             setRenderResult({
-                job_id: String(result?.job_id || stillsJobId),
+                job_id: finishedJobId,
                 title: result?.title,
                 mp4_url: result?.mp4_url ? `${API}${result.mp4_url}` : undefined,
                 scene_count: result?.scene_count,
                 duration_total_sec: result?.duration_total_sec,
                 fal_cost_estimate_usd: result?.fal_cost_estimate_usd,
+                description: result?.youtube_metadata?.description,
+                tags: result?.youtube_metadata?.tags,
             });
+            // PR #142 — auto-fire metadata generation right after finalize.
+            // Render is done, MP4 is on disk — no reason to make Casey click
+            // a separate button before he can copy/paste into YouTube Studio.
+            // If the job already had youtube_metadata baked into result.json
+            // (e.g. on a resume), skip the regeneration to save a Grok call.
+            if (!result?.youtube_metadata?.description) {
+                generateMetadataRef.current?.(finishedJobId).catch(() => {});
+            }
         } catch (e: any) {
             setBuildError(String(e?.message || e || 'Finalize failed'));
         } finally {
             setFinalizeLoading(false);
         }
     }, [accessToken, stillsJobId, finalizeLoading, pollJobStatus, getFreshToken, fetchJsonResilient]);
+
+    // PR #142 — YouTube metadata generator. Calls
+    // POST /api/zerotier-private/generate-metadata which uses Grok with
+    // ZeroTier-locked metadata system prompt to produce description + tags
+    // from the title + scene narration. Result is also persisted into
+    // result.json on disk so it survives a page reload.
+    //
+    // Wrapped in a ref so finalizeRender (defined above) can call this
+    // before generateMetadata is defined as a const. Same pattern used by
+    // the long-form panel for resume hooks.
+    const generateMetadataRef = useRef<((jobId: string) => Promise<void>) | null>(null);
+    const generateMetadata = useCallback(async (jobId: string) => {
+        if (!accessToken || !jobId || metadataLoading) return;
+        setMetadataLoading(true);
+        setMetadataError('');
+        try {
+            const tok = await getFreshToken();
+            const r = await fetch(`${API}/api/zerotier-private/generate-metadata`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${tok}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ job_id: jobId }),
+            });
+            if (!r.ok) {
+                const txt = await r.text().catch(() => '');
+                throw new Error(`generate-metadata failed: ${r.status} ${txt.slice(0, 200)}`);
+            }
+            const d = await r.json();
+            setRenderResult((prev) => prev ? {
+                ...prev,
+                title: d.title || prev.title,
+                description: d.description || '',
+                tags: Array.isArray(d.tags) ? d.tags : [],
+            } : prev);
+        } catch (e: any) {
+            setMetadataError(String(e?.message || e || 'Failed to generate metadata'));
+        } finally {
+            setMetadataLoading(false);
+        }
+    }, [accessToken, getFreshToken, metadataLoading]);
+    // Bind the ref every render so finalizeRender's closure reads the
+    // latest generateMetadata (which itself depends on accessToken etc.).
+    generateMetadataRef.current = generateMetadata;
+
+    // Copy helper — writes to clipboard + flashes "Copied!" badge for the
+    // field. Tags are joined with ", " for YouTube Studio's tag input.
+    const copyToClipboard = useCallback(async (field: 'title' | 'description' | 'tags', text: string) => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopiedField(field);
+            setTimeout(() => setCopiedField(''), 1800);
+        } catch {
+            // Fallback: select + execCommand (deprecated but still works in
+            // older browsers). If even this fails, alert the user.
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                setCopiedField(field);
+                setTimeout(() => setCopiedField(''), 1800);
+            } catch {
+                alert('Could not copy to clipboard. Select and copy manually.');
+            }
+        }
+    }, []);
 
     const generateBuildScript = useCallback(async () => {
         if (!accessToken || !buildTopic.trim() || buildLoading) return;
@@ -1565,6 +1667,127 @@ export default function ZeroTierPrivatePanel() {
                                         </a>
                                     </div>
                                 </div>
+                            </div>
+                        )}
+
+                        {/* PR #142 — YouTube upload metadata card. Auto-
+                            generates after finalize completes (or on click of
+                            Regenerate). Casey copy-pastes title +
+                            description + tags into YouTube Studio. */}
+                        {renderResult?.mp4_url && (
+                            <div className="mt-3 rounded-lg border border-violet-500/30 bg-violet-500/5 p-3 text-xs text-zinc-100">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="font-semibold uppercase tracking-[0.18em] text-violet-300">
+                                        YouTube upload metadata
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => renderResult.job_id && generateMetadata(renderResult.job_id)}
+                                        disabled={metadataLoading || !renderResult.job_id}
+                                        className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 hover:bg-violet-500/20 border border-violet-500/30 px-2.5 py-1 text-[10px] font-semibold text-violet-200 transition disabled:opacity-50"
+                                    >
+                                        {metadataLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                        {metadataLoading ? 'Generating…' : (renderResult.description ? 'Regenerate' : 'Generate')}
+                                    </button>
+                                </div>
+
+                                {metadataError && (
+                                    <div className="mb-2 flex items-start gap-1.5 rounded border border-red-500/30 bg-red-500/10 p-2 text-[11px] text-red-200">
+                                        <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+                                        <span>{metadataError}</span>
+                                    </div>
+                                )}
+
+                                {!renderResult.description && !metadataLoading && !metadataError && (
+                                    <div className="text-[11px] text-violet-200/70 italic">
+                                        No metadata yet. Click "Generate" to ask Grok for a tuned description + tag list.
+                                    </div>
+                                )}
+
+                                {(renderResult.description || metadataLoading) && (
+                                    <div className="space-y-2.5">
+                                        {/* Title row — read-only, locked by render */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-0.5">
+                                                <label className="text-[10px] uppercase tracking-[0.15em] text-violet-300/70">Title</label>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => renderResult.title && copyToClipboard('title', renderResult.title)}
+                                                    disabled={!renderResult.title}
+                                                    className="text-[10px] font-semibold text-violet-200 hover:text-white transition disabled:opacity-40"
+                                                >
+                                                    {copiedField === 'title' ? '✓ Copied' : 'Copy'}
+                                                </button>
+                                            </div>
+                                            <input
+                                                type="text"
+                                                readOnly
+                                                value={renderResult.title || ''}
+                                                className="w-full rounded border border-violet-500/20 bg-black/40 px-2 py-1 text-[11px] text-zinc-100 font-mono"
+                                            />
+                                        </div>
+
+                                        {/* Description row — multi-line textarea */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-0.5">
+                                                <label className="text-[10px] uppercase tracking-[0.15em] text-violet-300/70">
+                                                    Description {renderResult.description && (
+                                                        <span className="ml-1 text-zinc-500 normal-case tracking-normal">({renderResult.description.length} chars)</span>
+                                                    )}
+                                                </label>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => renderResult.description && copyToClipboard('description', renderResult.description)}
+                                                    disabled={!renderResult.description}
+                                                    className="text-[10px] font-semibold text-violet-200 hover:text-white transition disabled:opacity-40"
+                                                >
+                                                    {copiedField === 'description' ? '✓ Copied' : 'Copy'}
+                                                </button>
+                                            </div>
+                                            <textarea
+                                                readOnly
+                                                value={metadataLoading && !renderResult.description ? 'Generating…' : (renderResult.description || '')}
+                                                rows={5}
+                                                className="w-full resize-none rounded border border-violet-500/20 bg-black/40 px-2 py-1 text-[11px] text-zinc-100 font-mono leading-snug"
+                                            />
+                                        </div>
+
+                                        {/* Tags row — comma-joined for clipboard, chip display for visual */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-0.5">
+                                                <label className="text-[10px] uppercase tracking-[0.15em] text-violet-300/70">
+                                                    Tags {renderResult.tags && (
+                                                        <span className="ml-1 text-zinc-500 normal-case tracking-normal">({renderResult.tags.length})</span>
+                                                    )}
+                                                </label>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => renderResult.tags?.length && copyToClipboard('tags', renderResult.tags.join(', '))}
+                                                    disabled={!renderResult.tags?.length}
+                                                    className="text-[10px] font-semibold text-violet-200 hover:text-white transition disabled:opacity-40"
+                                                >
+                                                    {copiedField === 'tags' ? '✓ Copied (comma-separated)' : 'Copy'}
+                                                </button>
+                                            </div>
+                                            {renderResult.tags?.length ? (
+                                                <div className="flex flex-wrap gap-1 rounded border border-violet-500/20 bg-black/40 px-2 py-1.5">
+                                                    {renderResult.tags.map((t, i) => (
+                                                        <span
+                                                            key={`${t}-${i}`}
+                                                            className="rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-[10px] text-violet-100"
+                                                        >
+                                                            {t}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="rounded border border-violet-500/20 bg-black/40 px-2 py-1 text-[11px] text-zinc-500 italic">
+                                                    {metadataLoading ? 'Generating…' : '(no tags yet)'}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
