@@ -17,10 +17,64 @@
  *     candidate title prefilled (Phase 2 wires the zerotier_private template).
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Film, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
+import { AlertTriangle, Download, Film, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
 import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
+
+// PR #143 — bundle title + description + tags into a single plain-text
+// blob and trigger a browser download to Casey's Downloads folder.
+// Casey's flow: render finishes → metadata auto-generates → this fires
+// → a `.txt` lands in Downloads alongside the MP4 he's about to upload.
+// The clipboard copy buttons remain as the per-field fallback.
+function _slugifyForFilename(s: string, max = 60): string {
+    const cleaned = (s || '')
+        .normalize('NFKD')
+        .replace(/[̀-ͯ]/g, '')   // strip combining marks
+        .replace(/[^A-Za-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, max);
+    return cleaned || 'untitled';
+}
+function downloadMetadataAsTxt(
+    title: string,
+    description: string,
+    tags: string[],
+    jobId: string,
+): void {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    const cleanTitle = (title || '').trim();
+    const cleanDesc = (description || '').trim();
+    const cleanTags = (tags || []).map((t) => String(t).trim()).filter(Boolean);
+
+    const lines: string[] = [];
+    lines.push('=== TITLE ===');
+    lines.push(cleanTitle);
+    lines.push('');
+    lines.push('=== DESCRIPTION ===');
+    lines.push(cleanDesc || '(none)');
+    lines.push('');
+    lines.push('=== TAGS (comma-separated, paste into YouTube Studio) ===');
+    lines.push(cleanTags.join(', '));
+    lines.push('');
+    lines.push(`# ZeroTier short — job ${jobId} — generated ${new Date().toISOString()}`);
+    const text = lines.join('\n');
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const slug = _slugifyForFilename(cleanTitle || `ZeroTier_${jobId}`);
+    a.href = url;
+    a.download = `ZeroTier_${slug}_${jobId}.txt`;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    // Defer revoke + remove so the click event has fully dispatched.
+    setTimeout(() => {
+        try { document.body.removeChild(a); } catch { /* ignored */ }
+        try { URL.revokeObjectURL(url); } catch { /* ignored */ }
+    }, 1500);
+}
 
 type UploadedVideo = {
     video_id?: string;
@@ -893,18 +947,27 @@ export default function ZeroTierPrivatePanel() {
                 throw new Error(`generate-metadata failed: ${r.status} ${txt.slice(0, 200)}`);
             }
             const d = await r.json();
+            const tagsArr: string[] = Array.isArray(d.tags) ? d.tags : [];
+            const titleStr: string = String(d.title || '').trim();
+            const descStr: string = String(d.description || '').trim();
             setRenderResult((prev) => prev ? {
                 ...prev,
-                title: d.title || prev.title,
-                description: d.description || '',
-                tags: Array.isArray(d.tags) ? d.tags : [],
+                title: titleStr || prev.title,
+                description: descStr,
+                tags: tagsArr,
             } : prev);
+            // PR #143 — auto-save title + description + tags as a single
+            // .txt to Casey's Downloads folder so he doesn't need to copy
+            // each field individually before YouTube uploading.
+            try {
+                downloadMetadataAsTxt(titleStr || (renderResult?.title || ''), descStr, tagsArr, jobId);
+            } catch { /* best-effort; clipboard buttons remain as fallback */ }
         } catch (e: any) {
             setMetadataError(String(e?.message || e || 'Failed to generate metadata'));
         } finally {
             setMetadataLoading(false);
         }
-    }, [accessToken, getFreshToken, metadataLoading]);
+    }, [accessToken, getFreshToken, metadataLoading, renderResult?.title]);
     // Bind the ref every render so finalizeRender's closure reads the
     // latest generateMetadata (which itself depends on accessToken etc.).
     generateMetadataRef.current = generateMetadata;
@@ -1680,15 +1743,37 @@ export default function ZeroTierPrivatePanel() {
                                     <div className="font-semibold uppercase tracking-[0.18em] text-violet-300">
                                         YouTube upload metadata
                                     </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => renderResult.job_id && generateMetadata(renderResult.job_id)}
-                                        disabled={metadataLoading || !renderResult.job_id}
-                                        className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 hover:bg-violet-500/20 border border-violet-500/30 px-2.5 py-1 text-[10px] font-semibold text-violet-200 transition disabled:opacity-50"
-                                    >
-                                        {metadataLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                                        {metadataLoading ? 'Generating…' : (renderResult.description ? 'Regenerate' : 'Generate')}
-                                    </button>
+                                    <div className="flex items-center gap-1.5">
+                                        {/* PR #143 — manual re-download. Auto-fires
+                                            once on Generate/Regenerate, but Casey
+                                            can re-trigger here if the original
+                                            download was lost or skipped by the
+                                            browser's per-site download prompt. */}
+                                        <button
+                                            type="button"
+                                            onClick={() => renderResult?.description && downloadMetadataAsTxt(
+                                                renderResult.title || '',
+                                                renderResult.description || '',
+                                                renderResult.tags || [],
+                                                renderResult.job_id,
+                                            )}
+                                            disabled={!renderResult.description}
+                                            title="Download title + description + tags as a .txt file to your Downloads folder"
+                                            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 hover:bg-violet-500/20 border border-violet-500/30 px-2.5 py-1 text-[10px] font-semibold text-violet-200 transition disabled:opacity-50"
+                                        >
+                                            <Download className="h-3 w-3" />
+                                            Download .txt
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => renderResult.job_id && generateMetadata(renderResult.job_id)}
+                                            disabled={metadataLoading || !renderResult.job_id}
+                                            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 hover:bg-violet-500/20 border border-violet-500/30 px-2.5 py-1 text-[10px] font-semibold text-violet-200 transition disabled:opacity-50"
+                                        >
+                                            {metadataLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                            {metadataLoading ? 'Generating…' : (renderResult.description ? 'Regenerate' : 'Generate')}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 {metadataError && (
