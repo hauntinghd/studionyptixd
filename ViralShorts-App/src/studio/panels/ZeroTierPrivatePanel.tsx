@@ -372,6 +372,20 @@ export default function ZeroTierPrivatePanel() {
     const [genTopics, setGenTopics] = useState<string[]>([]);
     const [genError, setGenError] = useState('');
     const [genBaseline, setGenBaseline] = useState<{ channel_top_lr?: number; channel_avg_lr?: number; uploads_considered?: number } | null>(null);
+    // PR #144 — Catalyst Learning Loop visibility. Surfaces the HIT/MISS
+    // pattern buckets the backend extracted from THIS channel's actual
+    // uploads. So Casey can SEE what Catalyst has learned, not just trust it.
+    interface PatternBucket {
+        name: string;
+        n: number;
+        avg_lr: number;
+        delta_vs_baseline: number;
+        examples: string[];
+    }
+    const [genCalibration, setGenCalibration] = useState<null | {
+        channel_baseline_lr?: number;
+        buckets?: PatternBucket[];
+    }>(null);
     // Phase 2b: kept for the legacy 'monolithic render' path. Phase 4.5
     // splits this into stills + finalize stages, but the renderResult shape
     // is reused for both.
@@ -692,6 +706,7 @@ export default function ZeroTierPrivatePanel() {
             if (!r.ok) throw new Error(String(data?.detail || data?.error || `Failed (${r.status})`));
             setGenTopics(Array.isArray(data?.topics) ? data.topics : []);
             setGenBaseline(data?.baseline || null);
+            setGenCalibration(data?.calibration || null);
         } catch (e: any) {
             setGenError(String(e?.message || e || 'Topic generation failed'));
         } finally {
@@ -1262,6 +1277,76 @@ export default function ZeroTierPrivatePanel() {
                                 Channel baseline: <span className="text-zinc-200 font-semibold">{(genBaseline.channel_top_lr || 0).toFixed(2)}%</span> top LR ·
                                 <span className="text-zinc-200 font-semibold"> {(genBaseline.channel_avg_lr || 0).toFixed(2)}%</span> avg
                                 <span className="text-zinc-600"> · {genBaseline.uploads_considered || 0} uploads considered</span>
+                            </div>
+                        )}
+
+                        {/* PR #144 — Catalyst Learning Loop visibility.
+                            Renders the HIT/MISSED pattern buckets the
+                            backend extracted from THIS channel's actual
+                            uploads. So Casey can SEE what Catalyst has
+                            learned before he hits Generate. */}
+                        {genCalibration && Array.isArray(genCalibration.buckets) && genCalibration.buckets.length > 0 && (
+                            <div className="mb-3 rounded-lg border border-violet-500/30 bg-black/30 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="text-[10px] uppercase tracking-[0.18em] text-violet-300 font-semibold">
+                                        🧠 Catalyst learning signal — patterns from your uploads
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500">
+                                        baseline {(genCalibration.channel_baseline_lr || 0).toFixed(2)}% LR
+                                    </div>
+                                </div>
+                                {(() => {
+                                    const buckets = genCalibration.buckets || [];
+                                    const hits = buckets.filter((b) => b.delta_vs_baseline > 0 && b.n >= 2);
+                                    const misses = buckets.filter((b) => b.delta_vs_baseline < 0 && b.n >= 2);
+                                    const weak = buckets.filter((b) => b.n < 2);
+                                    return (
+                                        <div className="grid gap-2 sm:grid-cols-2">
+                                            <div>
+                                                <div className="text-[10px] uppercase tracking-[0.15em] text-emerald-300/70 mb-1">
+                                                    ✓ Patterns that HIT
+                                                </div>
+                                                {hits.length === 0 ? (
+                                                    <div className="text-[11px] text-zinc-500 italic">(not enough data — need more uploads)</div>
+                                                ) : (
+                                                    <ul className="space-y-1">
+                                                        {hits.map((b) => (
+                                                            <li key={`hit-${b.name}`} className="text-[11px] text-zinc-200">
+                                                                <span className="font-semibold text-emerald-300">{b.name.replace(/_/g, ' ')}</span>
+                                                                <span className="text-zinc-500"> · {b.avg_lr.toFixed(2)}% LR (+{b.delta_vs_baseline.toFixed(2)}, n={b.n})</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                )}
+                                            </div>
+                                            <div>
+                                                <div className="text-[10px] uppercase tracking-[0.15em] text-rose-300/70 mb-1">
+                                                    ✗ Patterns that MISSED
+                                                </div>
+                                                {misses.length === 0 ? (
+                                                    <div className="text-[11px] text-zinc-500 italic">(no clear losers yet)</div>
+                                                ) : (
+                                                    <ul className="space-y-1">
+                                                        {misses.map((b) => (
+                                                            <li key={`miss-${b.name}`} className="text-[11px] text-zinc-200">
+                                                                <span className="font-semibold text-rose-300">{b.name.replace(/_/g, ' ')}</span>
+                                                                <span className="text-zinc-500"> · {b.avg_lr.toFixed(2)}% LR ({b.delta_vs_baseline.toFixed(2)}, n={b.n})</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                )}
+                                                {weak.length > 0 && (
+                                                    <div className="mt-2 text-[10px] text-zinc-500">
+                                                        Weak signal (n=1): {weak.map((b) => b.name.replace(/_/g, ' ')).join(', ')}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+                                <div className="mt-2 text-[10px] text-zinc-500 italic">
+                                    Grok sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
+                                </div>
                             </div>
                         )}
 

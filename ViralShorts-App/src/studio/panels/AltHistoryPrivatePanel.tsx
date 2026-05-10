@@ -287,6 +287,20 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
     const [topics, setTopics] = useState<GeneratedTopic[]>([]);
     const [genError, setGenError] = useState('');
     const [genBaseline, setGenBaseline] = useState<{ channel_top_lr?: number; channel_avg_lr?: number; uploads_considered?: number } | null>(null);
+    // PR #144 — Catalyst Learning Loop visibility for Cryptic Science.
+    // Shows which alt-battles era/commander/terrain/tech-gap patterns are
+    // hitting on this channel based on real upload like-rates.
+    interface PatternBucket {
+        name: string;
+        n: number;
+        avg_lr: number;
+        delta_vs_baseline: number;
+        examples: string[];
+    }
+    const [genCalibration, setGenCalibration] = useState<null | {
+        channel_baseline_lr?: number;
+        buckets?: PatternBucket[];
+    }>(null);
 
     const generateTopics = useCallback(async () => {
         if (!accessToken) {
@@ -315,6 +329,7 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
             scored.sort((a, b) => b.score.score - a.score.score);
             setTopics(scored);
             setGenBaseline(d.channel_baseline || null);
+            setGenCalibration(d.calibration || null);
         } catch (e) {
             setGenError((e as Error).message);
         } finally {
@@ -503,6 +518,73 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
                 {genError && (
                     <div className="rounded-md bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200">
                         {genError}
+                    </div>
+                )}
+                {/* PR #144 — Catalyst Learning Loop visibility for Cryptic
+                    Science. Shows which alt-battles patterns hit/missed
+                    based on real upload like-rates from this channel. */}
+                {genCalibration && Array.isArray(genCalibration.buckets) && genCalibration.buckets.length > 0 && (
+                    <div className="rounded-md border border-violet-500/30 bg-black/30 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                            <div className="text-[10px] uppercase tracking-[0.18em] text-violet-300 font-semibold">
+                                🧠 Catalyst learning signal — patterns from your uploads
+                            </div>
+                            <div className="text-[10px] text-zinc-500">
+                                baseline {(genCalibration.channel_baseline_lr || 0).toFixed(2)}% LR
+                            </div>
+                        </div>
+                        {(() => {
+                            const buckets = genCalibration.buckets || [];
+                            const hits = buckets.filter((b) => b.delta_vs_baseline > 0 && b.n >= 2);
+                            const misses = buckets.filter((b) => b.delta_vs_baseline < 0 && b.n >= 2);
+                            const weak = buckets.filter((b) => b.n < 2);
+                            return (
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                    <div>
+                                        <div className="text-[10px] uppercase tracking-[0.15em] text-emerald-300/70 mb-1">
+                                            ✓ Patterns that HIT
+                                        </div>
+                                        {hits.length === 0 ? (
+                                            <div className="text-[11px] text-zinc-500 italic">(not enough data — need more uploads)</div>
+                                        ) : (
+                                            <ul className="space-y-1">
+                                                {hits.map((b) => (
+                                                    <li key={`hit-${b.name}`} className="text-[11px] text-zinc-200">
+                                                        <span className="font-semibold text-emerald-300">{b.name.replace(/_/g, ' ')}</span>
+                                                        <span className="text-zinc-500"> · {b.avg_lr.toFixed(2)}% LR (+{b.delta_vs_baseline.toFixed(2)}, n={b.n})</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <div className="text-[10px] uppercase tracking-[0.15em] text-rose-300/70 mb-1">
+                                            ✗ Patterns that MISSED
+                                        </div>
+                                        {misses.length === 0 ? (
+                                            <div className="text-[11px] text-zinc-500 italic">(no clear losers yet)</div>
+                                        ) : (
+                                            <ul className="space-y-1">
+                                                {misses.map((b) => (
+                                                    <li key={`miss-${b.name}`} className="text-[11px] text-zinc-200">
+                                                        <span className="font-semibold text-rose-300">{b.name.replace(/_/g, ' ')}</span>
+                                                        <span className="text-zinc-500"> · {b.avg_lr.toFixed(2)}% LR ({b.delta_vs_baseline.toFixed(2)}, n={b.n})</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                        {weak.length > 0 && (
+                                            <div className="mt-2 text-[10px] text-zinc-500">
+                                                Weak signal (n=1): {weak.map((b) => b.name.replace(/_/g, ' ')).join(', ')}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })()}
+                        <div className="mt-2 text-[10px] text-zinc-500 italic">
+                            Grok sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
+                        </div>
                     </div>
                 )}
                 {topics.length > 0 && (

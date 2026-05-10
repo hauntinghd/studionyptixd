@@ -32,10 +32,38 @@ from pydantic import BaseModel
 
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
 
+# PR #144 — share the pattern-calibration helper across private niche
+# routers. Catalyst learning loop must be identical machinery on every
+# channel so behavior is predictable + diagnosable.
+from zerotier_private_router import _compute_pattern_calibration
+
 
 # Cryptic Science channel ID (per project_channel_lanes_locked.md +
 # long_form/prompts/channels.py registry).
 CRYPTIC_SCIENCE_CHANNEL_ID = "UCOHnksm14B-9AqGhlpRxG5A"
+
+
+# PR #144 — alt-battles pattern buckets. Mirrors ZT_PATTERN_BUCKETS but
+# tuned to the counterfactual-military-matchup grammar:
+#   - Era classes (classical, medieval, gunpowder, modern)
+#   - Leader types (named commander vs anonymous army)
+#   - Hook types (terrain, tech gap, supply lines, weather)
+#   - Anti-patterns (vague "who would win", ranker formats)
+ALT_BATTLES_PATTERN_BUCKETS = {
+    "named_commander":      ["napoleon", "caesar", "alexander", "hannibal", "patton", "rommel", "zhukov",
+                             "saladin", "genghis", "khan", "leonidas", "scipio", "frederick", "wellington",
+                             "tamerlane", "attila", "belisarius", "subutai", "pyrrhus", "cyrus", "darius"],
+    "classical_era":        ["roman", "spartan", "greek", "persian", "carthag", "macedon", "phalanx", "legion"],
+    "medieval_era":         ["medieval", "crusader", "viking", "samurai", "mongol", "byzantine", "khan", "knight"],
+    "gunpowder_era":        ["napoleon", "musket", "cannon", "redcoat", "civil war", "napoleonic", "ottoman"],
+    "modern_era":           ["wwi", "wwii", "vietnam", "cold war", "modern", "tank", "drone", "rifle"],
+    "terrain_hook":         ["mountain", "river", "desert", "forest", "urban", "siege", "bridge", "beach",
+                             "valley", "jungle", "tundra", "steppe", "pass", "crossing"],
+    "tech_gap_hook":        ["gunpowder", "cavalry", "phalanx", "longbow", "crossbow", "musket", "cannon",
+                             "chariot", "elephant", "infantry", "artillery"],
+    "vague_who_would_win":  ["who would win", "best army", "ultimate", "craziest", "greatest of all"],
+    "ranker_format":        ["every ", "ranked", "ranking", "top 10", "top 5", "all time"],
+}
 
 
 # Locked alt-battles system prompt — derived from Casey's CreatePanel
@@ -143,6 +171,17 @@ def build_alt_history_private_router(
         losers = valid[-3:] if len(valid) >= 8 else valid[-min(3, len(valid)):]
         already_uploaded = [t for t, _, _ in scored]
 
+        # PR #144 — Catalyst Learning Loop. Use the shared pattern-
+        # calibration helper from zerotier_private_router with alt-battles-
+        # specific keyword buckets. Casey 2026-05-10: "i need it to
+        # actually LEARN from the content i post, rather than not".
+        # Once Cryptic Science has uploads, this surfaces which era /
+        # commander / terrain / tech-gap patterns are landing for THIS
+        # channel and biases the next Grok call toward winners.
+        calibration = _compute_pattern_calibration(
+            uploads, buckets=ALT_BATTLES_PATTERN_BUCKETS
+        )
+
         winners_block = "\n".join(
             [f'  - "{t}" — {lr:.2f}% like-rate ({v:,} views)' for t, lr, v in winners]
         ) or "  (none yet — channel may be new or unsynced)"
@@ -154,19 +193,29 @@ def build_alt_history_private_router(
         topic_user_prompt = (
             "Generating fresh alt-history battle topic ideas for the "
             "Cryptic Science channel.\n\n"
-            "=== This channel's actual data ===\n\n"
-            f"TOP PERFORMERS (what's working — highest like-rate):\n"
-            f"{winners_block}\n\n"
-            f"UNDER-PERFORMERS (avoid this energy):\n{losers_block}\n\n"
+            f"=== Channel learning signal (baseline LR = {calibration['channel_baseline_lr']:.2f}%) ===\n\n"
+            "PATTERNS THAT HIT (lean harder on these — proven by THIS channel's actual uploads):\n"
+            f"{calibration['hit_block']}\n\n"
+            "PATTERNS THAT MISSED (avoid this energy — proven by THIS channel's actual uploads):\n"
+            f"{calibration['miss_block']}\n\n"
+            "=== Raw winners / losers ===\n\n"
+            f"TOP PERFORMERS:\n{winners_block}\n\n"
+            f"UNDER-PERFORMERS:\n{losers_block}\n\n"
             f"ALREADY UPLOADED (do NOT propose these or close variants):\n"
             f"{already_block}\n\n"
             "=== Your task ===\n\n"
             f"Generate {body.count} FRESH alt-history battle topic titles "
-            "that vary across eras (classical / medieval / gunpowder / "
-            "modern), pit two well-known forces against each other in a "
-            "matchup that didn't actually happen, and have a specific "
-            "narrative hook (terrain, tech gap, leader psychology, etc.) "
-            "rather than a generic 'who would win.'\n\n"
+            "that:\n"
+            "  - BIAS HEAVILY toward the PATTERNS THAT HIT block above. Use "
+            "those era classes + commander types + hook types in at least "
+            f"{max(2, int(body.count * 0.6))} of {body.count} proposals.\n"
+            "  - STRICTLY AVOID anything matching the PATTERNS THAT MISSED "
+            "block (especially vague 'who would win' framings + ranker "
+            "formats).\n"
+            "  - Pit two well-known forces against each other in a matchup "
+            "that didn't actually happen.\n"
+            "  - Carry a SPECIFIC narrative hook (terrain, tech gap, leader "
+            "psychology, supply lines, weather) rather than generic.\n\n"
             "Return STRICT JSON only:\n"
             '  {"topics": ["<topic>", ...]}\n'
             "No markdown fences, no preamble, no commentary."
@@ -235,6 +284,13 @@ def build_alt_history_private_router(
             "topics": deduped[:body.count],
             "raw_count": len(topics),
             "channel_baseline": baseline,
+            # PR #144 — Catalyst Learning Loop visibility. Panel renders
+            # the HIT/MISS pattern blocks so Casey can SEE what Catalyst
+            # has learned from Cryptic Science's upload corpus.
+            "calibration": {
+                "channel_baseline_lr": calibration["channel_baseline_lr"],
+                "buckets": calibration["buckets"],
+            },
         }
 
     return router
