@@ -636,10 +636,12 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
             </section>
 
             <div className="rounded-md bg-zinc-900/50 border border-zinc-800 px-4 py-3 text-xs text-zinc-400">
-                <strong className="text-zinc-300">Build path:</strong> clicking "Build with this topic" hands the
-                topic off to the public Alt-History Battles niche, which uses the existing skeleton-ai render
-                pipeline (Grok script → seedream stills → Seedance/LTX i2v → ElevenLabs VO → ffmpeg compose).
-                Same render flow as the public version — this panel is just the channel-aware topic discovery on top.
+                <strong className="text-zinc-300">Build path:</strong> clicking "Build with this topic" hands
+                the topic off to the Alt-History Battles render pipeline, which renders the cast as
+                <strong className="text-violet-300"> porcelain mannequins in period-correct armor on a photoreal world </strong>
+                (PR #145 lock — same cast grammar as Empire Magnates' red porcelain lane, adapted for alt-history).
+                Pipeline: Grok script → seedream stills (mannequin lock) → LTX i2v → ElevenLabs VO → ffmpeg compose.
+                <span className="text-zinc-500"> No skeleton-AI anatomical figures, no real human faces, no modern photoreal.</span>
             </div>
         </div>
     );
