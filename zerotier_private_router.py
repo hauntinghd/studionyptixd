@@ -220,6 +220,147 @@ def _build_zt_user_prompt(topic: str) -> str:
     )
 
 
+# ────────────────────────────────────────────────────────────────────
+# PR #144 — Catalyst Learning Loop
+# ────────────────────────────────────────────────────────────────────
+# Casey 2026-05-10: "i need it to actually LEARN from the content i
+# post, rather than not". The existing /generate-topics route already
+# feeds Grok winners + losers, but as a static title list. This helper
+# extracts SEMANTIC PATTERNS from the title corpus (antagonist class,
+# format, hook type) and computes their average like-rate, then formats
+# a "PATTERNS THAT HIT vs PATTERNS THAT MISSED" calibration block that
+# gets injected into the topic-gen prompt.
+#
+# Casey's diagnosis from 2026-05-09 ZeroTier review:
+#   "External antagonist (Death, Black Hole, Reverse Flash) wins.
+#    Abstract concept (Identity, Fate) loses. LADDER format ceilings
+#    out lower than Conflict Arc."
+# This helper turns that human diagnosis into machine-readable signal
+# Grok sees on every topic-gen call.
+ZT_PATTERN_BUCKETS = {
+    # External antagonist class — each entry is (bucket_label, [keywords])
+    "cosmic_force":         ["death", "speed force", "black hole", "speed-force"],
+    "iconic_enemy":         ["reverse flash", "reverse-flash", "zoom", "savitar", "superman", "darkseid", "doomsday"],
+    "family_bond":          ["daughter", "linda", "iris", "bart", "wally jr", "family", "wife", "father"],
+    "outsmart_payoff":      ["outsmart", "outran", "outwitted", "forgave", "refused", "admitted", "saved"],
+    "abstract_concept":     ["identity", "memory", "fate", "soul", "purpose", "loneliness", "regret"],
+    "ladder_format":        ["every time", "every ", "ranking", "ranked", "all time", "top 10", "top 5"],
+    "league_member":        ["batman", "wonder woman", "aquaman", "green lantern", "cyborg", "martian manhunter", "supergirl"],
+    "rogues_gallery":       ["captain cold", "mirror master", "trickster", "heat wave", "weather wizard", "pied piper", "gorilla grodd"],
+    "multiverse":           ["multiverse", "earth-3", "flashpoint", "injustice", "dark multiverse", "alternate"],
+}
+
+
+def _compute_pattern_calibration(
+    uploads: list[dict],
+    *,
+    buckets: dict[str, list[str]] | None = None,
+    min_views: int = 100,
+    botspike_lr_threshold: float = 0.3,
+) -> dict[str, Any]:
+    """Group uploads by which keyword bucket their title hits, compute
+    avg like-rate per bucket, return both an analyzable dict AND a
+    pre-formatted Grok block.
+
+    Returns:
+      {
+        "channel_baseline_lr": float,   # avg LR across non-bot uploads
+        "buckets":  [                   # sorted high-to-low avg LR
+          {"name": "cosmic_force", "n": 4, "avg_lr": 2.84, "delta_vs_baseline": +0.86,
+           "examples": ["Outran Death Itself", ...]},
+          ...
+        ],
+        "hit_block":   "PATTERNS THAT HIT ...",
+        "miss_block":  "PATTERNS THAT MISSED ...",
+      }
+    """
+    bk = buckets or ZT_PATTERN_BUCKETS
+    # Bot-spike filter: very high views with very low LR (e.g. ZT's
+    # "Wally West vs Death" hit 3.9K views at 0.15% — clear spam-
+    # impression spike that would otherwise poison the baseline).
+    cleaned: list[tuple[str, float, int]] = []  # (title, lr, views)
+    for v in uploads:
+        if not isinstance(v, dict):
+            continue
+        title = str(v.get("title", "") or "").strip()
+        views = int(float(v.get("views", 0) or 0))
+        likes = int(float(v.get("likes", 0) or 0))
+        if not title or views < min_views:
+            continue
+        lr = (likes / views * 100.0) if views else 0.0
+        # Drop bot-spikes that would skew the baseline
+        if views >= 1000 and lr < botspike_lr_threshold:
+            continue
+        cleaned.append((title, round(lr, 3), views))
+
+    if not cleaned:
+        return {
+            "channel_baseline_lr": 0.0,
+            "buckets": [],
+            "hit_block": "",
+            "miss_block": "",
+        }
+
+    baseline_lr = sum(lr for _, lr, _ in cleaned) / len(cleaned)
+
+    # Tag each upload with which buckets it matches
+    bucket_hits: dict[str, list[tuple[str, float]]] = {k: [] for k in bk}
+    for title, lr, _views in cleaned:
+        tl = title.lower()
+        for bucket_name, keywords in bk.items():
+            for kw in keywords:
+                if kw in tl:
+                    bucket_hits[bucket_name].append((title, lr))
+                    break
+
+    # Roll up each bucket: avg LR, n, delta vs baseline
+    rolled: list[dict[str, Any]] = []
+    for name, rows in bucket_hits.items():
+        if not rows:
+            continue
+        avg_lr = sum(lr for _, lr in rows) / len(rows)
+        rolled.append({
+            "name": name,
+            "n": len(rows),
+            "avg_lr": round(avg_lr, 2),
+            "delta_vs_baseline": round(avg_lr - baseline_lr, 2),
+            "examples": [t for t, _ in rows[:2]],  # 2 examples max
+        })
+
+    rolled.sort(key=lambda r: r["avg_lr"], reverse=True)
+
+    # Format the calibration blocks. HIT = above-baseline buckets with
+    # n>=2 (single-sample buckets are too noisy to surface). MISS =
+    # below-baseline buckets, same rule.
+    def _fmt_row(r: dict[str, Any]) -> str:
+        sign = "+" if r["delta_vs_baseline"] >= 0 else ""
+        ex = " — e.g. \"" + r["examples"][0] + "\"" if r["examples"] else ""
+        return (
+            f"  - {r['name'].replace('_', ' ')}: "
+            f"avg {r['avg_lr']:.2f}% LR ({sign}{r['delta_vs_baseline']:.2f} vs baseline, n={r['n']}){ex}"
+        )
+
+    hits = [r for r in rolled if r["delta_vs_baseline"] > 0 and r["n"] >= 2]
+    misses = [r for r in rolled if r["delta_vs_baseline"] < 0 and r["n"] >= 2]
+    # Single-sample outliers — surfaced separately as "weak signal"
+    singletons = [r for r in rolled if r["n"] < 2]
+
+    hit_block = "\n".join(_fmt_row(r) for r in hits) or "  (not enough data — need more uploads)"
+    miss_block = "\n".join(_fmt_row(r) for r in misses) or "  (no clear losers yet)"
+    if singletons:
+        miss_block += "\n  WEAK SIGNAL (n=1 — provisional):\n" + "\n".join(
+            f"    - {r['name'].replace('_', ' ')}: {r['avg_lr']:.2f}% LR — \"{r['examples'][0] if r['examples'] else ''}\""
+            for r in singletons
+        )
+
+    return {
+        "channel_baseline_lr": round(baseline_lr, 2),
+        "buckets": rolled,
+        "hit_block": hit_block,
+        "miss_block": miss_block,
+    }
+
+
 def build_zerotier_private_router(
     require_auth: Callable[..., dict] | None = None,
     *,
@@ -297,6 +438,14 @@ def build_zerotier_private_router(
 
         already_uploaded = [t for t, _ in scored]
 
+        # PR #144 — Catalyst Learning Loop. Extract semantic patterns from
+        # the upload corpus (antagonist class, format, hook type) + their
+        # avg LR, then format a "PATTERNS THAT HIT vs PATTERNS THAT MISSED"
+        # block for Grok. Turns Casey's manual diagnosis ("external villain
+        # wins, abstract concept loses") into machine-readable signal that
+        # tightens every subsequent topic-gen call.
+        calibration = _compute_pattern_calibration(uploads)
+
         # Compose the dynamic-context user prompt. The system prompt remains
         # the locked zerotier_private TEMPLATE_SYSTEM_PROMPT (Conflict Arc +
         # title formula + comic visuals + JSON schema) but we override the
@@ -308,9 +457,14 @@ def build_zerotier_private_router(
         topic_user_prompt = (
             f"You are generating fresh short-video topic ideas for a small DC speedster fan-fiction "
             f"channel called ZeroTier. Use the locked formula encoded in the system prompt above.\n\n"
-            f"=== This channel's actual data ===\n\n"
-            f"TOP PERFORMERS (what works — highest like-rate):\n{winners_block}\n\n"
-            f"UNDER-PERFORMERS (what to avoid):\n{losers_block}\n\n"
+            f"=== Channel learning signal (channel baseline LR = {calibration['channel_baseline_lr']:.2f}%) ===\n\n"
+            f"PATTERNS THAT HIT (lean harder on these — proven by THIS channel's actual uploads):\n"
+            f"{calibration['hit_block']}\n\n"
+            f"PATTERNS THAT MISSED (avoid this energy — proven by THIS channel's actual uploads):\n"
+            f"{calibration['miss_block']}\n\n"
+            f"=== Raw winners / losers ===\n\n"
+            f"TOP PERFORMERS (highest like-rate):\n{winners_block}\n\n"
+            f"UNDER-PERFORMERS:\n{losers_block}\n\n"
             f"ALREADY UPLOADED (do NOT propose these or close variants):\n{already_block}\n\n"
             f"=== Public competitor patterns ===\n\n"
             f"From CreationsComic (329K subs, 7.70% top like-rate) and TheManDeeDubs (1.89M, "
@@ -320,12 +474,13 @@ def build_zerotier_private_router(
             f"=== Your task ===\n\n"
             f"Generate {body.count} FRESH short-video topic titles that:\n"
             f"  - Strictly follow the format \"The Time Wally West [past-tense verb]\"\n"
-            f"  - Hit cosmic / identity / mortality / time-loss stakes (NOT raw power scaling)\n"
-            f"  - Use impersonal forces or iconic characters as antagonists (NOT generic villains)\n"
+            f"  - BIAS HEAVILY toward the PATTERNS THAT HIT block above. Use those antagonist "
+            f"classes + hook types in at least 6 of {body.count} proposals.\n"
+            f"  - STRICTLY AVOID anything matching the PATTERNS THAT MISSED block.\n"
             f"  - Carry an emotional COMEBACK beat (sacrifice / forgiveness / identity loss)\n"
             f"  - Are NOT in the already-uploaded list above\n"
             f"  - Are NOT minor variants of already-uploaded titles\n"
-            f"  - Vary across different stakes archetypes (don't propose 8 time-travel ideas)\n\n"
+            f"  - Vary across different antagonist archetypes (don't propose 8 Reverse-Flash ideas)\n\n"
             f"Output ONLY a JSON object with a single 'topics' key — array of strings, no scenes,"
             f" no descriptions:\n"
             f"  {{\"topics\": [\"The Time Wally West [verb] ...\", ...]}}\n\n"
@@ -396,6 +551,13 @@ def build_zerotier_private_router(
             "topics": deduped[:body.count],
             "raw_count": len(topics),
             "baseline": baseline,
+            # PR #144 — Catalyst Learning Loop visibility. Panel renders
+            # the HIT/MISS pattern blocks so Casey can SEE what Catalyst
+            # has learned from his upload corpus, not just trust it.
+            "calibration": {
+                "channel_baseline_lr": calibration["channel_baseline_lr"],
+                "buckets": calibration["buckets"],
+            },
         }
 
     # ────────────────────────────────────────────────────────────────────
