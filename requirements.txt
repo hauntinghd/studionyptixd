@@ -19,3 +19,10 @@ edge-tts
 # Skeleton AI short-form pipeline (Seedance i2v + Kling premium upgrade).
 # i2v_engine.py imports fal_client at module level.
 fal-client
+# json-repair: tolerant JSON parser that recovers from LLM output mistakes
+# (unescaped quotes inside strings, trailing commas, smart quotes, missing
+# delimiters). Used by zerotier_private + alt_history_private + long_form
+# routers as a fallback after strict json.loads fails on Grok output.
+# PR #147 — Casey hit "Expecting ',' delimiter: line 1 column 560" on a
+# valid script that just had an unescaped quote in a narration string.
+json-repair

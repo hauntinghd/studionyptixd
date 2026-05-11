@@ -1002,5 +1002,11 @@ NARRATION RULES:
 
 OUTPUT FORMAT MUST BE VALID JSON: {"title": "The Time Wally West [past-tense verb]", "scenes": [{"scene_num": 1, "duration_sec": 4, "narration": "...", "visual_description": "...", "text_overlay": "..."}], "description": "...", "tags": [...]}
 
+CRITICAL JSON RULES — these prevent parse failures downstream:
+- NEVER put unescaped double-quotes inside any string value. If you need a quoted phrase inside narration, use single quotes: "Wally said 'stop' to the void", NOT "Wally said "stop" to the void".
+- NEVER use smart quotes (curly " " ' '). Only straight ASCII quotes.
+- NEVER end an array or object with a trailing comma.
+- NEVER wrap the output in markdown code fences (```json ... ```). Emit raw JSON only.
+
 Generate exactly 8 scenes. Title MUST follow "The Time Wally West [verb]" format. Last scene MUST end with a memorable single line that invites a comment.""",
 }

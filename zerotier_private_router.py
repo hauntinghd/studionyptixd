@@ -44,6 +44,90 @@ from pydantic import BaseModel, Field
 
 from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
+
+# PR #147 — Tolerant JSON repair for Grok output. Grok occasionally
+# emits unescaped quotes inside narration strings ("Wally said "stop"")
+# which trip strict json.loads. json_repair is a small library that
+# fixes the common LLM mistakes (unescaped quotes, trailing commas,
+# smart quotes, missing delimiters). Falls back to strict parsing if
+# the library isn't installed so dev environments without the dep
+# still work the way they did before PR #147.
+try:
+    from json_repair import repair_json as _json_repair_lib  # type: ignore[import-untyped]
+    _JSON_REPAIR_AVAILABLE = True
+except Exception:
+    _json_repair_lib = None
+    _JSON_REPAIR_AVAILABLE = False
+
+
+def _safe_parse_script_json(text: str) -> tuple[dict, str]:
+    """Parse possibly-malformed Grok JSON.
+
+    Returns (parsed_dict, repair_note). repair_note is "" if strict
+    json.loads succeeded; otherwise a short label describing which
+    fallback ran. Raises HTTPException(400) with a useful message if
+    no fallback recovers a dict.
+    """
+    if not text or not text.strip():
+        raise HTTPException(400, "script_json is empty")
+
+    # Strip any ```json fences Grok sometimes emits despite the prompt.
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+
+    # Fast path: strict JSON
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed, ""
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback 1: json_repair library if installed
+    if _JSON_REPAIR_AVAILABLE and _json_repair_lib is not None:
+        try:
+            repaired = _json_repair_lib(cleaned, return_objects=True)
+            if isinstance(repaired, dict):
+                return repaired, "json_repair_lib"
+            # Some json_repair versions return a string — try one more parse
+            if isinstance(repaired, str):
+                parsed = json.loads(repaired)
+                if isinstance(parsed, dict):
+                    return parsed, "json_repair_lib_string"
+        except Exception:
+            pass
+
+    # Fallback 2: heuristic — smart quotes → straight, trailing commas
+    # before } or ], CRLF normalization. Catches the cheapest cases
+    # even without json_repair installed.
+    heuristic = cleaned
+    heuristic = heuristic.replace("“", '"').replace("”", '"')
+    heuristic = heuristic.replace("‘", "'").replace("’", "'")
+    heuristic = re.sub(r",(\s*[}\]])", r"\1", heuristic)
+    try:
+        parsed = json.loads(heuristic)
+        if isinstance(parsed, dict):
+            return parsed, "heuristic_repair"
+    except json.JSONDecodeError as e:
+        # Final failure — return a useful error pointing at the
+        # break, plus a snippet so Casey can manually fix in the
+        # editable textarea if he wants.
+        msg = str(e)
+        m = re.search(r"char (\d+)", msg)
+        snippet = ""
+        if m:
+            pos = int(m.group(1))
+            start = max(0, pos - 30)
+            end = min(len(cleaned), pos + 30)
+            snippet = f' near "...{cleaned[start:end]}..."'
+        raise HTTPException(
+            400,
+            f"script_json must be valid JSON: {msg}{snippet}",
+        )
+
+    raise HTTPException(400, "script_json could not be parsed even with repair fallbacks")
 from zerotier_private.pipeline import (
     render_zerotier_short,
     render_stills_only,
@@ -631,20 +715,22 @@ def build_zerotier_private_router(
         _gate_admin(user)
 
         # Validate the script JSON parses + has scenes before kicking off
-        # any fal calls (cheap fail-fast).
-        try:
-            parsed = json.loads(body.script_json)
-        except Exception as e:
-            raise HTTPException(400, f"script_json must be valid JSON: {e}")
-        if not isinstance(parsed, dict) or not parsed.get("scenes"):
+        # any fal calls (cheap fail-fast). PR #147 — tolerant repair.
+        parsed, repair_note = _safe_parse_script_json(body.script_json)
+        if repair_note:
+            log.info(f"[zt /render] script_json recovered via {repair_note}")
+        if not parsed.get("scenes"):
             raise HTTPException(400, "script_json must be an object with a non-empty 'scenes' array")
 
         job_id = uuid.uuid4().hex[:12]
         workspace = ZT_OUTPUT_ROOT / job_id
         workspace.mkdir(parents=True, exist_ok=True)
-        # Persist the input script for replay/debugging.
+        # Persist the (potentially repaired) input script for replay/debugging.
         try:
-            (workspace / "script.json").write_text(body.script_json, encoding="utf-8")
+            (workspace / "script.json").write_text(
+                json.dumps(parsed, indent=2) if repair_note else body.script_json,
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
@@ -740,19 +826,26 @@ def build_zerotier_private_router(
     async def zt_render_stills(body: ZTStillsOnlyRequest, user: dict = auth_dep):
         _gate_admin(user)
 
-        # Validate JSON parses
-        try:
-            parsed = json.loads(body.script_json)
-        except Exception as e:
-            raise HTTPException(400, f"script_json must be valid JSON: {e}")
-        if not isinstance(parsed, dict) or not parsed.get("scenes"):
+        # Validate JSON parses. PR #147 — tolerant repair handles
+        # unescaped-quote / trailing-comma / smart-quote failures Grok
+        # emits ~10% of the time. Repair is logged so we can track how
+        # often the fallbacks kick in vs. tightening the system prompt.
+        parsed, repair_note = _safe_parse_script_json(body.script_json)
+        if repair_note:
+            log.info(f"[zt /render-stills] script_json recovered via {repair_note}")
+        if not parsed.get("scenes"):
             raise HTTPException(400, "script_json must be an object with a non-empty 'scenes' array")
 
         job_id = uuid.uuid4().hex[:12]
         workspace = ZT_OUTPUT_ROOT / job_id
         workspace.mkdir(parents=True, exist_ok=True)
         try:
-            (workspace / "script.json").write_text(body.script_json, encoding="utf-8")
+            # Write the (potentially repaired) JSON so downstream consumers
+            # see the clean version, not Grok's malformed original.
+            (workspace / "script.json").write_text(
+                json.dumps(parsed, indent=2) if repair_note else body.script_json,
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
