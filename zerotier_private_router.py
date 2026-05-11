@@ -301,7 +301,23 @@ def _compute_pattern_calibration(
             "miss_block": "",
         }
 
-    baseline_lr = sum(lr for _, lr, _ in cleaned) / len(cleaned)
+    # PR #146 — use MEDIAN instead of MEAN for the channel baseline.
+    # Why: small-sample channels (10-15 uploads) get their baseline
+    # dragged by a single fresh-but-strong-LR outlier. Concrete
+    # 2026-05-10 case on ZeroTier: "The Time Wally West Lost His
+    # Identity" recovered from 27 views (LR 11%, sub-min_views) to
+    # 152 views / 8 likes (LR 5.26%). Single sample pulled the mean
+    # to 2.67% and made every multi-sample bucket appear below
+    # baseline — calibration output told Grok "AVOID EVERYTHING".
+    # Median is robust to that outlier: 2.29% with the same data,
+    # which correctly surfaces iconic_enemy / cosmic_force / ladder
+    # / outsmart as HIT patterns.
+    sorted_lrs = sorted(lr for _, lr, _ in cleaned)
+    n = len(sorted_lrs)
+    if n % 2 == 1:
+        baseline_lr = sorted_lrs[n // 2]
+    else:
+        baseline_lr = (sorted_lrs[n // 2 - 1] + sorted_lrs[n // 2]) / 2
 
     # Tag each upload with which buckets it matches
     bucket_hits: dict[str, list[tuple[str, float]]] = {k: [] for k in bk}
