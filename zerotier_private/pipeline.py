@@ -144,9 +144,27 @@ def _normalize_scenes(script_json: Any) -> tuple[list[dict], str]:
     return out, title
 
 
-def _save_url(url: str, path: Path) -> None:
+def _save_url(url: str | None, path: Path, *, source: str = "?") -> None:
+    """Download a remote URL to disk.
+
+    PR #148 — guard against None URLs. Pixverse / mmaudio / minimax all
+    have a thin edge case where the queue reports COMPLETED but the
+    response payload is missing the video/audio URL field (transient
+    fal-side glitch). Without a guard, `httpx.stream("GET", None, ...)`
+    raises 'TypeError: Invalid type for url. Expected str or httpx.URL,
+    got <class NoneType>: None' — opaque to Casey, who just sees the
+    polling timeout. This explicit check converts that into a clean
+    ZTRenderError naming WHICH step failed so the resume button knows
+    where to retry.
+    """
     if path.exists() and path.stat().st_size > 1024:
         return
+    if not url or not isinstance(url, str):
+        raise ZTRenderError(
+            f"missing download url from {source}: got {type(url).__name__} "
+            f"(typically fal returned COMPLETED with no video/audio field — "
+            f"retry the same step usually works)"
+        )
     with httpx.stream("GET", url, timeout=180) as r:
         r.raise_for_status()
         with open(path, "wb") as f:
@@ -178,7 +196,7 @@ def _gen_still(scene: dict, stills_dir: Path) -> Path:
     images = r.json().get("images") or []
     if not images:
         raise ZTRenderError(f"seedream returned no images for {scene['id']}")
-    _save_url(images[0]["url"], out)
+    _save_url(images[0].get("url"), out, source=f"seedream still {scene['id']}")
     return out
 
 
@@ -211,7 +229,16 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
         if st == "COMPLETED":
             rr = httpx.get(sub["response_url"], headers=HDR, timeout=30).json()
             v = (rr.get("video") or {}).get("url") or rr.get("video_url")
-            _save_url(v, out)
+            # PR #148 — Pixverse occasionally reports COMPLETED with an
+            # empty video field. Surface the raw response so the failure
+            # is debuggable + so resume can retry the same scene.
+            if not v:
+                raise ZTRenderError(
+                    f"pixverse COMPLETED but returned no video url for "
+                    f"{scene['id']}; response keys={list(rr.keys())}; "
+                    f"raw={str(rr)[:240]}"
+                )
+            _save_url(v, out, source=f"pixverse clip {scene['id']}")
             return out
         if st in ("FAILED", "ERROR"):
             raise ZTRenderError(f"pixverse {st} for {scene['id']}: {s}")
@@ -299,10 +326,12 @@ def _gen_scene_sfx(scene: dict, clip_path: Path, sfx_dir: Path) -> Path:
         },
     )
     sfx_video_url = (result.get("video") or {}).get("url") or result.get("video_url")
+    # PR #148 — already had a None-check here, but harden the error
+    # message + dump response keys so we can diagnose if it ever fires.
     if not sfx_video_url:
         raise ZTRenderError(f"no video in mmaudio result for {sid}: {result}")
     tmp = sfx_dir / f"{sid}_tmp.mp4"
-    _save_url(sfx_video_url, tmp)
+    _save_url(sfx_video_url, tmp, source=f"mmaudio sfx {sid}")
     subprocess.run([
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(tmp), "-vn",
@@ -443,8 +472,8 @@ def _gen_vo(scenes: list[dict], vo_dir: Path) -> Path:
         else result.get("audio_url")
     )
     if not audio_url:
-        raise ZTRenderError(f"minimax returned no audio: {result}")
-    _save_url(audio_url, out)
+        raise ZTRenderError(f"minimax returned no audio url; response keys={list(result.keys())}; raw={str(result)[:240]}")
+    _save_url(audio_url, out, source="minimax narration")
     return out
 
 
