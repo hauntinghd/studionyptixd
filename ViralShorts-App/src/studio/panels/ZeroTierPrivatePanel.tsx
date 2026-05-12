@@ -905,7 +905,12 @@ export default function ZeroTierPrivatePanel() {
                 body: JSON.stringify({ job_id: stillsJobId }),
             });
             if (!ok) throw new Error(String(data?.detail || data?.error || `Finalize submit failed (${status})`));
-            const ready = await pollJobStatus(stillsJobId, 720);
+            // PR #148 — bump poll timeout 720s → 1200s. Pixverse i2v at
+            // 8 scenes × ~30-90s each + mmaudio SFX + minimax narration +
+            // compose can legitimately take 10-14 min. The prior 12-min
+            // ceiling fired before the backend finished, leaving Casey
+            // with "Timed out" while the job was still running.
+            const ready = await pollJobStatus(stillsJobId, 1200);
             const result = ready?.result || {};
             const finishedJobId = String(result?.job_id || stillsJobId);
             setRenderResult({
