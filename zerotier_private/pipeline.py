@@ -144,6 +144,58 @@ def _normalize_scenes(script_json: Any) -> tuple[list[dict], str]:
     return out, title
 
 
+def _probe_duration_sec(path: Path) -> float:
+    """Return duration in seconds via ffprobe, or 0.0 if unparseable.
+
+    PR #149 — distinguishes real animated clips (5s expected from
+    Pixverse) from corrupt single-frame "MP4s" Pixverse occasionally
+    returns when its queue glitches. A real clip is 5.0±0.2s; a
+    corrupt one is usually <0.5s or unparseable.
+    """
+    try:
+        res = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if res.returncode != 0:
+            return 0.0
+        return float(res.stdout.strip() or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _validate_clip_or_delete(path: Path, *, sid: str, expected_sec: float = 5.0) -> None:
+    """Verify a Pixverse-downloaded clip is a real video (>= 3s).
+
+    PR #149 — if the clip is corrupt or too short, delete it so the
+    cache check at _gen_clip_pixverse re-runs i2v on the next attempt
+    instead of returning the junk file. Then raise ZTRenderError so
+    the caller knows which scene failed.
+    """
+    dur = _probe_duration_sec(path)
+    # Real Pixverse 5s clips probe at 4.8-5.2s. Corrupt single-frame
+    # outputs probe at 0.04s or fail to parse entirely. Set threshold
+    # at 3.0s so we don't reject legitimate 4s clips from the rare
+    # short-duration request.
+    if dur < 3.0:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise ZTRenderError(
+            f"pixverse returned a corrupt clip for {sid}: probed duration "
+            f"{dur:.2f}s (expected ~{expected_sec}s). Cache cleared — retry "
+            f"will re-run Pixverse on this scene."
+        )
+
+
 def _save_url(url: str | None, path: Path, *, source: str = "?") -> None:
     """Download a remote URL to disk.
 
@@ -206,7 +258,17 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
     720p without audio = ~$0.225/clip."""
     out = clips_dir / f"{scene['id']}.mp4"
     if out.exists() and out.stat().st_size > 1024:
-        return out
+        # PR #149 — even cached clips must validate. A corrupt clip
+        # from a previous failed run that wrote >1024 bytes would
+        # otherwise be silently re-used. _validate_clip_or_delete
+        # raises + deletes if too short, forcing this call to fall
+        # through and re-run Pixverse below.
+        try:
+            _validate_clip_or_delete(out, sid=scene["id"])
+            return out
+        except ZTRenderError:
+            # File was deleted; fall through to fresh Pixverse run
+            pass
     PIXVERSE = "https://queue.fal.run/fal-ai/pixverse/v6/image-to-video"
     fal_key = os.environ["FAL_KEY"]
     HDR = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
@@ -239,6 +301,13 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
                     f"raw={str(rr)[:240]}"
                 )
             _save_url(v, out, source=f"pixverse clip {scene['id']}")
+            # PR #149 — validate the downloaded clip is a real video.
+            # Pixverse sometimes returns a tiny corrupt MP4 that passes
+            # the size>1024 cache check but has near-zero duration —
+            # produces a stills-slideshow on compose. ffprobe catches
+            # that here so we fail loudly instead of silently shipping
+            # an MP4 that "didn't animate".
+            _validate_clip_or_delete(out, sid=scene["id"])
             return out
         if st in ("FAILED", "ERROR"):
             raise ZTRenderError(f"pixverse {st} for {scene['id']}: {s}")
@@ -696,6 +765,23 @@ def render_finalize(
     final_mp4 = workspace / final_filename
     _compose(scenes, clips, audio_track, workspace, final_mp4)
 
+    # PR #149 — final MP4 sanity check. The render_finalize result
+    # gets reported as "status: ready" with this MP4's URL, which
+    # auto-fires metadata-gen + .txt download on the frontend. If the
+    # compose produced a near-zero-duration MP4 (e.g. corrupt input
+    # clips all stitched together), the user gets a .txt for a video
+    # that "didn't animate". Validate here so we raise loudly instead.
+    expected_total = sum(s["duration"] for s in scenes)
+    actual_total = _probe_duration_sec(final_mp4)
+    if actual_total < expected_total * 0.7:  # 30% slack for encoder rounding
+        raise ZTRenderError(
+            f"compose produced an MP4 too short to be the real render: "
+            f"got {actual_total:.1f}s, expected ~{expected_total:.1f}s. "
+            f"Per-clip durations: " + ", ".join(
+                f"{c.name}={_probe_duration_sec(c):.1f}s" for c in clips
+            )
+        )
+
     fal_cost_est = round(
         len(scenes) * 0.225 + 0.10 + len(scenes) * 0.05, 2  # Pixverse + MiniMax + mmaudio (stills already paid)
     )
@@ -704,7 +790,7 @@ def render_finalize(
         "mp4_path": str(final_mp4),
         "title": title,
         "scene_count": len(scenes),
-        "duration_total_sec": round(sum(s["duration"] for s in scenes), 1),
+        "duration_total_sec": round(actual_total, 1),
         "fal_cost_estimate_usd": fal_cost_est,
         "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
     }
