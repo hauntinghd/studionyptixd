@@ -1,14 +1,25 @@
-"""
-xAI Grok 4.1 Fast Reasoning client for Skeleton AI script generation.
+"""LLM client for Skeleton AI + ZeroTier + alt-history script generation.
 
-Endpoint: https://api.x.ai/v1/chat/completions
-Model:    grok-4-fast-reasoning  (per Casey 2026-05-05 directive)
+PR #152 (2026-05-12) — REPOINTED to fal.ai's any-llm router (Claude
+Sonnet 4.5 by default). Casey's xAI team hit the monthly spending cap
+and 429'd every Grok call. Per `project_studio_models.md`: "Fal
+any-llm (Sonnet 4.5) for text." This is the canonical text path.
 
-Auth via XAI_API_KEY env var. Server returns 400 with "Incorrect API key"
-if key is dead — caller should surface that to the user as a config error,
-not retry blindly.
+Backward compat:
+  - Class name stays `GrokClient` so every caller keeps working.
+  - `GrokAuthError` is raised on fal auth failures (401/403).
+  - `GrokRateLimitError` is raised after retry-with-backoff exhausts
+    on 429 (PR #151's logic preserved).
+  - `.complete()` signature unchanged.
+  - `.stream()` degrades to non-streaming under fal any-llm (returns
+    the full completion as a single chunk). The frontend SSE plumbing
+    in zerotier_private_router still works — it just delivers one big
+    chunk instead of incremental tokens. Future PR can re-add real
+    streaming if fal any-llm exposes it.
 
-Streaming supported via SSE (Korpi-style real-time script display).
+Endpoint: https://fal.run/fal-ai/any-llm
+Model:    anthropic/claude-sonnet-4.5  (per Casey 2026-05-01 directive)
+Auth:     FAL_AI_KEY env var (already configured across the platform)
 """
 from __future__ import annotations
 import os
@@ -18,12 +29,15 @@ import random
 import httpx
 from typing import Iterator
 
-XAI_BASE = "https://api.x.ai/v1"
-DEFAULT_MODEL = "grok-4-fast-reasoning"
+FAL_ANYLLM_URL = "https://fal.run/fal-ai/any-llm"
+DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 
 
 class GrokAuthError(RuntimeError):
-    """Raised when XAI_API_KEY is missing or rejected by server."""
+    """Raised when fal API key is missing or rejected by server.
+
+    Legacy name kept for callsite compat — this is no longer xAI-specific.
+    """
 
 
 class GrokRateLimitError(RuntimeError):
@@ -31,13 +45,25 @@ class GrokRateLimitError(RuntimeError):
 
 
 class GrokClient:
+    """LLM client routing through fal.ai any-llm. Class name kept as
+    GrokClient for backward compat with every caller in the codebase.
+    """
+
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL):
-        self.api_key = api_key or os.getenv("XAI_API_KEY", "").strip()
+        # FAL_AI_KEY is the canonical env var across the platform (used
+        # by backend.py and the fal_client lib). Accept FAL_KEY as a
+        # fallback so dev environments that only set the older name
+        # still work.
+        self.api_key = (
+            api_key
+            or os.getenv("FAL_AI_KEY", "").strip()
+            or os.getenv("FAL_KEY", "").strip()
+        )
         if not self.api_key:
-            raise GrokAuthError("XAI_API_KEY not set in env")
+            raise GrokAuthError("FAL_AI_KEY not set in env")
         self.model = model
         self._headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Key {self.api_key}",
             "Content-Type": "application/json",
         }
 
@@ -48,52 +74,48 @@ class GrokClient:
         max_tokens: int = 1500,
         temperature: float = 0.8,
     ) -> str:
-        """Synchronous completion with 429 retry-with-backoff.
+        """Synchronous completion. Returns the assistant content.
 
-        PR #151 — when x.ai returns 429 Too Many Requests, honor the
-        Retry-After header if present, else exponential backoff
-        (30s, 60s, 120s) up to 3 retries. Mid-render Grok calls
-        across the skeleton-ai and zerotier-private pipelines no
-        longer crash on transient rate limits.
+        PR #151 retry-with-backoff preserved. On 429, honor Retry-After
+        header if present, else exponential schedule [30s, 60s, 120s]
+        for up to 3 attempts.
+
+        fal any-llm response shape (per backend.py:4755):
+          - data["output"]  → primary
+          - data["result"]  → secondary
+          - data["choices"][0]["message"]["content"] → OpenAI-shaped legacy
+        We try all three so the client is resilient to fal changing the
+        envelope.
         """
+        # fal any-llm does NOT accept max_tokens — its router infers
+        # from the underlying provider's defaults. The arg is preserved
+        # in the signature so existing callers don't break.
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "system_prompt": system,
+            "prompt": user,
+            "temperature": max(0.2, float(temperature)),
         }
         max_retries = 3
-        # Exponential backoff schedule used when Retry-After is absent.
         backoff_seconds = [30, 60, 120]
 
         for attempt in range(max_retries + 1):
-            with httpx.Client(timeout=120) as c:
-                r = c.post(
-                    f"{XAI_BASE}/chat/completions",
-                    headers=self._headers,
-                    json=payload,
-                )
-            if r.status_code == 400 and "Incorrect API key" in r.text:
-                raise GrokAuthError(f"xAI rejected key: {r.text[:200]}")
+            with httpx.Client(timeout=180) as c:
+                r = c.post(FAL_ANYLLM_URL, headers=self._headers, json=payload)
             if r.status_code in (401, 403):
-                raise GrokAuthError(f"xAI auth failed {r.status_code}: {r.text[:200]}")
+                raise GrokAuthError(
+                    f"fal rejected key {r.status_code}: {r.text[:200]}"
+                )
             if r.status_code == 429 and attempt < max_retries:
-                # Honor Retry-After if present (can be integer seconds or
-                # HTTP-date; x.ai uses integer seconds in practice).
                 retry_after_hdr = r.headers.get("Retry-After", "").strip()
                 wait_s = backoff_seconds[attempt]
                 if retry_after_hdr.isdigit():
                     wait_s = max(1, int(retry_after_hdr))
-                # Add 10% jitter so concurrent threads don't all wake up
-                # at the same instant and re-trigger the limit.
                 wait_s = int(wait_s * (1.0 + random.random() * 0.1))
                 try:
                     import logging
                     logging.getLogger(__name__).warning(
-                        f"Grok 429 — retrying in {wait_s}s "
+                        f"fal any-llm 429 — retrying in {wait_s}s "
                         f"(attempt {attempt+1}/{max_retries})"
                     )
                 except Exception:
@@ -101,23 +123,36 @@ class GrokClient:
                 time.sleep(wait_s)
                 continue
             if r.status_code == 429:
-                # Out of retries
                 raise GrokRateLimitError(
-                    f"xAI 429 after {max_retries} retries; "
+                    f"fal any-llm 429 after {max_retries} retries; "
                     f"body={r.text[:200]}"
                 )
             r.raise_for_status()
             data = r.json()
-            choices = data.get("choices") or []
-            if not choices:
-                raise RuntimeError(f"Grok returned no choices: {data}")
-            msg = choices[0].get("message", {})
-            # Reasoning models put the answer in .content (sometimes also
-            # reasoning_content for the chain-of-thought). We want .content.
-            return (msg.get("content") or "").strip()
+            if not isinstance(data, dict):
+                raise RuntimeError(f"fal any-llm returned non-dict: {data!r}")
+            # Surface upstream errors before trying to extract content
+            output_err = data.get("error")
+            if output_err:
+                raise RuntimeError(f"fal any-llm upstream error: {output_err}")
+            # Try the three known envelope shapes
+            content = (
+                data.get("output")
+                or data.get("result")
+                or ""
+            )
+            if not content:
+                # OpenAI-shaped legacy envelope
+                choices = data.get("choices") or []
+                if choices:
+                    content = (choices[0] or {}).get("message", {}).get("content", "")
+            if not content:
+                raise RuntimeError(
+                    f"fal any-llm returned empty content; keys={list(data.keys())}"
+                )
+            return str(content).strip()
 
-        # Unreachable in practice — every path above either returns or raises.
-        raise GrokRateLimitError("xAI 429 — exhausted retries")
+        raise GrokRateLimitError("fal any-llm 429 — exhausted retries")
 
     def stream(
         self,
@@ -126,56 +161,34 @@ class GrokClient:
         max_tokens: int = 1500,
         temperature: float = 0.8,
     ) -> Iterator[str]:
-        """Stream completion as SSE chunks. Yields incremental content pieces."""
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": True,
-        }
-        with httpx.Client(timeout=120) as c:
-            with c.stream("POST", f"{XAI_BASE}/chat/completions",
-                          headers=self._headers, json=payload) as r:
-                if r.status_code == 400:
-                    body = r.read().decode()
-                    if "Incorrect API key" in body:
-                        raise GrokAuthError(f"xAI rejected key: {body[:200]}")
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    chunk = line[6:].strip()
-                    if chunk == "[DONE]":
-                        return
-                    try:
-                        d = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = (d.get("choices") or [{}])[0].get("delta", {})
-                    piece = delta.get("content")
-                    if piece:
-                        yield piece
+        """Stream completion as SSE chunks. PR #152 — fal any-llm doesn't
+        expose token-level SSE through the simple POST surface, so this
+        degrades to a single-chunk yield of the full completion. The
+        zerotier_private SSE wrapper still works — Casey just sees the
+        full script land in one piece instead of progressively.
+
+        Future PR can re-add real streaming if fal exposes an SSE
+        endpoint for any-llm.
+        """
+        text = self.complete(system, user, max_tokens=max_tokens, temperature=temperature)
+        if text:
+            yield text
 
 
 def build_script_prompt(category_system: str, topic: str | None = None) -> str:
-    """Build the user-side prompt for the script gen call.
-
-    `category_system` is the system prompt from idea_lists.CATEGORIES[k]["system_prompt"].
-    `topic` is the optional user-provided topic; if None, Grok picks one from the seeds.
+    """Build the user-side prompt for a script generation call. Combines
+    the topic (if given) with a generic generate-a-script directive.
+    Category-specific system prompt lives in idea_lists.CATEGORIES[k].
     """
     if topic:
         return (
-            f"Topic: {topic}\n\n"
-            f"Write the 60-second narration script. Output ONLY the script text "
-            f"(no commentary, no scene labels, no markdown). Each beat is one "
-            f"sentence. Total ~12 sentences."
+            f"Generate the 60-second YouTube Shorts narration script for "
+            f"this topic now: {topic}\n\n"
+            f"Output ONLY the narration text — no headings, no JSON, no "
+            f"scene breakdown, no commentary."
         )
     return (
-        "Pick ONE strong topic from the category and write the 60-second "
-        "narration script. Output ONLY the script text (no commentary, no "
-        "scene labels, no markdown). Each beat is one sentence. Total ~12 sentences."
+        "Generate a fresh 60-second YouTube Shorts narration script "
+        "following the system prompt's format. Output ONLY the "
+        "narration text — no headings, no JSON, no commentary."
     )
