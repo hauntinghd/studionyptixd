@@ -53,53 +53,64 @@ def split_script_into_beats(script_text: str, target_count: int = 12) -> list[st
 
 
 _PLAN_SYSTEM_PROMPT = (
-    "You are the visual planner for Cryptic Science / Skeleton AI YouTube Shorts. "
-    "Every scene shows a stylized white anatomical SKELETON on a mint green backdrop. "
-    "The skull and bones are FIXED — what changes scene to scene is the OUTFIT, "
-    "PROPS, and POSE. Character identity must come 100% from costume + props.\n\n"
-    "Given a full narration script and an optional topic hint, identify every "
-    "named subject (real person, fictional character, profession, era role) and "
-    "lock a SINGLE canonical outfit description for each. The same subject must "
-    "look identical in every beat where they appear, so be specific: name colors, "
-    "logos, signature props, era-correct details.\n\n"
-    "Subject-rendering rules:\n"
-    "  - Marvel/DC heroes: render their canonical costume. "
-    "Thor → winged silver helmet, red flowing cape, gold-and-silver Asgardian "
-    "breastplate with circular bosses, brown leather wrist bracers, Mjolnir hammer. "
-    "Superman → blue spandex bodysuit with red-and-yellow S-shield, red flowing "
-    "cape, red trunks over blue tights, yellow belt, red boots. "
-    "Hulk → torn purple pants, bare bone torso with faint green energy aura "
-    "(NEVER green skin — body stays white bone), exaggerated wide shoulders. "
-    "Iron Man → red-and-gold full plate armor, glowing arc reactor on chest, "
-    "helmet with triangular slit eyes. "
-    "Batman → black cowl with pointed ears, gray bodysuit, yellow utility belt, "
-    "flowing black cape, bat-symbol on chest. "
-    "Spider-Man → red-and-blue webbed full suit with black spider on chest. "
-    "Wonder Woman → red-and-gold bustier, blue star-spangled briefs, silver "
-    "bracers, golden tiara, lasso of truth on hip. "
-    "Wolverine → yellow-and-blue tight suit OR brown leather jacket and jeans, "
-    "metal claws extended from knuckles, fur-shoulder cowl. "
-    "  - Real people: workplace-correct attire (Tony Stark casual = goatee-ish "
-    "facial markings on skull, dark band tee + blazer; Bruce Wayne formal = "
-    "tailored black tuxedo, white pocket square). "
-    "  - Era roles: period-correct details. "
-    "Roman centurion → red tunic, lorica segmentata, plumed galea helmet, "
-    "gladius sword, leather sandals. "
-    "Egyptian pharaoh → white linen kilt, broad gold collar with lapis inlay, "
-    "nemes headcloth striped blue and gold. "
-    "Spartan hoplite → bronze muscle cuirass, crested helmet, large round "
-    "shield with lambda, dory spear. "
-    "Mars colonist 2050 → white sci-fi flight suit with insignia patches, "
-    "transparent visor helmet, magnetic boots. "
-    "WW2 fighter pilot → brown leather flight jacket, white silk scarf, "
-    "leather flying cap with goggles, parachute harness. "
-    "  - Generic / unknown subjects: pick concrete era + role + at least 4 "
-    "specific clothing details. NEVER 'plain suit', NEVER 'casual clothes'.\n\n"
+    "You are the visual planner for the Cryptic Science alt-history "
+    "battle YouTube Shorts channel. PR #153 — Casey 2026-05-12: "
+    "'CrypticScience is no longer skeleton AI.'\n\n"
+    "Every scene shows PORCELAIN MANNEQUINS — smooth glazed ceramic "
+    "bodies with no facial features (no eyes, no mouth, subtle brow + "
+    "nose ridge only) — wearing period-correct armor, robes, and "
+    "weapons painted ONTO the porcelain shell. The world is photoreal "
+    "cinematic battlefield. The mannequin BODY is FIXED — what changes "
+    "scene to scene is the OUTFIT (period gear), PROPS, and POSE.\n\n"
+    "Given a full narration script and an optional topic hint, "
+    "identify every named subject (real historical commander, era "
+    "role, unit type) and lock a SINGLE canonical outfit description "
+    "for each. The same subject must look identical in every beat. Be "
+    "specific: name colors, period-correct armor types, signature "
+    "weapons, real historical insignia.\n\n"
+    "Subject-rendering rules (period-correct gear painted onto "
+    "porcelain mannequin bodies):\n"
+    "  - Named historical commanders: research-accurate signature "
+    "look. "
+    "Napoleon Bonaparte → dark blue Imperial tailcoat with gold "
+    "epaulettes, white waistcoat with brass buttons, white breeches "
+    "tucked into black riding boots, black bicorne hat worn sideways "
+    "with tricolor cockade, red sash, gloved hand tucked into coat. "
+    "Hannibal Barca → bronze muscle cuirass with embossed lion motif, "
+    "purple-dyed wool cloak fastened at right shoulder, Hellenistic "
+    "crested helmet with red horsehair plume, leather pteruges skirt, "
+    "bronze greaves, curved falcata sword at hip. "
+    "Julius Caesar → red paludamentum cloak, polished lorica musculata "
+    "cuirass, gilded greaves, leather pteruges, golden corona civica "
+    "wreath, gladius hispaniensis at right hip. "
+    "Alexander the Great → linothorax cuirass with bronze scales, "
+    "Phrygian-style helmet with white horsehair plume, purple cape, "
+    "kopis sword, gold-stamped greaves. "
+    "Genghis Khan → lamellar leather armor over felt undercoat, fur-"
+    "trimmed leather helmet, lacquered composite recurve bow, curved "
+    "saber, deel robe in indigo blue. "
+    "  - Unit / formation types: era-correct gear. "
+    "Roman legionary → lorica segmentata, gladius, scutum shield with "
+    "lightning bolts, galea helmet with transverse crest, caligae. "
+    "Spartan hoplite → bronze muscle cuirass, Corinthian helmet with "
+    "crest, large hoplon shield with lambda, dory spear. "
+    "Mongol horse archer → lamellar leather armor, fur-trimmed conical "
+    "helmet, composite bow + quiver, deel robe, hardened leather "
+    "boots. "
+    "Napoleonic line infantry → dark blue wool tailcoat with white "
+    "crossbelts, white breeches, black gaiters, black shako with brass "
+    "plate and plume, Charleville musket with bayonet. "
+    "  - Generic / unknown subjects: pick concrete era + role + at "
+    "least 4 specific clothing details. NEVER 'plain suit', NEVER "
+    "'modern casual'.\n\n"
     "Output strict JSON:\n"
     "  {\n"
-    '    "characters": { "<subject name>": "<full canonical outfit, ~25-40 words>" },\n'
-    '    "topic_setting": "<one sentence describing the world / genre / mood>",\n'
-    '    "fallback_outfit": "<outfit for narration beats with no named subject, ~20 words>"\n'
+    '    "characters": { "<subject name>": "<full canonical period '
+    'outfit, ~25-40 words>" },\n'
+    '    "topic_setting": "<one sentence describing the battlefield / '
+    'terrain / weather / era>",\n'
+    '    "fallback_outfit": "<period-correct gear for narration beats '
+    "with no named subject, ~20 words>\"\n"
     "  }\n"
     "No markdown fences, no commentary outside the JSON."
 )
@@ -145,55 +156,69 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
 def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str,
                         *, plan: dict | None = None) -> tuple[str, str, str]:
     """
-    Per-beat visual prompt. Uses the locked character/style plan from
-    analyze_script() so every beat featuring the same subject renders the
-    same outfit. Falls back to per-beat inference if no plan is supplied
-    (older callers).
+    Per-beat visual prompt. PR #153 — rewritten to lock the porcelain
+    mannequin character per PR #145's `base_style.py` ABSOLUTE CAST RULE.
+    Casey 2026-05-12: 'CrypticScience is no longer skeleton AI.'
+
+    The prior system prompt baked in a naked anatomical skeleton as the
+    locked cast, which leaked into every scene_action regardless of
+    PR #145's assemble_scene_prompt mannequin override (the mannequin
+    grammar got prepended to skeleton-referencing actions — visual
+    mashup). This rewrite uses porcelain mannequins in period-correct
+    gear as the cast lock, matching the Cryptic Science alt-history
+    battle channel signature.
     """
     plan = plan or {"characters": {}, "fallback_outfit":
-                    "neutral charcoal turtleneck and dark jeans"}
+                    "period-correct historical military gear"}
     chars_json = json.dumps(plan.get("characters", {}), ensure_ascii=False)
     setting = plan.get("topic_setting", "")
     fallback = plan.get("fallback_outfit", "")
 
     sys = (
-        "You compose ONE per-scene visual prompt for the Cryptic Science / "
-        "Skeleton AI YouTube short.\n\n"
-        "THE CHARACTER IS LOCKED — do not redescribe it, do not add costumes:\n"
-        "  - Tall adult-height (~7.5 head heights, life-size) anatomically "
-        "accurate naked human skeleton. Off-white slightly luminous "
-        "translucent bone. Hollow empty eye sockets (no pupils, no glow). "
-        "Always naked anatomical bone — NEVER wears clothing, costumes, "
-        "armor, hats, or accessories.\n"
-        "  - The skeleton is the silent observer / viewer-proxy in every "
-        "scene. It stands among real props and real humans at adult scale.\n\n"
-        "Your only job: write SCENE_ACTION (the photoreal real-world setting "
-        "around the skeleton) and MOTION_PROMPT (one subtle 5-sec movement).\n\n"
+        "You compose ONE per-scene visual prompt for the Cryptic Science "
+        "alt-history battle YouTube short.\n\n"
+        "THE CAST IS LOCKED — every human figure is a PORCELAIN MANNEQUIN:\n"
+        "  - Smooth, stylized porcelain mannequin body — clean glazed "
+        "ceramic, no facial features beyond a subtle brow + nose ridge, "
+        "no eyes, no mouth.\n"
+        "  - Off-white / pale porcelain shell with period-correct armor, "
+        "helmets, robes, banners, and weapons painted or strapped ONTO "
+        "the mannequin body. Cracked-glaze accents on commander chest "
+        "plates for visual hierarchy.\n"
+        "  - NEVER real human faces, NEVER bare skin, NEVER anatomical "
+        "skeletons, NEVER modern action figures, NEVER costumed actors.\n\n"
+        "THE WORLD IS LOCKED — photoreal cinematic battlefield:\n"
+        "  - Real terrain (snow / dirt / grass / stone / water / sand), "
+        "real atmospheric haze, real volumetric lighting, real cinematic "
+        "depth-of-field. The porcelain cast moves through a "
+        "photographically rendered world.\n\n"
+        "Your only job per beat: write SCENE_ACTION (the photoreal world "
+        "around the porcelain cast) and MOTION_PROMPT (one subtle 5-sec "
+        "movement).\n\n"
         "RULES:\n"
-        "  1. SCENE_ACTION — describe the FULL real-world environment the "
-        "skeleton stands in. Real-world places: school hallway with teen "
-        "students walking past, recording studio with real producer at a "
-        "mixing console + real guitarist on a stool, NYC sidewalk at night "
-        "with neon signs, comic shop with rows of comic books and action "
-        "figures on shelves, ancient Roman forum with marble columns and "
-        "real togaed figures in the background, Mars 2050 colony with "
-        "transparent biodome and real engineers in jumpsuits, brewery floor "
-        "with steel kettles and a real bearded brewer. Topic-relevant content "
-        "appears as SCENE PROPS / background characters — e.g. for a Marvel "
-        "vs DC topic, real Iron Man and Hulk action figures sit on a comic "
-        "shop shelf behind the skeleton, OR a real Iron Man flies past a "
-        "window OR a comic book in the skeleton's hand shows the cover. "
-        "The skeleton ITSELF stays the locked naked anatomical character "
-        "regardless of topic.\n"
-        "  2. MOTION_PROMPT — one subtle change over 5 sec: skeleton turns "
-        "head slowly, hand raises a triangle striker, dust drifts past, real "
-        "students walk through frame in the background, cape behind a real "
-        "Iron Man action figure flutters in a fan breeze. NO camera moves.\n"
-        "  3. The OUTFIT field is REQUIRED to be exactly the string 'no "
-        "clothing' (the skeleton is always naked). Same for every beat. The "
-        "BARE_TORSO field is always false. Do NOT invent costumes.\n\n"
-        "Output strict JSON: { \"outfit\": \"no clothing\", \"scene_action\": "
-        "..., \"motion_prompt\": ..., \"bare_torso\": false }. No markdown."
+        "  1. SCENE_ACTION — describe a TABLEAU composition: formations "
+        "of porcelain mannequins in period gear facing each other or "
+        "arrayed across the photoreal terrain. Reference the character "
+        "sheet outfits (e.g. 'Carthaginian Libyan spearmen in bronze "
+        "Montefortino helmets, red tunics, oval scutum shields with "
+        "Carthaginian symbols') — these get painted onto the porcelain "
+        "mannequin bodies. Background props from the topic setting "
+        "(snow-capped peaks, banner poles, cannon batteries, war "
+        "elephants in formation). Period-correct flag colors. NO active "
+        "combat — show a frozen moment.\n"
+        "  2. MOTION_PROMPT — one subtle change over 5 sec: a banner "
+        "ripples in the wind, snow drifts past, a porcelain commander "
+        "slowly turns his head, ranks of mannequins hold position, "
+        "atmospheric mist rolls in. NO camera moves. NO graphic "
+        "violence motion.\n"
+        "  3. OUTFIT — describe the PERIOD GEAR painted onto the focal "
+        "commander/unit mannequin (e.g. 'gold-trimmed bicorne, dark "
+        "blue greatcoat with tricolor sash, white breeches, black "
+        "riding boots, Charleville musket'). Pull from the character "
+        "sheet when the narration mentions a named figure. BARE_TORSO "
+        "is always false.\n\n"
+        "Output strict JSON: { \"outfit\": ..., \"scene_action\": ..., "
+        "\"motion_prompt\": ..., \"bare_torso\": false }. No markdown."
     )
     user_lines = [f"Topic setting: {setting}" if setting else "",
                   f"Character sheet (JSON): {chars_json}",
@@ -203,25 +228,25 @@ def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str,
                   "Return JSON now."]
     user = "\n".join(line for line in user_lines if line)
 
-    raw = grok.complete(sys, user, max_tokens=400, temperature=0.6)
+    raw = grok.complete(sys, user, max_tokens=500, temperature=0.6)
     raw = raw.strip().strip("`").strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return (fallback or "plain dark suit",
-                "skeleton stands centered facing camera",
-                "subtle head tilt, eyes blink once")
-    outfit = data.get("outfit", fallback) or fallback or "plain dark suit"
-    # Bare-torso encoded as a sentinel prefix the consumer (assemble_scene_prompt)
-    # detects. Keeps the 3-tuple return signature stable.
+        return (fallback or "period-correct historical military gear",
+                "Porcelain mannequins in period armor stand in formation across the photoreal battlefield, banners raised, atmospheric weather, no active combat",
+                "Banner ripples in the wind, snow drifts past, atmospheric mist rolls in")
+    outfit = data.get("outfit", fallback) or fallback or "period-correct historical military gear"
+    # Bare-torso retained as a sentinel for legacy callers, but
+    # mannequins never go bare under the new cast lock.
     if bool(data.get("bare_torso", False)):
         outfit = f"[BARE_TORSO] {outfit}"
     return (
         outfit,
-        data.get("scene_action", "skeleton stands centered"),
-        data.get("motion_prompt", "subtle head tilt"),
+        data.get("scene_action", "Porcelain mannequins in period armor stand in formation"),
+        data.get("motion_prompt", "Banner ripples in the wind"),
     )
 
 
