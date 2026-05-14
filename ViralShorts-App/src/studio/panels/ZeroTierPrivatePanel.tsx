@@ -610,10 +610,31 @@ export default function ZeroTierPrivatePanel() {
         }
     }, [accessToken]);
 
+    // PR #154 — always-visible Catalyst calibration. Fetch the HIT/MISS/
+    // WEAK pattern buckets on mount + after every channel sync, so the
+    // panel shows what Catalyst has learned BEFORE Casey clicks Generate
+    // Topic Ideas. No Grok call — pure bucket data from /calibration.
+    const fetchCalibration = useCallback(async () => {
+        if (!accessToken) return;
+        try {
+            const r = await fetch(`${API}/api/zerotier-private/calibration`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (!r.ok) return;
+            const d = await r.json();
+            if (d?.calibration) {
+                setGenCalibration(d.calibration);
+            }
+        } catch {
+            // non-blocking
+        }
+    }, [accessToken]);
+
     useEffect(() => {
         void fetchPredictions();
         void fetchRecentJobs();
-    }, [fetchPredictions, fetchRecentJobs, payload]);
+        void fetchCalibration();
+    }, [fetchPredictions, fetchRecentJobs, fetchCalibration, payload]);
 
     // Phase 4.5c: resume a past job — re-hydrate the modal with its persisted
     // scenes + stills + script. User can regenerate any still or jump straight
@@ -1514,12 +1535,124 @@ export default function ZeroTierPrivatePanel() {
                         </section>
                     )}
 
+                    {/* PR #154 — Always-visible Catalyst pattern calibration.
+                        Auto-fetches from /api/zerotier-private/calibration on
+                        mount + after every Sync, so Casey sees HIT/MISS
+                        patterns before clicking Generate Topic Ideas.
+                        Lives ABOVE the predictions card because patterns are
+                        the higher-order learning signal (aggregated across
+                        all uploads, vs per-render predictions). */}
+                    {genCalibration && Array.isArray(genCalibration.buckets) && genCalibration.buckets.length > 0 && (
+                        <section className="rounded-2xl border border-violet-500/40 bg-violet-500/[0.05] p-5">
+                            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                                <div className="flex items-center gap-2">
+                                    <Sparkles className="h-5 w-5 text-violet-300" />
+                                    <h2 className="text-lg font-bold text-white">Catalyst pattern learning</h2>
+                                    <span className="text-xs text-zinc-500">
+                                        — what's hitting / missing on YOUR channel right now
+                                    </span>
+                                </div>
+                                <span className="text-xs text-zinc-400">
+                                    baseline (median) <span className="font-semibold text-zinc-200">{(genCalibration.channel_baseline_lr || 0).toFixed(2)}%</span> LR
+                                </span>
+                            </div>
+                            {(() => {
+                                const buckets = genCalibration.buckets || [];
+                                const hits = buckets.filter((b) => b.delta_vs_baseline > 0 && b.n >= 2);
+                                const misses = buckets.filter((b) => b.delta_vs_baseline < 0 && b.n >= 2);
+                                const weak = buckets.filter((b) => b.n < 2);
+                                return (
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3">
+                                            <div className="text-[10px] uppercase tracking-[0.15em] text-emerald-300 mb-2 font-semibold">
+                                                ✓ HIT — Catalyst biases Grok toward these
+                                            </div>
+                                            {hits.length === 0 ? (
+                                                <div className="text-xs text-zinc-500 italic">
+                                                    (not enough data — need more uploads in this bucket)
+                                                </div>
+                                            ) : (
+                                                <ul className="space-y-1.5">
+                                                    {hits.map((b) => (
+                                                        <li key={`hit-pat-${b.name}`} className="text-xs">
+                                                            <div className="flex items-baseline justify-between gap-2">
+                                                                <span className="font-semibold text-emerald-200">{b.name.replace(/_/g, ' ')}</span>
+                                                                <span className="text-zinc-400 tabular-nums">
+                                                                    {b.avg_lr.toFixed(2)}% <span className="text-emerald-400">(+{b.delta_vs_baseline.toFixed(2)})</span> · n={b.n}
+                                                                </span>
+                                                            </div>
+                                                            {b.examples && b.examples[0] && (
+                                                                <div className="text-[10px] text-zinc-500 truncate" title={b.examples[0]}>
+                                                                    e.g. {b.examples[0]}
+                                                                </div>
+                                                            )}
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </div>
+                                        <div className="rounded-lg border border-rose-500/30 bg-rose-500/[0.04] p-3">
+                                            <div className="text-[10px] uppercase tracking-[0.15em] text-rose-300 mb-2 font-semibold">
+                                                ✗ MISSED — Catalyst tells Grok to avoid
+                                            </div>
+                                            {misses.length === 0 ? (
+                                                <div className="text-xs text-zinc-500 italic">
+                                                    (no clear losers yet — all multi-sample buckets at or above median)
+                                                </div>
+                                            ) : (
+                                                <ul className="space-y-1.5">
+                                                    {misses.map((b) => (
+                                                        <li key={`miss-pat-${b.name}`} className="text-xs">
+                                                            <div className="flex items-baseline justify-between gap-2">
+                                                                <span className="font-semibold text-rose-200">{b.name.replace(/_/g, ' ')}</span>
+                                                                <span className="text-zinc-400 tabular-nums">
+                                                                    {b.avg_lr.toFixed(2)}% <span className="text-rose-400">({b.delta_vs_baseline.toFixed(2)})</span> · n={b.n}
+                                                                </span>
+                                                            </div>
+                                                            {b.examples && b.examples[0] && (
+                                                                <div className="text-[10px] text-zinc-500 truncate" title={b.examples[0]}>
+                                                                    e.g. {b.examples[0]}
+                                                                </div>
+                                                            )}
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                            {weak.length > 0 && (
+                                                <div className="mt-3 pt-2 border-t border-rose-500/20">
+                                                    <div className="text-[10px] uppercase tracking-[0.15em] text-amber-300 mb-1 font-semibold">
+                                                        ⚠ Weak signal (n=1, watch)
+                                                    </div>
+                                                    <ul className="space-y-1">
+                                                        {weak.map((b) => (
+                                                            <li key={`weak-${b.name}`} className="text-[11px] text-zinc-300">
+                                                                <span className="font-semibold">{b.name.replace(/_/g, ' ')}</span>
+                                                                <span className="text-zinc-500"> · {b.avg_lr.toFixed(2)}% LR</span>
+                                                                {b.examples && b.examples[0] && (
+                                                                    <span className="text-zinc-600"> — {b.examples[0].slice(0, 40)}</span>
+                                                                )}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                            <div className="mt-3 text-[11px] text-zinc-500">
+                                Grok sees this exact calibration in its prompt on every Generate Topic Ideas call.
+                                Updates after every channel Sync.
+                            </div>
+                        </section>
+                    )}
+
                     {/* Phase 3: Predictions calibration — predicted vs actual */}
                     {predictions.length > 0 && (
                         <section className="rounded-2xl border border-cyan-500/30 bg-cyan-500/[0.04] p-5">
                             <div className="flex items-center gap-2 mb-3">
                                 <TrendingUp className="h-5 w-5 text-cyan-300" />
-                                <h2 className="text-lg font-bold text-white">Catalyst learning</h2>
+                                <h2 className="text-lg font-bold text-white">Catalyst predictions vs outcomes</h2>
                                 <span className="text-xs text-zinc-500">
                                     — heuristic v1 predictions vs actual YouTube outcomes
                                 </span>

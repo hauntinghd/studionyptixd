@@ -496,6 +496,43 @@ def build_zerotier_private_router(
     #
     # Returns: {topics: [string, ...], channel_baseline: {top_lr, avg_lr}}.
     # ────────────────────────────────────────────────────────────────────
+    @router.get("/calibration")
+    async def get_zt_calibration(user: dict = auth_dep):
+        """PR #154 — return the channel's HIT/MISS/WEAK pattern calibration
+        without firing a Grok call. Panel calls this on mount + after every
+        Sync to keep the '🧠 Catalyst learning signal' card always visible
+        (not gated behind clicking Generate Topic Ideas).
+
+        Returns the same `calibration` dict shape that /generate-topics
+        embeds in its response, so the frontend can render the card from
+        either endpoint interchangeably.
+        """
+        _gate_admin(user)
+        uploads: list[dict] = []
+        try:
+            from youtube import _load_youtube_connections, _youtube_bucket_for_user
+            user_id = str(user.get("id", "") or user.get("user_id", "") or "")
+            if user_id:
+                _load_youtube_connections()
+                bucket = _youtube_bucket_for_user(user_id)
+                channels = (bucket or {}).get("channels") or {}
+                ZT_ID = "UC9Gth_4MVet6rdPH7MHJf-g"
+                ch = channels.get(ZT_ID) or {}
+                snap = (ch.get("analytics_snapshot") or {})
+                uploads = list(snap.get("uploaded_videos") or [])
+        except Exception:
+            uploads = []
+
+        cal = _compute_pattern_calibration(uploads)
+        return {
+            "ok": True,
+            "uploads_count": len(uploads),
+            "calibration": {
+                "channel_baseline_lr": cal["channel_baseline_lr"],
+                "buckets": cal["buckets"],
+            },
+        }
+
     @router.post("/generate-topics")
     async def generate_zt_topics(body: ZTGenerateTopicsRequest, user: dict = auth_dep):
         _gate_admin(user)
