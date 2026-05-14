@@ -252,29 +252,93 @@ def _gen_still(scene: dict, stills_dir: Path) -> Path:
     return out
 
 
-def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
-    """Pixverse V6 i2v at 720p 5s 9:16 — proven fallback (LTX has been
-    intermittently degraded in 2026-05). Pixverse pricing: $0.045/sec at
-    720p without audio = ~$0.225/clip."""
-    out = clips_dir / f"{scene['id']}.mp4"
-    if out.exists() and out.stat().st_size > 1024:
-        # PR #149 — even cached clips must validate. A corrupt clip
-        # from a previous failed run that wrote >1024 bytes would
-        # otherwise be silently re-used. _validate_clip_or_delete
-        # raises + deletes if too short, forcing this call to fall
-        # through and re-run Pixverse below.
-        try:
-            _validate_clip_or_delete(out, sid=scene["id"])
-            return out
-        except ZTRenderError:
-            # File was deleted; fall through to fresh Pixverse run
-            pass
+def _sanitize_motion_via_sonnet(original: str, scene_id: str) -> str:
+    """PR #155 — when Pixverse rejects a motion_prompt for
+    content_policy_violation, ask Sonnet (via fal any-llm) to rewrite
+    it as a tableau-safe version: same narrative intent, no death /
+    violence / dying / graphic action verbs. Returns the rewritten
+    prompt, or the original if Sonnet call fails (then Ken Burns
+    fallback takes over).
+    """
+    try:
+        from skeleton_ai.scripting_grok import GrokClient
+        grok = GrokClient()
+        system = (
+            "You rewrite Pixverse i2v motion prompts that got rejected "
+            "by the content checker. Output a SAFE version that:\n"
+            "  - Removes any death imagery (dying, last breath, "
+            "    deathbed, expiring, passing).\n"
+            "  - Removes graphic violence verbs (kills, slays, "
+            "    shatters, destroys, rips, shreds).\n"
+            "  - Reframes as TABLEAU motion — subtle physical movement, "
+            "    no kinetic action, no implied harm.\n"
+            "  - Preserves the emotional weight via atmospheric/visual "
+            "    cues (wind ripples a banner, golden light shifts, dust "
+            "    settles, a hand slowly lifts, eyes close peacefully).\n"
+            "  - Keeps a 5-second timeframe and 9:16 vertical context.\n\n"
+            "Output ONLY the rewritten motion prompt (one paragraph, "
+            "40-100 words). No quotes, no JSON, no preamble."
+        )
+        user = f"Rewrite this rejected motion prompt as tableau-safe:\n\n{original}"
+        out = grok.complete(system, user, max_tokens=400, temperature=0.4)
+        cleaned = (out or "").strip().strip('"').strip("'")
+        if cleaned and len(cleaned) >= 20:
+            print(
+                f"  [{scene_id}] motion sanitized via Sonnet — "
+                f"new length {len(cleaned)}c",
+                flush=True,
+            )
+            return cleaned
+    except Exception as e:
+        print(
+            f"  [{scene_id}] sonnet sanitize failed ({type(e).__name__}: "
+            f"{str(e)[:100]}) — using original",
+            flush=True,
+        )
+    return original
+
+
+def _ffmpeg_ken_burns_clip(still_path: Path, out_path: Path,
+                            duration_sec: float = 5.0) -> Path:
+    """PR #155 — final fallback when Pixverse refuses a motion prompt
+    twice. Generates a slow Ken Burns pan from the still so the scene
+    isn't lost entirely. Same approach we used to rescue the Anti-
+    Monitor render's flagged scene 2.
+    """
+    fps = 30
+    total_frames = int(duration_sec * fps)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-loop", "1", "-i", str(still_path),
+        "-vf", (
+            f"scale=1440:2560,"
+            f"zoompan="
+            f"z='min(1.0+on/{total_frames}*0.06,1.06)':"
+            f"x='iw/2-(iw/zoom/2)+on*0.4':"
+            f"y='ih/2-(ih/zoom/2)':"
+            f"d=1:fps={fps}:s=720x1280"
+        ),
+        "-t", str(duration_sec),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-an", str(out_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out_path
+
+
+def _pixverse_submit_and_poll(motion_prompt: str, image_url: str,
+                                scene_id: str) -> str | None:
+    """PR #155 — extracted Pixverse submit + poll loop. Returns the
+    video URL on success, or None on content_policy_violation. Raises
+    ZTRenderError on any other Pixverse failure (network, FAILED,
+    timeout, etc.) so callers can distinguish "retry possible" from
+    "infrastructure broken".
+    """
     PIXVERSE = "https://queue.fal.run/fal-ai/pixverse/v6/image-to-video"
     fal_key = os.environ["FAL_KEY"]
     HDR = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
-    image_url = fal_client.upload_file(str(still_path))
     sub_r = httpx.post(PIXVERSE, headers=HDR, json={
-        "prompt": scene["motion_prompt"][:1500],
+        "prompt": motion_prompt[:1500],
         "image_url": image_url,
         "aspect_ratio": "9:16",
         "resolution": "720p",
@@ -291,27 +355,89 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
         if st == "COMPLETED":
             rr = httpx.get(sub["response_url"], headers=HDR, timeout=30).json()
             v = (rr.get("video") or {}).get("url") or rr.get("video_url")
-            # PR #148 — Pixverse occasionally reports COMPLETED with an
-            # empty video field. Surface the raw response so the failure
-            # is debuggable + so resume can retry the same scene.
             if not v:
+                # Inspect the rr body — content_policy_violation has a
+                # specific shape (detail = list of dicts with
+                # type='content_policy_violation').
+                detail = rr.get("detail") or []
+                is_content_policy = False
+                if isinstance(detail, list) and detail:
+                    first = detail[0] if isinstance(detail[0], dict) else {}
+                    if first.get("type") == "content_policy_violation":
+                        is_content_policy = True
+                if is_content_policy:
+                    print(
+                        f"  [{scene_id}] pixverse content_policy_violation",
+                        flush=True,
+                    )
+                    return None  # signal caller to sanitize+retry
                 raise ZTRenderError(
                     f"pixverse COMPLETED but returned no video url for "
-                    f"{scene['id']}; response keys={list(rr.keys())}; "
+                    f"{scene_id}; response keys={list(rr.keys())}; "
                     f"raw={str(rr)[:240]}"
                 )
-            _save_url(v, out, source=f"pixverse clip {scene['id']}")
-            # PR #149 — validate the downloaded clip is a real video.
-            # Pixverse sometimes returns a tiny corrupt MP4 that passes
-            # the size>1024 cache check but has near-zero duration —
-            # produces a stills-slideshow on compose. ffprobe catches
-            # that here so we fail loudly instead of silently shipping
-            # an MP4 that "didn't animate".
+            return v
+        if st in ("FAILED", "ERROR"):
+            raise ZTRenderError(f"pixverse {st} for {scene_id}: {s}")
+        time.sleep(5)
+    raise ZTRenderError(f"pixverse timeout for {scene_id} after 240s")
+
+
+def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
+    """Pixverse V6 i2v at 720p 5s 9:16 — proven fallback (LTX has been
+    intermittently degraded in 2026-05). Pixverse pricing: $0.045/sec at
+    720p without audio = ~$0.225/clip.
+
+    PR #155 — resilient against Pixverse content_policy_violation:
+      1. Try with original motion_prompt
+      2. On 422 content-policy, Sonnet-sanitize the prompt and retry
+      3. If still rejected, generate a ffmpeg Ken Burns pan from the
+         still (always works, no animation but better than no scene)
+    """
+    out = clips_dir / f"{scene['id']}.mp4"
+    if out.exists() and out.stat().st_size > 1024:
+        # PR #149 — even cached clips must validate. A corrupt clip
+        # from a previous failed run that wrote >1024 bytes would
+        # otherwise be silently re-used. _validate_clip_or_delete
+        # raises + deletes if too short, forcing this call to fall
+        # through and re-run Pixverse below.
+        try:
             _validate_clip_or_delete(out, sid=scene["id"])
             return out
-        if st in ("FAILED", "ERROR"):
-            raise ZTRenderError(f"pixverse {st} for {scene['id']}: {s}")
-        time.sleep(5)
+        except ZTRenderError:
+            # File was deleted; fall through to fresh Pixverse run
+            pass
+
+    sid = scene["id"]
+    image_url = fal_client.upload_file(str(still_path))
+    original_motion = scene["motion_prompt"]
+
+    # Attempt 1: original motion_prompt
+    video_url = _pixverse_submit_and_poll(original_motion, image_url, sid)
+    if video_url:
+        _save_url(video_url, out, source=f"pixverse clip {sid}")
+        _validate_clip_or_delete(out, sid=sid)
+        return out
+
+    # Attempt 2: Sonnet-sanitized motion_prompt
+    sanitized = _sanitize_motion_via_sonnet(original_motion, sid)
+    if sanitized != original_motion:
+        video_url = _pixverse_submit_and_poll(sanitized, image_url, sid)
+        if video_url:
+            _save_url(video_url, out, source=f"pixverse clip {sid} (sanitized)")
+            _validate_clip_or_delete(out, sid=sid)
+            return out
+
+    # Fallback: ffmpeg Ken Burns pan on the still. Loses motion variety
+    # for this one scene but guarantees the render completes.
+    print(
+        f"  [{sid}] pixverse rejected twice — falling back to ffmpeg "
+        f"Ken Burns pan from the still",
+        flush=True,
+    )
+    duration = float(scene.get("duration", scene.get("duration_sec", 5.0)) or 5.0)
+    _ffmpeg_ken_burns_clip(still_path, out, duration_sec=duration)
+    return out
     raise ZTRenderError(f"pixverse timeout for {scene['id']} after 240s")
 
 
