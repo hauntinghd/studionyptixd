@@ -1,7 +1,8 @@
 import { useContext, useEffect, useMemo } from 'react';
-import { Crown, Sparkles, User, WalletCards } from 'lucide-react';
-import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { ArrowLeft, CheckCircle2, LogOut, User, WalletCards } from 'lucide-react';
+import StudioShell from '../components/layout/StudioShell';
+import { type PageNav } from '../components/NavBar';
+import { AuthContext, BILLING_SITE_URL, isBillingHost } from '../shared';
 
 export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
@@ -26,9 +27,9 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
         const entries = [
             ['Create', Boolean(studioLaneAccess.create || ownerOverride)],
             ['Chat Story', Boolean(studioLaneAccess.chatstory || ownerOverride)],
-            ['Thumbnails (beta)', Boolean(studioLaneAccess.thumbnails || ownerOverride)],
-            ['Clone (beta)', Boolean(studioLaneAccess.clone || ownerOverride)],
-            ['Long Form (beta)', Boolean(studioLaneAccess.longform || ownerOverride)],
+            ['Thumbnails', Boolean(studioLaneAccess.thumbnails || ownerOverride)],
+            ['Clone', Boolean(studioLaneAccess.clone || ownerOverride)],
+            ['Long Form', Boolean(studioLaneAccess.longform || ownerOverride)],
             ['AutoClipper', Boolean(studioLaneAccess.autoclipper || ownerOverride)],
         ] as const;
         return entries;
@@ -40,7 +41,7 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
     const currentPlanLabel = ownerOverride
         ? 'Owner override (Pro)'
         : billingActive
-            ? `Active (${normalizedPlan || 'starter'})`
+            ? capitalize(normalizedPlan || 'starter')
             : 'Free';
 
     const handleOpenBilling = () => {
@@ -51,49 +52,51 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
         window.location.href = `${BILLING_SITE_URL}?page=billing`;
     };
 
-    const handleOpenMembership = () => {
-        if (isBillingHost) {
-            window.location.href = `${window.location.origin}?page=subscription`;
-            return;
-        }
-        window.location.href = `${STUDIO_SITE_URL}?page=subscription`;
-    };
+    const handleOpenMembership = () => onNavigate('subscription');
+
+    const handleBack = () => onNavigate('dashboard');
 
     return (
-        <>
-            <NavBar onNavigate={onNavigate} active="account" />
-            <div className="mx-auto max-w-6xl px-6 pt-24 pb-10">
-                <div className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
-                    <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                        <div className="flex items-center gap-4">
-                            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-500/10">
+        <StudioShell onNavigate={onNavigate}>
+            <div className="mx-auto max-w-6xl space-y-8">
+                <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-br from-violet-950/30 via-[#0c0c10] to-cyan-950/20 p-6 sm:p-8">
+                    <div className="relative z-10 flex flex-wrap items-start justify-between gap-6">
+                        <div className="flex items-start gap-4">
+                            <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.04]">
                                 <User className="h-7 w-7 text-violet-300" />
                             </div>
                             <div>
-                                <p className="text-lg font-bold text-white">{session.user.email}</p>
-                                <div className="mt-1 flex items-center gap-2 text-sm">
-                                    {ownerOverride || role === 'admin' ? (
-                                        <>
-                                            <Crown className="h-4 w-4 text-emerald-300" />
-                                            <span className="font-medium text-emerald-300">Owner override active</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Sparkles className="h-4 w-4 text-cyan-300" />
-                                            <span className="font-medium text-cyan-300">Catalyst account</span>
-                                        </>
-                                    )}
-                                </div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-300">Account</p>
+                                <h1 className="mt-2 text-2xl font-bold text-white sm:text-3xl">{session.user.email}</h1>
+                                <p className="mt-2 text-sm text-gray-400">
+                                    {ownerOverride || role === 'admin'
+                                        ? 'Owner override — all lanes open on this workspace.'
+                                        : requiresTopup
+                                            ? 'Top up before your next animation-heavy run.'
+                                            : 'Ready for Create and Chat Story jobs.'}
+                                </p>
                             </div>
                         </div>
+                        <button
+                            type="button"
+                            onClick={handleBack}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                        >
+                            <ArrowLeft className="h-4 w-4" />
+                            Back to Studio
+                        </button>
+                    </div>
+                </section>
 
-                        <div className="mt-6 grid gap-3">
-                            <OverviewCard label="Current Plan" value={currentPlanLabel} />
-                            <OverviewCard label="Included Credits" value={String(Number(monthlyCreditsRemaining || 0))} />
-                            <OverviewCard label="Credit Wallet" value={String(Number(topupCreditsRemaining || 0))} />
-                            <OverviewCard label="Total Available" value={String(Number(creditsTotalRemaining || 0))} />
+                <div className="grid gap-6 lg:grid-cols-[0.95fr,1.05fr]">
+                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+                        <h2 className="text-lg font-bold text-white">Credits & plan</h2>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                            <Stat label="Plan" value={currentPlanLabel} />
+                            <Stat label="Total available" value={String(Number(creditsTotalRemaining || 0))} accent />
+                            <Stat label="Included credits" value={String(Number(monthlyCreditsRemaining || 0))} />
+                            <Stat label="Credit wallet" value={String(Number(topupCreditsRemaining || 0))} />
                         </div>
-
                         <div className="mt-6 flex flex-wrap gap-3">
                             <button
                                 type="button"
@@ -111,63 +114,61 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                                 Billing
                             </button>
                         </div>
-
-                        <p className={`mt-4 text-sm ${requiresTopup ? 'text-amber-300' : 'text-emerald-300'}`}>
-                            {ownerOverride
-                                ? 'Owner account bypass is active on this workspace.'
-                                : requiresTopup
-                                    ? 'Top up the credit wallet before your next animation-heavy run.'
-                                    : 'Your account is ready for Catalyst jobs.'}
-                        </p>
                     </section>
 
-                    <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                        <h2 className="text-xl font-bold text-white">Lane Access</h2>
-                        <p className="mt-2 text-sm text-gray-400">
-                            Studio now uses one normalized access model: membership, wallet, included credits, and lane-level access. Public plans are short-form only right now while the heavier lanes stay in beta.
+                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+                        <h2 className="text-lg font-bold text-white">Lane access</h2>
+                        <p className="mt-2 text-sm text-gray-500">
+                            One model: membership, wallet, included credits, and per-lane gates.
                         </p>
-
-                        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                        <div className="mt-4 grid gap-2 sm:grid-cols-2">
                             {laneEntries.map(([label, enabled]) => (
                                 <div
                                     key={label}
-                                    className={`rounded-2xl border px-4 py-3 text-sm ${
+                                    className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm ${
                                         enabled
-                                            ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100'
-                                            : 'border-white/[0.08] bg-black/20 text-gray-400'
+                                            ? 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-100'
+                                            : 'border-white/[0.06] bg-black/20 text-gray-500'
                                     }`}
                                 >
-                                    <p className="font-semibold">{label}</p>
-                                    <p className="mt-1 text-xs opacity-80">{enabled ? 'Available on this account' : 'Not enabled yet'}</p>
+                                    <span className="font-medium">{label}</span>
+                                    {enabled ? (
+                                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                                    ) : (
+                                        <span className="text-[10px] uppercase tracking-wider">Locked</span>
+                                    )}
                                 </div>
                             ))}
                         </div>
-
-                        <div className="mt-6 rounded-2xl border border-white/[0.08] bg-black/20 p-4 text-sm text-gray-300">
-                            <p className="font-semibold text-white">Billing Behavior</p>
+                        <div className="mt-6 rounded-xl border border-white/[0.06] bg-black/20 p-4 text-sm text-gray-400">
+                            <p className="font-semibold text-white">Billing behavior</p>
                             <p className="mt-2">Included credits burn first when membership is active.</p>
-                            <p className="mt-1">Credit wallet remains available for overflow and usage-only accounts.</p>
-                            <p className="mt-1">If membership expires, wallet credits stay attached to the account.</p>
+                            <p className="mt-1">Wallet credits persist if membership expires.</p>
                         </div>
-
                         <button
                             onClick={signOut}
-                            className="mt-6 w-full rounded-xl border border-red-500/20 bg-red-500/10 py-3 text-sm font-medium text-red-300 transition hover:bg-red-500/20"
+                            className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 py-3 text-sm font-medium text-red-300 transition hover:bg-red-500/20"
                         >
-                            Sign Out
+                            <LogOut className="h-4 w-4" />
+                            Sign out
                         </button>
                     </section>
                 </div>
             </div>
-        </>
+        </StudioShell>
     );
 }
 
-function OverviewCard({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
     return (
-        <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3">
+        <div className={`rounded-xl border px-4 py-3 ${accent ? 'border-violet-500/25 bg-violet-500/10' : 'border-white/[0.08] bg-black/20'}`}>
             <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">{label}</p>
             <p className="mt-2 text-lg font-bold text-white">{value}</p>
         </div>
     );
+}
+
+function capitalize(s: string) {
+    if (!s) return s;
+    return s.charAt(0).toUpperCase() + s.slice(1);
 }

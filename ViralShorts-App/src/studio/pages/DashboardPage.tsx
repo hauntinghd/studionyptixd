@@ -5,6 +5,7 @@ import StudioShell from '../components/layout/StudioShell';
 import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
 import NicheGalleryV2, { StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
 import RenderTierPicker from '../components/home/RenderTierPicker';
+import { NichePickerGrid } from '../components/create/NichePickerStrip';
 import {
     nicheById,
     type DashboardTab,
@@ -119,6 +120,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (action === 'automate') return;
         setTab('create');
         setCreateOpen(true);
+        setSelectedNiche(null);
     };
 
     const selectTab = (id: DashboardTab) => {
@@ -131,6 +133,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         if (id === 'create') {
             setTab('create');
             setCreateOpen(true);
+            setSelectedNiche(null);
             return;
         }
         setTab(id);
@@ -173,35 +176,43 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 />,
             );
         }
-        if (createOpen && tab === 'create') {
-            const niche = nicheById(selectedNiche || 'alt_battles');
+        if (createOpen && tab === 'create' && selectedNiche) {
+            const niche = nicheById(selectedNiche);
             return (
                 <CreatePanel
-                    initialTemplate={selectedNiche || 'alt_battles'}
+                    key={selectedNiche}
+                    nicheId={selectedNiche}
                     categoryKey={niche?.categoryKey || 'classical_clash'}
                     renderTier={renderTier}
                     nicheTitle={niche?.title}
+                    onNicheChange={setSelectedNiche}
+                    isOwner={ownerOverride}
                 />
             );
         }
         return null;
     })();
 
+    const inBuilder = tab === 'create' && createOpen;
     const showHome = tab === 'home' || (tab === 'create' && !createOpen);
 
     return (
         <StudioShell
             onNavigate={onNavigate}
+            fullWidth={inBuilder}
             sidebar={
-                <StudioSidebar
-                    active={tab === 'create' && !createOpen ? 'home' : tab}
-                    items={sidebarItems}
-                    onCreate={() => {
-                        setTab('create');
-                        setCreateOpen(true);
-                    }}
-                    onSelect={selectTab}
-                />
+                inBuilder ? undefined : (
+                    <StudioSidebar
+                        active={tab === 'create' && !createOpen ? 'home' : tab}
+                        items={sidebarItems}
+                        onCreate={() => {
+                            setTab('create');
+                            setCreateOpen(true);
+                            setSelectedNiche(null);
+                        }}
+                        onSelect={selectTab}
+                    />
+                )
             }
         >
             {showHome && (
@@ -217,8 +228,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             )}
 
-            {tab === 'create' && createOpen && (
-                <div className="mx-auto max-w-6xl space-y-4">
+            {inBuilder && (
+                <div className="mx-auto max-w-5xl space-y-4">
                     <button
                         type="button"
                         onClick={() => {
@@ -231,7 +242,14 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         <ArrowLeft className="h-4 w-4" />
                         Back to Home
                     </button>
-                    {panel}
+                    {!selectedNiche ? (
+                        <NichePickerGrid
+                            isOwner={ownerOverride}
+                            onPick={(id) => setSelectedNiche(id)}
+                        />
+                    ) : (
+                        panel
+                    )}
                 </div>
             )}
 

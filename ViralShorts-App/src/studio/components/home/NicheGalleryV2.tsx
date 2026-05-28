@@ -1,4 +1,12 @@
+import { Film, Link2, Palette, Zap } from 'lucide-react';
 import { STUDIO_TOOLS, visibleNiches, type NicheId, type StudioNiche } from '../../lib/studioProduct';
+
+const TOOL_ICONS: Record<string, typeof Zap> = {
+    shorts: Zap,
+    longform: Film,
+    style: Palette,
+    automate: Link2,
+};
 
 export default function NicheGalleryV2({
     isOwner,
@@ -36,10 +44,7 @@ export default function NicheGalleryV2({
                             />
                             <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
                             <div className="absolute inset-x-0 bottom-0 p-4">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-lg">{n.icon}</span>
-                                    <h3 className="text-base font-bold text-white">{n.title}</h3>
-                                </div>
+                                <h3 className="text-base font-bold text-white">{n.title}</h3>
                                 <p className="mt-1 text-xs text-gray-300">{n.desc}</p>
                             </div>
                             {n.badge && (
@@ -64,7 +69,9 @@ export function StudioToolsRow({
         <section>
             <h2 className="mb-3 text-lg font-bold text-white">Studio tools</h2>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                {STUDIO_TOOLS.map((tool) => (
+                {STUDIO_TOOLS.map((tool) => {
+                    const Icon = TOOL_ICONS[tool.id] || Zap;
+                    return (
                     <button
                         key={tool.id}
                         type="button"
@@ -75,7 +82,7 @@ export function StudioToolsRow({
                         }`}
                     >
                         <div className="flex items-start justify-between gap-2">
-                            <span className="text-2xl">{tool.icon}</span>
+                            <Icon className="h-5 w-5 text-violet-300" />
                             {tool.badge && (
                                 <span className="rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-200">
                                     {tool.badge}
@@ -85,7 +92,8 @@ export function StudioToolsRow({
                         <h3 className="mt-3 text-sm font-bold text-white">{tool.title}</h3>
                         <p className="mt-1 text-xs leading-relaxed text-gray-400">{tool.desc}</p>
                     </button>
-                ))}
+                    );
+                })}
             </div>
         </section>
     );

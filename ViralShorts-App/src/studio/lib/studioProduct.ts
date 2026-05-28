@@ -41,7 +41,6 @@ export interface StudioNiche {
     id: NicheId;
     title: string;
     desc: string;
-    icon: string;
     badge?: string;
     ownerOnly?: boolean;
     /** skeleton-ai category key or pipeline route */
@@ -53,7 +52,6 @@ export interface StudioTool {
     id: string;
     title: string;
     desc: string;
-    icon: string;
     badge?: string;
     action: 'create' | 'longform' | 'style_clone' | 'automate' | 'playground';
     comingSoon?: boolean;
@@ -93,7 +91,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'alt_battles',
         title: 'Alt-History Battles',
         desc: 'Counterfactual matchups — painterly cinematic battles',
-        icon: '🛡️',
         badge: 'Live',
         categoryKey: 'classical_clash',
         format: 'short',
@@ -102,7 +99,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'dilemma',
         title: 'Moral Dilemma',
         desc: 'Binary-choice hooks that drive comments',
-        icon: '⚖️',
         badge: 'Trending',
         categoryKey: 'wildcard_clash',
         format: 'short',
@@ -111,7 +107,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'scary',
         title: 'Scary Stories',
         desc: 'Horror atmosphere, true-crime pacing',
-        icon: '👻',
         badge: 'Trending',
         categoryKey: 'medieval_clash',
         format: 'short',
@@ -120,7 +115,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'history',
         title: 'Historical Epic',
         desc: 'Ridley-Scott scale — armies, siege, empire',
-        icon: '⚔️',
         badge: 'Trending',
         categoryKey: 'gunpowder_clash',
         format: 'short',
@@ -129,7 +123,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'longform',
         title: 'Documentary',
         desc: '15–60 min episodes — fraud, mystery, science',
-        icon: '🎬',
         badge: 'Beta',
         categoryKey: 'v5_episode',
         format: 'long',
@@ -138,7 +131,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'style_clone',
         title: 'Clone a Style',
         desc: 'Paste a reference URL — save your visual + title pack',
-        icon: '✨',
         badge: 'New',
         categoryKey: 'reference',
         format: 'short',
@@ -147,7 +139,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'zerotier_private',
         title: 'ZeroTier (Private)',
         desc: 'DC comic shorts — mechanism-first canon',
-        icon: '⚡',
         badge: 'Owner',
         ownerOnly: true,
         categoryKey: 'zerotier_private',
@@ -157,7 +148,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'alt_history_private',
         title: 'Alt-History (Private)',
         desc: 'Cryptic Science + Catalyst outcomes',
-        icon: '🛡️',
         badge: 'Owner',
         ownerOnly: true,
         categoryKey: 'alt_history_private',
@@ -167,7 +157,6 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'history_rewind_private',
         title: 'History Rewind (Private)',
         desc: '9-hour sleep doc topics',
-        icon: '📜',
         badge: 'Owner',
         ownerOnly: true,
         categoryKey: 'history_rewind_private',
@@ -180,14 +169,12 @@ export const STUDIO_TOOLS: StudioTool[] = [
         id: 'shorts',
         title: 'Short Builder',
         desc: 'Script → scenes → ship a vertical short',
-        icon: '⚡',
         action: 'create',
     },
     {
         id: 'longform',
         title: 'Documentary',
         desc: 'Outline → still gallery → LTX + VO compose',
-        icon: '🎬',
         badge: 'Beta',
         action: 'longform',
     },
@@ -195,7 +182,6 @@ export const STUDIO_TOOLS: StudioTool[] = [
         id: 'style',
         title: 'Style Pack',
         desc: 'Lock look, title shape, and hook cadence',
-        icon: '🎨',
         badge: 'New',
         action: 'style_clone',
     },
@@ -203,7 +189,6 @@ export const STUDIO_TOOLS: StudioTool[] = [
         id: 'automate',
         title: 'Automate',
         desc: 'Schedule renders + outcome checks',
-        icon: '🔗',
         badge: 'Soon',
         action: 'automate',
         comingSoon: true,
@@ -228,4 +213,10 @@ export function estimateShortsRemaining(totalAc: number, tier: RenderTierId = 'd
 
 export function visibleNiches(isOwner: boolean): StudioNiche[] {
     return STUDIO_NICHES.filter((n) => !n.ownerOnly || isOwner);
+}
+
+/** Public short-form niches that use the Create builder (skeleton-ai lane). */
+export function creatableShortNiches(_isOwner = false): StudioNiche[] {
+    const ids: NicheId[] = ['alt_battles', 'dilemma', 'scary', 'history'];
+    return ids.map((id) => nicheById(id)).filter(Boolean) as StudioNiche[];
 }

@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
-import { Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
-import NavBar, { type PageNav } from '../components/NavBar';
+import { ArrowLeft, Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
+import StudioShell from '../components/layout/StudioShell';
+import { type PageNav } from '../components/NavBar';
 import { API, AuthContext, BILLING_SITE_URL, startYouTubeBrowserConnect } from '../shared';
 
 type ConnectedYouTubeChannel = {
@@ -65,114 +66,164 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
     if (!session) return null;
 
     return (
-        <>
-            <NavBar onNavigate={onNavigate} active="settings" />
-            <div className="mx-auto max-w-5xl px-6 pt-24 pb-10">
-                <div className="mb-8">
-                    <h1 className="text-3xl font-bold text-white">Settings</h1>
-                    <p className="mt-2 text-sm text-gray-400">Workspace preferences, rendering defaults, and billing shortcuts.</p>
-                </div>
-
-                <div className="space-y-6">
-                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                        <div className="flex items-center justify-between gap-4">
-                            <div className="flex items-center gap-3">
-                                <Youtube className="w-5 h-5 text-red-300" />
-                                <div>
-                                    <h2 className="text-lg font-semibold text-white">YouTube Channels</h2>
-                                    <p className="mt-1 text-sm text-gray-400">Connect one or more channels so Catalyst can learn from private title, thumbnail, and analytics patterns.</p>
-                                </div>
-                            </div>
-                            <div className="flex gap-2">
-                                <button type="button" onClick={() => void loadYouTubeChannels()} disabled={youtubeLoading} className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06] disabled:opacity-60">
-                                    {youtubeLoading ? 'Refreshing...' : 'Refresh'}
-                                </button>
-                                <button type="button" onClick={startYouTubeConnect} disabled={youtubeConnecting} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60">
-                                    {youtubeConnecting ? 'Opening Google...' : 'Connect YouTube'}
-                                </button>
-                            </div>
-                        </div>
-                        {!longformOwnerBeta ? (
-                            <p className="mt-4 text-xs text-amber-300">
-                                Deep Catalyst analysis features are owner beta right now, but you can still connect your channel so Catalyst can learn from private title, thumbnail, and analytics patterns once those features ship.
+        <StudioShell onNavigate={onNavigate}>
+            <div className="mx-auto max-w-5xl space-y-8">
+                <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-br from-cyan-950/20 via-[#0c0c10] to-violet-950/30 p-6 sm:p-8">
+                    <div className="relative z-10 flex flex-wrap items-end justify-between gap-4">
+                        <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Workspace</p>
+                            <h1 className="mt-2 text-2xl font-bold text-white sm:text-3xl">Settings</h1>
+                            <p className="mt-2 max-w-xl text-sm text-gray-400">
+                                YouTube connections, defaults, and billing shortcuts — same shell as the rest of Studio v2.
                             </p>
-                        ) : null}
-                        {youtubeError ? <p className="mt-4 text-sm text-red-400">{youtubeError}</p> : null}
-                        {youtubeChannels.length > 0 ? (
-                            <div className="mt-4 grid gap-3 md:grid-cols-2">
-                                {youtubeChannels.map((channel) => (
-                                    <div key={channel.channel_id} className={`rounded-xl border p-4 ${youtubeDefaultChannelId === channel.channel_id ? 'border-cyan-400/30 bg-cyan-500/10' : 'border-white/[0.08] bg-black/20'}`}>
-                                        <p className="text-sm font-semibold text-white">{channel.title}</p>
-                                        {channel.channel_handle ? <p className="mt-1 text-xs text-cyan-200">{channel.channel_handle}</p> : null}
-                                        {channel.analytics_snapshot?.channel_summary ? <p className="mt-2 text-xs text-gray-400">{channel.analytics_snapshot.channel_summary}</p> : null}
-                                        {youtubeDefaultChannelId === channel.channel_id ? <p className="mt-3 text-[11px] uppercase tracking-[0.18em] text-cyan-300">Default channel for Catalyst</p> : null}
-                                    </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <p className="mt-4 text-sm text-gray-400">No YouTube channels connected yet.</p>
-                        )}
-                    </section>
-
-                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                        <div className="flex items-center gap-3">
-                            <Globe2 className="w-5 h-5 text-cyan-300" />
-                            <h2 className="text-lg font-semibold text-white">Language + Regional Defaults</h2>
                         </div>
-                        <p className="mt-3 text-sm text-gray-400">
-                            English is the current default UI language. Multi-language narration and region presets will expand here as the dashboard overhaul continues.
-                        </p>
-                    </section>
+                        <button
+                            type="button"
+                            onClick={() => onNavigate('dashboard')}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                        >
+                            <ArrowLeft className="h-4 w-4" />
+                            Back to Studio
+                        </button>
+                    </div>
+                </section>
 
-                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                        <div className="flex items-center gap-3">
-                            <SlidersHorizontal className="w-5 h-5 text-violet-300" />
-                            <h2 className="text-lg font-semibold text-white">Creation Defaults</h2>
-                        </div>
-                        <div className="mt-4 grid gap-4 md:grid-cols-2">
-                            <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
-                                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Default Quality</p>
-                                <p className="mt-2 text-sm font-semibold text-white">720p launch profile</p>
-                                <p className="mt-2 text-xs text-gray-500">Keeps render reliability high while preserving the current paid animation lane.</p>
-                            </div>
-                            <div className="rounded-xl border border-white/[0.08] bg-black/20 p-4">
-                                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Voice Providers</p>
-                                <p className="mt-2 text-sm font-semibold text-white">ElevenLabs first</p>
-                                <p className="mt-2 text-xs text-gray-500">ElevenLabs is the main live voice provider now. The custom Catalyst rack stays available as a fallback and for tuned house voices.</p>
-                            </div>
-                        </div>
-                    </section>
-
-                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                        <div className="flex items-center gap-3">
-                            <Bell className="w-5 h-5 text-amber-300" />
-                            <h2 className="text-lg font-semibold text-white">Notifications</h2>
-                        </div>
-                        <p className="mt-3 text-sm text-gray-400">
-                            Notification controls are being moved into this page as part of the new dashboard architecture. The shell is live now; deeper controls come next.
-                        </p>
-                    </section>
-
-                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                        <div className="flex items-center justify-between gap-4">
-                            <div className="flex items-center gap-3">
-                                <WalletCards className="w-5 h-5 text-emerald-300" />
-                                <div>
-                                    <h2 className="text-lg font-semibold text-white">Billing</h2>
-                                    <p className="mt-1 text-sm text-gray-400">Open the dedicated billing surface for Free, the three monthly plans, and the top-up packs.</p>
-                                </div>
-                            </div>
-                            <button type="button" onClick={() => { window.location.href = `${BILLING_SITE_URL}?view=checkout`; }} className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500">
-                                Open Billing
+                <SettingsBlock
+                    icon={Youtube}
+                    iconClass="text-red-300"
+                    title="YouTube channels"
+                    description="Connect channels so Catalyst can learn from private title, thumbnail, and analytics patterns."
+                    actions={
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => void loadYouTubeChannels()}
+                                disabled={youtubeLoading}
+                                className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.06] disabled:opacity-60"
+                            >
+                                {youtubeLoading ? 'Refreshing…' : 'Refresh'}
                             </button>
+                            <button
+                                type="button"
+                                onClick={startYouTubeConnect}
+                                disabled={youtubeConnecting}
+                                className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60"
+                            >
+                                {youtubeConnecting ? 'Opening Google…' : 'Connect YouTube'}
+                            </button>
+                        </>
+                    }
+                >
+                    {!longformOwnerBeta && (
+                        <p className="text-xs text-amber-300/90">
+                            Deep Catalyst analysis is owner beta — you can still connect now for when it ships.
+                        </p>
+                    )}
+                    {youtubeError && <p className="text-sm text-red-400">{youtubeError}</p>}
+                    {youtubeChannels.length > 0 ? (
+                        <div className="grid gap-3 md:grid-cols-2">
+                            {youtubeChannels.map((channel) => (
+                                <div
+                                    key={channel.channel_id}
+                                    className={`rounded-xl border p-4 ${
+                                        youtubeDefaultChannelId === channel.channel_id
+                                            ? 'border-cyan-400/30 bg-cyan-500/10'
+                                            : 'border-white/[0.08] bg-black/20'
+                                    }`}
+                                >
+                                    <p className="text-sm font-semibold text-white">{channel.title}</p>
+                                    {channel.channel_handle && (
+                                        <p className="mt-1 text-xs text-cyan-200">{channel.channel_handle}</p>
+                                    )}
+                                    {channel.analytics_snapshot?.channel_summary && (
+                                        <p className="mt-2 text-xs text-gray-400">{channel.analytics_snapshot.channel_summary}</p>
+                                    )}
+                                    {youtubeDefaultChannelId === channel.channel_id && (
+                                        <p className="mt-3 text-[11px] uppercase tracking-[0.18em] text-cyan-300">Default for Catalyst</p>
+                                    )}
+                                </div>
+                            ))}
                         </div>
-                        {isAdmin && <p className="mt-4 text-xs text-emerald-300">Admin preview account detected. Settings architecture is live without changing owner overrides.</p>}
-                    </section>
+                    ) : (
+                        <p className="text-sm text-gray-500">No YouTube channels connected yet.</p>
+                    )}
+                </SettingsBlock>
 
-                    {isAdmin && <AdminRefundPanel />}
+                <div className="grid gap-6 md:grid-cols-2">
+                    <SettingsBlock
+                        icon={Globe2}
+                        iconClass="text-cyan-300"
+                        title="Language"
+                        description="English is the default UI language. Multi-language narration expands here."
+                    />
+                    <SettingsBlock
+                        icon={SlidersHorizontal}
+                        iconClass="text-violet-300"
+                        title="Creation defaults"
+                        description="720p launch profile · ElevenLabs voice · Generate-first quick run."
+                    />
                 </div>
+
+                <SettingsBlock
+                    icon={Bell}
+                    iconClass="text-amber-300"
+                    title="Notifications"
+                    description="Render complete, upload outcomes, and billing alerts — deeper controls coming soon."
+                />
+
+                <SettingsBlock
+                    icon={WalletCards}
+                    iconClass="text-emerald-300"
+                    title="Billing"
+                    description="Monthly plans and wallet top-ups live on the billing page."
+                    actions={
+                        <button
+                            type="button"
+                            onClick={() => { window.location.href = `${BILLING_SITE_URL}?view=checkout`; }}
+                            className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
+                        >
+                            Open Billing
+                        </button>
+                    }
+                />
+
+                {isAdmin && <AdminRefundPanel />}
             </div>
-        </>
+        </StudioShell>
+    );
+}
+
+function SettingsBlock({
+    icon: Icon,
+    iconClass,
+    title,
+    description,
+    actions,
+    children,
+}: {
+    icon: typeof Youtube;
+    iconClass: string;
+    title: string;
+    description: string;
+    actions?: React.ReactNode;
+    children?: React.ReactNode;
+}) {
+    return (
+        <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="flex gap-3">
+                    <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-black/30 ${iconClass}`}>
+                        <Icon className="h-4 w-4" />
+                    </div>
+                    <div>
+                        <h2 className="text-base font-semibold text-white">{title}</h2>
+                        <p className="mt-1 text-sm text-gray-500">{description}</p>
+                    </div>
+                </div>
+                {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
+            </div>
+            {children && <div className="mt-4 space-y-3">{children}</div>}
+        </section>
     );
 }
 
@@ -183,8 +234,8 @@ function AdminRefundPanel() {
     const [reason, setReason] = useState('');
     const [source, setSource] = useState<'auto' | 'topup' | 'monthly'>('auto');
     const [busy, setBusy] = useState(false);
-    const [result, setResult] = useState<string>('');
-    const [errorMsg, setErrorMsg] = useState<string>('');
+    const [result, setResult] = useState('');
+    const [errorMsg, setErrorMsg] = useState('');
 
     const submit = async () => {
         if (!session) return;
@@ -202,7 +253,7 @@ function AdminRefundPanel() {
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(String((data as any)?.detail || `Refund failed (${res.status})`));
-            setResult(`Refunded ${(data as any)?.credits || credits} AC to ${(data as any)?.email || email} via ${(data as any)?.source || source}.`);
+            setResult(`Refunded ${(data as any)?.credits || credits} AC to ${(data as any)?.email || email}.`);
             setCredits('');
             setReason('');
         } catch (e: any) {
@@ -214,71 +265,64 @@ function AdminRefundPanel() {
 
     return (
         <section className="rounded-2xl border border-rose-500/20 bg-rose-500/[0.04] p-6">
-            <div className="flex items-center gap-3">
-                <WalletCards className="w-5 h-5 text-rose-300" />
-                <div>
-                    <h2 className="text-lg font-semibold text-white">Admin · Issue Refund</h2>
-                    <p className="mt-1 text-sm text-gray-400">Credit AC back to a user's wallet. Use for chargeback resolution or support refunds. Logged + Discord-alerted.</p>
-                </div>
-            </div>
+            <h2 className="text-base font-semibold text-white">Admin · issue refund</h2>
+            <p className="mt-1 text-sm text-gray-500">Credit AC back to a user wallet. Logged and Discord-alerted.</p>
             <div className="mt-5 grid gap-3 md:grid-cols-2">
+                <Field label="User email" type="email" value={email} onChange={setEmail} placeholder="user@example.com" />
+                <Field label="Credits to refund" type="number" value={credits} onChange={setCredits} placeholder="40" />
                 <div>
-                    <label className="text-xs uppercase tracking-wider text-gray-400">User Email</label>
-                    <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="user@example.com"
-                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
-                    />
-                </div>
-                <div>
-                    <label className="text-xs uppercase tracking-wider text-gray-400">Credits to Refund</label>
-                    <input
-                        type="number"
-                        min={1}
-                        max={10000}
-                        value={credits}
-                        onChange={(e) => setCredits(e.target.value)}
-                        placeholder="e.g. 40"
-                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
-                    />
-                </div>
-                <div>
-                    <label className="text-xs uppercase tracking-wider text-gray-400">Source</label>
+                    <label className="text-xs uppercase tracking-wider text-gray-500">Source</label>
                     <select
                         value={source}
                         onChange={(e) => setSource(e.target.value as 'auto' | 'topup' | 'monthly')}
                         className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white"
                     >
-                        <option value="auto">Auto (recommended — refunds to top-up wallet)</option>
+                        <option value="auto">Auto (top-up wallet)</option>
                         <option value="topup">Top-up wallet</option>
-                        <option value="monthly">Monthly included credits</option>
+                        <option value="monthly">Monthly included</option>
                     </select>
                 </div>
-                <div>
-                    <label className="text-xs uppercase tracking-wider text-gray-400">Reason (optional)</label>
-                    <input
-                        type="text"
-                        value={reason}
-                        onChange={(e) => setReason(e.target.value)}
-                        placeholder="e.g. broken render, content-filter false-flag, support credit"
-                        className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
-                    />
-                </div>
+                <Field label="Reason (logs)" type="text" value={reason} onChange={setReason} placeholder="Support credit" />
             </div>
-            <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+            <div className="mt-5 flex flex-wrap items-center gap-3">
                 <button
                     type="button"
                     onClick={() => void submit()}
                     disabled={busy || !email.trim() || !credits || Number(credits) <= 0}
                     className="rounded-xl bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-40"
                 >
-                    {busy ? 'Issuing refund…' : 'Issue Refund'}
+                    {busy ? 'Issuing…' : 'Issue refund'}
                 </button>
                 {result && <p className="text-sm text-emerald-300">{result}</p>}
                 {errorMsg && <p className="text-sm text-rose-300">{errorMsg}</p>}
             </div>
         </section>
+    );
+}
+
+function Field({
+    label,
+    type,
+    value,
+    onChange,
+    placeholder,
+}: {
+    label: string;
+    type: string;
+    value: string;
+    onChange: (v: string) => void;
+    placeholder?: string;
+}) {
+    return (
+        <div>
+            <label className="text-xs uppercase tracking-wider text-gray-500">{label}</label>
+            <input
+                type={type}
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                placeholder={placeholder}
+                className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-600"
+            />
+        </div>
     );
 }

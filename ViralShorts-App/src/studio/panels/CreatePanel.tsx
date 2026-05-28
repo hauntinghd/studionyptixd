@@ -24,6 +24,8 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
 import { AuthContext } from '../shared';
+import NichePickerStrip from '../components/create/NichePickerStrip';
+import type { NicheId } from '../lib/studioProduct';
 
 type Tab = 'script' | 'scenes' | 'audio';
 type IdeaCategory = 'classical_clash' | 'medieval_clash' | 'gunpowder_clash' | 'wildcard_clash';
@@ -74,20 +76,25 @@ const IMAGE_MODELS: ImageModelOption[] = [
 ];
 
 interface CreatePanelProps {
-    initialTemplate?: string;
+    nicheId: string;
     categoryKey?: string;
     renderTier?: 'draft' | 'ship' | 'documentary';
     nicheTitle?: string;
+    onNicheChange?: (id: NicheId) => void;
+    isOwner?: boolean;
 }
 
 export default function CreatePanel({
-    initialTemplate = 'alt_battles',
-    categoryKey = 'classical_clash',
+    nicheId,
+    categoryKey: categoryKeyProp = 'classical_clash',
     renderTier = 'draft',
     nicheTitle,
+    onNicheChange,
+    isOwner,
 }: CreatePanelProps) {
     const { session } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
+    const activeCategory = categoryKeyProp as IdeaCategory;
 
     const [tab, setTab] = useState<Tab>('script');
     const [script, setScript] = useState('');
@@ -164,7 +171,7 @@ export default function CreatePanel({
                     Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({ script, image_model: imageModel, category: categoryKey }),
+                body: JSON.stringify({ script, image_model: imageModel, category: activeCategory }),
                 signal: controller.signal,
             });
             if (!r.ok || !r.body) {
@@ -220,7 +227,7 @@ export default function CreatePanel({
             setScenesGenerating(false);
             scenesAbortRef.current = null;
         }
-    }, [script, imageModel, accessToken]);
+    }, [script, imageModel, accessToken, activeCategory]);
 
     const stopGenerateScenes = useCallback(() => {
         scenesAbortRef.current?.abort();
@@ -245,7 +252,7 @@ export default function CreatePanel({
                     Authorization: `Bearer ${accessToken}`,
                 },
                 body: JSON.stringify({
-                    category: categoryKey,
+                    category: activeCategory,
                     script_override: script,
                     render_tier: renderTier,
                     image_model: imageModel,
@@ -285,20 +292,30 @@ export default function CreatePanel({
         } finally {
             setGenerating(false);
         }
-    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken, categoryKey, renderTier]);
+    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken, activeCategory, renderTier]);
+
+    const tierLabel = renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration';
+    const scriptHeading = nicheTitle ? `${nicheTitle} script` : 'Narration script';
 
     return (
-        <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
-            <header className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                    <h1 className="text-2xl font-bold text-white">{nicheTitle || 'Short Builder'}</h1>
-                    <p className="mt-1 text-xs text-zinc-400">
-                        {renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration'}
-                        {' · '}{initialTemplate.replace(/_/g, ' ')}
-                    </p>
-                </div>
-                <div className="text-xs text-zinc-400">
-                    Standard = 5 AC · Premium = 7 AC
+        <div className="flex flex-col gap-6 py-2 max-w-5xl mx-auto">
+            <header className="space-y-4">
+                {onNicheChange && (
+                    <NichePickerStrip
+                        value={nicheId as NicheId}
+                        onChange={onNicheChange}
+                        isOwner={isOwner}
+                        compact
+                    />
+                )}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h1 className="text-2xl font-bold text-white">{nicheTitle || 'Short Builder'}</h1>
+                        <p className="mt-1 text-xs text-zinc-400">{tierLabel}</p>
+                    </div>
+                    <div className="text-xs text-zinc-400">
+                        Standard = 5 AC · Premium = 7 AC
+                    </div>
                 </div>
             </header>
 
@@ -311,6 +328,7 @@ export default function CreatePanel({
                     streaming={scriptStreaming}
                     charCount={scriptCharCount}
                     duration={estimatedDuration}
+                    heading={scriptHeading}
                     onOpenIdeaModal={() => setIdeaModalOpen(true)}
                 />
             )}
@@ -362,7 +380,8 @@ export default function CreatePanel({
             {ideaModalOpen && (
                 <IdeaModal
                     accessToken={accessToken}
-                    initialCategory={(categoryKey as IdeaCategory) || 'classical_clash'}
+                    initialCategory={activeCategory}
+                    nicheTitle={nicheTitle}
                     onClose={() => setIdeaModalOpen(false)}
                     onScript={(text) => {
                         setScript(text);
@@ -408,19 +427,20 @@ function TabRow({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 }
 
 function ScriptTab({
-    script, setScript, streaming, charCount, duration, onOpenIdeaModal,
+    script, setScript, streaming, charCount, duration, heading, onOpenIdeaModal,
 }: {
     script: string;
     setScript: (s: string) => void;
     streaming: boolean;
     charCount: number;
     duration: number;
+    heading: string;
     onOpenIdeaModal: () => void;
 }) {
     return (
         <section className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">Alt-History Battles Script</h2>
+                <h2 className="text-lg font-semibold text-white">{heading}</h2>
             </div>
             <div className="flex items-center justify-between">
                 <label className="text-sm text-zinc-300">Narration Script</label>
@@ -440,7 +460,7 @@ function ScriptTab({
             <textarea
                 value={script}
                 onChange={(e) => setScript(e.target.value)}
-                placeholder="Enter your battle narration script..."
+                placeholder="Enter your narration script..."
                 rows={14}
                 className="w-full rounded-md bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 resize-y"
             />
@@ -875,10 +895,11 @@ function RangeRow({
 }
 
 function IdeaModal({
-    accessToken, initialCategory, onClose, onScript, onStreamStart, onStreamEnd,
+    accessToken, initialCategory, nicheTitle, onClose, onScript, onStreamStart, onStreamEnd,
 }: {
     accessToken: string;
     initialCategory?: IdeaCategory;
+    nicheTitle?: string;
     onClose: () => void;
     onScript: (s: string) => void;
     onStreamStart: () => void;
@@ -949,7 +970,7 @@ function IdeaModal({
                 <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-bold text-white flex items-center gap-2">
                         <Sparkles className="h-5 w-5 text-violet-400" />
-                        Generate Battle Script with AI
+                        Generate script with AI{nicheTitle ? ` · ${nicheTitle}` : ''}
                     </h3>
                     <button onClick={onClose} className="text-zinc-400 hover:text-white">
                         <X className="h-5 w-5" />

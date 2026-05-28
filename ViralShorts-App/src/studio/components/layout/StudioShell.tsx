@@ -6,17 +6,24 @@ export default function StudioShell({
     onNavigate,
     sidebar,
     children,
+    fullWidth,
 }: {
     onNavigate: PageNav;
-    sidebar: ReactNode;
+    sidebar?: ReactNode;
     children: ReactNode;
+    /** When true, content spans full width (e.g. builder without sidebar). */
+    fullWidth?: boolean;
 }) {
     return (
         <div className="flex min-h-screen flex-col bg-[#09090b] text-gray-100">
             <StudioTopBar onNavigate={onNavigate} />
             <div className="flex min-h-0 flex-1">
                 {sidebar}
-                <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+                <main
+                    className={`min-w-0 flex-1 overflow-x-hidden overflow-y-auto py-5 ${
+                        fullWidth ? 'px-4 sm:px-6' : 'px-4 sm:px-6 lg:px-8'
+                    }`}
+                >
                     {children}
                 </main>
             </div>
