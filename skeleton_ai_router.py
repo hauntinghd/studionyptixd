@@ -114,11 +114,13 @@ class ScriptRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    category: str = Field(default="human_limits")
+    category: str = Field(default="classical_clash")
     topic: str | None = None
     tier: str = Field(default="standard")  # "standard" | "premium"
     voice_id: str | None = None
-    script_override: str | None = None  # if user edited the script in the textarea
+    script_override: str | None = None
+    script: str | None = None  # frontend alias
+    render_tier: str = Field(default="draft")  # draft | ship | documentary
 
 
 class PlanRequest(BaseModel):
@@ -414,6 +416,9 @@ def build_skeleton_ai_router(
     async def generate(body: GenerateRequest, user: dict = auth_dep):
         if body.tier not in ("standard", "premium"):
             raise HTTPException(400, "tier must be standard or premium")
+        if body.render_tier == "ship" and body.tier != "premium":
+            body = body.model_copy(update={"tier": "premium"})
+        script_text = (body.script_override or body.script or "").strip() or None
 
         ac_required = AC_COST_PREMIUM if body.tier == "premium" else AC_COST_STANDARD
 
@@ -448,6 +453,7 @@ def build_skeleton_ai_router(
                 workspace=workspace,
                 tier=body.tier,
                 voice_id=body.voice_id,
+                script_override=script_text,
             )
         except (GrokAuthError, ElevenLabsAuthError) as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)

@@ -260,6 +260,7 @@ def run(
     grok: GrokClient | None = None,
     el: ElevenLabsClient | None = None,
     voice_id: str | None = None,
+    script_override: str | None = None,
 ) -> dict:
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
@@ -274,10 +275,13 @@ def run(
     grok = grok or GrokClient()
     el = el or ElevenLabsClient()
 
-    # 1. Generate the script.
+    # 1. Generate the script (or use user-edited override from Create panel).
     cat = get_category(category_key)
-    user_prompt = build_script_prompt(cat["system_prompt"], topic)
-    script_text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
+    if script_override and script_override.strip():
+        script_text = script_override.strip()
+    else:
+        user_prompt = build_script_prompt(cat["system_prompt"], topic)
+        script_text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
     (workspace / "script.txt").write_text(script_text, encoding="utf-8")
 
     # 2. Pre-pass: analyze the full script to lock a canonical character +

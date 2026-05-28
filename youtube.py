@@ -1165,7 +1165,17 @@ async def _google_refresh_access_token(refresh_token: str, oauth_mode: str | Non
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
     if resp.status_code != 200:
-        raise RuntimeError(_format_google_oauth_failure("token refresh", resp.status_code, resp.text, oauth_mode))
+        detail = _format_google_oauth_failure("token refresh", resp.status_code, resp.text, oauth_mode)
+        if _google_oauth_error_suggests_reconnect_required(detail):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "youtube_reconnect_required",
+                    "message": "YouTube authorization expired. Reconnect this channel in Settings.",
+                    "raw": detail[:320],
+                },
+            )
+        raise RuntimeError(detail)
     payload = resp.json()
     if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
         raise RuntimeError("Google token refresh returned no access token")

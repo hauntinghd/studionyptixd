@@ -75,9 +75,17 @@ const IMAGE_MODELS: ImageModelOption[] = [
 
 interface CreatePanelProps {
     initialTemplate?: string;
+    categoryKey?: string;
+    renderTier?: 'draft' | 'ship' | 'documentary';
+    nicheTitle?: string;
 }
 
-export default function CreatePanel(_props: CreatePanelProps) {
+export default function CreatePanel({
+    initialTemplate = 'alt_battles',
+    categoryKey = 'classical_clash',
+    renderTier = 'draft',
+    nicheTitle,
+}: CreatePanelProps) {
     const { session } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
 
@@ -92,7 +100,11 @@ export default function CreatePanel(_props: CreatePanelProps) {
     const [voiceLang, setVoiceLang] = useState('auto');
     const [captionFont, setCaptionFont] = useState('Komika Axis');
     const [voices, setVoices] = useState<Voice[]>([]);
-    const [tier, setTier] = useState<Tier>('standard');
+    const [tier, setTier] = useState<Tier>(renderTier === 'ship' ? 'premium' : 'standard');
+
+    useEffect(() => {
+        setTier(renderTier === 'ship' ? 'premium' : 'standard');
+    }, [renderTier]);
     const [generating, setGenerating] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
 
@@ -152,7 +164,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({ script, image_model: imageModel }),
+                body: JSON.stringify({ script, image_model: imageModel, category: categoryKey }),
                 signal: controller.signal,
             });
             if (!r.ok || !r.body) {
@@ -233,7 +245,9 @@ export default function CreatePanel(_props: CreatePanelProps) {
                     Authorization: `Bearer ${accessToken}`,
                 },
                 body: JSON.stringify({
-                    script,
+                    category: categoryKey,
+                    script_override: script,
+                    render_tier: renderTier,
                     image_model: imageModel,
                     voice_id: voiceId,
                     voice_speed: voiceSpeed,
@@ -271,14 +285,20 @@ export default function CreatePanel(_props: CreatePanelProps) {
         } finally {
             setGenerating(false);
         }
-    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken]);
+    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken, categoryKey, renderTier]);
 
     return (
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
-            <header className="flex items-center justify-between">
-                <h1 className="text-2xl font-bold text-white">Alt-History Battles</h1>
+            <header className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h1 className="text-2xl font-bold text-white">{nicheTitle || 'Short Builder'}</h1>
+                    <p className="mt-1 text-xs text-zinc-400">
+                        {renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration'}
+                        {' · '}{initialTemplate.replace(/_/g, ' ')}
+                    </p>
+                </div>
                 <div className="text-xs text-zinc-400">
-                    Standard short = 5 AC · Premium short = 7 AC
+                    Standard = 5 AC · Premium = 7 AC
                 </div>
             </header>
 
@@ -342,6 +362,7 @@ export default function CreatePanel(_props: CreatePanelProps) {
             {ideaModalOpen && (
                 <IdeaModal
                     accessToken={accessToken}
+                    initialCategory={(categoryKey as IdeaCategory) || 'classical_clash'}
                     onClose={() => setIdeaModalOpen(false)}
                     onScript={(text) => {
                         setScript(text);
@@ -854,9 +875,10 @@ function RangeRow({
 }
 
 function IdeaModal({
-    accessToken, onClose, onScript, onStreamStart, onStreamEnd,
+    accessToken, initialCategory, onClose, onScript, onStreamStart, onStreamEnd,
 }: {
     accessToken: string;
+    initialCategory?: IdeaCategory;
     onClose: () => void;
     onScript: (s: string) => void;
     onStreamStart: () => void;
@@ -864,7 +886,7 @@ function IdeaModal({
 }) {
     const [modalTab, setModalTab] = useState<'idea_list' | 'custom_topic' | 'remix'>('idea_list');
     const [categories, setCategories] = useState<CategoryInfo[]>([]);
-    const [selectedCat, setSelectedCat] = useState<IdeaCategory>('classical_clash');
+    const [selectedCat, setSelectedCat] = useState<IdeaCategory>(initialCategory || 'classical_clash');
     const [customTopic, setCustomTopic] = useState('');
     const [remixUrl, setRemixUrl] = useState('');
     const [remixPlatform, setRemixPlatform] = useState<'youtube' | 'facebook' | 'tiktok' | 'instagram'>('youtube');

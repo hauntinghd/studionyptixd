@@ -74,6 +74,11 @@ except Exception:
         return ""
 
 
+class RegenerateSceneRequest(BaseModel):
+    scene_idx: int
+    new_prompt: str | None = None
+
+
 def _references_for_channel(user: dict, channel_key: str) -> str:
     """Pull user's saved refs whose channel_key matches the requested
     channel OR is universal (''). Returns a Grok-ready text block."""
@@ -536,10 +541,6 @@ def build_long_form_router(
     # ─────────────────────────────────────────────────────────────────────
     # PR #127: per-scene approval gate endpoints
     # ─────────────────────────────────────────────────────────────────────
-
-    class RegenerateSceneRequest(BaseModel):
-        scene_idx: int
-        new_prompt: str | None = None
 
     @router.post("/jobs/{job_id}/regenerate-scene")
     async def job_regenerate_scene_route(

@@ -1,6 +1,10 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, WalletCards } from 'lucide-react';
-import NavBar, { type PageNav } from '../components/NavBar';
+import { ArrowLeft, CheckCircle2 } from 'lucide-react';
+import BillingPremiumView from '../components/billing/BillingPremiumView';
+import StudioShell from '../components/layout/StudioShell';
+import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
+import { estimateShortsRemaining } from '../lib/studioProduct';
+import { type PageNav } from '../components/NavBar';
 import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
 
@@ -21,12 +25,10 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         manageBilling,
         verifyPayPalOrder,
         topupPacks,
-        topupCreditsRemaining,
-        monthlyCreditsRemaining,
         creditsTotalRemaining,
         publicPlanLimits,
         publicPlanPrices,
-        requiresTopup,
+        role,
     } = useContext(AuthContext);
     const [locationState, setLocationState] = useState(() => ({
         search: typeof window === 'undefined' ? '' : window.location.search,
@@ -40,7 +42,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const requestedPlanId = String(params.get('plan') || '').trim().toLowerCase();
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
-    const subscriptionError = String(params.get('error') || '').trim();
     const paypalProvider = String(params.get('provider') || '').trim().toLowerCase() === 'paypal';
     const paypalOrderId = String(params.get('order_id') || '').trim();
     const [paypalVerifyState, setPaypalVerifyState] = useState<'idle' | 'verifying' | 'verified' | 'failed' | 'revoked'>('idle');
@@ -246,224 +247,90 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         }
     }, [checkoutTopup, onNavigate, selectedPack, session]);
 
-    return (
+    const isAdmin = role === 'admin';
+    const totalAc = Number(creditsTotalRemaining || 0);
+    const shortsEstimate = estimateShortsRemaining(totalAc);
+
+    const paypalBanner = (
         <>
-            <NavBar onNavigate={onNavigate} active="billing" />
-            <div className="mx-auto max-w-7xl px-6 pt-24 pb-12">
-                <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                        <div className="flex items-center gap-2 text-cyan-300 text-sm font-semibold uppercase tracking-[0.18em]">
-                            <WalletCards className="h-4 w-4" />
-                            Billing
-                        </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white">One price. Every short ships.</h1>
-                        <p className="mt-2 max-w-3xl text-sm text-gray-400">
-                            Start free with two animated shorts. Upgrade when you're ready to post every day — no babysitting the renderer, no mystery errors, and any failed render refunds your credits automatically.
-                        </p>
-                    </div>
-                    <div className="flex flex-wrap gap-3">
-                        <button
-                            type="button"
-                            onClick={handleBack}
-                            className="inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
-                        >
-                            <ArrowLeft className="h-4 w-4" />
-                            Back
-                        </button>
-                    </div>
+            {topupResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                    Credit wallet payment received. Your balance is refreshing now.
                 </div>
-
-                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr),minmax(320px,0.75fr)]">
-                    <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                        <div className="mb-5">
-                            <p className="text-xs uppercase tracking-[0.18em] text-violet-300">Plans</p>
-                            <h2 className="mt-2 text-2xl font-bold text-white">Pick the plan that matches your posting cadence</h2>
-                            <p className="mt-2 text-sm text-gray-400">
-                                Every render goes through the same reliability stack: content-filter errors surface with edit-prompt guidance, and failed renders automatically refund your credits. Pick the plan based on how many shorts you want to ship this month.
-                            </p>
-                        </div>
-                        <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-                            {publicPlans.map((planCard) => {
-                                const isCurrent = normalizedCurrentPlan === planCard.id;
-                                const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
-                                const actionLabel = planCard.id === 'free'
-                                    ? (session ? (isCurrent && !billingActive ? 'Current plan' : 'Included with account') : 'Sign in to start')
-                                    : isPaidCurrent
-                                        ? (usesStripeMembership ? 'Manage plan' : 'Extend plan')
-                                        : billingActive
-                                            ? `Switch to ${planCard.title}`
-                                            : `Start ${planCard.title}`;
-                                return (
-                                    <div
-                                        key={planCard.id}
-                                        className={`rounded-3xl border p-5 ${
-                                            isCurrent
-                                                ? 'border-violet-500/40 bg-violet-500/[0.08]'
-                                                : 'border-white/[0.08] bg-black/20'
-                                        }`}
-                                    >
-                                        <div className="flex items-start justify-between gap-3">
-                                            <div>
-                                                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">{planCard.id === 'free' ? 'Free plan' : 'Monthly plan'}</p>
-                                                <h3 className="mt-2 text-xl font-bold text-white">{planCard.title}</h3>
-                                            </div>
-                                            {isCurrent && (
-                                                <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-200">
-                                                    Current
-                                                </span>
-                                            )}
-                                        </div>
-                                        <p className="mt-4 text-3xl font-bold text-white">{planCard.priceLabel}</p>
-                                        <p className="mt-3 text-sm text-gray-300">{planCard.description}</p>
-                                        <div className="mt-5 space-y-3">
-                                            {planCard.features.map((feature) => (
-                                                <div key={feature} className="flex items-start gap-2 text-sm text-gray-300">
-                                                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
-                                                    <span>{feature}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => void handlePlanAction(planCard.id)}
-                                            disabled={planLoadingId === planCard.id || (planCard.id === 'free' && !!session && isCurrent && !billingActive)}
-                                            className={`mt-6 w-full rounded-xl px-4 py-3 text-sm font-semibold transition ${
-                                                isCurrent
-                                                    ? 'bg-white/[0.08] text-white hover:bg-white/[0.14]'
-                                                    : 'bg-violet-600 text-white hover:bg-violet-500'
-                                            } disabled:opacity-60`}
-                                        >
-                                            {planLoadingId === planCard.id ? 'Opening...' : actionLabel}
-                                        </button>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </section>
-
-                    <aside className="space-y-6">
-                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">Balance Overview</h2>
-                            <div className="mt-4 grid gap-3">
-                                <BalanceCard label="Credit Wallet" value={Number(topupCreditsRemaining || 0)} accent="cyan" helper="Pay-as-you-go balance" />
-                                <BalanceCard label="Included Credits" value={Number(monthlyCreditsRemaining || 0)} accent="violet" helper="Monthly plan or free-plan included credits" />
-                                <BalanceCard label="Total Available" value={Number(creditsTotalRemaining || 0)} accent="emerald" helper={requiresTopup ? 'Top up before the next animation-heavy run' : 'Ready for Catalyst jobs'} />
-                            </div>
-                        </section>
-
-                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">Selected Credit Pack</h2>
-                            {selectedPack ? (
-                                <>
-                                    <div className="mt-4 rounded-2xl border border-white/[0.08] bg-black/20 p-4">
-                                        <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Pack</p>
-                                        <p className="mt-2 text-lg font-semibold text-white">{String(selectedPack.pack || '').toUpperCase()} Pack</p>
-                                        <div className="mt-4 flex items-center justify-between text-sm">
-                                            <span className="text-gray-400">Credits</span>
-                                            <span className="font-semibold text-cyan-300">{selectedPack.credits}</span>
-                                        </div>
-                                        <div className="mt-2 flex items-center justify-between text-sm">
-                                            <span className="text-gray-400">Price</span>
-                                            <span className="font-semibold text-white">${Number(selectedPack.price_usd || 0).toFixed(2)}</span>
-                                        </div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => void handlePackCheckout()}
-                                        className="mt-5 w-full rounded-xl bg-cyan-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-cyan-500"
-                                    >
-                                        {packCheckoutLoadingId === selectedPack.price_id ? 'Opening PayPal...' : 'Buy Credits with PayPal'}
-                                    </button>
-                                </>
-                            ) : (
-                                <p className="mt-4 text-sm text-gray-400">Select a top-up pack below.</p>
-                            )}
-                        </section>
-                        <section className="rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6">
-                            <h2 className="text-lg font-semibold text-white">What plans actually unlock</h2>
-                            <div className="mt-4 space-y-3 text-sm text-gray-300">
-                                <p>1. Free and paid plans are for short-form only.</p>
-                                <p>2. Paid monthly plans add more included credits and unlock Chat Story.</p>
-                                <p>3. Clone, Thumbnails, and Long Form stay outside the public plan promise while they are still in beta.</p>
-                                <p>4. Wallet packs stack on top for heavier animation usage.</p>
-                            </div>
-                        </section>
-                    </aside>
+            )}
+            {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                    Your monthly plan is active. Included credits burn before wallet fuel.
                 </div>
-
-                <section
-                    id="topup-packs"
-                    ref={topupSectionRef}
-                    className="mt-8 scroll-mt-28 rounded-3xl border border-white/[0.06] bg-white/[0.02] p-6"
-                >
-                    <div className="mb-5">
-                        <h2 className="text-lg font-semibold text-white">Top-up packs</h2>
-                        <p className="mt-1 text-sm text-gray-400">
-                            Pay-as-you-go credits for bursty weeks. Stack on any plan — your monthly credits burn first, then top-up credits kick in.
-                        </p>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        {sortedPacks.map((pack) => {
-                            const active = pack.price_id === selectedPackId;
-                            return (
-                                <button
-                                    key={pack.price_id}
-                                    type="button"
-                                    onClick={() => setSelectedPackId(pack.price_id)}
-                                    className={`rounded-2xl border p-4 text-left transition ${
-                                        active
-                                            ? 'border-cyan-500 bg-cyan-500/10'
-                                            : 'border-white/[0.08] bg-black/20 hover:border-cyan-500/30'
-                                    }`}
-                                >
-                                    <p className="text-sm font-semibold text-white">{String(pack.pack || '').toUpperCase()} Pack</p>
-                                    <p className="mt-1 text-xs text-gray-500">{pack.credits} credits</p>
-                                    <p className="mt-4 text-2xl font-bold text-white">${Number(pack.price_usd || 0).toFixed(2)}</p>
-                                    <p className="mt-1 text-[11px] text-gray-500">one-time top-up</p>
-                                </button>
-                            );
-                        })}
-                    </div>
-                </section>
-
-                {checkoutError && (
-                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                        {checkoutError}
-                    </p>
-                )}
-                {topupResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
-                    <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        Credit wallet payment received. Your balance is refreshing now.
-                    </p>
-                )}
-                {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
-                    <p className="mt-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                        Your monthly plan is active. Included credits now burn before the wallet.
-                    </p>
-                )}
-                {paypalProvider && paypalVerifyState === 'verifying' && (
-                    <p className="mt-6 rounded-2xl border border-sky-500/20 bg-sky-500/10 px-5 py-4 text-sm text-sky-100">
-                        Confirming your PayPal payment with our servers…
-                    </p>
-                )}
-                {paypalProvider && paypalVerifyState === 'failed' && (
-                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                        We couldn't confirm your PayPal payment yet. {paypalVerifyError ? `Details: ${paypalVerifyError}. ` : ''}If funds were charged, they will show up within a minute — refresh this page to re-check.
-                    </p>
-                )}
-                {paypalProvider && paypalVerifyState === 'revoked' && (
-                    <p className="mt-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-5 py-4 text-sm text-rose-100">
-                        This PayPal order was refunded or reversed. Credits/access have been removed. If this is a mistake, contact support.
-                    </p>
-                )}
-                {subscriptionResult === 'cancelled' && (
-                    <p className="mt-6 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-5 py-4 text-sm text-amber-100">
-                        Monthly checkout was cancelled.{subscriptionError ? ` ${subscriptionError}` : ''}
-                    </p>
-                )}
-                <RefundRequestCard />
-            </div>
+            )}
+            {paypalProvider && paypalVerifyState === 'verifying' && (
+                <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+                    Confirming your PayPal payment…
+                </div>
+            )}
+            {paypalProvider && paypalVerifyState === 'failed' && (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                    Payment not confirmed yet. {paypalVerifyError} Refresh if you were charged.
+                </div>
+            )}
         </>
+    );
+
+    const billingBody = (
+        <>
+            {!isBillingHost && (
+                <button
+                    type="button"
+                    onClick={handleBack}
+                    className="mb-4 inline-flex items-center gap-2 text-sm text-gray-400 transition hover:text-white"
+                >
+                    <ArrowLeft className="h-4 w-4" />
+                    Back to Studio
+                </button>
+            )}
+            <BillingPremiumView
+                publicPlans={publicPlans}
+                normalizedCurrentPlan={normalizedCurrentPlan}
+                billingActive={billingActive}
+                totalAc={totalAc}
+                shortsEstimate={shortsEstimate}
+                selectedPack={selectedPack}
+                sortedPacks={sortedPacks}
+                onSelectPack={setSelectedPackId}
+                onPlanAction={(id) => void handlePlanAction(id as PublicPlanId)}
+                onPackCheckout={() => void handlePackCheckout()}
+                planLoadingId={planLoadingId}
+                packCheckoutLoadingId={packCheckoutLoadingId}
+                checkoutError={checkoutError}
+                paypalBanner={paypalBanner}
+                topUpSectionRef={topupSectionRef}
+                refundSection={<RefundRequestCard />}
+            />
+        </>
+    );
+
+    if (session) {
+        return (
+            <StudioShell
+                onNavigate={onNavigate}
+                sidebar={
+                    <StudioSidebar
+                        active="home"
+                        items={buildSidebarItems(isAdmin)}
+                        onCreate={() => onNavigate('dashboard')}
+                        onSelect={() => onNavigate('dashboard')}
+                    />
+                }
+            >
+                {billingBody}
+            </StudioShell>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-[#09090b] px-6 py-24 text-gray-100">
+            <div className="mx-auto max-w-6xl">{billingBody}</div>
+        </div>
     );
 }
 
@@ -666,29 +533,4 @@ function RefundRequestCard() {
 
 function capitalizePlan(planId: PublicPlanId) {
     return planId.charAt(0).toUpperCase() + planId.slice(1);
-}
-
-function BalanceCard({
-    label,
-    value,
-    helper,
-    accent,
-}: {
-    label: string;
-    value: number;
-    helper: string;
-    accent: 'cyan' | 'violet' | 'emerald';
-}) {
-    const accentClasses = accent === 'cyan'
-        ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
-        : accent === 'violet'
-            ? 'border-violet-500/20 bg-violet-500/10 text-violet-100'
-            : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100';
-    return (
-        <div className={`rounded-2xl border px-4 py-3 ${accentClasses}`}>
-            <p className="text-[10px] uppercase tracking-[0.18em] text-white/60">{label}</p>
-            <p className="mt-2 text-2xl font-bold text-white">{value}</p>
-            <p className="mt-1 text-xs text-white/70">{helper}</p>
-        </div>
-    );
 }
