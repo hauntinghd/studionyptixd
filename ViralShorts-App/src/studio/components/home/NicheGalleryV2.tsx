@@ -1,7 +1,8 @@
-import { Film, Link2, Palette, Zap } from 'lucide-react';
+import { Film, Link2, Palette, Wand2, Zap } from 'lucide-react';
 import { STUDIO_TOOLS, visibleNiches, type NicheId, type StudioNiche } from '../../lib/studioProduct';
 
 const TOOL_ICONS: Record<string, typeof Zap> = {
+    agent: Wand2,
     shorts: Zap,
     longform: Film,
     style: Palette,
@@ -62,14 +63,17 @@ export default function NicheGalleryV2({
 
 export function StudioToolsRow({
     onTool,
+    isAdmin = false,
 }: {
     onTool: (action: string) => void;
+    isAdmin?: boolean;
 }) {
+    const tools = STUDIO_TOOLS.filter((t) => t.action !== 'agent' || isAdmin);
     return (
         <section>
             <h2 className="mb-3 text-lg font-bold text-white">Studio tools</h2>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                {STUDIO_TOOLS.map((tool) => {
+                {tools.map((tool) => {
                     const Icon = TOOL_ICONS[tool.id] || Zap;
                     return (
                     <button
