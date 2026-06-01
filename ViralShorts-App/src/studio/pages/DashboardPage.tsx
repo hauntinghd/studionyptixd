@@ -256,6 +256,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         <StudioShell
             onNavigate={onNavigate}
             fullWidth={inBuilder || isAgentTab}
+            flush={isAgentTab}
             sidebar={
                 inBuilder || isAgentTab ? undefined : (
                     <StudioSidebar
@@ -307,7 +308,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             )}
 
             {isAgentTab && (
-                <div className="mx-auto flex h-[calc(100vh-3.75rem)] max-w-5xl flex-col px-2 sm:px-4">
+                <div className="mx-auto flex h-[calc(100dvh-3.75rem)] max-w-5xl flex-col overflow-hidden px-2 sm:px-4">
                     {panel}
                 </div>
             )}

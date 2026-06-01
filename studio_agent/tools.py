@@ -248,6 +248,27 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "get_fal_pricing",
+                "description": (
+                    "Fetch live fal.ai Platform API pricing for image/i2v/TTS endpoints. "
+                    "Use before quoting render costs. Returns USD estimates per model/endpoint."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "endpoints": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional fal endpoint ids e.g. fal-ai/flux-pro/v1.1",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "poll_render_job",
                 "description": "Poll long-form or short-form job status by job_id and kind.",
                 "parameters": {
@@ -544,6 +565,19 @@ def execute_tool(
             return {"window_days": days, "queries": queries, "videos": rows[:20], "predicted_topics": predictions}
 
         return json.dumps(_run_async(_fetch()), indent=2)
+
+    if name == "get_fal_pricing":
+        try:
+            from long_form.fal_pricing import get_pricing_snapshot, ENDPOINTS
+
+            snap = get_pricing_snapshot()
+            endpoints = args.get("endpoints")
+            if endpoints:
+                filt = {k: v for k, v in ENDPOINTS.items() if v in endpoints or k in endpoints}
+                snap = {**snap, "filtered_endpoints": filt}
+            return json.dumps(snap, indent=2)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "note": "Set FAL_AI_KEY for live fal.ai pricing."})
 
     if name == "poll_render_job":
         job_id = str(args.get("job_id") or "").strip()

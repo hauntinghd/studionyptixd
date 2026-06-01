@@ -65,13 +65,21 @@ def build_studio_agent_router(
     @router.get("/models")
     async def list_models(user: dict = Depends(_admin)):
         try:
-            models = await openrouter.list_models()
-            ids = [m.get("id") for m in models if m.get("id")]
-            recommended = [m for m in openrouter.RECOMMENDED_MODELS if m in ids]
-            extra = [i for i in ids if i in openrouter.RECOMMENDED_MODELS] or openrouter.RECOMMENDED_MODELS
-            return {"recommended": recommended or extra, "count": len(ids)}
-        except Exception as exc:
+            live = await openrouter.list_models()
+            catalog = openrouter.build_model_catalog(live)
+            ids = [m.get("id") for m in live if m.get("id")]
+            recommended = [m["id"] for m in catalog if m.get("recommended")]
+            if not recommended:
+                recommended = [m for m in openrouter.RECOMMENDED_MODELS if m in ids] or openrouter.RECOMMENDED_MODELS
             return {
+                "models": catalog,
+                "recommended": recommended,
+                "count": len(ids),
+            }
+        except Exception as exc:
+            catalog = openrouter.build_model_catalog(None)
+            return {
+                "models": catalog,
                 "recommended": openrouter.RECOMMENDED_MODELS,
                 "error": str(exc),
             }

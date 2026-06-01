@@ -23,6 +23,149 @@ RECOMMENDED_MODELS = [
     "qwen/qwen-2.5-72b-instruct",
 ]
 
+# Display metadata for Studio Agent model picker (merged with live OpenRouter pricing).
+CURATED_META: dict[str, dict[str, Any]] = {
+    "anthropic/claude-sonnet-4": {
+        "name": "Claude Sonnet 4",
+        "provider": "Anthropic",
+        "description": "Best balance of tool use, reasoning, and production planning.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+    },
+    "anthropic/claude-3.5-sonnet": {
+        "name": "Claude 3.5 Sonnet",
+        "provider": "Anthropic",
+        "description": "Reliable orchestrator with strong instruction following.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+    },
+    "openai/gpt-4o": {
+        "name": "GPT-4o",
+        "provider": "OpenAI",
+        "description": "General-purpose runner with solid tool calling.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+    },
+    "openai/gpt-4o-mini": {
+        "name": "GPT-4o Mini",
+        "provider": "OpenAI",
+        "description": "Cheaper OpenAI runner for drafts and iteration.",
+        "recommended": False,
+        "intelligence": 4,
+        "speed": 5,
+    },
+    "google/gemini-2.5-pro-preview": {
+        "name": "Gemini 2.5 Pro",
+        "provider": "Google",
+        "description": "Long context + strong multimodal reasoning.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 3,
+    },
+    "google/gemini-2.0-flash-001": {
+        "name": "Gemini 2.0 Flash",
+        "provider": "Google",
+        "description": "Fast, low-cost runner for high-volume chat loops.",
+        "recommended": True,
+        "intelligence": 4,
+        "speed": 5,
+    },
+    "meta-llama/llama-3.3-70b-instruct": {
+        "name": "Llama 3.3 70B",
+        "provider": "Meta",
+        "description": "Open-weight workhorse for tool-heavy sessions.",
+        "recommended": False,
+        "intelligence": 4,
+        "speed": 4,
+    },
+    "deepseek/deepseek-chat": {
+        "name": "DeepSeek Chat",
+        "provider": "DeepSeek",
+        "description": "Cost-efficient runner with good coding/tool use.",
+        "recommended": True,
+        "intelligence": 4,
+        "speed": 5,
+    },
+    "qwen/qwen-2.5-72b-instruct": {
+        "name": "Qwen 2.5 72B",
+        "provider": "Qwen",
+        "description": "Strong multilingual + structured output.",
+        "recommended": False,
+        "intelligence": 4,
+        "speed": 4,
+    },
+}
+
+
+def _provider_from_id(model_id: str) -> str:
+    slug = model_id.split("/")[0] if "/" in model_id else model_id
+    return slug.replace("-", " ").title()
+
+
+def _price_per_mtok(raw: Any) -> float | None:
+    try:
+        if raw is None:
+            return None
+        per_token = float(raw)
+        return round(per_token * 1_000_000, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Merge curated display metadata with live OpenRouter model list + pricing."""
+    live_by_id: dict[str, dict[str, Any]] = {}
+    for item in live or []:
+        mid = str(item.get("id") or "")
+        if mid:
+            live_by_id[mid] = item
+
+    catalog: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for mid in RECOMMENDED_MODELS:
+        seen.add(mid)
+        meta = CURATED_META.get(mid, {})
+        live_row = live_by_id.get(mid, {})
+        pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
+        catalog.append({
+            "id": mid,
+            "name": meta.get("name") or live_row.get("name") or mid.split("/")[-1],
+            "provider": meta.get("provider") or _provider_from_id(mid),
+            "description": meta.get("description") or live_row.get("description") or "",
+            "context_length": live_row.get("context_length"),
+            "prompt_price_per_m": _price_per_mtok(pricing.get("prompt")),
+            "completion_price_per_m": _price_per_mtok(pricing.get("completion")),
+            "recommended": bool(meta.get("recommended", mid in RECOMMENDED_MODELS[:5])),
+            "intelligence": meta.get("intelligence"),
+            "speed": meta.get("speed"),
+        })
+
+    for mid, live_row in live_by_id.items():
+        if mid in seen:
+            continue
+        if not any(k in mid for k in ("claude", "gpt", "gemini", "deepseek", "llama", "qwen", "grok")):
+            continue
+        meta = CURATED_META.get(mid, {})
+        pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
+        catalog.append({
+            "id": mid,
+            "name": meta.get("name") or live_row.get("name") or mid,
+            "provider": meta.get("provider") or _provider_from_id(mid),
+            "description": meta.get("description") or "",
+            "context_length": live_row.get("context_length"),
+            "prompt_price_per_m": _price_per_mtok(pricing.get("prompt")),
+            "completion_price_per_m": _price_per_mtok(pricing.get("completion")),
+            "recommended": bool(meta.get("recommended")),
+            "intelligence": meta.get("intelligence"),
+            "speed": meta.get("speed"),
+        })
+
+    return catalog
+
 
 def api_key() -> str:
     key = (
