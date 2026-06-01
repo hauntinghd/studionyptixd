@@ -19,6 +19,7 @@ import CreatePanel from '../panels/CreatePanel';
 const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
+const AgentPanel = lazy(() => import('../panels/AgentPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 const ZeroTierPrivatePanel = lazy(() => import('../panels/ZeroTierPrivatePanel'));
@@ -33,6 +34,7 @@ const PanelFallback = () => (
 
 const OWNER_ALL_ACCESS = {
     create: true,
+    agent: true,
     longform: true,
     analytics: true,
     catalyst: true,
@@ -40,13 +42,27 @@ const OWNER_ALL_ACCESS = {
     waitlist: true,
 };
 
+function tabFromUrl(): DashboardTab {
+    if (typeof window === 'undefined') return 'home';
+    try {
+        const t = new URL(window.location.href).searchParams.get('tab');
+        const allowed: DashboardTab[] = [
+            'home', 'create', 'agent', 'longform', 'analytics', 'catalyst', 'refunds', 'waitlist',
+        ];
+        if (t && allowed.includes(t as DashboardTab)) return t as DashboardTab;
+    } catch {
+        /* ignore */
+    }
+    return 'home';
+}
+
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, loading, role, ownerOverride, studioLaneAccess } = useContext(AuthContext);
     const isAdmin = role === 'admin' || ownerOverride;
     const laneAccess = ownerOverride ? OWNER_ALL_ACCESS : studioLaneAccess;
 
-    const [tab, setTab] = useState<DashboardTab>('home');
-    const [createOpen, setCreateOpen] = useState(false);
+    const [tab, setTab] = useState<DashboardTab>(tabFromUrl);
+    const [createOpen, setCreateOpen] = useState(() => tabFromUrl() === 'create');
     const [selectedNiche, setSelectedNiche] = useState<NicheId | null>(() => {
         if (typeof window === 'undefined') return null;
         try {
@@ -69,6 +85,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         (nextTab: DashboardTab) => {
             if (nextTab === 'home' || nextTab === 'create') return true;
             if (nextTab === 'longform') return isAdmin;
+            if (nextTab === 'agent') return isAdmin;
             if (['analytics', 'catalyst', 'refunds', 'waitlist'].includes(nextTab)) return isAdmin;
             return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
         },
@@ -81,16 +98,69 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [session, loading, onNavigate]);
 
     useEffect(() => {
-        if (selectedNiche) {
+        if (loading) return;
+        const urlTab = tabFromUrl();
+        if (urlTab === 'agent' && isAdmin) {
+            setTab('agent');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        if (urlTab === 'longform' && isAdmin) {
+            setTab('longform');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        // Only open niche builder when URL doesn't explicitly request another tab.
+        if (selectedNiche && (urlTab === 'home' || urlTab === 'create' || !urlTab)) {
             setCreateOpen(true);
             setTab('create');
         }
-    }, []);
+    }, [loading, isAdmin, selectedNiche]);
 
     if (!session) return null;
 
     const sidebarItems = buildSidebarItems(isAdmin);
     const displayName = session.user.email?.split('@')[0] || 'creator';
+
+    const openAgent = () => {
+        if (!isAdmin) return;
+        selectTab('agent');
+    };
+
+    const selectTab = (id: DashboardTab) => {
+        if (!isTabUnlocked(id)) return;
+        try {
+            const u = new URL(window.location.href);
+            if (id === 'home') {
+                u.searchParams.delete('tab');
+            } else {
+                u.searchParams.set('tab', id);
+            }
+            if (id === 'agent' || id === 'longform') {
+                u.searchParams.delete('niche');
+            }
+            window.history.replaceState({}, '', u.toString());
+        } catch {
+            /* ignore */
+        }
+        if (id === 'home') {
+            setTab('home');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        if (id === 'create') {
+            setTab('create');
+            setCreateOpen(true);
+            setSelectedNiche(null);
+            return;
+        }
+        setTab(id);
+        setCreateOpen(false);
+        setSelectedNiche(null);
+    };
 
     const openNiche = (niche: StudioNiche) => {
         if (niche.id === 'longform') {
@@ -112,32 +182,16 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     };
 
     const handleTool = (action: string) => {
+        if (action === 'agent') {
+            if (isAdmin) openAgent();
+            return;
+        }
         if (action === 'longform' && isAdmin) {
-            setTab('longform');
-            setCreateOpen(false);
+            selectTab('longform');
             return;
         }
         if (action === 'automate') return;
-        setTab('create');
-        setCreateOpen(true);
-        setSelectedNiche(null);
-    };
-
-    const selectTab = (id: DashboardTab) => {
-        if (!isTabUnlocked(id)) return;
-        if (id === 'home') {
-            setTab('home');
-            setCreateOpen(false);
-            return;
-        }
-        if (id === 'create') {
-            setTab('create');
-            setCreateOpen(true);
-            setSelectedNiche(null);
-            return;
-        }
-        setTab(id);
-        setCreateOpen(false);
+        selectTab('create');
     };
 
     const lazyPanel = (node: React.ReactNode) => (
@@ -146,6 +200,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const panel = (() => {
         if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
+        if (tab === 'agent' && isAdmin) return lazyPanel(<AgentPanel onBack={() => selectTab('home')} />);
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
@@ -194,22 +249,20 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     })();
 
     const inBuilder = tab === 'create' && createOpen;
+    const isAgentTab = tab === 'agent' && isAdmin;
     const showHome = tab === 'home' || (tab === 'create' && !createOpen);
 
     return (
         <StudioShell
             onNavigate={onNavigate}
-            fullWidth={inBuilder}
+            fullWidth={inBuilder || isAgentTab}
             sidebar={
-                inBuilder ? undefined : (
+                inBuilder || isAgentTab ? undefined : (
                     <StudioSidebar
                         active={tab === 'create' && !createOpen ? 'home' : tab}
                         items={sidebarItems}
-                        onCreate={() => {
-                            setTab('create');
-                            setCreateOpen(true);
-                            setSelectedNiche(null);
-                        }}
+                        onCreate={() => selectTab('create')}
+                        onOpenAgent={openAgent}
                         onSelect={selectTab}
                     />
                 )
@@ -218,7 +271,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             {showHome && (
                 <div className="mx-auto max-w-6xl space-y-8">
                     <StudioHomeHero greeting={greeting} name={displayName} ownerPreview={ownerOverride} />
-                    <StudioToolsRow onTool={handleTool} />
+                    <StudioToolsRow onTool={handleTool} isAdmin={isAdmin} />
                     <section>
                         <h2 className="mb-3 text-lg font-bold text-white">Render tier</h2>
                         <p className="mb-3 text-sm text-gray-500">Draft to iterate. Ship for cinematic export. Documentary for long-form episodes.</p>
@@ -253,7 +306,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             )}
 
-            {tab !== 'create' && tab !== 'home' && (
+            {isAgentTab && (
+                <div className="mx-auto flex h-[calc(100vh-3.75rem)] max-w-5xl flex-col px-2 sm:px-4">
+                    {panel}
+                </div>
+            )}
+
+            {tab !== 'create' && tab !== 'home' && !isAgentTab && (
                 <div className="mx-auto max-w-6xl">{panel}</div>
             )}
         </StudioShell>

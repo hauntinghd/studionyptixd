@@ -23902,6 +23902,27 @@ try:
 except Exception as _long_form_err:
     log.warning(f"Long-form router NOT mounted: {_long_form_err}")
 
+try:
+    from studio_agent_router import build_studio_agent_router
+    app.include_router(build_studio_agent_router(
+        require_auth=require_auth,
+        is_admin_check=_is_admin_user,
+    ))
+    log.info("Studio Agent router mounted at /api/studio-agent (admin-only beta)")
+except Exception as _studio_agent_err:
+    log.warning(f"Studio Agent router NOT mounted: {_studio_agent_err}")
+
+try:
+    from studio_analytics_router import build_studio_analytics_router
+    app.include_router(build_studio_analytics_router(
+        require_auth=require_auth,
+        is_admin_check=_is_admin_user,
+        admin_analytics_fn=_admin_analytics_payload,
+    ))
+    log.info("Studio analytics router mounted at /api/studio/analytics")
+except Exception as _studio_analytics_err:
+    log.warning(f"Studio analytics router NOT mounted: {_studio_analytics_err}")
+
 
 # â"€â"€â"€ Static Files â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 

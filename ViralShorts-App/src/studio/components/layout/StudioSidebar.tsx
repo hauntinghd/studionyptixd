@@ -5,7 +5,6 @@ import {
     CalendarClock,
     Film,
     Home,
-    LineChart,
     Plus,
     Receipt,
     Sparkles,
@@ -27,11 +26,13 @@ export default function StudioSidebar({
     active,
     items,
     onCreate,
+    onOpenAgent,
     onSelect,
 }: {
     active: DashboardTab;
     items: SidebarItem[];
     onCreate: () => void;
+    onOpenAgent?: () => void;
     onSelect: (id: DashboardTab) => void;
 }) {
     return (
@@ -49,17 +50,19 @@ export default function StudioSidebar({
                 <Plus className="h-4 w-4" />
                 Create New
             </button>
+            {onOpenAgent && (
             <button
                 type="button"
-                onClick={onCreate}
-                className="mb-4 flex w-full items-center gap-2.5 rounded-xl border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-left text-xs font-medium text-gray-300 transition hover:border-violet-500/30 hover:bg-violet-500/5"
+                onClick={onOpenAgent}
+                className="mb-4 flex w-full items-center gap-2.5 rounded-xl border border-violet-500/25 bg-violet-500/10 px-3 py-2 text-left text-xs font-medium text-violet-100 transition hover:border-violet-400/40 hover:bg-violet-500/15"
             >
                 <Wand2 className="h-3.5 w-3.5 text-violet-300" />
                 Studio Agent
-                <span className="ml-auto rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-200">
-                    Soon
+                <span className="ml-auto rounded border border-violet-400/30 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-violet-200">
+                    Beta
                 </span>
             </button>
+            )}
 
             <nav className="flex-1 space-y-0.5 overflow-y-auto">
                 {items.map((item) => {
@@ -105,9 +108,9 @@ export function buildSidebarItems(isAdmin: boolean): SidebarItem[] {
     return ([
         { id: 'home', label: 'Home', icon: Home },
         { id: 'create', label: 'Create', icon: Sparkles },
+        { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !isAdmin, badge: 'Beta' },
         { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin, badge: 'Beta' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
-        { id: 'insights', label: 'Insights', icon: LineChart, comingSoon: true, badge: 'Soon' },
         { id: 'analytics', label: 'Analytics', icon: BarChart3, hidden: !isAdmin },
         { id: 'catalyst', label: 'Catalyst', icon: BrainCircuit, hidden: !isAdmin },
         { id: 'refunds', label: 'Refunds', icon: Receipt, hidden: !isAdmin },

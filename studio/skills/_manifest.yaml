@@ -1,0 +1,82 @@
+# Rookcast skills manifest — full API import
+# Skills: 26 | Files: 41
+
+skills:
+  ai-host-setup:
+    status: extracted
+    siblings: [host-doctor.md, host-financial-advisor.md, host-teacher.md, host-war-veteran.md]
+  audio-mix-assembly:
+    status: extracted
+    siblings: []
+  authentic-setting:
+    status: extracted
+    siblings: []
+  broll-selection:
+    status: extracted
+    siblings: []
+  captions:
+    status: extracted
+    siblings: []
+  channel-onboarding:
+    status: extracted
+    siblings: [niche-bank.md, pipeline-bank.md]
+  character-continuity:
+    status: extracted
+    siblings: []
+  compliance-preflight:
+    status: extracted
+    siblings: []
+  composite-character:
+    status: extracted
+    siblings: []
+  description-writing:
+    status: extracted
+    siblings: [bank.md]
+  gimp-image-editing:
+    status: extracted
+    siblings: []
+  heygen-avatar-video:
+    status: extracted
+    siblings: []
+  heygen-translate:
+    status: extracted
+    siblings: []
+  image-generation:
+    status: extracted
+    siblings: [bank.md]
+  image-to-video:
+    status: extracted
+    siblings: [cookbook.md]
+  import-existing-channel:
+    status: extracted
+    siblings: []
+  outlier-mining:
+    status: extracted
+    siblings: []
+  performance-analysis:
+    status: extracted
+    siblings: []
+  photoreal-vs-cinematic:
+    status: extracted
+    siblings: []
+  reference-channel:
+    status: extracted
+    siblings: [library.md]
+  script-writing:
+    status: extracted
+    siblings: [beat-anatomy.md]
+  skill-customization:
+    status: extracted
+    siblings: []
+  storyboard:
+    status: extracted
+    siblings: [shot-bank.md]
+  thumbnail-design:
+    status: extracted
+    siblings: [composition-bank.md]
+  title-creation:
+    status: extracted
+    siblings: [bank.md]
+  voice-tts:
+    status: extracted
+    siblings: [config-bank.md]

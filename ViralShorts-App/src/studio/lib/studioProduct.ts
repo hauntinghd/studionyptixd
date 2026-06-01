@@ -19,9 +19,9 @@ export type NicheId =
 export type DashboardTab =
     | 'home'
     | 'create'
+    | 'agent'
     | 'longform'
     | 'automate'
-    | 'insights'
     | 'analytics'
     | 'catalyst'
     | 'refunds'
@@ -53,7 +53,7 @@ export interface StudioTool {
     title: string;
     desc: string;
     badge?: string;
-    action: 'create' | 'longform' | 'style_clone' | 'automate' | 'playground';
+    action: 'create' | 'longform' | 'style_clone' | 'automate' | 'playground' | 'agent';
     comingSoon?: boolean;
 }
 
@@ -165,6 +165,13 @@ export const STUDIO_NICHES: StudioNiche[] = [
 ];
 
 export const STUDIO_TOOLS: StudioTool[] = [
+    {
+        id: 'agent',
+        title: 'Studio Agent',
+        desc: 'Chat-first production — long-form, shorts, analytics',
+        badge: 'Beta',
+        action: 'agent',
+    },
     {
         id: 'shorts',
         title: 'Short Builder',
