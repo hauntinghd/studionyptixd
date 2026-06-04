@@ -42,6 +42,30 @@ KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
 # Standard tier fallback chain — first model that doesn't 422 wins.
 STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
 
+AC_COST_STANDARD = 5
+AC_COST_PREMIUM = 7
+
+VIDEO_MODELS: dict[str, dict[str, object]] = {
+    "seedance": {
+        "label": "Seedance 2.0",
+        "description": "Default. Strong motion; auto-falls back to Pixverse on content-policy flags.",
+        "endpoints": list(STANDARD_FALLBACK_CHAIN),
+        "ac_cost": AC_COST_STANDARD,
+    },
+    "pixverse": {
+        "label": "Pixverse V6",
+        "description": "Permissive moderation; use when Seedance blocks skeleton imagery.",
+        "endpoints": [PIXVERSE_V6_ENDPOINT],
+        "ac_cost": AC_COST_STANDARD,
+    },
+    "kling_pro": {
+        "label": "Kling 2.1 Pro",
+        "description": "Highest quality motion; premium cost per short.",
+        "endpoints": [KLING_PRO_ENDPOINT],
+        "ac_cost": AC_COST_PREMIUM,
+    },
+}
+
 
 def _ensure_fal():
     key = os.getenv("FAL_AI_KEY", "").strip()
@@ -98,20 +122,72 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
     }
 
 
+def list_video_models() -> list[dict[str, object]]:
+    """Selectable i2v models for Skeleton AI (image stills are always canonical edit)."""
+    return [
+        {
+            "key": "seedance",
+            "label": "Seedance 2.0",
+            "description": "Default. Auto-falls back to Pixverse on content-policy flags.",
+            "ac_cost": AC_COST_STANDARD,
+            "image_model": "seedream_v45_edit (locked — not selectable)",
+        },
+        {
+            "key": "pixverse",
+            "label": "Pixverse V6",
+            "description": "Permissive moderation when Seedance blocks skeleton scenes.",
+            "ac_cost": AC_COST_STANDARD,
+            "image_model": "seedream_v45_edit (locked — not selectable)",
+        },
+        {
+            "key": "kling_pro",
+            "label": "Kling 2.1 Pro",
+            "description": "Best motion quality; higher AC per short.",
+            "ac_cost": AC_COST_PREMIUM,
+            "image_model": "seedream_v45_edit (locked — not selectable)",
+        },
+    ]
+
+
+def resolve_video_model_chain(
+    *,
+    video_model: str | None = None,
+    tier: str = "standard",
+) -> tuple[list[str], str]:
+    """Return (endpoint chain, resolved video_model key)."""
+    vm = (video_model or "").strip().lower()
+    if not vm:
+        vm = "kling_pro" if tier == "premium" else "seedance"
+    if vm in ("premium", "standard"):
+        vm = "kling_pro" if vm == "premium" else "seedance"
+    spec = VIDEO_MODELS.get(vm)
+    if not spec:
+        raise I2VError(
+            f"unknown video_model {video_model!r}. "
+            f"valid: {sorted(VIDEO_MODELS.keys())}"
+        )
+    return list(spec["endpoints"]), vm  # type: ignore[arg-type]
+
+
+def ac_cost_for_video_model(video_model: str | None = None, *, tier: str = "standard") -> int:
+    _, vm = resolve_video_model_chain(video_model=video_model, tier=tier)
+    return int(VIDEO_MODELS[vm]["ac_cost"])  # type: ignore[arg-type]
+
+
 def generate(
     still_path: Path,
     motion_prompt: str,
     out_path: Path,
     *,
     tier: str = "standard",
+    video_model: str | None = None,
     duration_sec: int = 5,
     aspect_ratio: str = "9:16",
 ) -> Path:
     """
     Animate a still into a short clip.
 
-    tier="standard" → Seedance 2.0, fallback Pixverse V6 on content policy 422.
-    tier="premium"  → Kling 2.1 Pro (no fallback — caller pays for it).
+    video_model: seedance | pixverse | kling_pro (preferred). tier is legacy fallback.
     """
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
@@ -120,9 +196,7 @@ def generate(
     _ensure_fal()
     image_url = fal_client.upload_file(str(still_path))
 
-    chain = (
-        [KLING_PRO_ENDPOINT] if tier == "premium" else list(STANDARD_FALLBACK_CHAIN)
-    )
+    chain, _vm = resolve_video_model_chain(video_model=video_model, tier=tier)
 
     last_exc: Exception | None = None
     used_endpoint: str | None = None
@@ -182,8 +256,3 @@ def _download(url: str, dest: Path, retries: int = 3) -> None:
             raise
     if last_exc:
         raise last_exc
-
-
-# AC pricing (per Casey's pricing tiers)
-AC_COST_STANDARD = 5  # Seedance 2.0 default
-AC_COST_PREMIUM = 7   # +2 AC for Kling Pro upgrade

@@ -6,7 +6,8 @@ Wires into backend.py via:
     app.include_router(build_skeleton_ai_router(require_auth=require_auth))
 
 Routes:
-  GET  /api/skeleton-ai/categories         List the 4 idea categories
+  GET  /api/skeleton-ai/categories         List built-in + user custom categories
+  POST /api/skeleton-ai/categories         Create a custom category (auth)
   GET  /api/skeleton-ai/voices              List ElevenLabs voices for picker
   GET  /api/skeleton-ai/pricing             Tier table for pricing UI
   POST /api/skeleton-ai/script              Generate script with Grok (streamable)
@@ -24,7 +25,12 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from skeleton_ai.prompts.idea_lists import list_categories, get_category
+from skeleton_ai.prompts.category_registry import (
+    create_custom_category,
+    get_category,
+    list_categories,
+    list_valid_keys,
+)
 from skeleton_ai.prompts.base_style import assemble_scene_prompt, NEG_STILL
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError, build_script_prompt
 from skeleton_ai.voice_elevenlabs import ElevenLabsClient, ElevenLabsAuthError
@@ -34,6 +40,7 @@ from skeleton_ai.pipeline import (
     derive_beat_visuals,
     split_script_into_beats,
 )
+from skeleton_ai.canonical_edit import build_scene_edit_prompt, generate_still_edit
 from skeleton_ai.stills_engine import (
     generate as gen_still_for_model,
     MODEL_ENDPOINTS,
@@ -108,15 +115,19 @@ async def _maybe_refund(refund_fn, user: dict, source: str, credits: int) -> Non
 
 
 class ScriptRequest(BaseModel):
-    category: str = Field(default="human_limits")
+    category: str = Field(default="people_blogs")
     topic: str | None = None
     stream: bool = False
 
 
 class GenerateRequest(BaseModel):
-    category: str = Field(default="classical_clash")
+    category: str = Field(default="people_blogs")
     topic: str | None = None
-    tier: str = Field(default="standard")  # "standard" | "premium"
+    tier: str = Field(default="standard")  # legacy; use video_model when possible
+    video_model: str | None = Field(
+        default=None,
+        description="seedance | pixverse | kling_pro — stills always canonical Seedream edit",
+    )
     voice_id: str | None = None
     script_override: str | None = None
     script: str | None = None  # frontend alias
@@ -133,8 +144,16 @@ class ScenesRequest(BaseModel):
     script: str
     category: str | None = None
     topic: str | None = None
-    image_model: str = Field(default="seedream_45")
+    image_model: str = Field(default="seedream_edit")  # ignored — canonical edit is always used
     beats_target: int = 12
+
+
+class CreateCategoryRequest(BaseModel):
+    label: str = Field(min_length=2, max_length=80)
+    key: str | None = Field(default=None, max_length=48)
+    tagline: str | None = Field(default=None, max_length=200)
+    system_prompt: str | None = Field(default=None, max_length=4000)
+    seed_ideas: list[str] = Field(default_factory=list, max_length=12)
 
 
 def build_skeleton_ai_router(
@@ -162,8 +181,46 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.get("/categories")
-    async def categories():
-        return {"categories": list_categories()}
+    async def categories(user: dict = auth_dep):
+        uid = _user_id(user)
+        cats = list_categories(user_id=uid or None)
+        return {
+            "categories": cats,
+            "builtin_count": sum(1 for c in cats if c.get("builtin")),
+            "custom_count": sum(1 for c in cats if c.get("custom")),
+            "valid_keys": list_valid_keys(uid or None),
+        }
+
+    @router.post("/categories")
+    async def create_category(body: CreateCategoryRequest, user: dict = auth_dep):
+        uid = _user_id(user)
+        if not uid or uid == "anon":
+            raise HTTPException(401, "sign in required to create custom categories")
+        try:
+            entry = create_custom_category(
+                uid,
+                label=body.label,
+                key=body.key,
+                tagline=body.tagline,
+                system_prompt=body.system_prompt,
+                seed_ideas=body.seed_ideas,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"category": entry, "valid_keys": list_valid_keys(uid)}
+
+    @router.get("/video-models")
+    async def video_models():
+        from skeleton_ai.i2v_engine import list_video_models
+
+        return {
+            "video_models": list_video_models(),
+            "stills_model": {
+                "key": "seedream_edit",
+                "label": "Seedream 4.5 Edit (canonical skeleton master)",
+                "locked": True,
+            },
+        }
 
     @router.get("/pricing")
     async def pricing():
@@ -217,9 +274,11 @@ def build_skeleton_ai_router(
     @router.post("/script")
     async def generate_script(body: ScriptRequest, user: dict = auth_dep):
         try:
-            cat = get_category(body.category)
+            cat = get_category(body.category, user_id=_user_id(user) or None)
             grok = GrokClient()
-        except (ValueError, GrokAuthError) as e:
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except GrokAuthError as e:
             raise HTTPException(503, f"config: {e}")
 
         # Append the user's reference-video context (if any) so the script
@@ -271,7 +330,7 @@ def build_skeleton_ai_router(
         cat_label = ""
         if body.category:
             try:
-                cat_label = get_category(body.category).get("label", "")
+                cat_label = get_category(body.category, user_id=_user_id(_user) or None).get("label", "")
             except ValueError:
                 cat_label = ""
         plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
@@ -284,7 +343,7 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/scenes")
-    async def generate_scenes(body: ScenesRequest, _user: dict = auth_dep):
+    async def generate_scenes(body: ScenesRequest, user: dict = auth_dep):
         """
         SSE-streaming stills render. Emits events as scenes complete so the
         frontend can reveal each tile the moment fal returns it (Korpi-style),
@@ -302,7 +361,17 @@ def build_skeleton_ai_router(
         """
         if not body.script or not body.script.strip():
             raise HTTPException(400, "script is required")
-        if body.image_model not in MODEL_ENDPOINTS:
+        uid = _user_id(user) or None
+        if body.category:
+            try:
+                get_category(body.category, user_id=uid)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        # Stills always use canonical Seedream edit; image_model is kept for API compat.
+        if body.image_model not in MODEL_ENDPOINTS and body.image_model not in (
+            "seedream_edit",
+            "canonical",
+        ):
             raise HTTPException(
                 400,
                 f"unknown image_model {body.image_model!r}. valid: {sorted(MODEL_ENDPOINTS.keys())}"
@@ -315,7 +384,7 @@ def build_skeleton_ai_router(
         cat_label = ""
         if body.category:
             try:
-                cat_label = get_category(body.category).get("label", "")
+                cat_label = get_category(body.category, user_id=uid).get("label", "")
             except ValueError:
                 cat_label = ""
 
@@ -329,7 +398,7 @@ def build_skeleton_ai_router(
         stills_dir.mkdir(parents=True, exist_ok=True)
         (workspace / "script.txt").write_text(body.script, encoding="utf-8")
 
-        endpoint = MODEL_ENDPOINTS[body.image_model]
+        endpoint = "fal-ai/bytedance/seedream/v4.5/edit"
 
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -340,8 +409,9 @@ def build_skeleton_ai_router(
                 # 1. Meta + plan up front so the UI can show "Generating x/N" immediately.
                 yield sse("meta", {
                     "job_id": job_id,
-                    "image_model": body.image_model,
+                    "image_model": "seedream_edit",
                     "endpoint": endpoint,
+                    "render_mode": "canonical_master_edit",
                     "total": len(sentences),
                 })
                 plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
@@ -358,12 +428,16 @@ def build_skeleton_ai_router(
                         outfit, action, motion = derive_beat_visuals(
                             grok, narration, cat_label, plan=plan
                         )
-                        still_prompt = assemble_scene_prompt(action, outfit, mint_bg=True)
-                        gen_still_for_model(
-                            body.image_model,
-                            still_prompt,
-                            stills_dir / f"{sid}.png",
-                            negative_prompt=NEG_STILL,
+                        out_file = stills_dir / f"{sid}.png"
+                        edit_prompt = build_scene_edit_prompt(
+                            topic=body.topic or cat_label,
+                            visual_description=action,
+                            outfit=outfit,
+                        )
+                        generate_still_edit(
+                            edit_prompt,
+                            out_file,
+                            seed=420042 + i,
                         )
                     except StillsError as e:
                         yield sse("error", {"beat_index": i, "message": str(e)})
@@ -444,6 +518,20 @@ def build_skeleton_ai_router(
                     },
                 )
 
+        uid = _user_id(user) or None
+        try:
+            get_category(body.category, user_id=uid)
+            from skeleton_ai.i2v_engine import resolve_video_model_chain
+
+            resolve_video_model_chain(video_model=body.video_model, tier=body.tier)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            from skeleton_ai.i2v_engine import I2VError
+
+            if isinstance(e, I2VError):
+                raise HTTPException(400, str(e))
+
         job_id = uuid.uuid4().hex[:12]
         workspace = OUTPUT_ROOT / job_id
         try:
@@ -452,9 +540,14 @@ def build_skeleton_ai_router(
                 topic=body.topic,
                 workspace=workspace,
                 tier=body.tier,
+                video_model=body.video_model,
                 voice_id=body.voice_id,
                 script_override=script_text,
+                user_id=uid,
             )
+        except ValueError as e:
+            await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            raise HTTPException(400, str(e))
         except (GrokAuthError, ElevenLabsAuthError) as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
             raise HTTPException(503, f"upstream_auth: {e}")

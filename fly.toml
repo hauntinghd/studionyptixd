@@ -21,6 +21,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   PORT = "10000"
   FRONTEND_DIST_DIR = "/app/ViralShorts-App/dist"
   APP_DATA_DIR = "/var/data"
+  STUDIO_AGENT_SESSIONS_DIR = "/var/data/studio_agent_sessions"
   OUTPUT_DIR = "/var/data/generated_videos"
   TEMP_DIR = "/var/data/temp_assets"
   TRAINING_DATA_DIR = "/var/data/training_data"
@@ -42,13 +43,19 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   HIDREAM_ENABLED = "false"
   HIDREAM_EDIT_ENABLED = "false"
   SKELETON_REQUIRE_WAN22 = "false"
+  SKELETON_USE_SEEDREAM_EDIT = "true"
+  SKELETON_GLOBAL_REFERENCE_IMAGE_URL = "https://studio.nyptidindustries.com/canonical-skeleton-master.png"
   RUNPOD_IMAGE_FEEDBACK_ENABLED = "false"
   RUNPOD_COMPOSITOR_ENABLED = "false"
   CHATSTORY_FORCE_LOCAL_TTS = "false"
   CHATSTORY_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
-  WAITLIST_ONLY_MODE = "true"
+  WAITLIST_ONLY_MODE = "false"
   WAITLIST_REQUIRE_STRIPE_PAYMENT = "false"
   ALGROW_API_BASE_URL = "https://api.algrow.online"
+  # Catalyst 24/7 self-learning: continuously scrape trending per niche and update
+  # the "what works" corpus. Quota-safe (budget-capped per tick, ~4 ticks/day).
+  CATALYST_BACKFILL_AUTO_ENABLED = "true"
+  CATALYST_BACKFILL_AUTO_INTERVAL_SEC = "21600"
 
 [[mounts]]
   source = "studio_data"

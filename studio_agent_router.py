@@ -1,6 +1,7 @@
 """
 FastAPI router for NYPTID Studio Agent (OpenRouter + Rookcast skills).
 
+  GET    /api/studio-agent/sessions
   POST   /api/studio-agent/sessions
   GET    /api/studio-agent/sessions/{id}
   PATCH  /api/studio-agent/sessions/{id}
@@ -88,6 +89,33 @@ def build_studio_agent_router(
     async def list_skills(user: dict = Depends(_admin)):
         return {"skills": skills.list_skill_slugs(), "count": len(skills.list_skill_slugs())}
 
+    @router.get("/credits")
+    async def credits(user: dict = Depends(_admin)):
+        """Unified single-wallet credit state (replaces render-fuel + shorts)."""
+        import unified_credits as uc
+
+        uid = _user_id(user)
+        try:
+            uc.ensure_monthly_grant(uid)
+            state = uc.get_state(uid)
+        except Exception as exc:
+            state = {"balance": 0, "plan": "", "error": str(exc)}
+        state["unlimited"] = bool(is_admin_check(user)) if is_admin_check else False
+        try:
+            state["recent"] = uc.recent_ledger(uid, limit=10)
+        except Exception:
+            state["recent"] = []
+        return state
+
+    @router.get("/sessions")
+    async def list_sessions(user: dict = Depends(_admin), limit: int = 40):
+        uid = _user_id(user)
+        sessions = store.list_sessions(uid, limit=limit)
+        return {
+            "sessions": [_session_summary(s) for s in sessions],
+            "count": len(sessions),
+        }
+
     @router.post("/sessions")
     async def create_session(body: CreateSessionRequest, user: dict = Depends(_admin)):
         try:
@@ -171,13 +199,23 @@ def build_studio_agent_router(
     return router
 
 
-def _public_session(session: dict[str, Any]) -> dict[str, Any]:
+def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_id": session.get("session_id"),
+        "title": store.derive_title(session),
         "model": session.get("model"),
-        "approval_mode": session.get("approval_mode"),
         "content_format": session.get("content_format"),
+        "message_count": len(session.get("messages") or []),
+        "pending_count": len(session.get("pending_actions") or []),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+    }
+
+
+def _public_session(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_session_summary(session),
+        "approval_mode": session.get("approval_mode"),
         "pending_actions": session.get("pending_actions") or [],
         "messages": session.get("messages") or [],
-        "updated_at": session.get("updated_at"),
     }

@@ -19,28 +19,78 @@ def system_prompt(*, content_format: str) -> str:
         "both": "Infer short vs long from the conversation — do not ask unless genuinely ambiguous.",
     }.get(content_format, "Infer short vs long from the conversation.")
 
-    return f"""You are NYPTID Studio Agent — a production orchestrator for YouTube content.
-
-You have access to the full Rookcast skills library (26 playbooks) at studio/skills/.
-Always load_skill BEFORE executing a step (title-creation, script-writing, storyboard, thumbnail-design, compliance-preflight, image-generation, image-to-video, etc.).
+    return f"""You are NYPTID Studio Agent — the primary NYPTID Studio product. You are a strategist +
+producer: connect YouTube, read what's working, plan the next upload, quote credits, then render.
 
 {fmt_hint}
 
-Rookcast skill rules (non-negotiable):
-- load_skill content is authoritative — follow script templates, beat anatomy, and model tables inside each SKILL.md.
-- image-generation and image-to-video skills list reference models, NOT closed lists. Users pick models per job.
-  Never hard-lock a single fal model unless the user explicitly chose it. Offer 2–3 options with tradeoffs.
-- Before quoting spend, call get_fal_pricing (fal.ai Platform API) and cite OpenRouter usage from the runner model.
-- Scene batches: plan parallel fal image requests (one per scene/keyframe) for consistency, then sample-then-confirm before full i2v.
-- Sample-then-confirm for host, thumbnail, and expensive renders unless user chose auto-accept.
-- YMYL channels (CrypticScience): primary .gov sources only; run compliance-preflight.
-- Follow CHANNEL.md + FLOW.md when a channel_key is set.
-- Never invent API keys or credentials.
+═══ YOUTUBE CHANNEL INTELLIGENCE (start here when user mentions their channel) ═══
+1. `youtube_oauth_status` — if not connected, send them to Studio → Settings → Channels.
+2. `list_youtube_channels` — only shows THIS user's connected channels.
+3. `get_channel_analytics` — Catalyst winners/losers + `growth_playbook` (brand_new / early /
+   growing / established). For 0-sub channels: positioning + competitor homework, NOT "why X failed."
+4. `get_public_search_trends` — demand when harvest is thin or channel is new.
+5. `get_studio_credits` before expensive renders; low balance → Wallet top-up (unlimited purchases).
 
-When proposing renders or shell builds, explain cost/risk with live pricing when available.
-Use tools to read skills, channel docs, and analytics — do not guess playbook content.
-For topic selection, call get_public_search_trends and get_channel_analytics before outlining.
-After starting a render, poll with poll_render_job until awaiting_approval or complete.
+Always explain: what's working, what's not, recommended next 1–3 actions, then offer to render.
+
+═══ PREMIUM LONG-FORM (documentaries — Jake Tran / Magnates / MrBeast pacing bar) ═══
+Quality target: feels like a $5k+ edit — NOT "good enough AI."
+- Voice: ElevenLabs on channel config (`voice_provider_default`); never downgrade to cheap TTS unless user insists.
+- Script: `load_skill script-writing` + CHANNEL.md; cold open hook in first 8s; pattern interrupts every 45–90s;
+  no dead air; escalate stakes; land a crisp outro CTA.
+- Visuals: photoreal premium stills per channel FLOW; stat cards / motion graphics where channel allows.
+- Deliver: 4K/UHD when pipeline supports it; default to highest tier the channel registry specifies.
+- Thumbnails: `thumbnail-design` skill BEFORE proposing upload package.
+- `start_longform_render` after outline approval; poll until complete.
+
+═══ SKELETON AI SHORTS (mandatory when user wants skeleton / NYPTID / comparison shorts) ═══
+ONLY render path: `start_shortform_generate` (+ poll_render_job kind=shortform). Never use
+load_skill image-generation, never fal T2I per scene, never ERNIE/Flux for scene stills.
+
+STILLS (locked — not user-selectable):
+- One canonical master PNG → every scene is Seedream 4.5 **edit** (`seedream_v45_edit_canonical`).
+- SAME skeleton every beat: ivory bones, glass shell, realistic eyes. Identity never changes.
+- Per scene, edit ONLY: background/environment, outfit/clothes, props, pose.
+- Need muscles? Add muscle definition ON the same skeleton (wardrobe/body overlay) — not a new character.
+- Need clothes? Edit wardrobe on the same skeleton. Different location? Edit background only.
+- Rinse and repeat: master → edit → master → edit for every beat.
+
+VIDEO (user-selectable — ask if unclear):
+- Call `list_skeleton_video_models` and pass `video_model` to start_shortform_generate:
+  `seedance` (default, 5 AC), `pixverse` (permissive), `kling_pro` (7 AC, best motion).
+
+SCRIPT CATEGORY:
+- Call `list_skeleton_categories` (20 YouTube lanes + user custom). Use `outcast` for edgy/contrarian.
+- Missing lane → `create_skeleton_category` then render with returned key.
+
+WARDROBE / STYLING (same skeleton — not a new character):
+- When the user specifies clothes, age vibe, muscles, or props, pass it in `visual_brief` on
+  `start_shortform_generate` (e.g. "teenager 18+, black hoodie and black pants, urban night").
+- This locks outfit/props on the canonical skeleton; Seedream edit changes background + wardrobe only.
+
+Do NOT tell users only classical_clash / wildcard_clash exist. Do NOT pick image models for skeleton shorts.
+
+═══ Long-form (up to ~15 minutes) + thumbnails ═══
+- Long-form: `start_longform_render` + `load_skill script-writing` + channel CHANNEL.md.
+  Target ~8–15 chapters for a 15-minute doc; use compliance-preflight on YMYL channels.
+- Thumbnails: `load_skill thumbnail-design` before proposing; cite channel grammar.
+- Poll `poll_render_job` with kind=longform until complete.
+
+═══ Other content (non-skeleton stills) ═══
+Rookcast skills at studio/skills/ — load_skill before steps. image-generation skills apply
+ONLY to non-skeleton work. Before quoting spend, call get_fal_pricing when helpful.
+YMYL: compliance-preflight + .gov sources. Follow CHANNEL.md when channel_key is set.
+
+When proposing renders, explain cost/risk. For non-skeleton topic research use get_public_search_trends.
+After starting a render, poll poll_render_job until complete or failed.
+
+Progress reporting (important): long-running tools run in the background and return a job_id.
+- analyze_competitor_video returns immediately; poll poll_render_job(job_id, kind='competitor')
+  and tell the user the CURRENT stage each time you poll (e.g. "Downloading the video…",
+  "Detecting scene cuts…", "Extracting audio…", "Done — analyzing"). Never go silent between
+  start and finish. Keep polling until status is complete or failed, then summarize findings.
+- Use the percent + stage fields from the poll result to give the user a concrete status.
 
 {skills.skills_index_for_prompt()}
 """
@@ -59,6 +109,7 @@ async def run_turn(
 
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
     messages.append({"role": "user", "content": user_text})
+    store.touch_title_from_user_message(sid, user_text)
 
     if not any(m.get("role") == "system" for m in messages):
         messages.insert(0, {"role": "system", "content": system_prompt(content_format=content_format)})
@@ -67,6 +118,8 @@ async def run_turn(
     pending: list[dict[str, Any]] = []
     assistant_text = ""
     usage_total: dict[str, Any] = {}
+    acc_prompt_tokens = 0
+    acc_completion_tokens = 0
 
     for _ in range(MAX_TOOL_ROUNDS):
         resp = await openrouter.chat_completion(
@@ -77,6 +130,8 @@ async def run_turn(
         msg = openrouter.message_from_response(resp)
         usage = openrouter.usage_from_response(resp)
         usage_total = usage
+        acc_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+        acc_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
@@ -149,12 +204,52 @@ async def run_turn(
     if pending:
         store.set_pending_actions(sid, pending)
 
+    # Meter OpenRouter token spend against the unified credit wallet.
+    credits_charged = 0
+    usd_cost = 0.0
+    prompt_ppm = completion_ppm = None
+    try:
+        prompt_ppm, completion_ppm = await openrouter.model_pricing(model)
+    except Exception:
+        prompt_ppm = completion_ppm = None
+    try:
+        import unified_credits as uc
+
+        usage_for_cost = {
+            "prompt_tokens": acc_prompt_tokens,
+            "completion_tokens": acc_completion_tokens,
+        }
+        usd_cost = uc.openrouter_usd(usage_for_cost, prompt_ppm, completion_ppm)
+        if usd_cost > 0 and user_id:
+            credits_charged, _bal = uc.debit_usd(
+                user_id,
+                usd_cost,
+                reason="studio_agent_openrouter",
+                metadata={
+                    "model": model,
+                    "session_id": sid,
+                    "prompt_tokens": acc_prompt_tokens,
+                    "completion_tokens": acc_completion_tokens,
+                    "prompt_price_per_m": prompt_ppm,
+                    "completion_price_per_m": completion_ppm,
+                },
+                allow_negative=True,
+            )
+    except Exception:
+        pass
+
     return {
         "session_id": sid,
         "assistant_message": assistant_text,
         "pending_actions": pending,
         "approval_mode": approval_mode,
         "usage": usage_total,
+        "billing": {
+            "credits_charged": credits_charged,
+            "provider_usd": round(float(usd_cost or 0.0), 6),
+            "prompt_tokens": acc_prompt_tokens,
+            "completion_tokens": acc_completion_tokens,
+        },
     }
 
 

@@ -3,7 +3,8 @@
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
-    ArrowLeft, ArrowUp, Bot, Check, Loader2, Paperclip, Shield, ShieldOff, Sparkles, X, Zap,
+    ArrowLeft, ArrowUp, Bot, Check, History, Loader2, MessageSquarePlus, Paperclip,
+    Shield, ShieldOff, Sparkles, X, Zap,
 } from 'lucide-react';
 import { API, AuthContext } from '../shared';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
@@ -65,11 +66,33 @@ const FALLBACK_MODELS: AgentModelOption[] = [
     },
 ];
 
+type ContentFormat = 'short' | 'long' | 'both';
+
+interface SessionSummary {
+    session_id: string;
+    title: string;
+    updated_at?: number;
+    message_count?: number;
+    pending_count?: number;
+    content_format?: string;
+}
+
+const LAST_SESSION_KEY = 'studio_agent_last_session';
+
 const STARTER_PROMPTS = [
-    'Plan a CrypticScience verified long-form on CTR + SS deposits — load compliance-preflight first.',
-    'Outline a 60s ZeroTier short using outlier-mining and thumbnail-design skills.',
-    'Pull channel analytics for cryptic_science and suggest 3 topics from public search trends.',
+    'Connect my YouTube channel — list channels, pull analytics, and tell me what to post next.',
+    'Skeleton AI short: outcast + pixverse. visual_brief: teenager 18+, black hoodie and black pants. Government 30-day expose topic.',
+    'Plan a premium ~15 min doc for cryptic_science — Jake Tran pacing, ElevenLabs VO, thumbnail variants, then render.',
 ];
+
+function formatSessionAge(updatedAt?: number) {
+    if (!updatedAt) return '';
+    const sec = Math.max(0, Math.floor(Date.now() / 1000 - updatedAt));
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+    return `${Math.floor(sec / 86400)}d ago`;
+}
 
 function displayModelName(models: AgentModelOption[], id: string) {
     return models.find((m) => m.id === id)?.name || id.split('/').pop()?.replace(/-/g, ' ') || id;
@@ -102,6 +125,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [attachmentPayload, setAttachmentPayload] = useState<Record<string, string>>({});
     const [loading, setLoading] = useState(false);
     const [booting, setBooting] = useState(true);
+    const [history, setHistory] = useState<SessionSummary[]>([]);
+    const [historyOpen, setHistoryOpen] = useState(true);
+    const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [error, setError] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -153,6 +179,57 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
     }, [messages, pending, loading, scrollToBottom]);
 
+    const applySessionPayload = useCallback((raw: Record<string, unknown>) => {
+        const sid = String(raw.session_id || '');
+        if (sid) {
+            setSessionId(sid);
+            try {
+                localStorage.setItem(LAST_SESSION_KEY, sid);
+            } catch {
+                /* ignore */
+            }
+        }
+        const msgs = (raw.messages as ChatMessage[]) || [];
+        setMessages(msgs);
+        setPending((raw.pending_actions as PendingAction[]) || []);
+        if (raw.model) setModel(String(raw.model));
+        if (raw.approval_mode === 'auto' || raw.approval_mode === 'confirm') {
+            setApprovalMode(raw.approval_mode);
+        }
+        const fmt = raw.content_format as ContentFormat | undefined;
+        if (fmt === 'short' || fmt === 'long' || fmt === 'both') setContentFormat(fmt);
+    }, []);
+
+    const refreshHistory = useCallback(async () => {
+        const data = await authFetch('/api/studio-agent/sessions?limit=50');
+        setHistory((data?.sessions as SessionSummary[]) || []);
+    }, [authFetch]);
+
+    const createNewSession = useCallback(
+        async (pickModel: string) => {
+            const created = await authFetch('/api/studio-agent/sessions', {
+                method: 'POST',
+                body: JSON.stringify({
+                    model: pickModel,
+                    approval_mode: approvalMode,
+                    content_format: contentFormat,
+                }),
+            });
+            applySessionPayload((created.session as Record<string, unknown>) || {});
+            await refreshHistory();
+        },
+        [applySessionPayload, approvalMode, authFetch, contentFormat, refreshHistory],
+    );
+
+    const openSession = useCallback(
+        async (id: string) => {
+            const data = await authFetch(`/api/studio-agent/sessions/${id}`);
+            applySessionPayload((data?.session as Record<string, unknown>) || {});
+            setError('');
+        },
+        [applySessionPayload, authFetch],
+    );
+
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -180,17 +257,31 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         setModel(pickModel);
                     }
                 }
-                const created = await authFetch('/api/studio-agent/sessions', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        model: pickModel,
-                        approval_mode: approvalMode,
-                        content_format: 'both',
-                    }),
-                });
-                if (!cancelled) {
-                    setSessionId((created.session as { session_id?: string })?.session_id || null);
-                    setPending((created.session as { pending_actions?: PendingAction[] })?.pending_actions || []);
+                const listData = await authFetch('/api/studio-agent/sessions?limit=50');
+                const sessions = (listData?.sessions as SessionSummary[]) || [];
+                if (!cancelled) setHistory(sessions);
+
+                let lastId = '';
+                try {
+                    lastId = localStorage.getItem(LAST_SESSION_KEY) || '';
+                } catch {
+                    lastId = '';
+                }
+                const resume = sessions.find((s) => s.session_id === lastId) || sessions[0];
+                if (!cancelled && resume?.session_id) {
+                    const data = await authFetch(`/api/studio-agent/sessions/${resume.session_id}`);
+                    applySessionPayload((data?.session as Record<string, unknown>) || {});
+                } else if (!cancelled) {
+                    const created = await authFetch('/api/studio-agent/sessions', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            model: pickModel,
+                            approval_mode: 'confirm',
+                            content_format: 'both',
+                        }),
+                    });
+                    applySessionPayload((created.session as Record<string, unknown>) || {});
+                    setHistory([]);
                 }
             } catch (e) {
                 if (!cancelled) setError((e as Error).message);
@@ -207,18 +298,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     }, [booting]);
 
     const patchSession = useCallback(
-        async (patch: { model?: string; approval_mode?: ApprovalMode }) => {
+        async (patch: { model?: string; approval_mode?: ApprovalMode; content_format?: ContentFormat }) => {
             if (!sessionId) return;
             try {
                 await authFetch(`/api/studio-agent/sessions/${sessionId}`, {
                     method: 'PATCH',
                     body: JSON.stringify(patch),
                 });
+                await refreshHistory();
             } catch (e) {
                 setError((e as Error).message);
             }
         },
-        [authFetch, sessionId],
+        [authFetch, refreshHistory, sessionId],
     );
 
     const buildOutboundMessage = useCallback(
@@ -255,13 +347,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     setMessages((m) => [...m, { role: 'assistant', content: reply }]);
                 }
                 setPending((data?.pending_actions as PendingAction[]) || []);
+                await refreshHistory();
             } catch (e) {
                 setError((e as Error).message);
             } finally {
                 setLoading(false);
             }
         },
-        [authFetch, buildOutboundMessage, loading, sessionId],
+        [authFetch, buildOutboundMessage, loading, refreshHistory, sessionId],
     );
 
     const sendMessage = useCallback(() => sendText(input), [input, sendText]);
@@ -351,8 +444,59 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 onClose={() => setModelPickerOpen(false)}
             />
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <header className="mb-2 flex shrink-0 items-center gap-2 border-b border-white/[0.06] pb-2">
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+                <aside
+                    className={`flex shrink-0 flex-col border-r border-white/[0.06] bg-[#08080a] transition-all ${
+                        historyOpen ? 'w-56' : 'w-0 overflow-hidden border-r-0'
+                    }`}
+                >
+                    <div className="flex items-center justify-between gap-1 border-b border-white/[0.06] p-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                            History
+                        </span>
+                        <button
+                            type="button"
+                            title="New chat"
+                            disabled={loading}
+                            onClick={() => createNewSession(model)}
+                            className="rounded-lg p-1.5 text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
+                        >
+                            <MessageSquarePlus className="h-4 w-4" />
+                        </button>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+                        {history.length === 0 && (
+                            <p className="px-2 py-3 text-[10px] text-gray-600">No chats yet — start one.</p>
+                        )}
+                        {history.map((s) => {
+                            const active = s.session_id === sessionId;
+                            return (
+                                <button
+                                    key={s.session_id}
+                                    type="button"
+                                    disabled={loading || active}
+                                    onClick={() => openSession(s.session_id)}
+                                    className={`mb-1 w-full rounded-lg px-2.5 py-2 text-left transition ${
+                                        active
+                                            ? 'bg-violet-500/20 text-white'
+                                            : 'text-gray-300 hover:bg-white/[0.05]'
+                                    }`}
+                                >
+                                    <p className="line-clamp-2 text-xs font-medium leading-snug">
+                                        {s.title || 'New chat'}
+                                    </p>
+                                    <p className="mt-0.5 text-[9px] text-gray-500">
+                                        {formatSessionAge(s.updated_at)}
+                                        {(s.pending_count || 0) > 0 ? ` · ${s.pending_count} pending` : ''}
+                                    </p>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </aside>
+
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                <header className="mb-2 flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] pb-2">
                     {onBack && (
                         <button
                             type="button"
@@ -363,12 +507,39 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             Studio
                         </button>
                     )}
+                    <button
+                        type="button"
+                        onClick={() => setHistoryOpen((o) => !o)}
+                        className="rounded-lg p-1.5 text-gray-400 transition hover:bg-white/[0.06] hover:text-white"
+                        title={historyOpen ? 'Hide history' : 'Show history'}
+                    >
+                        <History className="h-4 w-4" />
+                    </button>
                     <div className="flex items-center gap-2">
                         <Bot className="h-5 w-5 text-violet-400" />
                         <h1 className="text-sm font-semibold text-white">Studio Agent</h1>
                         <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-violet-300">
                             Beta
                         </span>
+                    </div>
+                    <div className="ml-auto flex flex-wrap items-center gap-1">
+                        {(['short', 'long', 'both'] as const).map((fmt) => (
+                            <button
+                                key={fmt}
+                                type="button"
+                                onClick={() => {
+                                    setContentFormat(fmt);
+                                    patchSession({ content_format: fmt });
+                                }}
+                                className={`rounded-md px-2 py-0.5 text-[9px] font-semibold uppercase transition ${
+                                    contentFormat === fmt
+                                        ? 'bg-violet-600/30 text-violet-200'
+                                        : 'bg-white/[0.04] text-gray-500 hover:text-gray-300'
+                                }`}
+                            >
+                                {fmt === 'both' ? 'Auto' : fmt}
+                            </button>
+                        ))}
                     </div>
                 </header>
 
@@ -391,7 +562,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </div>
                                 <h2 className="text-lg font-semibold text-white">What are we shipping?</h2>
                                 <p className="mt-2 max-w-md text-sm text-gray-500">
-                                    Long-form, shorts, analytics, renders — OpenRouter + 26 Rookcast skills.
+                                    Skeleton shorts (locked stills + your video model), long-form up to ~15 min,
+                                    thumbnails, analytics — chats are saved in History.
                                 </p>
                                 <div className="mt-6 grid w-full max-w-lg gap-2">
                                     {STARTER_PROMPTS.map((p) => (
@@ -576,6 +748,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         </div>
                     </div>
                 </div>
+            </div>
             </div>
         </>
     );

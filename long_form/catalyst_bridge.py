@@ -195,3 +195,121 @@ def insights_to_grok_context(insights: dict[str, Any]) -> str:
             lines.append(f"    • {t}")
 
     return "\n".join(lines)
+
+
+def assess_channel_growth(insights: dict[str, Any] | None, *, harvest_present: bool) -> dict[str, Any]:
+    """
+    Turn Catalyst-shaped insights into a Studio Agent playbook:
+    new vs established channel, what's working, what isn't, next posts.
+    """
+    ins = insights or {}
+    subs = int(ins.get("subscribers") or 0)
+    videos = int(ins.get("videos") or 0)
+    ch_views = int(ins.get("channel_views") or 0)
+    top = list(ins.get("top_titles") or [])
+    breakouts = list(ins.get("breakout_titles") or [])
+    hooks = list(ins.get("hook_patterns") or [])
+
+    if subs < 100 and videos <= 8:
+        stage = "brand_new"
+        stage_label = "Brand-new channel"
+    elif subs < 1_000 or (not harvest_present and subs < 5_000):
+        stage = "early"
+        stage_label = "Early channel (building baseline)"
+    elif subs < 50_000:
+        stage = "growing"
+        stage_label = "Growing channel"
+    else:
+        stage = "established"
+        stage_label = "Established channel"
+
+    working: list[str] = []
+    not_working: list[str] = []
+    next_actions: list[str] = []
+
+    if not harvest_present:
+        not_working.append(
+            "No Catalyst harvest yet — analytics snapshot missing. Connect YouTube in "
+            "Studio → Settings → Channels and allow harvest to complete."
+        )
+        next_actions.append(
+            "Call youtube_oauth_status, guide user to connect, then re-run get_channel_analytics."
+        )
+    elif not top and videos > 0:
+        not_working.append(
+            "Videos exist but no top-performer list in harvest — may need more uploads or a re-sync."
+        )
+    elif videos == 0:
+        not_working.append("No published videos on record — cannot infer packaging or retention winners yet.")
+
+    if top:
+        best = top[0]
+        working.append(
+            f"Strongest title on record: «{best.get('title', '')}» ({int(best.get('views', 0)):,} views)."
+        )
+        if len(top) >= 2:
+            weak = top[-1]
+            if int(weak.get("views", 0)) < int(best.get("views", 0)) * 0.15:
+                not_working.append(
+                    f"Weak tail vs winner: «{weak.get('title', '')}» ({int(weak.get('views', 0)):,} views) — "
+                    "study packaging gap vs top video."
+                )
+    if breakouts:
+        b = breakouts[0]
+        working.append(
+            f"Breakout lift: «{b.get('title', '')}» (~{float(b.get('lift_vs_baseline', 0)):.1f}x vs median)."
+        )
+    if hooks:
+        working.append(f"Hook patterns that repeat on-channel: {hooks[0][:120]}")
+
+    if stage == "brand_new":
+        next_actions.extend([
+            "Treat as positioning sprint: 3–5 tightly themed uploads, one packaging style, no format hopping.",
+            "Use get_public_search_trends + competitor analyze_competitor_video on 2 niche winners.",
+            "Propose one Skeleton short OR one 8–12 min doc outline — not both until identity is clear.",
+        ])
+    elif stage == "early":
+        next_actions.extend([
+            "Double down on the best-performing title pattern; iterate thumbnails before new topics.",
+            "Post 1–2x/week; each video should answer why someone would subscribe after one watch.",
+        ])
+    elif stage == "growing":
+        next_actions.extend([
+            "Clone breakout packaging (title cadence + thumb grammar) on adjacent topics.",
+            "Alternate proven winners with one experimental topic per month (20% portfolio).",
+        ])
+    else:
+        next_actions.extend([
+            "Protect baseline CTR packaging; test only one variable per upload (title OR thumb OR hook).",
+            "Use velocity data (if present) to time follow-ups within 48h of a spike.",
+        ])
+
+    if subs == 0 and ch_views == 0 and videos == 0:
+        summary = (
+            "This looks like a new or empty channel profile. Focus on niche positioning, "
+            "competitor homework, and a repeatable first series — not diagnosing 'bad' videos yet."
+        )
+    elif not working and harvest_present:
+        summary = (
+            "Harvest is present but no clear winners — prioritize consistent uploads and "
+            "tighter packaging before scaling spend on long renders."
+        )
+    elif working and not_working:
+        summary = "Mixed signals: double down on winners; fix packaging on underperformers."
+    elif working:
+        summary = "Clear winners on-channel — clone hooks, pacing, and packaging on the next topic."
+    else:
+        summary = "Connect YouTube and harvest analytics before recommending a posting strategy."
+
+    return {
+        "stage": stage,
+        "stage_label": stage_label,
+        "subscribers": subs,
+        "videos": videos,
+        "channel_views": ch_views,
+        "harvest_present": harvest_present,
+        "summary": summary,
+        "whats_working": working[:6],
+        "whats_not_working": not_working[:6],
+        "recommended_next_actions": next_actions[:8],
+    }

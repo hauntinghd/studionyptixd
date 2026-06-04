@@ -115,8 +115,53 @@ def _price_per_mtok(raw: Any) -> float | None:
         return None
 
 
+def _infer_speed(model_id: str, prompt_ppm: float | None) -> int | None:
+    slug = model_id.lower()
+    if any(k in slug for k in ("flash", "mini", "turbo", "lite", "fast", "haiku")):
+        return 5
+    if any(k in slug for k in ("opus", "pro", "reasoning", "o1", "o3")):
+        return 2
+    if prompt_ppm is not None and prompt_ppm >= 15:
+        return 2
+    if prompt_ppm is not None and prompt_ppm <= 0.5:
+        return 5
+    return 3
+
+
+def _infer_intelligence(model_id: str, prompt_ppm: float | None) -> int | None:
+    slug = model_id.lower()
+    if any(k in slug for k in ("opus", "o1", "o3", "sonnet-4", "gpt-4o", "gemini-2.5-pro")):
+        return 5
+    if any(k in slug for k in ("mini", "nano", "lite", "8b", "7b")):
+        return 3
+    if prompt_ppm is not None and prompt_ppm >= 10:
+        return 5
+    if prompt_ppm is not None and prompt_ppm >= 3:
+        return 4
+    return 3
+
+
+def _catalog_row(mid: str, live_row: dict[str, Any]) -> dict[str, Any]:
+    meta = CURATED_META.get(mid, {})
+    pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
+    prompt_ppm = _price_per_mtok(pricing.get("prompt"))
+    completion_ppm = _price_per_mtok(pricing.get("completion"))
+    return {
+        "id": mid,
+        "name": meta.get("name") or live_row.get("name") or mid.split("/")[-1],
+        "provider": meta.get("provider") or _provider_from_id(mid),
+        "description": meta.get("description") or live_row.get("description") or "",
+        "context_length": live_row.get("context_length"),
+        "prompt_price_per_m": prompt_ppm,
+        "completion_price_per_m": completion_ppm,
+        "recommended": bool(meta.get("recommended")),
+        "intelligence": meta.get("intelligence") or _infer_intelligence(mid, prompt_ppm),
+        "speed": meta.get("speed") or _infer_speed(mid, prompt_ppm),
+    }
+
+
 def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """Merge curated display metadata with live OpenRouter model list + pricing."""
+    """Merge curated display metadata with the full live OpenRouter model list + pricing."""
     live_by_id: dict[str, dict[str, Any]] = {}
     for item in live or []:
         mid = str(item.get("id") or "")
@@ -128,42 +173,24 @@ def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[s
 
     for mid in RECOMMENDED_MODELS:
         seen.add(mid)
-        meta = CURATED_META.get(mid, {})
-        live_row = live_by_id.get(mid, {})
-        pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
-        catalog.append({
-            "id": mid,
-            "name": meta.get("name") or live_row.get("name") or mid.split("/")[-1],
-            "provider": meta.get("provider") or _provider_from_id(mid),
-            "description": meta.get("description") or live_row.get("description") or "",
-            "context_length": live_row.get("context_length"),
-            "prompt_price_per_m": _price_per_mtok(pricing.get("prompt")),
-            "completion_price_per_m": _price_per_mtok(pricing.get("completion")),
-            "recommended": bool(meta.get("recommended", mid in RECOMMENDED_MODELS[:5])),
-            "intelligence": meta.get("intelligence"),
-            "speed": meta.get("speed"),
-        })
+        live_row = live_by_id.get(mid, {"id": mid})
+        row = _catalog_row(mid, live_row)
+        if not row.get("recommended"):
+            row["recommended"] = mid in RECOMMENDED_MODELS[:6]
+        catalog.append(row)
 
+    extras: list[dict[str, Any]] = []
     for mid, live_row in live_by_id.items():
         if mid in seen:
             continue
-        if not any(k in mid for k in ("claude", "gpt", "gemini", "deepseek", "llama", "qwen", "grok")):
+        arch = live_row.get("architecture") if isinstance(live_row.get("architecture"), dict) else {}
+        modality = str(arch.get("modality") or "").lower()
+        if modality and "text" not in modality:
             continue
-        meta = CURATED_META.get(mid, {})
-        pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
-        catalog.append({
-            "id": mid,
-            "name": meta.get("name") or live_row.get("name") or mid,
-            "provider": meta.get("provider") or _provider_from_id(mid),
-            "description": meta.get("description") or "",
-            "context_length": live_row.get("context_length"),
-            "prompt_price_per_m": _price_per_mtok(pricing.get("prompt")),
-            "completion_price_per_m": _price_per_mtok(pricing.get("completion")),
-            "recommended": bool(meta.get("recommended")),
-            "intelligence": meta.get("intelligence"),
-            "speed": meta.get("speed"),
-        })
+        extras.append(_catalog_row(mid, live_row))
 
+    extras.sort(key=lambda r: (r.get("provider") or "", r.get("name") or r["id"]))
+    catalog.extend(extras)
     return catalog
 
 
@@ -202,6 +229,31 @@ async def list_models() -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return [{"id": m, "name": m} for m in RECOMMENDED_MODELS]
     return items
+
+
+# In-memory model-pricing cache for per-turn credit metering (TTL seconds).
+_MODELS_CACHE: dict[str, Any] = {"at": 0.0, "by_id": {}}
+_MODELS_TTL = 1800.0
+
+
+async def model_pricing(model_id: str) -> tuple[float | None, float | None]:
+    """Return (prompt_price_per_m, completion_price_per_m) USD for a model.
+
+    Cached for _MODELS_TTL to avoid a /models round-trip on every chat turn.
+    """
+    import time as _t
+
+    now = _t.time()
+    if now - float(_MODELS_CACHE.get("at", 0) or 0) > _MODELS_TTL or not _MODELS_CACHE.get("by_id"):
+        try:
+            live = await list_models()
+            _MODELS_CACHE["by_id"] = {str(m.get("id")): m for m in live if m.get("id")}
+            _MODELS_CACHE["at"] = now
+        except Exception:
+            pass
+    row = (_MODELS_CACHE.get("by_id") or {}).get(model_id) or {}
+    pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+    return _price_per_mtok(pricing.get("prompt")), _price_per_mtok(pricing.get("completion"))
 
 
 async def chat_completion(

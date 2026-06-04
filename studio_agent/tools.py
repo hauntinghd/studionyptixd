@@ -149,21 +149,86 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "list_skeleton_video_models",
+                "description": (
+                    "List selectable i2v models for Skeleton AI shorts. Image stills are "
+                    "ALWAYS canonical Seedream 4.5 edit (not selectable). User picks video only."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_skeleton_categories",
+                "description": (
+                    "List Skeleton AI script categories: 20 YouTube-aligned built-ins "
+                    "(outcast, people_blogs, gaming, …) plus this user's custom categories. "
+                    "Call before start_shortform_generate when category is non-obvious."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_skeleton_category",
+                "description": (
+                    "Create a custom Skeleton AI category for this user (e.g. outcast, "
+                    "true crime lane, channel-specific tone). Returns the new category_key."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Display name e.g. Outcast"},
+                        "key": {"type": "string", "description": "Optional slug; auto-generated if omitted"},
+                        "tagline": {"type": "string"},
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "Optional Grok system tone; auto-generated from label if omitted",
+                        },
+                        "seed_ideas": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["label"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "start_shortform_generate",
                 "description": (
-                    "Queue a skeleton-ai short-form generate job. Spends fal credits."
+                    "Queue a Skeleton AI short (canonical skeleton stills + user-chosen i2v). "
+                    "Stills: locked Seedream edit from master — same skeleton; only background/outfit/props change. "
+                    "Call list_skeleton_video_models for video_model. list_skeleton_categories for category_key."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "category_key": {
                             "type": "string",
-                            "description": "e.g. classical_clash, wildcard_clash",
+                            "description": "e.g. outcast, people_blogs, custom_my_lane",
                         },
                         "topic": {"type": "string"},
                         "script": {"type": "string", "description": "Optional pre-written script"},
+                        "video_model": {
+                            "type": "string",
+                            "enum": ["seedance", "pixverse", "kling_pro"],
+                            "description": "i2v model (required for skeleton shorts). Stills are NOT configurable.",
+                        },
+                        "visual_brief": {
+                            "type": "string",
+                            "description": (
+                                "Locked wardrobe/styling on the SAME canonical skeleton "
+                                "(e.g. teenager 18+, black hoodie and black pants). "
+                                "Applied to every beat via Seedream edit."
+                            ),
+                        },
                     },
-                    "required": ["category_key", "topic"],
+                    "required": ["category_key", "topic", "video_model"],
                 },
             },
         },
@@ -211,8 +276,22 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "get_studio_credits",
+                "description": (
+                    "Unified credit wallet balance, plan, recent ledger. "
+                    "Use before expensive renders; tell user to top up in Studio Wallet when low."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_channel_analytics",
-                "description": "Catalyst channel insights + velocity for a connected channel.",
+                "description": (
+                    "Connected-channel Catalyst insights + growth playbook (new vs established, "
+                    "what's working / not, next posts) + latest video velocity when OAuth allows."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -269,13 +348,108 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "search_archival_media",
+                "description": (
+                    "Search FREE public-domain / archival media (footage, stills, records) "
+                    "across Internet Archive, NASA, Library of Congress, Wikimedia Commons, "
+                    "NPS, and FBI. Use this BEFORE generating with fal — real archival assets "
+                    "are higher quality and cost nothing. Great for history, documentary, "
+                    "science, and criminal-case content (e.g. Empire Magnates)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "preset": {
+                            "type": "string",
+                            "enum": ["history", "documentary", "science", "criminal", "nature", "all"],
+                            "description": "Curated source set. Omit to use 'documentary'.",
+                        },
+                        "sources": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["internet_archive", "nasa", "loc", "wikimedia", "nps", "fbi"],
+                            },
+                            "description": "Explicit sources (overrides preset).",
+                        },
+                        "limit_per_source": {"type": "integer", "default": 8},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_competitor_video",
+                "description": (
+                    "Download and analyze a competitor YouTube video (e.g. a MrBeast link) to "
+                    "learn what made it work. Uses yt-dlp + scene-detection keyframes (NOT blind "
+                    "1fps — storage-efficient) + audio extraction. Returns metadata, engagement "
+                    "rates, scene keyframe image paths, and audio path. Then load performance-analysis "
+                    "+ outlier-mining skills and compare against the channel's Catalyst data."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "YouTube video URL"},
+                        "scene_threshold": {
+                            "type": "number",
+                            "default": 0.3,
+                            "description": "Scene-cut sensitivity (0.2 = more frames, 0.4 = fewer).",
+                        },
+                        "max_frames": {"type": "integer", "default": 32},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_music",
+                "description": "Search free Creative Commons music (Jamendo) for background tracks. Returns direct audio download URLs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "instrumental": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "default": 12},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_sfx",
+                "description": "Search free sound effects (Freesound, CC0 by default for attribution-free commercial use).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "cc0_only": {"type": "boolean", "default": True},
+                        "limit": {"type": "integer", "default": 12},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "poll_render_job",
-                "description": "Poll long-form or short-form job status by job_id and kind.",
+                "description": (
+                    "Poll job status by job_id and kind. Use kind='competitor' for "
+                    "analyze_competitor_video to surface live progress stages."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "string"},
-                        "kind": {"type": "string", "enum": ["longform", "shortform"]},
+                        "kind": {"type": "string", "enum": ["longform", "shortform", "competitor"]},
                     },
                     "required": ["job_id", "kind"],
                 },
@@ -332,12 +506,45 @@ def _build_outline_from_args(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _debit_fal_for_outline(user_id: str, outline: dict[str, Any], *, job_id: str, kind: str) -> dict[str, Any]:
+    """Charge the unified wallet for fal spend using the outline's scene plan.
+
+    Estimate-at-start using live fal pricing (reconciled by the pipeline later).
+    One image + ~5s i2v clip per beat, plus narration TTS chars.
+    """
+    try:
+        import unified_credits as uc
+
+        beats = 0
+        tts_chars = 0
+        for ch in outline.get("chapters") or []:
+            for beat in ch.get("beats") or []:
+                beats += 1
+                tts_chars += len(str(beat.get("text") or ""))
+        if beats <= 0:
+            return {"credits_charged": 0, "note": "no beats to price"}
+        credits, balance = uc.debit_fal_render(
+            user_id,
+            images=beats,
+            video_seconds=beats * 5.0,
+            tts_chars=tts_chars,
+            reason=f"studio_agent_{kind}_estimate",
+            metadata={"job_id": job_id, "beats": beats},
+        )
+        return {"credits_charged": credits, "balance_after": balance, "estimate": True, "beats": beats}
+    except Exception as exc:
+        return {"credits_charged": 0, "error": str(exc)[:200]}
+
+
 def _spawn_shortform_job(
     *,
     category_key: str,
     topic: str | None,
     script: str | None,
     tier: str = "standard",
+    video_model: str | None = None,
+    visual_brief: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:12]
     workspace = (ROOT / SKELETON_OUTPUT / job_id).resolve()
@@ -352,7 +559,10 @@ def _spawn_shortform_job(
                 topic=topic,
                 workspace=workspace,
                 tier=tier,
+                video_model=video_model,
+                visual_brief=visual_brief,
                 script_override=script,
+                user_id=user_id,
             )
             payload = {"status": "complete", "job_id": job_id, **result}
         except Exception as exc:
@@ -423,6 +633,7 @@ def execute_tool(
         channel = get_channel(channel_key)
         outline = _build_outline_from_args(args)
         job_id = lf_pipeline.start_render(channel, outline)
+        billing = _debit_fal_for_outline(user_id, outline, job_id=job_id, kind="longform")
         return json.dumps({
             "status": "started",
             "job_id": job_id,
@@ -432,26 +643,94 @@ def execute_tool(
             "finalize_url": f"/api/long-form/jobs/{job_id}/finalize",
             "outline_title": outline.get("title"),
             "chapters": len(outline.get("chapters") or []),
+            "billing": billing,
         }, indent=2)
 
+    if name == "list_skeleton_video_models":
+        from skeleton_ai.i2v_engine import list_video_models
+
+        return json.dumps(
+            {
+                "video_models": list_video_models(),
+                "stills": {
+                    "model": "seedream_v45_edit",
+                    "locked": True,
+                    "rule": (
+                        "Every scene edits the canonical skeleton master — same identity; "
+                        "change background, clothes, muscles-on-shell, props only."
+                    ),
+                },
+            },
+            indent=2,
+        )
+
+    if name == "list_skeleton_categories":
+        from skeleton_ai.prompts.category_registry import list_categories, list_valid_keys
+
+        uid = str(user_id or "").strip() or None
+        cats = list_categories(user_id=uid)
+        return json.dumps(
+            {
+                "categories": cats,
+                "valid_keys": list_valid_keys(uid),
+                "hint": "Built-in outcast covers edgy/contrarian lanes; use create_skeleton_category for a personalized variant.",
+            },
+            indent=2,
+            ensure_ascii=True,
+        )
+
+    if name == "create_skeleton_category":
+        from skeleton_ai.prompts.category_registry import create_custom_category
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("sign in required to create custom categories")
+        entry = create_custom_category(
+            uid,
+            label=str(args.get("label") or "").strip(),
+            key=str(args.get("key") or "").strip() or None,
+            tagline=str(args.get("tagline") or "").strip() or None,
+            system_prompt=str(args.get("system_prompt") or "").strip() or None,
+            seed_ideas=[str(s) for s in (args.get("seed_ideas") or [])],
+        )
+        return json.dumps({"category": entry, "category_key": entry["key"]}, indent=2)
+
     if name == "start_shortform_generate":
-        category_key = str(args.get("category_key") or "classical_clash").strip()
+        from skeleton_ai.prompts.category_registry import get_category
+        from skeleton_ai.i2v_engine import resolve_video_model_chain
+
+        category_key = str(args.get("category_key") or "people_blogs").strip()
         topic = str(args.get("topic") or "").strip() or None
         script = str(args.get("script") or "").strip() or None
+        video_model = str(args.get("video_model") or "seedance").strip()
         tier = str(args.get("tier") or "standard").strip()
+        if video_model == "kling_pro":
+            tier = "premium"
+        uid = str(user_id or "").strip() or None
+        get_category(category_key, user_id=uid)
+        _, resolved_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
         job_id = _spawn_shortform_job(
             category_key=category_key,
             topic=topic,
             script=script,
             tier=tier,
+            video_model=resolved_vm,
+            visual_brief=visual_brief,
+            user_id=uid,
         )
         return json.dumps({
             "status": "started",
             "job_id": job_id,
             "category_key": category_key,
             "topic": topic,
+            "visual_brief": visual_brief,
+            "video_model": resolved_vm,
+            "stills_model": "seedream_v45_edit_canonical",
             "poll_url": f"/api/skeleton-ai/jobs/{job_id}",
-            "note": "Background thread — poll until result.json status is complete or failed.",
+            "note": (
+                "Skeleton AI: canonical master + Seedream edit per scene (identity locked); "
+                f"i2v via {resolved_vm}. Poll until result.json is complete or failed."
+            ),
         }, indent=2)
 
     if name == "run_build_script":
@@ -485,15 +764,34 @@ def execute_tool(
             "See OAUTH_PUBLISH_RUNBOOK.md for Google Cloud Console steps."
         )
 
+    if name == "get_studio_credits":
+        import unified_credits as uc
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("sign in required")
+        try:
+            uc.ensure_monthly_grant(uid)
+            state = uc.get_state(uid)
+            state["recent"] = uc.recent_ledger(uid, limit=8)
+        except Exception as exc:
+            state = {"balance": 0, "error": str(exc)}
+        if int(state.get("balance") or 0) < 15:
+            state["top_up_hint"] = "Low balance — user can add credits anytime in Studio → Wallet (unlimited top-ups)."
+        return json.dumps(state, indent=2)
+
     if name == "list_youtube_channels":
         from youtube_connections_store import hydrate
         from long_form.prompts.channels import CHANNELS
 
         hyd = hydrate() or {}
+        uid = str(user_id or "").strip()
         id_to_key = {v["channel_id"]: k for k, v in CHANNELS.items() if v.get("channel_id")}
         out: list[dict[str, Any]] = []
-        for u in hyd.values():
+        for owner_id, u in hyd.items():
             if not isinstance(u, dict):
+                continue
+            if uid and str(owner_id) != uid:
                 continue
             for ch_id, rec in (u.get("channels") or {}).items():
                 if not isinstance(rec, dict):
@@ -510,7 +808,12 @@ def execute_tool(
 
     if name == "get_channel_analytics":
         async def _fetch():
-            from long_form.catalyst_bridge import CHANNEL_KEY_TO_ID, fetch_channel_snapshot, shape_catalyst_insights
+            from long_form.catalyst_bridge import (
+                CHANNEL_KEY_TO_ID,
+                assess_channel_growth,
+                fetch_channel_snapshot,
+                shape_catalyst_insights,
+            )
 
             ch_id = str(args.get("channel_id") or "").strip()
             reg_key = str(args.get("registry_key") or "").strip()
@@ -518,12 +821,41 @@ def execute_tool(
                 ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
             if not ch_id:
                 raise ValueError("channel_id or registry_key required")
-            record = fetch_channel_snapshot(ch_id)
+            record = fetch_channel_snapshot(ch_id) or {}
             insights = shape_catalyst_insights(record)
+            harvest = bool((record.get("analytics_snapshot") or {}))
+            growth = assess_channel_growth(insights, harvest_present=harvest)
+
+            velocity: dict[str, Any] = {}
+            uid = str(user_id or "").strip()
+            if uid:
+                try:
+                    from youtube import (
+                        _youtube_connected_channel_access_token,
+                        youtube_get_latest_video_velocity,
+                    )
+
+                    access_token, _rec = await _youtube_connected_channel_access_token(
+                        {"id": uid}, ch_id
+                    )
+                    if access_token:
+                        velocity = await youtube_get_latest_video_velocity(
+                            access_token=access_token,
+                            channel_id=ch_id,
+                        )
+                except Exception:
+                    velocity = {}
+
             return {
                 "channel_id": ch_id,
-                "registry_key": reg_key,
+                "registry_key": reg_key or next(
+                    (k for k, v in CHANNEL_KEY_TO_ID.items() if v == ch_id),
+                    "",
+                ),
+                "channel_title": record.get("title") or record.get("channel_handle") or "",
                 "insights": insights,
+                "growth_playbook": growth,
+                "latest_video_velocity": velocity,
             }
 
         return json.dumps(_run_async(_fetch()), indent=2)
@@ -579,11 +911,76 @@ def execute_tool(
         except Exception as exc:
             return json.dumps({"error": str(exc), "note": "Set FAL_AI_KEY for live fal.ai pricing."})
 
+    if name == "search_archival_media":
+        from media_sources import search_archival
+
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("query required")
+        sources = args.get("sources") or None
+        preset = str(args.get("preset") or "").strip()
+        limit = int(args.get("limit_per_source") or 8)
+        data = search_archival(query, sources=sources, preset=preset, limit_per_source=limit)
+        return json.dumps(data, indent=2, ensure_ascii=True)
+
+    if name == "analyze_competitor_video":
+        from studio_agent import competitor
+
+        url = str(args.get("url") or "").strip()
+        if not url:
+            raise ValueError("url required")
+        job_id = competitor.start_analysis(
+            url,
+            scene_threshold=float(args.get("scene_threshold") or 0.3),
+            max_frames=int(args.get("max_frames") or 32),
+        )
+        return json.dumps({
+            "status": "started",
+            "job_id": job_id,
+            "kind": "competitor",
+            "stages": [s[0] for s in competitor.STAGES],
+            "note": (
+                "Analysis running in background. Poll with poll_render_job(job_id, kind='competitor') "
+                "to show live progress: fetching_metadata -> downloading_video -> extracting_keyframes "
+                "-> extracting_audio -> complete. Report each stage to the user as it advances."
+            ),
+        }, indent=2)
+
+    if name == "search_music":
+        from media_sources import search_music
+
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("query required")
+        data = search_music(
+            query,
+            limit=int(args.get("limit") or 12),
+            instrumental=bool(args.get("instrumental")),
+        )
+        return json.dumps(data, indent=2, ensure_ascii=True)
+
+    if name == "search_sfx":
+        from media_sources import search_sfx
+
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("query required")
+        data = search_sfx(
+            query,
+            limit=int(args.get("limit") or 12),
+            cc0_only=bool(args.get("cc0_only", True)),
+        )
+        return json.dumps(data, indent=2, ensure_ascii=True)
+
     if name == "poll_render_job":
         job_id = str(args.get("job_id") or "").strip()
         kind = str(args.get("kind") or "longform").strip().lower()
         if not job_id:
             raise ValueError("job_id required")
+        if kind == "competitor":
+            from studio_agent import competitor
+
+            return json.dumps(competitor.read_status(job_id), indent=2, ensure_ascii=True)
         if kind == "shortform":
             result_path = (ROOT / SKELETON_OUTPUT / job_id / "result.json").resolve()
             if not result_path.is_file():
