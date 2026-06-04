@@ -36,6 +36,17 @@ COPY long_form ./long_form
 # zerotier_private_router.py imports from zerotier_private.pipeline; without
 # this COPY the router fails to mount and /api/zerotier-private/* returns 404.
 COPY zerotier_private ./zerotier_private
+# Studio Agent (OpenRouter orchestrator) + Rookcast skills library.
+# Trailing slash + verify step busts stale Depot cache layers from pre-package builds.
+COPY studio_agent/ ./studio_agent/
+RUN test -f ./studio_agent/__init__.py && test -f ./studio_agent/runner.py
+# Unified wallet + media clients used by studio_agent tools.
+COPY unified_credits.py ./
+COPY media_sources ./media_sources
+# Free / public-domain external media source clients (archival, music, SFX).
+COPY cliplab ./cliplab
+COPY studio/skills ./studio/skills
+COPY studio/channels ./studio/channels
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json

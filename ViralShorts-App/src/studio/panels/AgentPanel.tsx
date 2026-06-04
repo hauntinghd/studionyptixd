@@ -100,11 +100,14 @@ function displayModelName(models: AgentModelOption[], id: string) {
 
 function friendlyApiError(status: number, data: Record<string, unknown>, fallback: string) {
     const detail = String(data?.detail || data?.error || fallback);
-    if (status === 404 && /not found/i.test(detail)) {
+    if (status === 401 || status === 403) {
+        return detail || 'Sign in required (Studio Agent is admin-only during beta).';
+    }
+    if (status === 404) {
         return (
-            'Studio Agent API is not available on the backend yet. '
-            + 'The frontend is deployed, but api-studio needs the latest Docker image on Fly '
-            + '(studio-agent routes return 404 until then).'
+            'Studio Agent API returned 404 — the backend image may be missing the studio_agent '
+            + 'package. Redeploy api-studio on Fly; if this persists, check Fly logs for '
+            + '"Studio Agent router NOT mounted".'
         );
     }
     if (status === 503) return detail;
