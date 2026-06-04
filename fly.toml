@@ -24,6 +24,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   STUDIO_AGENT_SESSIONS_DIR = "/var/data/studio_agent_sessions"
   STUDIO_AGENT_TELEMETRY_DIR = "/var/data/studio_agent_telemetry"
   STUDIO_AGENT_COMPETITOR_DIR = "/var/data/competitor_analysis"
+  STUDIO_AGENT_ARCHIVAL_DIR = "/var/data/archival_manifests"
   OUTPUT_DIR = "/var/data/generated_videos"
   TEMP_DIR = "/var/data/temp_assets"
   TRAINING_DATA_DIR = "/var/data/training_data"

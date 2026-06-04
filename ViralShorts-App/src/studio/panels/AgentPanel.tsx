@@ -81,7 +81,7 @@ const LAST_SESSION_KEY = 'studio_agent_last_session';
 
 const STARTER_PROMPTS = [
     "I don't know what video to make — recommend topics and niches for my channel.",
-    'I will paste a Lume / Jake Tran URL — analyze pacing with yt-dlp and blueprint scenes for my topic.',
+    'Topic: Bre-X gold fraud doc — fetch archival footage per scene, then script + thumbnail plan.',
     'Skeleton short: outcast + pixverse, visual_brief: teen 18+, black hoodie/pants. Then approve render.',
 ];
 

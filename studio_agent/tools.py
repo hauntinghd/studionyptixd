@@ -349,13 +349,72 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "fetch_archival_for_video",
+                "description": (
+                    "Get archival B-roll matched to THIS exact video: per-scene queries from "
+                    "topic + scene blueprint, fan-out Internet Archive (Prelinger/stock), LOC film, "
+                    "NASA video, Wikimedia, NPS, FBI. Resolves direct MP4/download URLs. "
+                    "Call after build_scene_blueprint_from_reference or with topic + registry_key. "
+                    "Use BEFORE fal generation — Lume/Magnates docs are ~90% archival stills+B-roll."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "description": "Exact video topic"},
+                        "title": {"type": "string"},
+                        "registry_key": {"type": "string", "description": "long_form channel e.g. cryptic_science"},
+                        "preset": {
+                            "type": "string",
+                            "enum": ["history", "documentary", "science", "criminal", "nature", "all"],
+                        },
+                        "blueprint_job_id": {
+                            "type": "string",
+                            "description": "scene blueprint job_id from analyze_reference_video flow",
+                        },
+                        "production_job_id": {
+                            "type": "string",
+                            "description": "Stable id for manifest path (defaults to blueprint_job_id)",
+                        },
+                        "limit_per_scene": {"type": "integer", "default": 5},
+                        "resolve_downloads": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Resolve direct file URLs (IA mp4, NASA assets, etc.)",
+                        },
+                    },
+                    "required": ["topic"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "resolve_archival_asset",
+                "description": (
+                    "Resolve direct download URLs for one archival search hit "
+                    "(pass the asset object from fetch_archival_for_video or search_archival_media)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string"},
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "page_url": {"type": "string"},
+                        "download_url": {"type": "string"},
+                        "media_type": {"type": "string"},
+                    },
+                    "required": ["source"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "search_archival_media",
                 "description": (
-                    "Search FREE public-domain / archival media (footage, stills, records) "
-                    "across Internet Archive, NASA, Library of Congress, Wikimedia Commons, "
-                    "NPS, and FBI. Use this BEFORE generating with fal — real archival assets "
-                    "are higher quality and cost nothing. Great for history, documentary, "
-                    "science, and criminal-case content (e.g. Empire Magnates)."
+                    "Quick single-query archival search. For a full video shot list use "
+                    "fetch_archival_for_video instead (per-scene, direct downloads)."
                 ),
                 "parameters": {
                     "type": "object",
@@ -977,6 +1036,50 @@ def execute_tool(
             return json.dumps(snap, indent=2)
         except Exception as exc:
             return json.dumps({"error": str(exc), "note": "Set FAL_AI_KEY for live fal.ai pricing."})
+
+    if name == "fetch_archival_for_video":
+        from media_sources import fetch_archival_for_video
+
+        topic = str(args.get("topic") or "").strip()
+        if not topic:
+            raise ValueError("topic required")
+        manifest = fetch_archival_for_video(
+            topic,
+            title=str(args.get("title") or "").strip(),
+            registry_key=str(args.get("registry_key") or "").strip(),
+            preset=str(args.get("preset") or "").strip(),
+            blueprint_job_id=str(args.get("blueprint_job_id") or "").strip(),
+            limit_per_scene=int(args.get("limit_per_scene") or 5),
+            resolve_downloads=bool(args.get("resolve_downloads", True)),
+            production_job_id=str(args.get("production_job_id") or "").strip(),
+        )
+        telemetry.record_event(
+            user_id,
+            "archival_manifest_built",
+            {
+                "topic": topic[:200],
+                "preset": manifest.get("preset"),
+                "scene_count": manifest.get("scene_count"),
+                "production_job_id": manifest.get("production_job_id"),
+            },
+            session_id=session_id,
+        )
+        return json.dumps(manifest, indent=2, ensure_ascii=False)
+
+    if name == "resolve_archival_asset":
+        from media_sources import resolve_archival_asset
+
+        item = {
+            "source": str(args.get("source") or ""),
+            "id": str(args.get("id") or ""),
+            "title": str(args.get("title") or ""),
+            "page_url": str(args.get("page_url") or ""),
+            "download_url": str(args.get("download_url") or ""),
+            "media_type": str(args.get("media_type") or ""),
+        }
+        if not item["source"]:
+            raise ValueError("source required")
+        return json.dumps(resolve_archival_asset(item), indent=2, ensure_ascii=True)
 
     if name == "search_archival_media":
         from media_sources import search_archival

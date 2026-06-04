@@ -39,8 +39,10 @@ When user links a Lume/MrBeast/Jake Tran/Magnates/Mamoru-style video:
 2. Poll `poll_render_job` kind=competitor — report every stage live.
 3. `build_scene_blueprint_from_reference` — per-scene rows: 1–5 characters (channel-dependent),
    Seedream v4.5 **edit** for wardrobe/props/background only (same identity), i2v duration per cut.
-4. `load_skill script-writing` — map narration to story_beat labels in the blueprint.
-5. Audio: VO slightly louder than BGM (not extreme); per-scene BGM mood in blueprint; use search_music.
+4. `fetch_archival_for_video` — per-scene archival B-roll for THIS exact topic (IA Prelinger, LOC film,
+   NASA, Wikimedia, NPS, FBI) with direct download URLs; use before fal spend.
+5. `load_skill script-writing` — map narration to story_beat labels in the blueprint.
+6. Audio: VO slightly louder than BGM (not extreme); per-scene BGM via search_music; SFX via search_sfx.
 
 ═══ YOUTUBE CHANNEL INTELLIGENCE (start here when user mentions their channel) ═══
 1. `youtube_oauth_status` — if not connected, send them to Studio → Settings → Channels.
