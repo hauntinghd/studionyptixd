@@ -159,6 +159,49 @@ def extract_scene_keyframes(
     return {"method": method, "frame_count": len(frames), "frames": frames}
 
 
+def extract_cut_timeline(
+    video_path: str,
+    *,
+    scene_threshold: float = 0.3,
+    max_cuts: int = 80,
+) -> dict[str, Any]:
+    """Scene-change timestamps via ffmpeg showinfo (for pacing / blueprint)."""
+    ff = _ffmpeg_bin()
+    cmd = [
+        ff, "-hide_banner", "-loglevel", "info", "-i", video_path,
+        "-vf", f"select='gt(scene,{scene_threshold})',showinfo",
+        "-an", "-f", "null", "-",
+    ]
+    cuts: list[float] = []
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        import re
+
+        for line in (proc.stderr or "").splitlines():
+            m = re.search(r"pts_time:([0-9.]+)", line)
+            if m:
+                cuts.append(round(float(m.group(1)), 3))
+        cuts = sorted(set(cuts))[:max_cuts]
+    except Exception as exc:
+        return {"error": str(exc)[:200], "cuts_sec": [], "cut_count": 0}
+
+    duration = _probe_duration(video_path)
+    avg_shot = 0.0
+    if len(cuts) >= 2:
+        gaps = [cuts[i + 1] - cuts[i] for i in range(len(cuts) - 1)]
+        avg_shot = sum(gaps) / len(gaps) if gaps else 0.0
+    elif duration > 0 and cuts:
+        avg_shot = duration / max(len(cuts), 1)
+
+    return {
+        "cuts_sec": cuts,
+        "cut_count": len(cuts),
+        "duration_sec": round(duration, 2),
+        "avg_shot_sec": round(avg_shot, 2) if avg_shot else None,
+        "hook_window_sec": 8,
+    }
+
+
 def extract_audio(video_path: str, out_dir: Path) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     ff = _ffmpeg_bin()
@@ -183,7 +226,8 @@ STAGES = [
     ("queued", 0),
     ("fetching_metadata", 10),
     ("downloading_video", 35),
-    ("extracting_keyframes", 70),
+    ("extracting_keyframes", 55),
+    ("analyzing_pacing", 70),
     ("extracting_audio", 90),
     ("complete", 100),
 ]
@@ -223,9 +267,18 @@ def read_status(job_id: str) -> dict[str, Any]:
     if not sp.exists():
         return {"job_id": job_id, "status": "unknown", "error": "no such job"}
     try:
-        return json.loads(sp.read_text(encoding="utf-8"))
+        status = json.loads(sp.read_text(encoding="utf-8"))
     except Exception as exc:
         return {"job_id": job_id, "status": "error", "error": str(exc)[:200]}
+    if status.get("status") == "complete":
+        ar = work / "analysis_result.json"
+        if ar.is_file():
+            try:
+                full = json.loads(ar.read_text(encoding="utf-8"))
+                status = {**status, **{k: v for k, v in full.items() if k not in ("status",)}}
+            except Exception:
+                pass
+    return status
 
 
 def analyze(
@@ -280,6 +333,10 @@ def analyze(
     frames = extract_scene_keyframes(video_path, work / "frames", scene_threshold=scene_threshold, max_frames=max_frames)
     _write_status(work, frames_extracted=frames.get("frame_count", 0), frame_method=frames.get("method"))
 
+    _step("analyzing_pacing", "Building cut timeline for MrBeast/Lume-style pacing…")
+    pacing = extract_cut_timeline(video_path, scene_threshold=scene_threshold)
+    _write_status(work, pacing=pacing)
+
     _step("extracting_audio", "Extracting audio for transcription…")
     audio = extract_audio(video_path, work / "audio")
 
@@ -308,6 +365,7 @@ def analyze(
         "url": url,
         "metadata": meta,
         "engagement": engagement,
+        "pacing": pacing,
         "frames": {
             "method": frames.get("method"),
             "count": frames.get("frame_count", 0),
@@ -316,12 +374,24 @@ def analyze(
         },
         "audio": {"path": audio.get("audio_path", ""), "error": audio.get("error")},
         "workspace": str(work),
-        "next_steps": (
-            "Load skill 'performance-analysis' and 'outlier-mining'. Inspect keyframes for hook "
-            "structure + pacing, transcribe audio for script/retention beats, then compare against "
-            "the channel's Catalyst data via get_channel_analytics and recommend the next topic."
+        "next_steps": [
+            "Call build_scene_blueprint_from_reference(job_id, topic, characters_per_scene) to map "
+            "cuts → scenes with Seedream v4.5 edit + i2v duration targets.",
+            "load_skill script-writing — hardest step; beat-map narration to story_beat per scene.",
+            "load_skill thumbnail-design — packaging/delivery is second-hardest after script.",
+            "get_channel_analytics or recommend_video_topics to pick the user's next niche topic.",
+        ],
+        "style_reference_note": (
+            "Reference pacing extracted (Lume / MrBeast / Jake Tran tier). Same character identity; "
+            "change wardrobe/background/props per scene via seedream edit."
         ),
     }
+    try:
+        (work / "analysis_result.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
     final_status = {k: v for k, v in result.items() if k != "metadata"}
     final_status.update({"status": "complete", "stage": "complete", "percent": 100})
     _write_status(work, **final_status)

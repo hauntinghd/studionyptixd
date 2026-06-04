@@ -80,9 +80,9 @@ interface SessionSummary {
 const LAST_SESSION_KEY = 'studio_agent_last_session';
 
 const STARTER_PROMPTS = [
-    'Connect my YouTube channel — list channels, pull analytics, and tell me what to post next.',
-    'Skeleton AI short: outcast + pixverse. visual_brief: teenager 18+, black hoodie and black pants. Government 30-day expose topic.',
-    'Plan a premium ~15 min doc for cryptic_science — Jake Tran pacing, ElevenLabs VO, thumbnail variants, then render.',
+    "I don't know what video to make — recommend topics and niches for my channel.",
+    'I will paste a Lume / Jake Tran URL — analyze pacing with yt-dlp and blueprint scenes for my topic.',
+    'Skeleton short: outcast + pixverse, visual_brief: teen 18+, black hoodie/pants. Then approve render.',
 ];
 
 function formatSessionAge(updatedAt?: number) {

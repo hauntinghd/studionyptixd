@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from studio_agent import skills as skill_loader
+from studio_agent import telemetry
 
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
@@ -382,14 +383,28 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "analyze_competitor_video",
+                "name": "analyze_reference_video",
                 "description": (
-                    "Download and analyze a competitor YouTube video (e.g. a MrBeast link) to "
-                    "learn what made it work. Uses yt-dlp + scene-detection keyframes (NOT blind "
-                    "1fps — storage-efficient) + audio extraction. Returns metadata, engagement "
-                    "rates, scene keyframe image paths, and audio path. Then load performance-analysis "
-                    "+ outlier-mining skills and compare against the channel's Catalyst data."
+                    "Download a reference YouTube video (Lume, MrBeast, Jake Tran, Magnates, Mamoru, etc.) "
+                    "via yt-dlp: metadata, scene keyframes, cut timeline pacing, audio for transcription. "
+                    "Poll poll_render_job(kind=competitor), then build_scene_blueprint_from_reference."
                 ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "YouTube video URL"},
+                        "scene_threshold": {"type": "number", "default": 0.3},
+                        "max_frames": {"type": "integer", "default": 40},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_competitor_video",
+                "description": "Alias of analyze_reference_video (competitor/outlier study).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -402,6 +417,55 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "max_frames": {"type": "integer", "default": 32},
                     },
                     "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "build_scene_blueprint_from_reference",
+                "description": (
+                    "After analyze_reference_video completes: map keyframes + pacing into per-scene "
+                    "rows (1–5 characters), Seedream v4.5 edit fields, i2v duration, BGM cues, audio mix."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "topic": {"type": "string"},
+                        "channel_style": {
+                            "type": "string",
+                            "enum": ["premium_doc", "viral_short", "story_manhwa"],
+                            "default": "premium_doc",
+                        },
+                        "characters_per_scene": {
+                            "type": "integer",
+                            "default": 1,
+                            "description": "1 for skeleton host; up to 5 for ensemble/cast channels.",
+                        },
+                        "visual_brief": {"type": "string"},
+                        "target_scene_count": {"type": "integer"},
+                    },
+                    "required": ["job_id", "topic"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recommend_video_topics",
+                "description": (
+                    "For creators who don't know what to film: merge channel analytics (if connected), "
+                    "growth playbook, and public search trends into ranked topic + niche recommendations."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "registry_key": {"type": "string"},
+                        "niche_query": {"type": "string"},
+                        "days": {"type": "integer", "default": 30},
+                    },
+                    "required": [],
                 },
             },
         },
@@ -579,8 +643,11 @@ def execute_tool(
     *,
     user_id: str,
     content_format: str,
+    session_id: str | None = None,
 ) -> str:
     args = arguments or {}
+    if name in ("analyze_reference_video", "analyze_competitor_video"):
+        name = "analyze_reference_video"
 
     if name == "list_skills":
         return json.dumps({"skills": skill_loader.list_skill_slugs()}, indent=2)
@@ -923,28 +990,129 @@ def execute_tool(
         data = search_archival(query, sources=sources, preset=preset, limit_per_source=limit)
         return json.dumps(data, indent=2, ensure_ascii=True)
 
-    if name == "analyze_competitor_video":
+    if name == "analyze_reference_video":
         from studio_agent import competitor
 
         url = str(args.get("url") or "").strip()
         if not url:
             raise ValueError("url required")
+        telemetry.record_event(
+            user_id,
+            "reference_video_started",
+            {"url": url[:500]},
+            session_id=session_id,
+        )
         job_id = competitor.start_analysis(
             url,
             scene_threshold=float(args.get("scene_threshold") or 0.3),
-            max_frames=int(args.get("max_frames") or 32),
+            max_frames=int(args.get("max_frames") or 40),
         )
-        return json.dumps({
+        out = {
             "status": "started",
             "job_id": job_id,
             "kind": "competitor",
             "stages": [s[0] for s in competitor.STAGES],
             "note": (
-                "Analysis running in background. Poll with poll_render_job(job_id, kind='competitor') "
-                "to show live progress: fetching_metadata -> downloading_video -> extracting_keyframes "
-                "-> extracting_audio -> complete. Report each stage to the user as it advances."
+                "Poll poll_render_job(job_id, kind='competitor'): metadata → download → keyframes → "
+                "pacing → audio → complete. Then build_scene_blueprint_from_reference."
             ),
-        }, indent=2)
+        }
+        return json.dumps(out, indent=2)
+
+    if name == "build_scene_blueprint_from_reference":
+        from studio_agent import reference_planner
+
+        job_id = str(args.get("job_id") or "").strip()
+        topic = str(args.get("topic") or "").strip()
+        if not job_id or not topic:
+            raise ValueError("job_id and topic required")
+        blueprint = reference_planner.build_scene_blueprint(
+            job_id,
+            topic=topic,
+            channel_style=str(args.get("channel_style") or "premium_doc"),
+            characters_per_scene=int(args.get("characters_per_scene") or 1),
+            visual_brief=str(args.get("visual_brief") or "").strip(),
+            target_scene_count=int(args["target_scene_count"]) if args.get("target_scene_count") else None,
+        )
+        telemetry.record_event(
+            user_id,
+            "scene_blueprint_built",
+            {"job_id": job_id, "topic": topic[:200], "scene_count": len(blueprint.get("scenes") or [])},
+            session_id=session_id,
+        )
+        return json.dumps(blueprint, indent=2, ensure_ascii=False)
+
+    if name == "recommend_video_topics":
+        async def _topics():
+            from long_form.catalyst_bridge import (
+                CHANNEL_KEY_TO_ID,
+                assess_channel_growth,
+                fetch_channel_snapshot,
+                shape_catalyst_insights,
+            )
+            from studio_analytics_router import _fetch_public_search_videos, _predict_topics
+
+            reg_key = str(args.get("registry_key") or "").strip()
+            niche = str(args.get("niche_query") or "").strip()
+            days = int(args.get("days") or 30)
+
+            channel_block: dict[str, Any] = {}
+            if reg_key:
+                ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
+                if ch_id:
+                    rec = fetch_channel_snapshot(ch_id)
+                    ins = shape_catalyst_insights(rec)
+                    harvest = bool((rec or {}).get("analytics_snapshot"))
+                    channel_block = {
+                        "registry_key": reg_key,
+                        "insights": ins,
+                        "growth_playbook": assess_channel_growth(ins, harvest_present=harvest),
+                    }
+
+            queries = [niche] if niche else (
+                [reg_key.replace("_", " ")] if reg_key else ["YouTube documentary viral 2026"]
+            )
+            videos: list[dict[str, Any]] = []
+            titles: list[str] = []
+            for q in queries[:2]:
+                batch = await _fetch_public_search_videos(q, days=days, max_results=12, order="viewCount")
+                videos.extend(batch)
+                titles.extend([str(r.get("title") or "") for r in batch if r.get("title")])
+
+            top_titles = (channel_block.get("insights") or {}).get("top_titles") or []
+            channel_titles = [t.get("title", "") for t in top_titles if isinstance(t, dict)]
+            predictions = _predict_topics(
+                trending_titles=titles,
+                channel_titles=channel_titles,
+                niche_keywords=queries,
+            )
+            playbook = channel_block.get("growth_playbook") or {}
+            stage = playbook.get("stage", "unknown")
+            framing = (
+                "You don't need a topic yet — here's your positioning sprint."
+                if stage in ("brand_new", "early") and not channel_titles
+                else "Double down on what's already working on your channel."
+            )
+            return {
+                "framing_for_creator": framing,
+                "channel": channel_block,
+                "trending_sample": videos[:15],
+                "recommended_topics": predictions[:12],
+                "next_actions": (playbook.get("recommended_next_actions") or [])[:5],
+                "hardest_steps_reminder": [
+                    "Script-writing + story beats (use reference blueprint if you linked a Lume/MrBeast video)",
+                    "Packaging: title + thumbnail before you render",
+                ],
+            }
+
+        result = _run_async(_topics())
+        telemetry.record_event(
+            user_id,
+            "topic_recommendations",
+            {"registry_key": str(args.get("registry_key") or ""), "niche": str(args.get("niche_query") or "")[:120]},
+            session_id=session_id,
+        )
+        return result
 
     if name == "search_music":
         from media_sources import search_music
@@ -1001,6 +1169,28 @@ def execute_tool(
         }, indent=2)
 
     raise ValueError(f"unknown tool: {name}")
+
+
+def execute_tool_logged(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    user_id: str,
+    content_format: str,
+    session_id: str | None = None,
+) -> str:
+    """Wrapper that records telemetry then runs the tool."""
+    try:
+        result = execute_tool(
+            name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
+        )
+    except Exception as exc:
+        telemetry.record_tool_call(
+            user_id, name, arguments, session_id=session_id, result_preview=f"error: {exc}"
+        )
+        raise
+    telemetry.record_tool_call(user_id, name, arguments, session_id=session_id, result_preview=result[:800])
+    return result
 
 
 def requires_approval(name: str) -> bool:

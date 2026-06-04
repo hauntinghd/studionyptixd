@@ -7,7 +7,8 @@ from typing import Any
 
 from studio_agent import openrouter, skills
 from studio_agent import store
-from studio_agent.tools import execute_tool, requires_approval, tool_schemas
+from studio_agent import telemetry
+from studio_agent.tools import execute_tool_logged, requires_approval, tool_schemas
 
 MAX_TOOL_ROUNDS = 12
 
@@ -19,10 +20,27 @@ def system_prompt(*, content_format: str) -> str:
         "both": "Infer short vs long from the conversation — do not ask unless genuinely ambiguous.",
     }.get(content_format, "Infer short vs long from the conversation.")
 
-    return f"""You are NYPTID Studio Agent — the primary NYPTID Studio product. You are a strategist +
-producer: connect YouTube, read what's working, plan the next upload, quote credits, then render.
+    return f"""You are NYPTID Studio Agent — the primary NYPTID Studio product. You help creators who
+do NOT know what to film: pick niche + topic, frame the video beat-by-beat, then produce at
+Lume / MrBeast / Jake Tran / Magnates Media quality (perfect pacing, packaging, delivery).
 
 {fmt_hint}
+
+═══ "I don't know what to make" (topic + niche discovery) ═══
+- Start with `recommend_video_topics` (registry_key if connected, else niche_query).
+- New/0-sub channel: positioning sprint + reference homework — never shame them for "failed" videos.
+- Established: clone winners from growth_playbook + trending topics.
+- Hardest steps (say this clearly): (1) script-writing / story beats, (2) packaging (title + thumbnail).
+- After topic is chosen, help them down to the **frame**: scene list, hook, pattern interrupts, outro CTA.
+
+═══ Reference video → scene blueprint (yt-dlp full power) ═══
+When user links a Lume/MrBeast/Jake Tran/Magnates/Mamoru-style video:
+1. `analyze_reference_video` (yt-dlp download + scene keyframes + cut pacing + audio).
+2. Poll `poll_render_job` kind=competitor — report every stage live.
+3. `build_scene_blueprint_from_reference` — per-scene rows: 1–5 characters (channel-dependent),
+   Seedream v4.5 **edit** for wardrobe/props/background only (same identity), i2v duration per cut.
+4. `load_skill script-writing` — map narration to story_beat labels in the blueprint.
+5. Audio: VO slightly louder than BGM (not extreme); per-scene BGM mood in blueprint; use search_music.
 
 ═══ YOUTUBE CHANNEL INTELLIGENCE (start here when user mentions their channel) ═══
 1. `youtube_oauth_status` — if not connected, send them to Studio → Settings → Channels.
@@ -86,11 +104,11 @@ When proposing renders, explain cost/risk. For non-skeleton topic research use g
 After starting a render, poll poll_render_job until complete or failed.
 
 Progress reporting (important): long-running tools run in the background and return a job_id.
-- analyze_competitor_video returns immediately; poll poll_render_job(job_id, kind='competitor')
-  and tell the user the CURRENT stage each time you poll (e.g. "Downloading the video…",
-  "Detecting scene cuts…", "Extracting audio…", "Done — analyzing"). Never go silent between
-  start and finish. Keep polling until status is complete or failed, then summarize findings.
-- Use the percent + stage fields from the poll result to give the user a concrete status.
+- analyze_reference_video / analyze_competitor_video: poll kind=competitor through pacing + audio.
+- Never go silent between start and finish. Summarize pacing (avg shot length) + hook window.
+
+Data: every turn and tool call is logged for product improvement and future custom model training
+(previews only; no secrets). Encourage users to connect YouTube and paste reference URLs — richer signal.
 
 {skills.skills_index_for_prompt()}
 """
@@ -110,6 +128,10 @@ async def run_turn(
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
     messages.append({"role": "user", "content": user_text})
     store.touch_title_from_user_message(sid, user_text)
+    telemetry.record_session_turn(
+        user_id, sid, role="user", content_preview=user_text,
+        model=session.get("model"), content_format=content_format,
+    )
 
     if not any(m.get("role") == "system" for m in messages):
         messages.insert(0, {"role": "system", "content": system_prompt(content_format=content_format)})
@@ -173,11 +195,12 @@ async def run_turn(
                     continue
 
                 try:
-                    result = execute_tool(
+                    result = execute_tool_logged(
                         name,
                         args,
                         user_id=user_id,
                         content_format=content_format,
+                        session_id=sid,
                     )
                 except Exception as exc:
                     result = json.dumps({"error": str(exc)})
@@ -203,6 +226,11 @@ async def run_turn(
     store.update_session(sid, messages=messages)
     if pending:
         store.set_pending_actions(sid, pending)
+    if assistant_text:
+        telemetry.record_session_turn(
+            user_id, sid, role="assistant", content_preview=assistant_text,
+            model=model, content_format=content_format,
+        )
 
     # Meter OpenRouter token spend against the unified credit wallet.
     credits_charged = 0
@@ -260,11 +288,12 @@ async def approve_action(session: dict[str, Any], action_id: str) -> dict[str, A
 
     name = action["tool"]
     args = action.get("arguments") or {}
-    result = execute_tool(
+    result = execute_tool_logged(
         name,
         args,
         user_id=session["user_id"],
         content_format=session.get("content_format") or "both",
+        session_id=session["session_id"],
     )
 
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
