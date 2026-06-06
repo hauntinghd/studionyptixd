@@ -4,10 +4,7 @@
  * - Firefox and others without SpeechRecognition: MediaRecorder + server whisper.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-// @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
-import * as Shared from '../shared.tsx';
-// @ts-expect-error - module resolution quirk in build env, exports are present
-const { resolveStudioBackendUrl } = Shared as any;
+import { resolveStudioBackendUrl } from '../shared';
 
 export type DictationEngine = 'webspeech' | 'record' | 'none';
 

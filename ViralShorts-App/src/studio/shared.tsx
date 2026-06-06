@@ -1,5 +1,6 @@
 import { useState, useEffect, createContext, useCallback, useRef } from 'react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
+import { UNIFIED_TOPUP_PACKS } from './lib/studioProduct';
 import { trackAuthCompletion } from './lib/googleAds';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
@@ -42,6 +43,34 @@ const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
 const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
 export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || PROD_API_BASE_URL || hostedOrigin);
 export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi || PROD_API_BASE_URL || API);
+/** Studio Agent hits Fly directly (persistent sessions); api-studio RunPod can lag behind. */
+export const STUDIO_AGENT_API = isLocalDevHost
+    ? (rawLocalApi || API)
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || "https://nyptid-studio.fly.dev");
+
+export { resolveStudioBackendUrl, studioAgentOAuthReturnUrl } from './lib/backend';
+
+const FLY_DIRECT_API_PREFIXES = [
+    '/api/studio-agent',
+    '/api/youtube',
+    '/api/studio/analytics',
+];
+
+/** Authenticated fetch to Studio/Fly-backed routes (agent, YouTube, analytics). */
+export async function studioAgentFetch(
+    path: string,
+    accessToken: string,
+    init?: RequestInit,
+): Promise<Response> {
+    const url = resolveStudioBackendUrl(path);
+    return fetch(url, {
+        ...init,
+        headers: {
+            ...(init?.headers || {}),
+            Authorization: `Bearer ${accessToken}`,
+        },
+    });
+}
 const rawGenerationApi = resolveSafeApiBase(
     (isLocalDevHost ? viteEnv.VITE_GENERATION_API_BASE_URL : viteEnv.VITE_PROD_GENERATION_API_BASE_URL) || ""
 );
@@ -71,6 +100,7 @@ if (typeof window !== "undefined" && /firefox/i.test(window.navigator.userAgent)
     (window as any).__NYPTID_FIREFOX_HOTFIX__ = FIREFOX_HOTFIX_TAG;
 }
 export const CREATE_WORKFLOW_PERSISTENCE_ENABLED = true;
+
 export const startYouTubeBrowserConnect = (accessToken: string, nextUrl?: string): void => {
     const token = String(accessToken || "").trim();
     if (!token || typeof document === "undefined") return;
@@ -118,7 +148,14 @@ export const hasChatStoryTemplateAccess = (
 };
 export const CLONE_COMING_SOON = true;
 export const Logo = ({ size = 24 }: { size?: number }) => (
-    <img src="/logo.png" alt="NYPTID" width={size} height={size} className="rounded-full" />
+    <img
+        src="/logo.png"
+        alt="NYPTID Studio"
+        width={size}
+        height={size}
+        className="rounded-md object-contain"
+        style={{ maxHeight: size, maxWidth: size }}
+    />
 );
 
 // ── Supabase fallback credentials (used when /api/config is down) ───────────
@@ -312,6 +349,17 @@ const clearSupabaseAuthRedirectArtifacts = (): void => {
     }
 };
 
+/** Avoid re-rendering the whole Studio tree when Supabase emits the same tokens on a new object. */
+const sameAuthSession = (prev: Session | null, next: Session | null): boolean => {
+    if (prev === next) return true;
+    if (!prev || !next) return !prev && !next;
+    return (
+        prev.access_token === next.access_token
+        && prev.refresh_token === next.refresh_token
+        && (prev.user?.id ?? '') === (next.user?.id ?? '')
+    );
+};
+
 const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Session | null> => {
     if (typeof window === 'undefined') return null;
     const url = new URL(window.location.href);
@@ -436,6 +484,8 @@ export type PlanLimit = {
     videos_per_month?: number;
     animated_renders_per_month?: number;
     non_animated_ops_per_month?: number;
+    monthly_credits?: number;
+    price_usd?: number;
     max_duration_sec?: number;
     max_resolution?: string;
     can_clone?: boolean;
@@ -452,38 +502,22 @@ export type LaneAccessMap = Record<string, boolean>;
 // Billing/Dashboard render correct prices/limits even while /api/config is loading or
 // temporarily unreachable (e.g. serverless cold-start on RunPod).
 export const PUBLIC_PLAN_LIMITS_FALLBACK: PlanLimitMap = {
-    free:    { videos_per_month: 20,  animated_renders_per_month: 2,  non_animated_ops_per_month: 120,  max_duration_sec: 90,   max_resolution: "720p", can_clone: false, priority: false, demo_access: false },
-    starter: { videos_per_month: 90,  animated_renders_per_month: 10, non_animated_ops_per_month: 400,  max_duration_sec: 600,  max_resolution: "720p", can_clone: false, priority: false, demo_access: false },
-    creator: { videos_per_month: 140, animated_renders_per_month: 20, non_animated_ops_per_month: 800,  max_duration_sec: 900,  max_resolution: "720p", can_clone: false, priority: true,  demo_access: false },
-    pro:     { videos_per_month: 220, animated_renders_per_month: 40, non_animated_ops_per_month: 1500, max_duration_sec: 1200, max_resolution: "720p", can_clone: false, priority: true,  demo_access: false },
+    creator: { monthly_credits: 5000, price_usd: 60 },
+    studio: { monthly_credits: 20000, price_usd: 200 },
 };
 export const PUBLIC_PLAN_PRICES_FALLBACK: PlanPriceMap = {
-    free: 0,
-    starter: 14,
-    creator: 24,
-    pro: 39,
+    creator: 60,
+    studio: 200,
 };
 export const PUBLIC_PLAN_FEATURES_FALLBACK: PlanFeatureMap = {
-    free:    ['catalyst_core', 'create_lane', 'free_trial_credits'],
-    starter: ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits'],
-    creator: ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits', 'priority_queue'],
-    pro:     ['catalyst_core', 'create_lane', 'chatstory_lane', 'starter_included_credits', 'priority_queue', 'operator_headroom'],
+    creator: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs'],
+    studio: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
 };
 export const PUBLIC_TOPUP_PACKS_FALLBACK: TopupPack[] = [
-    { price_id: 'ac_trial',    pack: 'trial',    credits: 1,    price_usd: 0.60 },
-    { price_id: 'ac_starter',  pack: 'starter',  credits: 3,    price_usd: 1.80 },
-    { price_id: 'ac_mini',     pack: 'mini',     credits: 5,    price_usd: 3.00 },
-    { price_id: 'ac_lite',     pack: 'lite',     credits: 10,   price_usd: 6.00 },
-    { price_id: 'ac_boost',    pack: 'boost',    credits: 15,   price_usd: 9.00 },
-    { price_id: 'ac_basic',    pack: 'basic',    credits: 25,   price_usd: 15.00 },
-    { price_id: 'ac_runner',   pack: 'runner',   credits: 40,   price_usd: 24.00 },
-    { price_id: 'ac_creator',  pack: 'creator',  credits: 50,   price_usd: 30.00 },
-    { price_id: 'ac_operator', pack: 'operator', credits: 75,   price_usd: 45.00 },
-    { price_id: 'ac_growth',   pack: 'growth',   credits: 100,  price_usd: 60.00 },
-    { price_id: 'ac_power',    pack: 'power',    credits: 150,  price_usd: 90.00 },
-    { price_id: 'ac_scale',    pack: 'scale',    credits: 250,  price_usd: 150.00 },
-    { price_id: 'ac_studio',   pack: 'studio',   credits: 500,  price_usd: 300.00 },
-    { price_id: 'ac_agency',   pack: 'agency',   credits: 1000, price_usd: 600.00 },
+    { price_id: 'uc_boost', pack: 'boost', credits: 500, price_usd: 30 },
+    { price_id: 'uc_growth', pack: 'growth', credits: 2000, price_usd: 100 },
+    { price_id: 'uc_scale', pack: 'scale', credits: 5000, price_usd: 200 },
+    { price_id: 'uc_max', pack: 'max', credits: 10000, price_usd: 350 },
 ];
 
 export interface AuthContextType {
@@ -548,7 +582,7 @@ export const AuthContext = createContext<AuthContextType>({
     nextRenewalUnix: 0, nextRenewalSource: '',
     billingAnchorUnix: 0,
     monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: PUBLIC_TOPUP_PACKS_FALLBACK,
-    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: PUBLIC_PLAN_LIMITS_FALLBACK, publicPlanFeatures: PUBLIC_PLAN_FEATURES_FALLBACK, publicPlanPrices: PUBLIC_PLAN_PRICES_FALLBACK, studioLaneAccess: {}, defaultMembershipPlanId: 'starter',
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: PUBLIC_PLAN_LIMITS_FALLBACK, publicPlanFeatures: PUBLIC_PLAN_FEATURES_FALLBACK, publicPlanPrices: PUBLIC_PLAN_PRICES_FALLBACK, studioLaneAccess: {}, defaultMembershipPlanId: 'creator',
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     longformOwnerBeta: false,
     waitlistOnlyMode: false,
@@ -586,7 +620,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>(PUBLIC_PLAN_FEATURES_FALLBACK);
     const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>(PUBLIC_PLAN_PRICES_FALLBACK);
     const [studioLaneAccess, setStudioLaneAccess] = useState<LaneAccessMap>({});
-    const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('starter');
+    const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('creator');
     const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
     const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
     const [longformOwnerBeta, setLongformOwnerBeta] = useState(false);
@@ -602,6 +636,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const ownerLaneAccess: LaneAccessMap = {
         create: true,
         thumbnails: true,
+        cliplab: true,
         clone: true,
         longform: true,
         chatstory: true,
@@ -644,11 +679,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const sessionResult = recoveredSession
             ? { data: { session: recoveredSession } }
             : await withTimeout(sb.auth.getSession(), SUPABASE_SESSION_TIMEOUT_MS, 'Supabase session bootstrap');
-        setSession(sessionResult.data.session || null);
+        setSession((prev) => {
+            const next = sessionResult.data.session || null;
+            return sameAuthSession(prev, next) ? prev : next;
+        });
         if (!authSubscriptionRef.current) {
             const { data } = sb.auth.onAuthStateChange((_e, nextSession) => {
                 clearSupabaseAuthRedirectArtifacts();
-                setSession(nextSession);
+                setSession((prev) => (sameAuthSession(prev, nextSession) ? prev : nextSession));
             });
             authSubscriptionRef.current = data.subscription;
         }
@@ -770,7 +808,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setDemoAccess(false);
             setDemoComingSoon(true);
         }
-    }, [session, backendOffline, applyOwnerAccess, normalizeViewerPlanId]);
+    }, [session?.access_token, session?.user?.id, backendOffline, applyOwnerAccess, normalizeViewerPlanId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -813,7 +851,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                             price_usd: Number(p.price_usd || 0),
                         }))
                         .sort((a: TopupPack, b: TopupPack) => a.credits - b.credits);
-                    if (packs.length > 0) setTopupPacks(packs);
+                    const unifiedModel = String((cfg.billing_model as any)?.model || '').trim() === 'unified_credits';
+                    const unifiedPacks = packs.filter((p: TopupPack) => p.price_id.startsWith('uc_'));
+                    if (unifiedModel && unifiedPacks.length > 0) {
+                        setTopupPacks(unifiedPacks);
+                    } else if (unifiedModel) {
+                        setTopupPacks(UNIFIED_TOPUP_PACKS);
+                    } else if (packs.length > 0) {
+                        setTopupPacks(packs);
+                    }
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
                     const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
@@ -945,7 +991,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             window.removeEventListener('focus', handleFocusRefresh);
             document.removeEventListener('visibilitychange', handleVisibilityRefresh);
         };
-    }, [session, refreshViewerState]);
+    }, [session?.access_token, refreshViewerState]);
 
     const signIn = useCallback(async (email: string, password: string): Promise<string | null> => {
         const sb = supabase || await ensureSupabaseClient();
@@ -1033,8 +1079,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!session) return "Missing membership checkout details";
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
-        const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'starter') : normalizedPlanName;
-        const validPlan = targetPlanId === 'starter' || targetPlanId === 'creator' || targetPlanId === 'pro';
+        const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'creator') : normalizedPlanName;
+        const validPlan = targetPlanId === 'creator' || targetPlanId === 'studio';
         if (!validPlan) return "Missing membership checkout details";
         try {
             const res = await fetch(`${API}/api/checkout`, {
@@ -1077,7 +1123,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch (e) { console.error("Demo checkout failed", e); }
     }, [session, demoPriceId]);
 
-    const checkoutTopup = useCallback(async (priceId: string, preferredMethod: 'card' | 'paypal' = 'paypal'): Promise<string | null> => {
+    const checkoutTopup = useCallback(async (priceId: string, preferredMethod: 'card' | 'paypal' = 'card'): Promise<string | null> => {
         if (!priceId || !session) return "Missing top-up price";
         try {
             const res = await fetch(`${API}/api/checkout/topup`, {

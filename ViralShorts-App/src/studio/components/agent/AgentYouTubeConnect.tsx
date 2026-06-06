@@ -1,9 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Youtube } from 'lucide-react';
-// @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
-import * as Shared from '../../shared.tsx';
-// @ts-expect-error - module resolution quirk in build env, exports are present
-const { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } = Shared as any;
+import { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } from '../../shared';
 
 type ChannelRow = {
     channel_id: string;
