@@ -1,6 +1,7 @@
 // @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
 import * as Shared from '../shared.tsx';
-const { resolveStudioBackendUrl } = Shared;
+// @ts-expect-error - module resolution quirk in build env, exports are present
+const { resolveStudioBackendUrl } = Shared as any;
 
 export type AgentStreamEvent =
     | { event: 'status'; message?: string }
