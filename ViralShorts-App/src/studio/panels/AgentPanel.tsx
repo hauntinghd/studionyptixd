@@ -3,7 +3,7 @@
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
-    ArrowLeft, ArrowUp, BookOpen, Bot, Brain, Check, History, Loader2, MessageSquarePlus, Mic, MicOff,
+    ArrowLeft, ArrowUp, BookOpen, Brain, Check, History, Loader2, MessageSquarePlus, Mic, MicOff,
     Palette, Paperclip, Play, RefreshCw, RotateCcw, Shield, ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
 } from 'lucide-react';
 import AgentJobDeliverable from '../components/agent/AgentJobDeliverable';
@@ -273,7 +273,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
     const [renderStyle, setRenderStyle] = useState('cinematic');
-    const [animate, setAnimate] = useState(true);
+    const [, setAnimate] = useState(true); // internal for session compat / patch; UI toggle removed per request
     const [showStyleGrid, setShowStyleGrid] = useState(false);
     const [channelsOpen, setChannelsOpen] = useState(false);
     const [replyingTo, setReplyingTo] = useState<AgentJobSnapshot | null>(null);
@@ -290,7 +290,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [pollResetKey, setPollResetKey] = useState(0);
     const [retryingProduction, setRetryingProduction] = useState(false);
     const [cancellingProduction, setCancellingProduction] = useState(false);
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
     // First-time Studio Agent greeting (only once per user, only for non-owners, and only if no channels connected).
     // This runs on initial mount of the agent experience.

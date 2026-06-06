@@ -89,8 +89,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const canUseAgent = isAdmin || Boolean((laneAccess as Record<string, boolean>).agent);
 
     // For regular paying users, Studio Agent is the primary experience (first thing they see).
-    // We still allow tab switching, but default + visual priority goes to the chat.
-    const isRegularUser = !isAdmin && canUseAgent;
+    // Default tab logic already returns 'agent'; the const below documents intent for future conditionals.
 
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {
