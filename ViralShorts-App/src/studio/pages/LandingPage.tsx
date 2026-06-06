@@ -89,10 +89,11 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
                                 <button
                                     type="button"
-                                    onClick={() => onNavigate('waitlist')}
-                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-8 py-4 text-lg font-semibold text-white shadow-lg shadow-violet-900/30 transition hover:opacity-95"
+                                    onClick={openGoogle}
+                                    disabled={googleLoading}
+                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-cyan-600 px-8 py-4 text-lg font-semibold text-white shadow-lg shadow-violet-900/30 transition hover:opacity-95 disabled:opacity-60"
                                 >
-                                    Join Waiting List
+                                    {session ? 'Open Studio' : 'Get Started Free'}
                                     <ArrowRight className="h-5 w-5" />
                                 </button>
                                 <button
@@ -100,7 +101,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                                     onClick={openDashboard}
                                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-8 py-4 text-lg font-semibold text-white transition hover:bg-violet-500"
                                 >
-                                    {session ? 'Open Studio' : 'Open Sign In'}
+                                    {session ? 'Create a Short' : 'Sign In with Email'}
                                     <ArrowRight className="h-5 w-5" />
                                 </button>
                                 {session ? (
@@ -246,7 +247,11 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                     </div>
                     {!billingHost && (
                         <p className="mt-6 text-xs text-gray-500">
-                            ThumbLab now redirects into Studio. The thumbnail engine lives inside the same product at <span className="text-gray-300">{STUDIO_SITE_URL}</span>.
+                            <a href="/privacy" className="text-gray-400 underline-offset-2 hover:text-gray-200">Privacy Policy</a>
+                            {' · '}
+                            <a href="/terms" className="text-gray-400 underline-offset-2 hover:text-gray-200">Terms of Service</a>
+                            {' · '}
+                            <span className="text-gray-600">{STUDIO_SITE_URL}</span>
                         </p>
                     )}
                 </div>

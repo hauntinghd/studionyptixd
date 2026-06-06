@@ -101,6 +101,11 @@ interface CostEstimate {
     n_scenes: number;
     n_chapters: number;
     pipeline_kind: string;
+    pricing_source?: string;
+    pricing_fetched_at?: number;
+    non_fal_usd?: number;
+    all_in_usd?: number;
+    non_fal_breakdown?: Record<string, number>;
 }
 
 const CHANNEL_ICON: Record<string, typeof BookOpen> = {
@@ -1535,7 +1540,7 @@ function RenderTab({
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Pipeline:</span> {channel.pipeline_kind || 'sleep_doc'}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Image model:</span> {channel.image_model_default}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
-                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${totalCost.toFixed(2)}{costEstimate ? <span className="text-[10px] text-zinc-500 ml-2">(stage 1 ${stage1.toFixed(2)} · stage 2 ${stage2.toFixed(2)} · {costEstimate.n_scenes} scenes)</span> : null}</div>
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${totalCost.toFixed(2)}{costEstimate ? <span className="text-[10px] text-zinc-500 ml-2">(stage 1 ${stage1.toFixed(2)} · stage 2 ${stage2.toFixed(2)} · {costEstimate.n_scenes} scenes{costEstimate.pricing_source ? ` · ${costEstimate.pricing_source}` : ''}{typeof costEstimate.non_fal_usd === 'number' && costEstimate.non_fal_usd > 0 ? ` · +$${costEstimate.non_fal_usd.toFixed(2)} non-fal VO` : ''})</span> : null}</div>
                     </div>
                     <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200">
                         Two-stage render: <strong>Stage 1 generates stills only (~${stage1.toFixed(2)} fal)</strong> →

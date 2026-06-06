@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Bot, BrainCircuit, Download, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
-import { API, AuthContext, PROD_API_BASE_URL, startYouTubeBrowserConnect } from '../shared';
+import { API, AuthContext, PROD_API_BASE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
 import CatalystReferencesSection from './CatalystReferencesSection';
 
 type CatalystChannel = {
@@ -633,7 +633,7 @@ export default function CatalystPanel() {
         setRefreshingChannels(true);
         setError('');
         try {
-            const res = await fetchWithAuthRetry(`${API}/api/youtube/channels/select`, {
+            const res = await fetchWithAuthRetry(resolveStudioBackendUrl('/api/youtube/channels/select'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ channel_id: normalizedId }),
@@ -903,7 +903,7 @@ export default function CatalystPanel() {
         setRefreshingChannels(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/youtube/channels?sync=true`, {});
+            const { res, data } = await fetchJsonWithAuthRetry<any>(resolveStudioBackendUrl('/api/youtube/channels?sync=true'), {});
             if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to refresh channels (${res.status})`));
             const rows = Array.isArray(data?.channels) ? data.channels as CatalystChannel[] : [];
             const nextChannelId = pickCatalystChannelId(

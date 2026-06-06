@@ -18,7 +18,7 @@
  */
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Download, Film, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
-import { API, AuthContext, startYouTubeBrowserConnect } from '../shared';
+import { API, AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
 
@@ -544,7 +544,7 @@ export default function ZeroTierPrivatePanel() {
             // pulls likes/comments/CTR and writes them into the connection
             // store). /api/catalyst/hub/refresh alone does NOT trigger this —
             // it only rebuilds the hub payload from already-cached state.
-            const ytRes = await fetch(`${API}/api/youtube/channels?sync=true`, {
+            const ytRes = await fetch(resolveStudioBackendUrl('/api/youtube/channels?sync=true'), {
                 headers: { Authorization: `Bearer ${accessToken}` },
             });
             if (!ytRes.ok) {

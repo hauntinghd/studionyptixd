@@ -3,14 +3,10 @@ import { ArrowLeft, CheckCircle2 } from 'lucide-react';
 import BillingPremiumView from '../components/billing/BillingPremiumView';
 import StudioShell from '../components/layout/StudioShell';
 import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
-import { estimateShortsRemaining } from '../lib/studioProduct';
+import { UNIFIED_PLANS, UNIFIED_TOPUP_PACKS, type UnifiedPlanId } from '../lib/studioProduct';
 import { type PageNav } from '../components/NavBar';
-import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost, resolveStudioBackendUrl } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
-
-type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
-
-const PUBLIC_PLAN_ORDER: PublicPlanId[] = ['free', 'starter', 'creator', 'pro'];
 
 export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
@@ -26,22 +22,20 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         verifyPayPalOrder,
         topupPacks,
         creditsTotalRemaining,
-        publicPlanLimits,
-        publicPlanPrices,
         role,
     } = useContext(AuthContext);
     const [locationState, setLocationState] = useState(() => ({
         search: typeof window === 'undefined' ? '' : window.location.search,
         hash: typeof window === 'undefined' ? '' : window.location.hash,
     }));
-    const params = useMemo(() => {
-        return new URLSearchParams(locationState.search);
-    }, [locationState.search]);
+    const [unifiedBalance, setUnifiedBalance] = useState<number | null>(null);
+    const params = useMemo(() => new URLSearchParams(locationState.search), [locationState.search]);
     const requestedSection = String(params.get('section') || '').trim().toLowerCase();
     const requestedPackId = String(params.get('pack') || '').trim();
     const requestedPlanId = String(params.get('plan') || '').trim().toLowerCase();
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
+    const stripeProvider = String(params.get('provider') || '').trim().toLowerCase() === 'stripe';
     const paypalProvider = String(params.get('provider') || '').trim().toLowerCase() === 'paypal';
     const paypalOrderId = String(params.get('order_id') || '').trim();
     const [paypalVerifyState, setPaypalVerifyState] = useState<'idle' | 'verifying' | 'verified' | 'failed' | 'revoked'>('idle');
@@ -56,46 +50,56 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
-    const sortedPacks = useMemo(() => [...topupPacks].sort((a, b) => a.credits - b.credits), [topupPacks]);
+    const sortedPacks = useMemo(() => {
+        const hasUnified = topupPacks.some((p) => p.price_id.startsWith('uc_'));
+        const source = hasUnified ? topupPacks : UNIFIED_TOPUP_PACKS;
+        return [...source].sort((a, b) => a.credits - b.credits);
+    }, [topupPacks]);
     const selectedPack = useMemo(
         () => sortedPacks.find((pack) => pack.price_id === selectedPackId) || null,
         [selectedPackId, sortedPacks],
     );
-    const normalizedCurrentPlan = useMemo<PublicPlanId>(() => {
-        const raw = String(membershipPlanId || plan || 'free').trim().toLowerCase();
-        if (raw === 'creator' || raw === 'pro' || raw === 'starter') return raw;
-        return 'free';
+    const normalizedCurrentPlan = useMemo<UnifiedPlanId | ''>(() => {
+        const raw = String(membershipPlanId || plan || '').trim().toLowerCase();
+        if (raw === 'creator' || raw === 'studio') return raw;
+        return '';
     }, [membershipPlanId, plan]);
-    const publicPlans = useMemo(() => {
-        return PUBLIC_PLAN_ORDER.map((planId) => {
-            const limits = (publicPlanLimits as Record<string, any>)[planId] || {};
-            const price = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
-            const durationMinutes = Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60));
-            const animatedCredits = Number(limits.animated_renders_per_month || 0);
-            return {
-                id: planId,
-                title: planId === 'free' ? 'Free' : capitalizePlan(planId),
-                price,
-                priceLabel: planId === 'free' ? '$0' : `$${price.toFixed(price % 1 === 0 ? 0 : 2)}/mo`,
-                description:
-                    planId === 'free'
-                        ? 'Try the short-form Studio workflow and get enough included credits for two animated renders.'
-                        : planId === 'starter'
-                            ? 'Best for solo operators shipping consistent short-form content without overcommitting.'
-                            : planId === 'creator'
-                                ? 'More monthly headroom for active creators publishing shorts every week.'
-                                : 'Highest short-form headroom for daily operators and teams.',
-                features: [
-                    `${animatedCredits} included animation credits${planId === 'free' ? '' : ' per month'}`,
-                    `${durationMinutes} minute max job length`,
-                    `${String(limits.max_resolution || '720p').toUpperCase()} output cap`,
-                    planId === 'free'
-                        ? 'Create workspace with Alt-History Battles, Moral Dilemma, Scary Stories, and Historical Epic'
-                        : 'Create workspace + Chat Story template access',
-                ],
-            };
-        });
-    }, [publicPlanLimits, publicPlanPrices]);
+
+    const publicPlans = useMemo(
+        () =>
+            UNIFIED_PLANS.map((p) => ({
+                id: p.id,
+                title: p.title,
+                priceLabel: `$${p.priceUsd}/mo`,
+                description: p.description,
+                features: p.features,
+                bestValue: Boolean(p.bestValue),
+            })),
+        [],
+    );
+
+    useEffect(() => {
+        const tok = session?.access_token;
+        if (!tok) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/credits'), {
+                    headers: { Authorization: `Bearer ${tok}` },
+                });
+                if (!res.ok) return;
+                const data = (await res.json()) as { balance?: number; unlimited?: boolean };
+                if (!cancelled) {
+                    setUnifiedBalance(data.unlimited ? 999999 : Number(data.balance || 0));
+                }
+            } catch {
+                /* fallback to legacy total */
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [session]);
 
     useEffect(() => {
         const syncLocationState = () => {
@@ -128,34 +132,19 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     useEffect(() => {
         const wantsTopups = requestedSection === 'topups' || requestedHash === 'topup-packs' || Boolean(requestedPackId);
-        if (!wantsTopups) return;
-        if (!topupSectionRef.current) return;
+        if (!wantsTopups || !topupSectionRef.current) return;
         const target = topupSectionRef.current;
-        let frameId = 0;
-        let timeoutId = 0;
-        const scrollIntoTopups = () => {
-            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        };
-        timeoutId = window.setTimeout(() => {
-            scrollIntoTopups();
-            frameId = window.requestAnimationFrame(scrollIntoTopups);
-        }, 60);
-        return () => {
-            window.clearTimeout(timeoutId);
-            window.cancelAnimationFrame(frameId);
-        };
+        const timeoutId = window.setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+        return () => window.clearTimeout(timeoutId);
     }, [requestedHash, requestedPackId, requestedSection, sortedPacks.length]);
 
     useEffect(() => {
         if (topupResult !== 'success') return;
-        const topupValue = Number(selectedPack?.price_usd || 0);
         trackOnce(`billing_topup_success:${locationState.search}`, () => {
-            trackTopupPurchaseCompleted(topupValue);
+            trackTopupPurchaseCompleted(Number(selectedPack?.price_usd || 0));
         });
     }, [locationState.search, selectedPack?.price_usd, topupResult]);
 
-    // Second-factor verification: after a PayPal redirect, ask the backend whether the
-    // order actually captured. We don't celebrate success until this confirms.
     useEffect(() => {
         if (!paypalProvider || !paypalOrderId) return;
         if (topupResult !== 'success' && subscriptionResult !== 'success') return;
@@ -177,17 +166,19 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             setPaypalVerifyState(result.captured ? 'verified' : 'failed');
             if (!result.captured) setPaypalVerifyError('PayPal has not confirmed capture yet. Refresh in a moment.');
         })();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+        };
     }, [paypalProvider, paypalOrderId, topupResult, subscriptionResult, verifyPayPalOrder]);
 
     useEffect(() => {
         if (subscriptionResult !== 'success') return;
-        const planId = requestedPlanId || normalizedCurrentPlan;
-        const value = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
+        const planId = requestedPlanId || normalizedCurrentPlan || 'creator';
+        const match = UNIFIED_PLANS.find((p) => p.id === planId);
         trackOnce(`billing_membership_success:${locationState.search}`, () => {
-            trackMembershipPurchaseCompleted(planId, value);
+            trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
         });
-    }, [locationState.search, normalizedCurrentPlan, publicPlanPrices, requestedPlanId, subscriptionResult]);
+    }, [locationState.search, normalizedCurrentPlan, requestedPlanId, subscriptionResult]);
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -197,36 +188,35 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         onNavigate('dashboard');
     };
 
-    const handlePlanAction = useCallback(async (planId: PublicPlanId) => {
-        if (planId === 'free') {
-            if (!session) onNavigate('auth');
-            return;
-        }
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        setCheckoutError('');
-        setPlanLoadingId(planId);
-        try {
-            if (billingActive && normalizedCurrentPlan === planId) {
-                if (usesStripeMembership) {
-                    const err = await manageBilling();
-                    if (err) setCheckoutError(err);
-                    return;
-                }
-                if (usesManualPayPalMembership) {
-                    const err = await checkout(planId);
-                    if (err) setCheckoutError(err);
-                    return;
-                }
+    const handlePlanAction = useCallback(
+        async (planId: UnifiedPlanId) => {
+            if (!session) {
+                onNavigate('auth');
+                return;
             }
-            const err = await checkout(planId);
-            if (err) setCheckoutError(err);
-        } finally {
-            setPlanLoadingId('');
-        }
-    }, [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
+            setCheckoutError('');
+            setPlanLoadingId(planId);
+            try {
+                if (billingActive && normalizedCurrentPlan === planId) {
+                    if (usesStripeMembership) {
+                        const err = await manageBilling();
+                        if (err) setCheckoutError(err);
+                        return;
+                    }
+                    if (usesManualPayPalMembership) {
+                        const err = await checkout(planId);
+                        if (err) setCheckoutError(err);
+                        return;
+                    }
+                }
+                const err = await checkout(planId);
+                if (err) setCheckoutError(err);
+            } finally {
+                setPlanLoadingId('');
+            }
+        },
+        [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
+    );
 
     const handlePackCheckout = useCallback(async () => {
         if (!selectedPack) {
@@ -240,7 +230,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         setCheckoutError('');
         setPackCheckoutLoadingId(selectedPack.price_id);
         try {
-            const err = await checkoutTopup(selectedPack.price_id, 'paypal');
+            const err = await checkoutTopup(selectedPack.price_id, 'card');
             if (err) setCheckoutError(err);
         } finally {
             setPackCheckoutLoadingId('');
@@ -248,19 +238,18 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [checkoutTopup, onNavigate, selectedPack, session]);
 
     const isAdmin = role === 'admin';
-    const totalAc = Number(creditsTotalRemaining || 0);
-    const shortsEstimate = estimateShortsRemaining(totalAc);
+    const creditBalance = unifiedBalance ?? Number(creditsTotalRemaining || 0);
 
     const paypalBanner = (
         <>
-            {topupResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
+            {topupResult === 'success' && (stripeProvider || (!paypalProvider || paypalVerifyState === 'verified')) && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    Credit wallet payment received. Your balance is refreshing now.
+                    Credit top-up received. Your balance is refreshing now.
                 </div>
             )}
-            {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
+            {subscriptionResult === 'success' && (stripeProvider || (!paypalProvider || paypalVerifyState === 'verified')) && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    Your monthly plan is active. Included credits burn before wallet fuel.
+                    Your plan is active. Monthly credits have been added to your wallet.
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'verifying' && (
@@ -292,12 +281,11 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 publicPlans={publicPlans}
                 normalizedCurrentPlan={normalizedCurrentPlan}
                 billingActive={billingActive}
-                totalAc={totalAc}
-                shortsEstimate={shortsEstimate}
+                creditBalance={creditBalance}
                 selectedPack={selectedPack}
                 sortedPacks={sortedPacks}
                 onSelectPack={setSelectedPackId}
-                onPlanAction={(id) => void handlePlanAction(id as PublicPlanId)}
+                onPlanAction={(id) => void handlePlanAction(id as UnifiedPlanId)}
                 onPackCheckout={() => void handlePackCheckout()}
                 planLoadingId={planLoadingId}
                 packCheckoutLoadingId={packCheckoutLoadingId}
@@ -351,11 +339,7 @@ function RefundRequestCard() {
     const amountNumber = Number(amount);
     const amountValid = amount.trim().length > 0 && Number.isFinite(amountNumber) && amountNumber > 0;
     const canSubmit =
-        reason.trim().length > 10 &&
-        amountValid &&
-        paymentRef.trim().length > 0 &&
-        imageProof.length > 0 &&
-        !submitting;
+        reason.trim().length > 10 && amountValid && paymentRef.trim().length > 0 && imageProof.length > 0 && !submitting;
 
     const handleProofFile = (file: File | null) => {
         setError(null);
@@ -451,7 +435,9 @@ function RefundRequestCard() {
                         All four fields are required so we can match your request to the PayPal charge and respond quickly.
                     </p>
                     <label className="block">
-                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Reason <span className="text-red-400">(required)</span></span>
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                            Reason <span className="text-red-400">(required)</span>
+                        </span>
                         <textarea
                             value={reason}
                             onChange={(e) => setReason(e.target.value)}
@@ -462,7 +448,9 @@ function RefundRequestCard() {
                     </label>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <label className="block">
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Amount paid (USD) <span className="text-red-400">(required)</span></span>
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                                Amount paid (USD) <span className="text-red-400">(required)</span>
+                            </span>
                             <input
                                 type="number"
                                 value={amount}
@@ -470,12 +458,14 @@ function RefundRequestCard() {
                                 step="0.01"
                                 min="0.01"
                                 required
-                                placeholder="29.00"
+                                placeholder="60.00"
                                 className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
                             />
                         </label>
                         <label className="block">
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">PayPal order / invoice id <span className="text-red-400">(required)</span></span>
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                                PayPal order / invoice id <span className="text-red-400">(required)</span>
+                            </span>
                             <input
                                 type="text"
                                 value={paymentRef}
@@ -489,7 +479,6 @@ function RefundRequestCard() {
                     <label className="block">
                         <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
                             Image proof <span className="text-red-400">(required)</span>
-                            <span className="ml-1 font-normal normal-case tracking-normal text-gray-500">— PayPal receipt, order page, or bank statement screenshot (max 2 MB)</span>
                         </span>
                         <input
                             type="file"
@@ -501,17 +490,18 @@ function RefundRequestCard() {
                         {imageProof && (
                             <span className="mt-1 flex items-center gap-2 text-[11px] text-emerald-300">
                                 <CheckCircle2 className="h-3.5 w-3.5" />
-                                Uploaded: {imageProofName} ({Math.round(imageProof.length / 1024)} KB encoded)
+                                Uploaded: {imageProofName}
                             </span>
                         )}
                     </label>
-                    {error && (
-                        <p className="text-[11px] text-red-300">{error}</p>
-                    )}
+                    {error && <p className="text-[11px] text-red-300">{error}</p>}
                     <div className="flex items-center justify-end gap-2">
                         <button
                             type="button"
-                            onClick={() => { setOpen(false); setError(null); }}
+                            onClick={() => {
+                                setOpen(false);
+                                setError(null);
+                            }}
                             className="rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-400 transition hover:text-white"
                         >
                             Cancel
@@ -529,8 +519,4 @@ function RefundRequestCard() {
             )}
         </div>
     );
-}
-
-function capitalizePlan(planId: PublicPlanId) {
-    return planId.charAt(0).toUpperCase() + planId.slice(1);
 }

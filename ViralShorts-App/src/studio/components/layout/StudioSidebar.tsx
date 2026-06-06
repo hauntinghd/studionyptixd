@@ -3,7 +3,9 @@ import {
     BarChart3,
     BrainCircuit,
     CalendarClock,
+    Clapperboard,
     Film,
+    Image as ImageIcon,
     Home,
     Plus,
     Receipt,
@@ -104,11 +106,17 @@ export default function StudioSidebar({
     );
 }
 
-export function buildSidebarItems(isAdmin: boolean): SidebarItem[] {
+export function buildSidebarItems(
+    isAdmin: boolean,
+    laneAccess: Record<string, boolean> = {},
+): SidebarItem[] {
+    const canAgent = isAdmin || Boolean(laneAccess.agent);
     return ([
         { id: 'home', label: 'Home', icon: Home },
         { id: 'create', label: 'Create', icon: Sparkles },
-        { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !isAdmin, badge: 'Beta' },
+        { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Beta' },
+        { id: 'thumbnails', label: 'ThumbLab', icon: ImageIcon, hidden: !isAdmin, badge: 'Beta' },
+        { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: !isAdmin, badge: 'Beta' },
         { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin, badge: 'Beta' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
         { id: 'analytics', label: 'Analytics', icon: BarChart3, hidden: !isAdmin },

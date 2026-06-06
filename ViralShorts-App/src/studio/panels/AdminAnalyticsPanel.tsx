@@ -2,7 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
     BarChart3, Eye, Loader2, RefreshCw, Search, TrendingUp, ChevronDown, Sparkles,
 } from 'lucide-react';
-import { API, AuthContext } from '../shared';
+import { API, AuthContext, resolveStudioBackendUrl } from '../shared';
 
 interface ConnectedChannel {
     channel_id: string;
@@ -72,7 +72,7 @@ export default function AdminAnalyticsPanel() {
 
     const loadChannels = useCallback(async () => {
         if (!session || backendOffline) return;
-        const res = await fetch(`${API}/api/studio/analytics/channels`, { headers: authHeaders() });
+        const res = await fetch(resolveStudioBackendUrl('/api/studio/analytics/channels'), { headers: authHeaders() });
         if (!res.ok) throw new Error(`Channels failed (${res.status})`);
         const data = await res.json();
         const list = Array.isArray(data?.channels) ? data.channels : [];
@@ -87,9 +87,11 @@ export default function AdminAnalyticsPanel() {
             const params = new URLSearchParams({ channel_id: channelId });
             if (registryKey) params.set('registry_key', registryKey);
             const [chRes, trendRes] = await Promise.all([
-                fetch(`${API}/api/studio/analytics/channel?${params}`, { headers: authHeaders() }),
+                fetch(resolveStudioBackendUrl(`/api/studio/analytics/channel?${params}`), { headers: authHeaders() }),
                 fetch(
-                    `${API}/api/studio/analytics/search-trends?days=30&registry_key=${encodeURIComponent(registryKey)}`,
+                    resolveStudioBackendUrl(
+                        `/api/studio/analytics/search-trends?days=30&registry_key=${encodeURIComponent(registryKey)}`,
+                    ),
                     { headers: authHeaders() },
                 ),
             ]);
@@ -117,7 +119,7 @@ export default function AdminAnalyticsPanel() {
 
     const loadProduct = useCallback(async () => {
         if (!session || backendOffline) return;
-        const res = await fetch(`${API}/api/studio/analytics/product`, { headers: authHeaders() });
+        const res = await fetch(resolveStudioBackendUrl('/api/studio/analytics/product'), { headers: authHeaders() });
         if (!res.ok) return;
         const payload = await res.json();
         setProductData(payload);

@@ -44,7 +44,7 @@ function formatPrice(inP?: number, outP?: number) {
     if (inP == null && outP == null) return '—';
     const i = inP != null ? `${inP.toFixed(2)} in` : '? in';
     const o = outP != null ? `${outP.toFixed(2)} out` : '? out';
-    return `${i} · ${o} cr/Mtok`;
+    return `${i} · ${o} $/Mtok`;
 }
 
 export default function AgentModelPicker({

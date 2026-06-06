@@ -3,15 +3,14 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import type { PageNav } from '../components/NavBar';
 import StudioShell from '../components/layout/StudioShell';
 import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
-import NicheGalleryV2, { StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
+import { StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
+import ChannelHomePanel from '../components/home/ChannelHomePanel';
 import RenderTierPicker from '../components/home/RenderTierPicker';
-import { NichePickerGrid } from '../components/create/NichePickerStrip';
 import {
     nicheById,
     type DashboardTab,
     type NicheId,
     type RenderTierId,
-    type StudioNiche,
 } from '../lib/studioProduct';
 import { AuthContext } from '../shared';
 import CreatePanel from '../panels/CreatePanel';
@@ -20,6 +19,8 @@ const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const AgentPanel = lazy(() => import('../panels/AgentPanel'));
+const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
+const ClipLabPanel = lazy(() => import('../panels/ClipLabPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
 const WaitlistPanel = lazy(() => import('../panels/WaitlistPanel'));
 const ZeroTierPrivatePanel = lazy(() => import('../panels/ZeroTierPrivatePanel'));
@@ -32,10 +33,12 @@ const PanelFallback = () => (
     </div>
 );
 
-const OWNER_ALL_ACCESS = {
+const OWNER_ALL_ACCESS: Record<string, boolean> = {
     create: true,
     agent: true,
     longform: true,
+    thumbnails: true,
+    cliplab: true,
     analytics: true,
     catalyst: true,
     refunds: true,
@@ -47,7 +50,7 @@ function tabFromUrl(): DashboardTab {
     try {
         const t = new URL(window.location.href).searchParams.get('tab');
         const allowed: DashboardTab[] = [
-            'home', 'create', 'agent', 'longform', 'analytics', 'catalyst', 'refunds', 'waitlist',
+            'home', 'create', 'agent', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
         ];
         if (t && allowed.includes(t as DashboardTab)) return t as DashboardTab;
     } catch {
@@ -81,15 +84,19 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         return 'Good evening';
     }, []);
 
+    const canUseAgent = isAdmin || Boolean((laneAccess as Record<string, boolean>).agent);
+
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {
             if (nextTab === 'home' || nextTab === 'create') return true;
             if (nextTab === 'longform') return isAdmin;
-            if (nextTab === 'agent') return isAdmin;
+            if (nextTab === 'agent') return canUseAgent;
+            if (nextTab === 'thumbnails') return isAdmin || Boolean((laneAccess as Record<string, boolean>).thumbnails);
+            if (nextTab === 'cliplab') return isAdmin || Boolean((laneAccess as Record<string, boolean>).cliplab);
             if (['analytics', 'catalyst', 'refunds', 'waitlist'].includes(nextTab)) return isAdmin;
             return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
         },
-        [isAdmin, laneAccess],
+        [isAdmin, canUseAgent, laneAccess],
     );
 
     useEffect(() => {
@@ -100,10 +107,21 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     useEffect(() => {
         if (loading) return;
         const urlTab = tabFromUrl();
-        if (urlTab === 'agent' && isAdmin) {
+        if (urlTab === 'agent' && canUseAgent) {
             setTab('agent');
             setCreateOpen(false);
             setSelectedNiche(null);
+            return;
+        }
+        if (urlTab === 'agent' && !canUseAgent) {
+            setTab('home');
+            try {
+                const u = new URL(window.location.href);
+                u.searchParams.delete('tab');
+                window.history.replaceState({}, '', u.toString());
+            } catch {
+                /* ignore */
+            }
             return;
         }
         if (urlTab === 'longform' && isAdmin) {
@@ -112,16 +130,39 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             setSelectedNiche(null);
             return;
         }
+        if (urlTab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
+            setTab('thumbnails');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        try {
+            const focus = new URL(window.location.href).searchParams.get('focus');
+            if (focus === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
+                setTab('thumbnails');
+                setCreateOpen(false);
+                setSelectedNiche(null);
+            }
+        } catch { /* ignore */ }
         // Only open niche builder when URL doesn't explicitly request another tab.
         if (selectedNiche && (urlTab === 'home' || urlTab === 'create' || !urlTab)) {
             setCreateOpen(true);
             setTab('create');
         }
-    }, [loading, isAdmin, selectedNiche]);
+    }, [loading, isAdmin, canUseAgent, selectedNiche]);
 
-    if (!session) return null;
+    if (!session) {
+        if (loading) {
+            return (
+                <StudioShell onNavigate={onNavigate}>
+                    <PanelFallback />
+                </StudioShell>
+            );
+        }
+        return null;
+    }
 
-    const sidebarItems = buildSidebarItems(isAdmin);
+    const sidebarItems = buildSidebarItems(isAdmin, laneAccess as Record<string, boolean>);
     const displayName = session.user.email?.split('@')[0] || 'creator';
 
     const openAgent = () => {
@@ -162,32 +203,21 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         setSelectedNiche(null);
     };
 
-    const openNiche = (niche: StudioNiche) => {
-        if (niche.id === 'longform') {
-            if (isAdmin) {
-                setTab('longform');
-                setCreateOpen(false);
-            }
-            return;
-        }
-        if (niche.id === 'style_clone') {
-            setTab('create');
-            setCreateOpen(true);
-            setSelectedNiche('alt_battles');
-            return;
-        }
-        setSelectedNiche(niche.id);
-        setTab('create');
-        setCreateOpen(true);
-    };
-
     const handleTool = (action: string) => {
         if (action === 'agent') {
-            if (isAdmin) openAgent();
+            if (canUseAgent) openAgent();
             return;
         }
         if (action === 'longform' && isAdmin) {
             selectTab('longform');
+            return;
+        }
+        if (action === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
+            selectTab('thumbnails');
+            return;
+        }
+        if (action === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
+            selectTab('cliplab');
             return;
         }
         if (action === 'automate') return;
@@ -200,7 +230,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const panel = (() => {
         if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
-        if (tab === 'agent' && isAdmin) return lazyPanel(<AgentPanel onBack={() => selectTab('home')} />);
+        if (tab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) return lazyPanel(<ThumbnailPanel />);
+        if (tab === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
+            return lazyPanel(<ClipLabPanel />);
+        }
+        if (tab === 'agent' && canUseAgent) {
+            return lazyPanel(<AgentPanel onBack={() => selectTab('home')} />);
+        }
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
@@ -237,7 +273,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 <CreatePanel
                     key={selectedNiche}
                     nicheId={selectedNiche}
-                    categoryKey={niche?.categoryKey || 'classical_clash'}
+                    categoryKey={niche?.categoryKey || 'people_blogs'}
                     renderTier={renderTier}
                     nicheTitle={niche?.title}
                     onNicheChange={setSelectedNiche}
@@ -249,7 +285,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     })();
 
     const inBuilder = tab === 'create' && createOpen;
-    const isAgentTab = tab === 'agent' && isAdmin;
+    const agentRequested = tab === 'agent';
+    const isAgentTab = agentRequested && (loading || canUseAgent);
     const showHome = tab === 'home' || (tab === 'create' && !createOpen);
 
     return (
@@ -278,7 +315,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="mb-3 text-sm text-gray-500">Draft to iterate. Ship for cinematic export. Documentary for long-form episodes.</p>
                         <RenderTierPicker value={renderTier} onChange={setRenderTier} />
                     </section>
-                    <NicheGalleryV2 isOwner={ownerOverride} onPick={openNiche} />
+                    <ChannelHomePanel onOpenAgent={openAgent} isAdmin={isAdmin} />
                 </div>
             )}
 
@@ -297,19 +334,40 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                         Back to Home
                     </button>
                     {!selectedNiche ? (
-                        <NichePickerGrid
-                            isOwner={ownerOverride}
-                            onPick={(id) => setSelectedNiche(id)}
-                        />
+                        <ChannelHomePanel onOpenAgent={openAgent} isAdmin={isAdmin} />
                     ) : (
                         panel
                     )}
                 </div>
             )}
 
-            {isAgentTab && (
+            {agentRequested && (
                 <div className="mx-auto flex h-[calc(100dvh-3.75rem)] max-w-5xl flex-col overflow-hidden px-2 sm:px-4">
-                    {panel}
+                    {loading ? (
+                        <PanelFallback />
+                    ) : canUseAgent ? (
+                        panel ?? <PanelFallback />
+                    ) : (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
+                            <p className="max-w-md text-sm text-gray-400">
+                                Studio Agent requires a Creator or Studio plan. Upgrade in Billing to unlock the agent.
+                            </p>
+                            <button
+                                type="button"
+                                onClick={() => onNavigate('billing')}
+                                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500"
+                            >
+                                View plans
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => selectTab('home')}
+                                className="text-xs text-gray-500 hover:text-gray-300"
+                            >
+                                Back to Home
+                            </button>
+                        </div>
+                    )}
                 </div>
             )}
 

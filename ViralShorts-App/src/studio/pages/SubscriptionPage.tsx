@@ -1,13 +1,10 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import MembershipPremiumView from '../components/membership/MembershipPremiumView';
 import StudioShell from '../components/layout/StudioShell';
+import { UNIFIED_PLANS, type UnifiedPlanId } from '../lib/studioProduct';
 import { type PageNav } from '../components/NavBar';
-import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost, resolveStudioBackendUrl } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce } from '../lib/googleAds';
-
-type PublicPlanId = 'free' | 'starter' | 'creator' | 'pro';
-
-const PUBLIC_PLAN_ORDER: PublicPlanId[] = ['free', 'starter', 'creator', 'pro'];
 
 export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
@@ -15,14 +12,10 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         billingActive,
         membershipPlanId,
         membershipSource,
-        monthlyCreditsRemaining,
-        topupCreditsRemaining,
         creditsTotalRemaining,
         nextRenewalSource,
         checkout,
         manageBilling,
-        publicPlanLimits,
-        publicPlanPrices,
         verifyPayPalOrder,
     } = useContext(AuthContext);
     const params = useMemo(() => {
@@ -38,53 +31,61 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const [paypalVerifyError, setPaypalVerifyError] = useState('');
     const [actionError, setActionError] = useState('');
     const [loadingPlanId, setLoadingPlanId] = useState('');
+    const [unifiedBalance, setUnifiedBalance] = useState<number | null>(null);
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
-    const normalizedCurrentPlan = useMemo<PublicPlanId>(() => {
-        const raw = String(membershipPlanId || 'free').trim().toLowerCase();
-        if (raw === 'starter' || raw === 'creator' || raw === 'pro') return raw;
-        return 'free';
+    const normalizedCurrentPlan = useMemo<UnifiedPlanId | ''>(() => {
+        const raw = String(membershipPlanId || '').trim().toLowerCase();
+        if (raw === 'creator' || raw === 'studio') return raw;
+        return '';
     }, [membershipPlanId]);
 
-    const planCards = useMemo(() => {
-        return PUBLIC_PLAN_ORDER.map((planId) => {
-            const limits = (publicPlanLimits as Record<string, any>)[planId] || {};
-            const price = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
-            const animatedCredits = Number(limits.animated_renders_per_month || 0);
-            return {
-                id: planId,
-                title: capitalizePlan(planId),
-                priceLabel: planId === 'free' ? '$0' : `$${price.toFixed(price % 1 === 0 ? 0 : 2)}/mo`,
-                subtitle:
-                    planId === 'free'
-                        ? 'Two included animation credits to try Create.'
-                        : planId === 'starter'
-                            ? 'Best for solo operators getting started.'
-                            : planId === 'creator'
-                                ? 'More monthly headroom for active creators.'
-                                : 'Highest public headroom for daily operators.',
-                bullets: [
-                    `${animatedCredits} included animation credits${planId === 'free' ? '' : ' per month'}`,
-                    `${Math.max(1, Math.round(Number(limits.max_duration_sec || 0) / 60))} minute max jobs`,
-                    `${String(limits.max_resolution || '720p').toUpperCase()} output`,
-                    planId === 'free'
-                        ? 'All public short-form niches in Create'
-                        : 'Create + Chat Story template access',
-                ],
-            };
-        });
-    }, [publicPlanLimits, publicPlanPrices]);
+    const planCards = useMemo(
+        () =>
+            UNIFIED_PLANS.map((p) => ({
+                id: p.id,
+                title: p.title,
+                priceLabel: `$${p.priceUsd}/mo`,
+                subtitle: p.description,
+                bullets: p.features,
+                bestValue: Boolean(p.bestValue),
+            })),
+        [],
+    );
+
+    useEffect(() => {
+        const tok = session?.access_token;
+        if (!tok) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/credits'), {
+                    headers: { Authorization: `Bearer ${tok}` },
+                });
+                if (!res.ok) return;
+                const data = (await res.json()) as { balance?: number; unlimited?: boolean };
+                if (!cancelled) {
+                    setUnifiedBalance(data.unlimited ? 999999 : Number(data.balance || 0));
+                }
+            } catch {
+                /* fallback */
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [session]);
 
     useEffect(() => {
         if (subscriptionResult !== 'success') return;
-        const planId = requestedPlanId || normalizedCurrentPlan;
-        const value = Number((publicPlanPrices as Record<string, number>)[planId] || 0);
+        const planId = requestedPlanId || normalizedCurrentPlan || 'creator';
+        const match = UNIFIED_PLANS.find((p) => p.id === planId);
         const search = typeof window === 'undefined' ? '' : window.location.search;
         trackOnce(`subscription_membership_success:${search}`, () => {
-            trackMembershipPurchaseCompleted(planId, value);
+            trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
         });
-    }, [normalizedCurrentPlan, publicPlanPrices, requestedPlanId, subscriptionResult]);
+    }, [normalizedCurrentPlan, requestedPlanId, subscriptionResult]);
 
     useEffect(() => {
         if (!paypalProvider || !paypalOrderId || subscriptionResult !== 'success') return;
@@ -106,10 +107,14 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
             setPaypalVerifyState(result.captured ? 'verified' : 'failed');
             if (!result.captured) setPaypalVerifyError('PayPal has not confirmed capture yet.');
         })();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+        };
     }, [paypalProvider, paypalOrderId, subscriptionResult, verifyPayPalOrder]);
 
-    const currentStatus = billingActive ? capitalizePlan(normalizedCurrentPlan) : 'Free';
+    const currentStatus = billingActive && normalizedCurrentPlan
+        ? UNIFIED_PLANS.find((p) => p.id === normalizedCurrentPlan)?.title || 'Active'
+        : 'No plan';
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -127,52 +132,51 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         onNavigate('billing');
     };
 
-    const handlePlanAction = useCallback(async (planId: PublicPlanId) => {
-        if (planId === 'free') {
-            if (!session) onNavigate('auth');
-            return;
-        }
-        if (!session) {
-            onNavigate('auth');
-            return;
-        }
-        setActionError('');
-        setLoadingPlanId(planId);
-        try {
-            if (billingActive && normalizedCurrentPlan === planId) {
-                if (usesStripeMembership) {
-                    const err = await manageBilling();
-                    if (err) setActionError(err);
-                    return;
-                }
-                if (usesManualPayPalMembership) {
-                    const err = await checkout(planId);
-                    if (err) setActionError(err);
-                    return;
-                }
+    const handlePlanAction = useCallback(
+        async (planId: UnifiedPlanId) => {
+            if (!session) {
+                onNavigate('auth');
+                return;
             }
-            const err = await checkout(planId);
-            if (err) setActionError(err);
-        } finally {
-            setLoadingPlanId('');
-        }
-    }, [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership]);
+            setActionError('');
+            setLoadingPlanId(planId);
+            try {
+                if (billingActive && normalizedCurrentPlan === planId) {
+                    if (usesStripeMembership) {
+                        const err = await manageBilling();
+                        if (err) setActionError(err);
+                        return;
+                    }
+                    if (usesManualPayPalMembership) {
+                        const err = await checkout(planId);
+                        if (err) setActionError(err);
+                        return;
+                    }
+                }
+                const err = await checkout(planId);
+                if (err) setActionError(err);
+            } finally {
+                setLoadingPlanId('');
+            }
+        },
+        [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
+    );
 
     const banners = (
         <>
             {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    Your monthly plan is active. Included credits now burn before the wallet.
+                    Your plan is active. Monthly credits have been added to your wallet.
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'verifying' && (
                 <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
-                    Confirming your PayPal payment with our servers…
+                    Confirming your PayPal payment…
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'failed' && (
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                    We couldn't confirm your PayPal payment yet. {paypalVerifyError ? `Details: ${paypalVerifyError}. ` : ''}If funds were charged, refresh in a minute.
+                    Payment not confirmed yet. {paypalVerifyError} Refresh if you were charged.
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'revoked' && (
@@ -194,33 +198,32 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     );
 
     const plans = planCards.map((planCard) => {
-        const isCurrent = normalizedCurrentPlan === planCard.id;
-        const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
-        const actionLabel = planCard.id === 'free'
-            ? (isCurrent && !billingActive ? 'Current plan' : 'Included with account')
-            : isPaidCurrent
-                ? (usesStripeMembership ? 'Manage plan' : 'Extend plan')
-                : billingActive
-                    ? `Switch to ${planCard.title}`
-                    : `Start ${planCard.title}`;
+        const isCurrent = billingActive && normalizedCurrentPlan === planCard.id;
+        const actionLabel = isCurrent
+            ? usesStripeMembership
+                ? 'Manage plan'
+                : 'Extend plan'
+            : billingActive
+                ? `Switch to ${planCard.title}`
+                : `Start ${planCard.title}`;
         return {
             ...planCard,
             isCurrent,
             actionLabel,
             loading: loadingPlanId === planCard.id,
-            disabled: planCard.id === 'free' && isCurrent && !billingActive,
+            disabled: false,
             onAction: () => void handlePlanAction(planCard.id),
         };
     });
+
+    const creditBalance = unifiedBalance ?? Number(creditsTotalRemaining || 0);
 
     return (
         <StudioShell onNavigate={onNavigate}>
             <MembershipPremiumView
                 currentStatus={currentStatus}
                 plans={plans}
-                includedCredits={Number(monthlyCreditsRemaining || 0)}
-                walletCredits={Number(topupCreditsRemaining || 0)}
-                totalCredits={Number(creditsTotalRemaining || 0)}
+                creditBalance={creditBalance}
                 onBack={handleBack}
                 onOpenBilling={handleOpenBilling}
                 banners={banners}
@@ -228,8 +231,4 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
             />
         </StudioShell>
     );
-}
-
-function capitalizePlan(planId: PublicPlanId) {
-    return planId.charAt(0).toUpperCase() + planId.slice(1);
 }

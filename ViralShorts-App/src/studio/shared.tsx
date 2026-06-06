@@ -5,7 +5,7 @@ import { trackAuthCompletion } from './lib/googleAds';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
 const hostLower = window.location.hostname.toLowerCase();
-const isLocalDevHost = hostLower === "localhost" || hostLower === "127.0.0.1";
+export const isLocalDevHost = hostLower === "localhost" || hostLower === "127.0.0.1";
 const billingHostAliases = new Set([
     "billing.nyptidindustries.com",
     "billing.niptidindustries.com",
@@ -48,13 +48,34 @@ export const STUDIO_AGENT_API = isLocalDevHost
     ? (rawLocalApi || API)
     : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || "https://nyptid-studio.fly.dev");
 
-export { resolveStudioBackendUrl, studioAgentOAuthReturnUrl } from './lib/backend';
-
-const FLY_DIRECT_API_PREFIXES = [
+export const FLY_DIRECT_API_PREFIXES = [
     '/api/studio-agent',
     '/api/youtube',
     '/api/studio/analytics',
 ];
+
+/** Routes that must not go through RunPod (429 queue, cold sync, session loss). */
+export function resolveStudioBackendUrl(path: string): string {
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    if (isLocalDevHost) return `${API}${normalized}`;
+    if (FLY_DIRECT_API_PREFIXES.some((prefix: string) => normalized.startsWith(prefix))) {
+        return `${STUDIO_AGENT_API}${normalized}`;
+    }
+    return `${API}${normalized}`;
+}
+
+/** OAuth return URL that lands back on Studio Agent after Google connect. */
+export const studioAgentOAuthReturnUrl = (): string => {
+    if (typeof window === "undefined") {
+        return `${STUDIO_SITE_URL}?page=dashboard&tab=agent`;
+    }
+    const u = new URL(window.location.href);
+    u.searchParams.set("page", "dashboard");
+    u.searchParams.set("tab", "agent");
+    u.searchParams.delete("youtube");
+    u.searchParams.delete("youtube_message");
+    return u.toString();
+};
 
 /** Authenticated fetch to Studio/Fly-backed routes (agent, YouTube, analytics). */
 export async function studioAgentFetch(

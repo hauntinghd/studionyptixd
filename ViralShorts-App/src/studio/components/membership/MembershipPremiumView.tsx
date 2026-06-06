@@ -1,4 +1,5 @@
 import { ArrowLeft, BadgeCheck, Sparkles } from 'lucide-react';
+import type { ReactNode } from 'react';
 
 type PlanCard = {
     id: string;
@@ -6,6 +7,7 @@ type PlanCard = {
     priceLabel: string;
     subtitle: string;
     bullets: string[];
+    bestValue?: boolean;
     isCurrent: boolean;
     actionLabel: string;
     loading: boolean;
@@ -16,9 +18,7 @@ type PlanCard = {
 export default function MembershipPremiumView({
     currentStatus,
     plans,
-    includedCredits,
-    walletCredits,
-    totalCredits,
+    creditBalance,
     onBack,
     onOpenBilling,
     banners,
@@ -26,12 +26,10 @@ export default function MembershipPremiumView({
 }: {
     currentStatus: string;
     plans: PlanCard[];
-    includedCredits: number;
-    walletCredits: number;
-    totalCredits: number;
+    creditBalance: number;
     onBack: () => void;
     onOpenBilling: () => void;
-    banners: React.ReactNode;
+    banners: ReactNode;
     actionError: string;
 }) {
     return (
@@ -50,9 +48,9 @@ export default function MembershipPremiumView({
                             <Sparkles className="h-4 w-4" />
                             Membership
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Free through Pro</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Creator & Studio</h1>
                         <p className="mt-3 max-w-xl text-sm leading-relaxed text-gray-400">
-                            Included credits burn first. Wallet top-ups stack on any plan and stay if membership lapses.
+                            One unified credit wallet for Studio Agent, OpenRouter, fal, and ElevenLabs. Top-ups stack on any plan.
                         </p>
                         <div className="mt-4 flex flex-wrap gap-3">
                             <button
@@ -75,24 +73,31 @@ export default function MembershipPremiumView({
                     <div className="rounded-2xl border border-violet-500/25 bg-violet-500/10 px-6 py-4 text-center">
                         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-200/80">Current</p>
                         <p className="mt-1 text-xl font-bold text-white">{currentStatus}</p>
-                        <p className="mt-1 text-xs text-violet-200/70">{totalCredits} AC available</p>
+                        <p className="mt-1 text-xs text-violet-200/70">
+                            {creditBalance >= 999999 ? '∞' : creditBalance.toLocaleString()} credits
+                        </p>
                     </div>
                 </div>
             </section>
 
             <section>
                 <h2 className="text-lg font-bold text-white">Plans</h2>
-                <p className="mt-1 text-sm text-gray-500">Short-form Create and Chat Story. Heavier lanes stay in beta.</p>
-                <div className="mt-4 grid gap-4 lg:grid-cols-4">
+                <p className="mt-1 text-sm text-gray-500">Monthly credits refresh each billing cycle.</p>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
                     {plans.map((plan) => (
                         <div
                             key={plan.id}
-                            className={`flex flex-col rounded-2xl border p-5 ${
+                            className={`relative flex flex-col rounded-2xl border p-5 ${
                                 plan.isCurrent
                                     ? 'border-violet-500/40 bg-violet-500/[0.08]'
                                     : 'border-white/[0.08] bg-white/[0.02]'
                             }`}
                         >
+                            {plan.bestValue && (
+                                <span className="absolute right-4 top-4 rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-cyan-200">
+                                    Best value
+                                </span>
+                            )}
                             <div className="flex items-start justify-between gap-2">
                                 <p className="text-xs uppercase tracking-wider text-gray-500">{plan.title}</p>
                                 {plan.isCurrent && (
@@ -115,7 +120,7 @@ export default function MembershipPremiumView({
                                 type="button"
                                 onClick={plan.onAction}
                                 disabled={plan.disabled || plan.loading}
-                                className="mt-5 w-full rounded-xl bg-white/[0.08] px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.14] disabled:opacity-60"
+                                className="mt-5 w-full rounded-xl bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-60"
                             >
                                 {plan.loading ? 'Opening…' : plan.actionLabel}
                             </button>
@@ -124,34 +129,15 @@ export default function MembershipPremiumView({
                 </div>
             </section>
 
-            <div className="grid gap-6 lg:grid-cols-2">
-                <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                    <h2 className="text-lg font-semibold text-white">Balance</h2>
-                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                        <Metric label="Included" value={includedCredits} />
-                        <Metric label="Wallet" value={walletCredits} />
-                        <Metric label="Total" value={totalCredits} />
-                    </div>
-                </section>
-                <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
-                    <h2 className="text-lg font-semibold text-white">How billing works</h2>
-                    <ol className="mt-4 list-decimal space-y-2 pl-4 text-sm text-gray-400">
-                        <li>Every account starts on Free with two included animation credits.</li>
-                        <li>Paid plans add monthly included credits and unlock Chat Story.</li>
-                        <li>Top-up packs live on Billing and stack with any plan.</li>
-                        <li>If membership expires, wallet credits remain on the account.</li>
-                    </ol>
-                </section>
-            </div>
-        </div>
-    );
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-    return (
-        <div className="rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">{label}</p>
-            <p className="mt-2 text-2xl font-bold tabular-nums text-white">{value}</p>
+            <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+                <h2 className="text-lg font-semibold text-white">How billing works</h2>
+                <ol className="mt-4 list-decimal space-y-2 pl-4 text-sm text-gray-400">
+                    <li>Pick Creator ($60 / 5,000 credits) or Studio ($200 / 20,000 credits).</li>
+                    <li>Credits debit from real usage — OpenRouter tokens, fal renders, ElevenLabs characters.</li>
+                    <li>Top-up packs on Billing stack with your monthly grant.</li>
+                    <li>Wallet credits stay on your account if membership lapses.</li>
+                </ol>
+            </section>
         </div>
     );
 }

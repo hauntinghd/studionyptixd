@@ -1,25 +1,10 @@
 /**
- * CreatePanel — Alt-History Battles short-form generator (rebuilt 2026-05-08).
+ * CreatePanel — Skeleton AI short builder (Studio Create tab).
  *
- * Niche taxonomy refactor 2026-05-08: this panel was originally Skeleton AI;
- * Casey replaced it with the Alternate History Battles niche (counterfactual
- * matchups: Napoleon vs Alexander, Mongols vs Romans, etc.). The skeleton_ai
- * backend module is reused — it now serves alt-battles content.
- *
- * 3-tab Korpi-shaped UX:
- *   1. Script  — narration textarea + "Generate w/ AI" modal (Idea List /
- *                Custom Topic / Remix Script). xAI Grok 4.1 Fast Reasoning
- *                streams the script in real time.
- *   2. Scenes  — image-model picker (paid + free tiers) + auto scene plan
- *                from script + Generate Scenes / Generate Scenes & Animate.
- *   3. Audio   — ElevenLabs voice picker + speed/pitch/language + caption
- *                font + final "Generate Video" button.
- *
- * Backend: /api/skeleton-ai/{categories,script,voices,generate,jobs/<id>}
- *          (URL kept for stability — internally serves alt-battles now).
- * Visual:  Kings-and-Generals / Total War / Ridley Scott painterly cinematic
- *          battle illustration. Period-correct gear. NOT photoreal. NOT
- *          modern. Period-correct historical painterly cinematic.
+ * 3-tab UX: Script → Scenes (canonical stills) → Audio → full render.
+ * Backend: /api/skeleton-ai/*
+ * Stills: one locked master PNG + Seedream 4.5 edit per beat (background,
+ *         outfit, props only — identity never drifts).
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
@@ -28,15 +13,19 @@ import NichePickerStrip from '../components/create/NichePickerStrip';
 import type { NicheId } from '../lib/studioProduct';
 
 type Tab = 'script' | 'scenes' | 'audio';
-type IdeaCategory = 'classical_clash' | 'medieval_clash' | 'gunpowder_clash' | 'wildcard_clash';
-type ImageModel = 'seedream_45' | 'flux_2_pro' | 'imagen4' | 'recraft_v4_pro' | 'nano_banana_pro' | 'ernie_image' | 'nano_banana_free';
-type Tier = 'standard' | 'premium';
+/** Stills always use canonical master + Seedream 4.5 edit (backend ignores other models). */
+const CANONICAL_IMAGE_MODEL = 'seedream_edit' as const;
+
+type VideoModel = 'seedance' | 'pixverse' | 'kling_pro';
 
 interface CategoryInfo {
-    key: IdeaCategory;
+    key: string;
     label: string;
     tagline: string;
     seeds: string[];
+    builtin?: boolean;
+    custom?: boolean;
+    youtube_category?: string;
 }
 
 interface Voice {
@@ -47,15 +36,6 @@ interface Voice {
     labels?: Record<string, string>;
 }
 
-interface ImageModelOption {
-    key: ImageModel;
-    name: string;
-    description: string;
-    tier: 'paid' | 'free';
-    credits: number;
-    speed: 'fast' | 'medium' | 'slow';
-}
-
 interface RenderedScene {
     beat_index: number;
     narration: string;
@@ -64,16 +44,6 @@ interface RenderedScene {
     motion_prompt: string;
     image_path: string;
 }
-
-const IMAGE_MODELS: ImageModelOption[] = [
-    { key: 'seedream_45', name: 'SeeDream 4.5', description: 'High quality with image input support', tier: 'paid', credits: 4, speed: 'fast' },
-    { key: 'flux_2_pro', name: 'Flux 2 Pro', description: 'Fast and creative AI art generation', tier: 'paid', credits: 5, speed: 'fast' },
-    { key: 'imagen4', name: 'Imagen 4', description: 'Google\'s highest quality model', tier: 'paid', credits: 5, speed: 'medium' },
-    { key: 'recraft_v4_pro', name: 'Recraft V4 Pro', description: 'Designer-focused, vector-style outputs', tier: 'paid', credits: 4, speed: 'medium' },
-    { key: 'nano_banana_pro', name: 'Nano Banana Pro', description: 'Google\'s premium fast model', tier: 'paid', credits: 5, speed: 'fast' },
-    { key: 'ernie_image', name: 'ERNIE Image', description: 'Reliable cheap fallback', tier: 'free', credits: 0, speed: 'fast' },
-    { key: 'nano_banana_free', name: 'Nano Banana Free', description: 'Free tier, sometimes falls back to a cheaper model', tier: 'free', credits: 0, speed: 'fast' },
-];
 
 interface CreatePanelProps {
     nicheId: string;
@@ -86,7 +56,7 @@ interface CreatePanelProps {
 
 export default function CreatePanel({
     nicheId,
-    categoryKey: categoryKeyProp = 'classical_clash',
+    categoryKey: categoryKeyProp = 'people_blogs',
     renderTier = 'draft',
     nicheTitle,
     onNicheChange,
@@ -94,23 +64,26 @@ export default function CreatePanel({
 }: CreatePanelProps) {
     const { session } = useContext(AuthContext);
     const accessToken = session?.access_token || '';
-    const activeCategory = categoryKeyProp as IdeaCategory;
+    const [activeCategory, setActiveCategory] = useState(categoryKeyProp);
+
+    useEffect(() => {
+        setActiveCategory(categoryKeyProp);
+    }, [categoryKeyProp]);
 
     const [tab, setTab] = useState<Tab>('script');
     const [script, setScript] = useState('');
     const [ideaModalOpen, setIdeaModalOpen] = useState(false);
     const [scriptStreaming, setScriptStreaming] = useState(false);
-    const [imageModel, setImageModel] = useState<ImageModel>('seedream_45');
     const [voiceId, setVoiceId] = useState('');
     const [voiceSpeed, setVoiceSpeed] = useState(1.0);
     const [voicePitch, setVoicePitch] = useState(1.0);
     const [voiceLang, setVoiceLang] = useState('auto');
     const [captionFont, setCaptionFont] = useState('Komika Axis');
     const [voices, setVoices] = useState<Voice[]>([]);
-    const [tier, setTier] = useState<Tier>(renderTier === 'ship' ? 'premium' : 'standard');
+    const [videoModel, setVideoModel] = useState<VideoModel>(renderTier === 'ship' ? 'kling_pro' : 'seedance');
 
     useEffect(() => {
-        setTier(renderTier === 'ship' ? 'premium' : 'standard');
+        setVideoModel(renderTier === 'ship' ? 'kling_pro' : 'seedance');
     }, [renderTier]);
     const [generating, setGenerating] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
@@ -171,7 +144,7 @@ export default function CreatePanel({
                     Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({ script, image_model: imageModel, category: activeCategory }),
+                body: JSON.stringify({ script, image_model: CANONICAL_IMAGE_MODEL, category: activeCategory }),
                 signal: controller.signal,
             });
             if (!r.ok || !r.body) {
@@ -227,7 +200,7 @@ export default function CreatePanel({
             setScenesGenerating(false);
             scenesAbortRef.current = null;
         }
-    }, [script, imageModel, accessToken, activeCategory]);
+    }, [script, accessToken, activeCategory]);
 
     const stopGenerateScenes = useCallback(() => {
         scenesAbortRef.current?.abort();
@@ -255,13 +228,14 @@ export default function CreatePanel({
                     category: activeCategory,
                     script_override: script,
                     render_tier: renderTier,
-                    image_model: imageModel,
+                    image_model: CANONICAL_IMAGE_MODEL,
                     voice_id: voiceId,
                     voice_speed: voiceSpeed,
                     voice_pitch: voicePitch,
                     voice_language: voiceLang,
                     caption_font: captionFont,
-                    tier,
+                    tier: videoModel === 'kling_pro' ? 'premium' : 'standard',
+                    video_model: videoModel,
                 }),
             });
             const d = await r.json();
@@ -271,7 +245,7 @@ export default function CreatePanel({
                 if (detail?.code === 'insufficient_credits') {
                     const needed = Number(detail.needed || 0);
                     const have = Number(detail.have || 0);
-                    const tierName = String(detail.tier || tier).toUpperCase();
+                    const tierName = String(detail.tier || videoModel).toUpperCase();
                     if (window.confirm(
                         `${tierName} short needs ${needed} AC. You have ${have}.\n\n`
                         + `Top up to continue?`
@@ -292,7 +266,7 @@ export default function CreatePanel({
         } finally {
             setGenerating(false);
         }
-    }, [script, imageModel, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, tier, accessToken, activeCategory, renderTier]);
+    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, accessToken, activeCategory, renderTier]);
 
     const tierLabel = renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration';
     const scriptHeading = nicheTitle ? `${nicheTitle} script` : 'Narration script';
@@ -317,6 +291,11 @@ export default function CreatePanel({
                         Standard = 5 AC · Premium = 7 AC
                     </div>
                 </div>
+                <CategorySelector
+                    accessToken={accessToken}
+                    value={activeCategory}
+                    onChange={setActiveCategory}
+                />
             </header>
 
             <TabRow tab={tab} setTab={setTab} />
@@ -334,8 +313,6 @@ export default function CreatePanel({
             )}
             {tab === 'scenes' && (
                 <ScenesTab
-                    imageModel={imageModel}
-                    setImageModel={setImageModel}
                     charCount={scriptCharCount}
                     duration={estimatedDuration}
                     estimatedScenes={estimatedScenes}
@@ -363,8 +340,8 @@ export default function CreatePanel({
                     setVoiceLang={setVoiceLang}
                     captionFont={captionFont}
                     setCaptionFont={setCaptionFont}
-                    tier={tier}
-                    setTier={setTier}
+                    videoModel={videoModel}
+                    setVideoModel={setVideoModel}
                     onGenerate={startGenerate}
                     generating={generating}
                 />
@@ -380,7 +357,8 @@ export default function CreatePanel({
             {ideaModalOpen && (
                 <IdeaModal
                     accessToken={accessToken}
-                    initialCategory={activeCategory}
+                    selectedCategory={activeCategory}
+                    onCategoryChange={setActiveCategory}
                     nicheTitle={nicheTitle}
                     onClose={() => setIdeaModalOpen(false)}
                     onScript={(text) => {
@@ -482,12 +460,10 @@ function ScriptTab({
 }
 
 function ScenesTab({
-    imageModel, setImageModel, charCount, duration, estimatedScenes, scriptValid,
+    charCount, duration, estimatedScenes, scriptValid,
     onGenerateScenes, onStopGenerateScenes, onGenerateAndAnimate,
     scenesGenerating, renderedScenes, scenesProgress, sceneError, accessToken,
 }: {
-    imageModel: ImageModel;
-    setImageModel: (m: ImageModel) => void;
     charCount: number;
     duration: number;
     estimatedScenes: number;
@@ -501,26 +477,17 @@ function ScenesTab({
     sceneError: string;
     accessToken: string;
 }) {
-    const [pickerOpen, setPickerOpen] = useState(false);
-    const selected = IMAGE_MODELS.find((m) => m.key === imageModel)!;
     return (
         <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-white">Generate Scenes</h2>
 
-            <div>
-                <label className="text-sm text-zinc-300 block mb-1">Image Generation Model</label>
-                <button
-                    onClick={() => setPickerOpen(true)}
-                    className="w-full text-left rounded-md bg-zinc-950 border border-zinc-800 px-3 py-3 hover:border-zinc-700 flex items-center justify-between"
-                >
-                    <div>
-                        <div className="text-sm font-semibold text-white">{selected.name}</div>
-                        <div className="text-xs text-zinc-500">{selected.description}</div>
-                    </div>
-                    <div className="text-xs text-zinc-400">
-                        {selected.tier === 'paid' ? `${selected.credits} credits/img` : 'Free'}
-                    </div>
-                </button>
+            <div className="rounded-md border border-violet-500/30 bg-violet-500/10 px-3 py-3">
+                <div className="text-sm font-semibold text-white">Canonical Skeleton (locked)</div>
+                <p className="text-xs text-zinc-400 mt-1">
+                    Every scene uses the same Studio skeleton from our master reference. Seedream 4.5 Edit
+                    changes only the background, props, and outfit — the character never drifts.
+                </p>
+                <p className="text-xs text-violet-300 mt-2">~4 credits per scene still</p>
             </div>
 
             <div className="grid grid-cols-3 gap-3">
@@ -592,13 +559,6 @@ function ScenesTab({
                 </div>
             )}
 
-            {pickerOpen && (
-                <ImageModelPicker
-                    selected={imageModel}
-                    onSelect={(m) => { setImageModel(m); setPickerOpen(false); }}
-                    onClose={() => setPickerOpen(false)}
-                />
-            )}
         </section>
     );
 }
@@ -680,6 +640,67 @@ function SceneGallery({ scenes, accessToken }: { scenes: RenderedScene[]; access
     );
 }
 
+function CategorySelector({
+    accessToken, value, onChange,
+}: {
+    accessToken: string;
+    value: string;
+    onChange: (key: string) => void;
+}) {
+    const [categories, setCategories] = useState<CategoryInfo[]>([]);
+
+    useEffect(() => {
+        const headers: Record<string, string> = {};
+        if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+        fetch('/api/skeleton-ai/categories', { headers })
+            .then((r) => r.json())
+            .then((d) => Array.isArray(d.categories) && setCategories(d.categories))
+            .catch(() => setCategories([]));
+    }, [accessToken]);
+
+    const selected = categories.find((c) => c.key === value);
+
+    return (
+        <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-3">
+            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+                Script category
+            </label>
+            <div className="mt-2 flex flex-wrap gap-2 items-center">
+                <select
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="min-w-[220px] flex-1 rounded-md bg-zinc-900 border border-zinc-700 px-3 py-2 text-sm text-white"
+                >
+                    {categories.length === 0 && (
+                        <option value={value}>{value || 'Loading…'}</option>
+                    )}
+                    {categories.filter((c) => c.builtin).length > 0 && (
+                        <optgroup label="YouTube-aligned (20)">
+                            {categories.filter((c) => c.builtin).map((c) => (
+                                <option key={c.key} value={c.key}>
+                                    {c.label}
+                                </option>
+                            ))}
+                        </optgroup>
+                    )}
+                    {categories.filter((c) => c.custom).length > 0 && (
+                        <optgroup label="Your custom categories">
+                            {categories.filter((c) => c.custom).map((c) => (
+                                <option key={c.key} value={c.key}>
+                                    {c.label}
+                                </option>
+                            ))}
+                        </optgroup>
+                    )}
+                </select>
+                {selected?.tagline && (
+                    <span className="text-xs text-zinc-500 flex-1 min-w-[12rem]">{selected.tagline}</span>
+                )}
+            </div>
+        </div>
+    );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
     return (
         <div className="rounded-md border border-zinc-800 px-3 py-2 bg-zinc-950">
@@ -689,61 +710,9 @@ function Stat({ label, value }: { label: string; value: string }) {
     );
 }
 
-function ImageModelPicker({
-    selected, onSelect, onClose,
-}: {
-    selected: ImageModel;
-    onSelect: (m: ImageModel) => void;
-    onClose: () => void;
-}) {
-    return (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
-            <div
-                className="bg-zinc-950 border border-zinc-800 rounded-lg p-6 max-w-3xl w-full max-h-[80vh] overflow-y-auto"
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-bold text-white">Select Image Generation Model</h3>
-                    <button onClick={onClose} className="text-zinc-400 hover:text-white">
-                        <X className="h-5 w-5" />
-                    </button>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                    {IMAGE_MODELS.map((m) => (
-                        <button
-                            key={m.key}
-                            onClick={() => onSelect(m.key)}
-                            className={`text-left rounded-md border p-3 transition ${
-                                selected === m.key
-                                    ? 'border-violet-500 bg-violet-500/5'
-                                    : 'border-zinc-800 bg-zinc-900 hover:border-zinc-700'
-                            }`}
-                        >
-                            <div className="text-sm font-bold text-white">{m.name}</div>
-                            <div className="text-xs text-zinc-400 mt-1 mb-3">{m.description}</div>
-                            <div className="flex items-center justify-between">
-                                <span className="text-[10px] uppercase tracking-wide font-bold text-zinc-500">
-                                    {m.speed}
-                                </span>
-                                <span
-                                    className={`text-xs font-semibold ${
-                                        m.tier === 'free' ? 'text-emerald-400' : 'text-violet-400'
-                                    }`}
-                                >
-                                    {m.tier === 'free' ? 'Free' : `${m.credits} credits`}
-                                </span>
-                            </div>
-                        </button>
-                    ))}
-                </div>
-            </div>
-        </div>
-    );
-}
-
 function AudioTab({
     voices, voiceId, setVoiceId, voiceSpeed, setVoiceSpeed, voicePitch, setVoicePitch,
-    voiceLang, setVoiceLang, captionFont, setCaptionFont, tier, setTier,
+    voiceLang, setVoiceLang, captionFont, setCaptionFont, videoModel, setVideoModel,
     onGenerate, generating,
 }: {
     voices: Voice[];
@@ -757,12 +726,12 @@ function AudioTab({
     setVoiceLang: (s: string) => void;
     captionFont: string;
     setCaptionFont: (s: string) => void;
-    tier: Tier;
-    setTier: (t: Tier) => void;
+    videoModel: VideoModel;
+    setVideoModel: (m: VideoModel) => void;
     onGenerate: () => void;
     generating: boolean;
 }) {
-    const cost = tier === 'premium' ? 7 : 5;
+    const cost = videoModel === 'kling_pro' ? 7 : 5;
     return (
         <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-white">Narration Voice</h2>
@@ -820,30 +789,30 @@ function AudioTab({
             </div>
 
             <div>
-                <label className="text-sm text-zinc-300 block mb-1">Quality Tier</label>
-                <div className="grid grid-cols-2 gap-2">
-                    <button
-                        onClick={() => setTier('standard')}
-                        className={`rounded-md border px-3 py-2 text-sm ${
-                            tier === 'standard'
-                                ? 'border-violet-500 bg-violet-500/10 text-white'
-                                : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
-                        }`}
-                    >
-                        <div className="font-bold">Standard</div>
-                        <div className="text-xs text-zinc-400 mt-0.5">Seedance 2.0 i2v · 5 AC</div>
-                    </button>
-                    <button
-                        onClick={() => setTier('premium')}
-                        className={`rounded-md border px-3 py-2 text-sm ${
-                            tier === 'premium'
-                                ? 'border-violet-500 bg-violet-500/10 text-white'
-                                : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
-                        }`}
-                    >
-                        <div className="font-bold">Premium</div>
-                        <div className="text-xs text-zinc-400 mt-0.5">Kling 2.1 Pro i2v · 7 AC</div>
-                    </button>
+                <label className="text-sm text-zinc-300 block mb-1">Video model (animation)</label>
+                <p className="text-xs text-zinc-500 mb-2">
+                    Stills are locked: canonical skeleton + Seedream 4.5 edit only. You choose how each still is animated.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {([
+                        { key: 'seedance' as const, title: 'Seedance 2.0', sub: 'Default · 5 AC', hint: 'Auto-fallback to Pixverse if flagged' },
+                        { key: 'pixverse' as const, title: 'Pixverse V6', sub: '5 AC', hint: 'Permissive moderation' },
+                        { key: 'kling_pro' as const, title: 'Kling 2.1 Pro', sub: '7 AC', hint: 'Best motion' },
+                    ]).map((m) => (
+                        <button
+                            key={m.key}
+                            onClick={() => setVideoModel(m.key)}
+                            className={`text-left rounded-md border px-3 py-2 text-sm ${
+                                videoModel === m.key
+                                    ? 'border-violet-500 bg-violet-500/10 text-white'
+                                    : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
+                            }`}
+                        >
+                            <div className="font-bold">{m.title}</div>
+                            <div className="text-xs text-zinc-400 mt-0.5">{m.sub}</div>
+                            <div className="text-[10px] text-zinc-500 mt-0.5">{m.hint}</div>
+                        </button>
+                    ))}
                 </div>
             </div>
 
@@ -895,31 +864,42 @@ function RangeRow({
 }
 
 function IdeaModal({
-    accessToken, initialCategory, nicheTitle, onClose, onScript, onStreamStart, onStreamEnd,
+    accessToken, selectedCategory, onCategoryChange, nicheTitle, onClose, onScript, onStreamStart, onStreamEnd,
 }: {
     accessToken: string;
-    initialCategory?: IdeaCategory;
+    selectedCategory: string;
+    onCategoryChange: (key: string) => void;
     nicheTitle?: string;
     onClose: () => void;
     onScript: (s: string) => void;
     onStreamStart: () => void;
     onStreamEnd: () => void;
 }) {
-    const [modalTab, setModalTab] = useState<'idea_list' | 'custom_topic' | 'remix'>('idea_list');
+    const [modalTab, setModalTab] = useState<'idea_list' | 'custom_topic' | 'create_category' | 'remix'>('idea_list');
     const [categories, setCategories] = useState<CategoryInfo[]>([]);
-    const [selectedCat, setSelectedCat] = useState<IdeaCategory>(initialCategory || 'classical_clash');
     const [customTopic, setCustomTopic] = useState('');
     const [remixUrl, setRemixUrl] = useState('');
     const [remixPlatform, setRemixPlatform] = useState<'youtube' | 'facebook' | 'tiktok' | 'instagram'>('youtube');
     const [busy, setBusy] = useState(false);
+    const [newLabel, setNewLabel] = useState('');
+    const [newTagline, setNewTagline] = useState('');
+    const [newPrompt, setNewPrompt] = useState('');
+    const [createError, setCreateError] = useState('');
 
-    // Categories endpoint is unauthed — populates the Idea List tab.
-    useEffect(() => {
-        fetch('/api/skeleton-ai/categories')
+    const loadCategories = useCallback(() => {
+        const headers: Record<string, string> = {};
+        if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+        return fetch('/api/skeleton-ai/categories', { headers })
             .then((r) => r.json())
-            .then((d) => Array.isArray(d.categories) && setCategories(d.categories))
+            .then((d) => {
+                if (Array.isArray(d.categories)) setCategories(d.categories);
+            })
             .catch(() => setCategories([]));
-    }, []);
+    }, [accessToken]);
+
+    useEffect(() => {
+        loadCategories();
+    }, [loadCategories]);
 
     const generate = async (topic: string | null) => {
         if (!accessToken) {
@@ -941,7 +921,7 @@ function IdeaModal({
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
                 },
-                body: JSON.stringify({ category: selectedCat, topic, stream: false }),
+                body: JSON.stringify({ category: selectedCategory, topic, stream: false }),
             });
             if (!r.ok) {
                 const txt = await r.text().catch(() => '');
@@ -980,28 +960,34 @@ function IdeaModal({
                     Pick an idea, enter a custom topic, or remix a script from an existing video.
                 </div>
 
-                <div className="grid grid-cols-3 gap-1 mb-4 border-b border-zinc-800">
+                <div className="grid grid-cols-4 gap-1 mb-4 border-b border-zinc-800">
                     <ModalTab id="idea_list" label="Idea List" current={modalTab} setTab={setModalTab} />
                     <ModalTab id="custom_topic" label="Custom Topic" current={modalTab} setTab={setModalTab} />
+                    <ModalTab id="create_category" label="New Category" current={modalTab} setTab={setModalTab} />
                     <ModalTab id="remix" label="Remix Script" current={modalTab} setTab={setModalTab} />
                 </div>
 
                 {modalTab === 'idea_list' && (
                     <div>
-                        <div className="text-sm font-semibold mb-2 text-white">Idea Style</div>
-                        <div className="grid grid-cols-2 gap-2 mb-4">
+                        <div className="text-sm font-semibold mb-2 text-white">Category &amp; seeds</div>
+                        <div className="max-h-48 overflow-y-auto grid grid-cols-2 gap-2 mb-4 pr-1">
                             {categories.map((c) => (
                                 <button
                                     key={c.key}
-                                    onClick={() => setSelectedCat(c.key)}
+                                    onClick={() => onCategoryChange(c.key)}
                                     className={`text-left rounded-md border px-3 py-2 ${
-                                        selectedCat === c.key
+                                        selectedCategory === c.key
                                             ? 'border-violet-500 bg-violet-500/5'
                                             : 'border-zinc-800 bg-zinc-900 hover:border-zinc-700'
                                     }`}
                                 >
-                                    <div className="text-sm font-bold text-white">{c.label}</div>
-                                    <div className="text-xs text-zinc-400 mt-0.5">{c.tagline}</div>
+                                    <div className="text-sm font-bold text-white flex items-center gap-1">
+                                        {c.label}
+                                        {c.custom && (
+                                            <span className="text-[10px] text-violet-300 font-normal">custom</span>
+                                        )}
+                                    </div>
+                                    <div className="text-xs text-zinc-400 mt-0.5 line-clamp-2">{c.tagline}</div>
                                 </button>
                             ))}
                         </div>
@@ -1011,6 +997,78 @@ function IdeaModal({
                             className="w-full rounded-md bg-violet-500 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800"
                         >
                             {busy ? 'Generating…' : 'Generate Ideas'}
+                        </button>
+                    </div>
+                )}
+
+                {modalTab === 'create_category' && (
+                    <div className="space-y-3">
+                        <p className="text-xs text-zinc-400">
+                            Create a lane for your channel (e.g. Outcast, whistleblower hypotheticals). Saved to your account.
+                        </p>
+                        <label className="text-sm text-zinc-300 block">Name</label>
+                        <input
+                            value={newLabel}
+                            onChange={(e) => setNewLabel(e.target.value)}
+                            placeholder="Outcast"
+                            className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-white"
+                        />
+                        <label className="text-sm text-zinc-300 block">Tagline (optional)</label>
+                        <input
+                            value={newTagline}
+                            onChange={(e) => setNewTagline(e.target.value)}
+                            placeholder="Edgy social experiments, contrarian hooks"
+                            className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-white"
+                        />
+                        <label className="text-sm text-zinc-300 block">Tone prompt (optional)</label>
+                        <textarea
+                            value={newPrompt}
+                            onChange={(e) => setNewPrompt(e.target.value)}
+                            placeholder="Contrarian thought experiments, anti-establishment framing…"
+                            rows={3}
+                            className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-white"
+                        />
+                        {createError && (
+                            <div className="text-sm text-rose-300">{createError}</div>
+                        )}
+                        <button
+                            disabled={busy || !newLabel.trim() || !accessToken}
+                            onClick={async () => {
+                                setCreateError('');
+                                setBusy(true);
+                                try {
+                                    const r = await fetch('/api/skeleton-ai/categories', {
+                                        method: 'POST',
+                                        headers: {
+                                            'Content-Type': 'application/json',
+                                            Authorization: `Bearer ${accessToken}`,
+                                        },
+                                        body: JSON.stringify({
+                                            label: newLabel.trim(),
+                                            tagline: newTagline.trim() || undefined,
+                                            system_prompt: newPrompt.trim() || undefined,
+                                        }),
+                                    });
+                                    const d = await r.json().catch(() => ({}));
+                                    if (!r.ok) {
+                                        throw new Error(String(d.detail || `HTTP ${r.status}`));
+                                    }
+                                    const key = String(d.category?.key || '');
+                                    if (key) onCategoryChange(key);
+                                    setNewLabel('');
+                                    setNewTagline('');
+                                    setNewPrompt('');
+                                    await loadCategories();
+                                    setModalTab('idea_list');
+                                } catch (e) {
+                                    setCreateError((e as Error).message);
+                                } finally {
+                                    setBusy(false);
+                                }
+                            }}
+                            className="w-full rounded-md bg-violet-500 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800"
+                        >
+                            {busy ? 'Saving…' : 'Create category'}
                         </button>
                     </div>
                 )}
@@ -1077,10 +1135,10 @@ function IdeaModal({
 function ModalTab({
     id, label, current, setTab,
 }: {
-    id: 'idea_list' | 'custom_topic' | 'remix';
+    id: 'idea_list' | 'custom_topic' | 'create_category' | 'remix';
     label: string;
     current: string;
-    setTab: (t: 'idea_list' | 'custom_topic' | 'remix') => void;
+    setTab: (t: 'idea_list' | 'custom_topic' | 'create_category' | 'remix') => void;
 }) {
     return (
         <button

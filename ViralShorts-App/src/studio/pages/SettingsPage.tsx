@@ -2,7 +2,7 @@ import { useCallback, useContext, useEffect, useState } from 'react';
 import { ArrowLeft, Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
 import StudioShell from '../components/layout/StudioShell';
 import { type PageNav } from '../components/NavBar';
-import { API, AuthContext, BILLING_SITE_URL, startYouTubeBrowserConnect } from '../shared';
+import { API, AuthContext, BILLING_SITE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
 
 type ConnectedYouTubeChannel = {
     channel_id: string;
@@ -26,13 +26,15 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!session) onNavigate('auth');
     }, [session, onNavigate]);
 
-    const loadYouTubeChannels = useCallback(async () => {
-        if (!session) return;
+    const accessToken = session?.access_token ?? '';
+
+    const loadYouTubeChannels = useCallback(async (sync = true) => {
+        if (!accessToken) return;
         setYoutubeLoading(true);
         setYoutubeError('');
         try {
-            const res = await fetch(`${API}/api/youtube/channels?sync=true`, {
-                headers: { Authorization: `Bearer ${session.access_token}` },
+            const res = await fetch(resolveStudioBackendUrl(`/api/youtube/channels?sync=${sync ? 'true' : 'false'}`), {
+                headers: { Authorization: `Bearer ${accessToken}` },
             });
             const payload = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(String((payload as any).detail || `Request failed (${res.status})`));
@@ -44,24 +46,24 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
         } finally {
             setYoutubeLoading(false);
         }
-    }, [session]);
+    }, [accessToken]);
 
     const startYouTubeConnect = useCallback(async () => {
-        if (!session) return;
+        if (!accessToken) return;
         setYoutubeConnecting(true);
         setYoutubeError('');
         try {
-            startYouTubeBrowserConnect(session.access_token, window.location.href);
+            startYouTubeBrowserConnect(accessToken, window.location.href);
         } catch (e: any) {
             setYoutubeError(e?.message || 'Failed to start Google YouTube connection');
             setYoutubeConnecting(false);
         }
-    }, [session]);
+    }, [accessToken]);
 
     useEffect(() => {
-        if (!session) return;
-        void loadYouTubeChannels();
-    }, [session, loadYouTubeChannels]);
+        if (!accessToken) return;
+        void loadYouTubeChannels(false);
+    }, [accessToken, loadYouTubeChannels]);
 
     if (!session) return null;
 

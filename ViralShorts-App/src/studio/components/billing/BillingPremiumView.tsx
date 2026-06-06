@@ -1,5 +1,5 @@
 import { CheckCircle2, Sparkles, WalletCards, Zap } from 'lucide-react';
-import type { RefObject } from 'react';
+import type { ReactNode, RefObject } from 'react';
 
 type PlanCard = {
     id: string;
@@ -7,6 +7,7 @@ type PlanCard = {
     priceLabel: string;
     description: string;
     features: string[];
+    bestValue?: boolean;
 };
 
 type Pack = {
@@ -16,12 +17,15 @@ type Pack = {
     price_usd: number;
 };
 
+function creditLabel(count: number): string {
+    return count === 1 ? '1 credit' : `${count.toLocaleString()} credits`;
+}
+
 export default function BillingPremiumView({
     publicPlans,
     normalizedCurrentPlan,
     billingActive,
-    totalAc,
-    shortsEstimate,
+    creditBalance,
     selectedPack,
     sortedPacks,
     onSelectPack,
@@ -37,8 +41,7 @@ export default function BillingPremiumView({
     publicPlans: PlanCard[];
     normalizedCurrentPlan: string;
     billingActive: boolean;
-    totalAc: number;
-    shortsEstimate: number;
+    creditBalance: number;
     selectedPack: Pack | null;
     sortedPacks: Pack[];
     onSelectPack: (id: string) => void;
@@ -47,16 +50,10 @@ export default function BillingPremiumView({
     planLoadingId: string;
     packCheckoutLoadingId: string;
     checkoutError: string;
-    paypalBanner: React.ReactNode;
+    paypalBanner: ReactNode;
     topUpSectionRef: RefObject<HTMLElement>;
     refundSection: React.ReactNode;
 }) {
-    const featuredPacks = sortedPacks.filter((p) => {
-        const name = String(p.pack || '').toLowerCase();
-        return ['trial', 'starter', 'creator', 'scale'].includes(name);
-    });
-    const extraPacks = sortedPacks.filter((p) => !featuredPacks.includes(p));
-
     return (
         <div className="mx-auto max-w-6xl space-y-8">
             {paypalBanner}
@@ -73,45 +70,49 @@ export default function BillingPremiumView({
                             <WalletCards className="h-4 w-4" />
                             Billing
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Fuel your renders. Ship your channel.</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">One wallet. Every model.</h1>
                         <p className="mt-3 max-w-xl text-sm leading-relaxed text-gray-400">
-                            Draft with fal. Ship with cinematic realism. Failed renders refund automatically — no ticket required.
+                            Credits cover OpenRouter, fal image/video, and ElevenLabs — debited from real usage, not guesswork.
                         </p>
                     </div>
-                    <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-6 py-4 text-center">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-200/80">Total fuel</p>
-                        <p className="mt-1 text-4xl font-bold tabular-nums text-white">{totalAc}</p>
-                        <p className="mt-1 text-xs text-emerald-200/70">~{shortsEstimate} draft shorts left</p>
+                    <div className="rounded-2xl border border-violet-500/25 bg-violet-500/10 px-6 py-4 text-center">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-200/80">Your balance</p>
+                        <p className="mt-1 text-4xl font-bold tabular-nums text-white">
+                            {creditBalance >= 999999 ? '∞' : creditBalance.toLocaleString()}
+                        </p>
+                        <p className="mt-1 text-xs text-violet-200/70">unified credits</p>
                     </div>
                 </div>
             </section>
 
             <section>
-                <h2 className="text-lg font-bold text-white">Membership</h2>
-                <p className="mt-1 text-sm text-gray-500">Monthly included credits stack with wallet top-ups.</p>
-                <div className="mt-4 grid gap-4 lg:grid-cols-4">
+                <h2 className="text-lg font-bold text-white">Plans</h2>
+                <p className="mt-1 text-sm text-gray-500">Two tiers. Monthly credits refresh each billing cycle. Top-ups stack on top.</p>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
                     {publicPlans.map((planCard) => {
-                        const isCurrent = normalizedCurrentPlan === planCard.id;
-                        const isPaidCurrent = billingActive && isCurrent && planCard.id !== 'free';
-                        const actionLabel = planCard.id === 'free'
-                            ? (isCurrent && !billingActive ? 'Current plan' : 'Included')
-                            : isPaidCurrent
-                                ? 'Extend plan'
-                                : billingActive
-                                    ? `Switch to ${planCard.title}`
-                                    : `Start ${planCard.title}`;
+                        const isCurrent = billingActive && normalizedCurrentPlan === planCard.id;
+                        const actionLabel = isCurrent
+                            ? 'Extend plan'
+                            : billingActive
+                                ? `Switch to ${planCard.title}`
+                                : `Start ${planCard.title}`;
                         return (
                             <div
                                 key={planCard.id}
-                                className={`flex flex-col rounded-2xl border p-5 ${
+                                className={`relative flex flex-col rounded-2xl border p-5 ${
                                     isCurrent ? 'border-violet-500/40 bg-violet-500/[0.08]' : 'border-white/[0.08] bg-white/[0.02]'
                                 }`}
                             >
+                                {planCard.bestValue && (
+                                    <span className="absolute right-4 top-4 rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-cyan-200">
+                                        Best value
+                                    </span>
+                                )}
                                 <p className="text-xs uppercase tracking-wider text-gray-500">{planCard.title}</p>
                                 <p className="mt-2 text-3xl font-bold text-white">{planCard.priceLabel}</p>
                                 <p className="mt-2 flex-1 text-sm text-gray-400">{planCard.description}</p>
                                 <ul className="mt-4 space-y-2">
-                                    {planCard.features.slice(0, 3).map((f) => (
+                                    {planCard.features.map((f) => (
                                         <li key={f} className="flex gap-2 text-xs text-gray-300">
                                             <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
                                             {f}
@@ -120,7 +121,7 @@ export default function BillingPremiumView({
                                 </ul>
                                 <button
                                     type="button"
-                                    disabled={planLoadingId === planCard.id || (planCard.id === 'free' && isCurrent && !billingActive)}
+                                    disabled={planLoadingId === planCard.id}
                                     onClick={() => onPlanAction(planCard.id)}
                                     className={`mt-5 w-full rounded-xl py-2.5 text-sm font-semibold transition ${
                                         isCurrent ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-violet-600 text-white hover:bg-violet-500'
@@ -139,9 +140,9 @@ export default function BillingPremiumView({
                     <Zap className="h-5 w-5 text-cyan-400" />
                     <h2 className="text-lg font-bold text-white">Top up</h2>
                 </div>
-                <p className="mt-1 text-sm text-gray-500">Pay-as-you-go credits — used after monthly included fuel.</p>
+                <p className="mt-1 text-sm text-gray-500">Pay-as-you-go credits — used after your monthly grant runs out.</p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    {featuredPacks.map((pack) => {
+                    {sortedPacks.map((pack) => {
                         const active = selectedPack?.price_id === pack.price_id;
                         return (
                             <button
@@ -153,29 +154,13 @@ export default function BillingPremiumView({
                                 }`}
                             >
                                 <p className="text-xs uppercase tracking-wider text-gray-500">{String(pack.pack || 'Pack').toUpperCase()}</p>
-                                <p className="mt-2 text-2xl font-bold text-white">{pack.credits} AC</p>
+                                <p className="mt-2 text-2xl font-bold text-white">{pack.credits.toLocaleString()}</p>
+                                <p className="text-[10px] uppercase tracking-wider text-gray-500">credits</p>
                                 <p className="mt-1 text-sm text-cyan-300">${Number(pack.price_usd || 0).toFixed(2)}</p>
                             </button>
                         );
                     })}
                 </div>
-                {extraPacks.length > 0 && (
-                    <details className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-                        <summary className="cursor-pointer text-sm font-medium text-gray-300">More packs for agencies & teams</summary>
-                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            {extraPacks.map((pack) => (
-                                <button
-                                    key={pack.price_id}
-                                    type="button"
-                                    onClick={() => onSelectPack(pack.price_id)}
-                                    className="rounded-lg border border-white/[0.08] px-3 py-2 text-left text-sm text-gray-300 hover:bg-white/[0.03]"
-                                >
-                                    {String(pack.pack || 'Pack').toUpperCase()} — {pack.credits} AC — ${Number(pack.price_usd || 0).toFixed(2)}
-                                </button>
-                            ))}
-                        </div>
-                    </details>
-                )}
                 {selectedPack && (
                     <button
                         type="button"
@@ -183,7 +168,9 @@ export default function BillingPremiumView({
                         disabled={Boolean(packCheckoutLoadingId)}
                         className="mt-5 w-full max-w-md rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-500 hover:to-cyan-400 disabled:opacity-60 sm:w-auto sm:px-8"
                     >
-                        {packCheckoutLoadingId ? 'Opening PayPal…' : `Buy ${selectedPack.credits} credits with PayPal`}
+                        {packCheckoutLoadingId
+                            ? 'Opening Stripe…'
+                            : `Buy ${creditLabel(selectedPack.credits)} with Stripe`}
                     </button>
                 )}
             </section>
@@ -191,10 +178,10 @@ export default function BillingPremiumView({
             <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5">
                 <div className="flex items-start gap-3">
                     <Sparkles className="mt-0.5 h-5 w-5 text-violet-400" />
-                    <div className="text-sm text-gray-400 space-y-2">
-                        <p><strong className="text-gray-200">Draft</strong> — fast fal iteration for hooks and pacing.</p>
-                        <p><strong className="text-gray-200">Ship</strong> — premium cinematic export (Higgsfield lane on Pro+).</p>
-                        <p><strong className="text-gray-200">Documentary</strong> — long-form beta; still gallery approval before animate.</p>
+                    <div className="space-y-2 text-sm text-gray-400">
+                        <p><strong className="text-gray-200">Studio Agent</strong> — OpenRouter models debited per token at live rates.</p>
+                        <p><strong className="text-gray-200">fal</strong> — image, video, SFX, and motion graphics charged per render.</p>
+                        <p><strong className="text-gray-200">ElevenLabs</strong> — TTS and voice cloning charged per character.</p>
                     </div>
                 </div>
             </section>
