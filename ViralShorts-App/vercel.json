@@ -2,19 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "redirects": [
-    {
-      "source": "/:path*",
-      "has": [
-        {
-          "type": "host",
-          "value": "thumblab.nyptidindustries.com"
-        }
-      ],
-      "destination": "https://studio.nyptidindustries.com/?focus=thumbnails",
-      "statusCode": 301
-    }
-  ],
   "rewrites": [
     {
       "source": "/api",

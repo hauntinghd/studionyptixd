@@ -43,9 +43,11 @@ Steals Markus Graves title shape + production speed; every claim traces to a pri
 
 ## Thumbnails
 
-- Style: `bold_text_face` (Markus Graves rage-stamp register)
-- Recurring: Host punch-in right; parchment/alert left panel; dollar specificity in headline
-- Workflow: **`user_picks`** — generate 3 Seedream variants, user selects (skip text-glitch variants)
+- **Primary style:** `verified_brief` — dark source-card + LIVE host panel (matches in-video SourceProofCard motion graphics)
+- **Legacy / lane test only:** `bold_text_face` (Markus Graves register) — do not default to this
+- Recurring (verified_brief): FinCEN/SSA URL bar, green VERIFIED SOURCE pill, yellow stat highlight, host in broadcast frame
+- Workflow: **`user_picks`** — generate variants, user selects before upload
+- CLI: `python long_form/compose_cryptic_thumb_verified_brief.py`
 
 ## Approval cadence
 

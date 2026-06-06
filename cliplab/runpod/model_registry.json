@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "updated_at": null,
+  "virality_scorer": {
+    "active": "local_llm",
+    "description": "Reranks LLM segment candidates. Train on cliplab_feedback.jsonl.",
+    "checkpoints": {
+      "runpod_custom_v1": {
+        "path": "virality/v1/model.pt",
+        "config": "virality/v1/config.json",
+        "status": "pending_training",
+        "input_dim": 768,
+        "notes": "Cross-encoder or MLP on [prompt_emb, segment_emb, metadata]"
+      }
+    }
+  },
+  "face_reframe": {
+    "active": "opencv_face",
+    "description": "Face trajectory for 9:16 crop. Train on cliplab_reframe.jsonl.",
+    "checkpoints": {
+      "runpod_face_v1": {
+        "path": "reframe/v1/tracker.pt",
+        "config": "reframe/v1/config.json",
+        "status": "pending_training",
+        "notes": "Lightweight temporal face tracker or heatmap regressor"
+      }
+    }
+  },
+  "volume_layout": {
+    "root": "/runpod-volume/studio/cliplab",
+    "models": "/runpod-volume/studio/cliplab/models",
+    "datasets": "/runpod-volume/studio/cliplab/datasets",
+    "exports": "/runpod-volume/studio/cliplab/exports"
+  }
+}

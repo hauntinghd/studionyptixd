@@ -1,8 +1,22 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
+/** Injects Search Console HTML-tag verification when VITE_GOOGLE_SITE_VERIFICATION is set. */
+function googleSiteVerificationPlugin(): Plugin {
+    return {
+        name: 'google-site-verification',
+        transformIndexHtml(html) {
+            const token = String(process.env.VITE_GOOGLE_SITE_VERIFICATION || '').trim()
+            if (!token) return html
+            const tag = `<meta name="google-site-verification" content="${token}" />`
+            if (html.includes('google-site-verification')) return html
+            return html.replace('</head>', `    ${tag}\n</head>`)
+        },
+    }
+}
+
 export default defineConfig({
-    plugins: [react()],
+    plugins: [react(), googleSiteVerificationPlugin()],
     build: {
         target: 'es2019',
         // Split vendor deps into their own long-lived chunks so refreshes

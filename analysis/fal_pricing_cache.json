@@ -1,0 +1,80 @@
+{
+  "fetched_at": 1780048601.4899578,
+  "source": "fal_api",
+  "error": null,
+  "prices": {
+    "fal-ai/ltx-video-13b-distilled/image-to-video": {
+      "endpoint_id": "fal-ai/ltx-video-13b-distilled/image-to-video",
+      "unit_price": 0.04,
+      "unit": "units",
+      "currency": "USD"
+    },
+    "fal-ai/bytedance/seedream/v4.5/text-to-image": {
+      "endpoint_id": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+      "unit_price": 0.04,
+      "unit": "images",
+      "currency": "USD"
+    },
+    "fal-ai/bytedance/seedream/v4.5/edit": {
+      "endpoint_id": "fal-ai/bytedance/seedream/v4.5/edit",
+      "unit_price": 0.04,
+      "unit": "images",
+      "currency": "USD"
+    },
+    "fal-ai/mmaudio-v2/text-to-audio": {
+      "endpoint_id": "fal-ai/mmaudio-v2/text-to-audio",
+      "unit_price": 0.001,
+      "unit": "seconds",
+      "currency": "USD"
+    },
+    "fal-ai/minimax/speech-02-hd": {
+      "endpoint_id": "fal-ai/minimax/speech-02-hd",
+      "unit_price": 0.1,
+      "unit": "1000 characters",
+      "currency": "USD"
+    },
+    "fal-ai/kling-video/v2.1/standard/image-to-video": {
+      "endpoint_id": "fal-ai/kling-video/v2.1/standard/image-to-video",
+      "unit_price": 0.056,
+      "unit": "seconds",
+      "currency": "USD"
+    },
+    "fal-ai/kling-video/v2.1/pro/image-to-video": {
+      "endpoint_id": "fal-ai/kling-video/v2.1/pro/image-to-video",
+      "unit_price": 0.098,
+      "unit": "seconds",
+      "currency": "USD"
+    },
+    "fal-ai/pixverse/v6/image-to-video": {
+      "endpoint_id": "fal-ai/pixverse/v6/image-to-video",
+      "unit_price": 0.005,
+      "unit": "seconds",
+      "currency": "USD"
+    }
+  },
+  "endpoints": {
+    "ltx_13b_distilled": "fal-ai/ltx-video-13b-distilled/image-to-video",
+    "seedream_v45": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+    "seedream_v45_edit": "fal-ai/bytedance/seedream/v4.5/edit",
+    "mmaudio_v2": "fal-ai/mmaudio-v2/text-to-audio",
+    "minimax_speech": "fal-ai/minimax/speech-02-hd",
+    "kling_v21_standard": "fal-ai/kling-video/v2.1/standard/image-to-video",
+    "kling_v21_pro": "fal-ai/kling-video/v2.1/pro/image-to-video",
+    "pixverse_v6": "fal-ai/pixverse/v6/image-to-video",
+    "minimax_speech_zt": "fal-ai/minimax/speech-02-hd"
+  },
+  "fallback_usd": {
+    "ltx_13b_distilled_per_clip": 0.04,
+    "seedream_v45_per_image": 0.04,
+    "mmaudio_v2_per_second": 0.001,
+    "fal_minimax_per_1k_chars": 0.1,
+    "elevenlabs_per_1k_chars": 0.1,
+    "kling_v21_standard_per_second": 0.056,
+    "kling_v21_pro_per_second": 0.098,
+    "pixverse_v6_per_second": 0.045,
+    "ernie_per_image": 0.03,
+    "cushion_pct": 0.15,
+    "grok_chapter_expand": 0.0,
+    "grok_outline": 0.0
+  }
+}

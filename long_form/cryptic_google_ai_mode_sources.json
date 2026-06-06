@@ -1,0 +1,74 @@
+{
+  "topic": "What Google AI Mode Actually Changes",
+  "verified_as_of": "2026-05-19",
+  "primary_sources": [
+    {
+      "id": "search_io_2026",
+      "title": "A new era for AI Search (Google Search I/O 2026)",
+      "author": "Elizabeth Reid, VP of Search",
+      "date": "2026-05-19",
+      "url": "https://blog.google/products-and-platforms/products/search/search-io-2026/"
+    },
+    {
+      "id": "pichai_keynote",
+      "title": "Google I/O 2026: Sundar Pichai opening keynote",
+      "author": "Sundar Pichai",
+      "date": "2026-05-19",
+      "url": "https://blog.google/innovation-and-ai/sundar-pichai-io-2026/"
+    },
+    {
+      "id": "keynote_clips",
+      "title": "I/O 2026 keynote moment videos (Search section)",
+      "author": "Google",
+      "date": "2026-05-19",
+      "url": "https://blog.google/innovation-and-ai/technology/ai/io-2026-keynote-moment-videos/"
+    }
+  ],
+  "verified_claims": [
+    {
+      "claim": "Gemini 3.5 Flash is the new default model in AI Mode globally, starting May 19, 2026.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "AI Mode surpassed 1 billion monthly users; queries more than doubled every quarter since launch.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "AI Overviews has 2.5 billion monthly active users (Pichai keynote).",
+      "source_id": "pichai_keynote"
+    },
+    {
+      "claim": "Search box redesigned — biggest upgrade in 25+ years; multimodal inputs (text, images, files, video, Chrome tabs).",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Follow-up from AI Overview into AI Mode is live worldwide on desktop and mobile.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Information agents monitor the web 24/7; launch summer 2026, first for Google AI Pro & Ultra subscribers.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Generative UI in Search (Antigravity) — free for everyone, rolling out summer 2026.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Custom dashboards / mini-apps in Search — coming months; Pro & Ultra US first.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Personal Intelligence expanded to ~200 countries, 98 languages — no subscription required.",
+      "source_id": "search_io_2026"
+    },
+    {
+      "claim": "Agentic booking expanded (home repair, beauty, pet care call businesses); US summer 2026.",
+      "source_id": "search_io_2026"
+    }
+  ],
+  "not_claimed_by_google": [
+    "Google did not announce removing traditional search results or blue links entirely.",
+    "Information agents and persistent mini-apps are not live for all users on day one.",
+    "Personal Intelligence requires opt-in connection of apps like Gmail — not automatic."
+  ]
+}

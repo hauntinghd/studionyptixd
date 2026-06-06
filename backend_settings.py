@@ -14,7 +14,7 @@ if env_path.exists():
 
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "") or "sk_c9d3573104596ff0bf69738092407422e512e493870e747b"
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 PIKZELS_API_KEY = os.getenv("PIKZELS_API_KEY", "")
 ALGROW_API_KEY = os.getenv("ALGROW_API_KEY", "")
 ALGROW_API_BASE_URL = str(os.getenv("ALGROW_API_BASE_URL", "https://api.algrow.online") or "https://api.algrow.online").strip().rstrip("/")
@@ -224,9 +224,16 @@ GOOGLE_INSTALLED_REGISTERED_REDIRECT_URIS = tuple(
     for value in list(_google_installed_oauth_settings.get("registered_redirect_uris") or [])
     if str(value or "").strip()
 )
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_TOPUP_PUBLIC_ENABLED = os.getenv("STRIPE_TOPUP_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+STRIPE_SECRET_KEY = (os.getenv("STRIPE_SECRET_KEY") or os.getenv("STRIPE_API_KEY") or "").strip()
+STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+STRIPE_TOPUP_PUBLIC_ENABLED = os.getenv(
+    "STRIPE_TOPUP_PUBLIC_ENABLED",
+    "1" if STRIPE_SECRET_KEY else "0",
+).lower() in ("1", "true", "yes", "on")
+BILLING_STRIPE_PRIMARY = os.getenv(
+    "BILLING_STRIPE_PRIMARY",
+    "1" if STRIPE_SECRET_KEY else "0",
+).lower() in ("1", "true", "yes", "on")
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
 PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
@@ -270,7 +277,15 @@ WAITLIST_ONLY_MODE = os.getenv("WAITLIST_ONLY_MODE", "0").lower() in ("1", "true
 WAITLIST_REQUIRE_STRIPE_PAYMENT = os.getenv("WAITLIST_REQUIRE_STRIPE_PAYMENT", "0").lower() in ("1", "true", "yes", "on")
 SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv(
     "SKELETON_GLOBAL_REFERENCE_IMAGE_URL",
-    f"{SITE_URL.rstrip('/')}/default-skeleton-style-lock.png",
+    f"{SITE_URL.rstrip('/')}/canonical-skeleton-master.png",
+)
+# When true, skeleton scenes use Seedream v4.5 *edit* from the canonical master
+# instead of ERNIE / fresh T2I (stops identity drift across scenes).
+SKELETON_USE_SEEDREAM_EDIT = os.getenv("SKELETON_USE_SEEDREAM_EDIT", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 STORY_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("STORY_GLOBAL_REFERENCE_IMAGE_URL", "")
 MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL = os.getenv("MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL", "")
@@ -388,6 +403,13 @@ JOB_MAX_QUEUE_DEPTH = max(1, int(os.getenv("JOB_MAX_QUEUE_DEPTH", "300")))
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_QUEUE_ENABLED = os.getenv("REDIS_QUEUE_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 REDIS_QUEUE_PREFIX = os.getenv("REDIS_QUEUE_PREFIX", "studio")
+# Studio Agent: cap simultaneous OpenRouter + fal turns (chat/approve) across all API workers.
+# When active sessions exceed this, new requests block in-queue until a slot frees (or 503 if full).
+STUDIO_AGENT_MAX_CONCURRENT = max(1, int(os.getenv("STUDIO_AGENT_MAX_CONCURRENT", "500")))
+STUDIO_AGENT_MAX_QUEUE_DEPTH = max(0, int(os.getenv("STUDIO_AGENT_MAX_QUEUE_DEPTH", "500")))
+STUDIO_AGENT_QUEUE_MAX_WAIT_SEC = max(30, int(os.getenv("STUDIO_AGENT_QUEUE_MAX_WAIT_SEC", "900")))
+STUDIO_AGENT_QUEUE_POLL_SEC = float(os.getenv("STUDIO_AGENT_QUEUE_POLL_SEC", "1.5"))
+STUDIO_AGENT_QUEUE_ENABLED = os.getenv("STUDIO_AGENT_QUEUE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 FORCE_720P_ONLY = os.getenv("FORCE_720P_ONLY", "0").lower() in ("1", "true", "yes", "on")
 SCRIPT_TO_SHORT_ENABLED = os.getenv("SCRIPT_TO_SHORT_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 STORY_ADVANCED_CONTROLS_ENABLED = os.getenv("STORY_ADVANCED_CONTROLS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
@@ -419,11 +441,51 @@ STRIPE_PRICE_TO_PLAN = {
 PLAN_PRICE_USD = {
     "free": 0.0,
     "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
-    "creator": float(os.getenv("PLAN_PRICE_CREATOR_USD", "24")),
+    "creator": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", os.getenv("PLAN_PRICE_CREATOR_USD", "60"))),
+    "studio": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
     "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
     "elite": float(os.getenv("PLAN_PRICE_ELITE_USD", "300")),
     "demo_pro": float(os.getenv("PLAN_PRICE_DEMO_PRO_USD", "150")),
 }
+
+# ---------------------------------------------------------------------------
+# Unified credit system (single wallet across OpenRouter + fal + ElevenLabs).
+# Replaces the fragmented animation/render-fuel/shorts wallets. Two plans only.
+# Credits are debited per operation from actual provider USD cost; see
+# CREDIT_USD_VALUE for the conversion rate.
+#
+# $200 tier is intentionally the better value: more credits per dollar than the
+# $60 tier (100 cr/$ vs ~83 cr/$) so upgrading is always the smarter buy.
+# ---------------------------------------------------------------------------
+UNIFIED_PLANS = {
+    "creator": {
+        "id": "creator",
+        "name": "Creator",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", "60")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_CREATOR_CREDITS", "5000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_CREATOR_PRICE_ID", "").strip(),
+    },
+    "studio": {
+        "id": "studio",
+        "name": "Studio",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_CREDITS", "20000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRICE_ID", "").strip(),
+        "best_value": True,
+    },
+}
+for _plan_id, _plan_spec in UNIFIED_PLANS.items():
+    _stripe_price = str(_plan_spec.get("stripe_price_id") or "").strip()
+    if _stripe_price:
+        STRIPE_PRICE_TO_PLAN[_stripe_price] = _plan_id
+
+# USD value of one credit when debiting against real provider spend.
+# credits_charged = ceil(provider_usd * (1 + CREDIT_MARGIN) / CREDIT_USD_VALUE)
+# At $60 -> 5,000 credits, 1 credit ~= $0.012 of plan price; the margin lets the
+# same credit cover ~$0.01 of raw provider cost (OpenRouter tokens, fal seconds,
+# ElevenLabs characters) while keeping a platform margin.
+CREDIT_USD_VALUE = float(os.getenv("CREDIT_USD_VALUE", "0.01"))
+CREDIT_MARGIN = float(os.getenv("CREDIT_MARGIN", "0.20"))
 
 # Animation usage pricing baseline:
 # Kling 2.1 Standard I2V observed market API cost (5s) ~= $0.28.
@@ -437,20 +499,10 @@ ANIMATION_CREDIT_UNIT_USD = round(
 
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 TOPUP_PACK_SPECS = [
-    {"id": "ac_trial", "pack": "trial", "credits": 1, "price_usd": 0.60},
-    {"id": "ac_starter", "pack": "starter", "credits": 3, "price_usd": 1.80},
-    {"id": "ac_mini", "pack": "mini", "credits": 5, "price_usd": 3.00},
-    {"id": "ac_lite", "pack": "lite", "credits": 10, "price_usd": 6.00},
-    {"id": "ac_boost", "pack": "boost", "credits": 15, "price_usd": 9.00},
-    {"id": "ac_basic", "pack": "basic", "credits": 25, "price_usd": 15.00},
-    {"id": "ac_runner", "pack": "runner", "credits": 40, "price_usd": 24.00},
-    {"id": "ac_creator", "pack": "creator", "credits": 50, "price_usd": 30.00},
-    {"id": "ac_operator", "pack": "operator", "credits": 75, "price_usd": 45.00},
-    {"id": "ac_growth", "pack": "growth", "credits": 100, "price_usd": 60.00},
-    {"id": "ac_power", "pack": "power", "credits": 150, "price_usd": 90.00},
-    {"id": "ac_scale", "pack": "scale", "credits": 250, "price_usd": 150.00},
-    {"id": "ac_studio", "pack": "studio", "credits": 500, "price_usd": 300.00},
-    {"id": "ac_agency", "pack": "agency", "credits": 1000, "price_usd": 600.00},
+    {"id": "uc_boost", "pack": "boost", "credits": 500, "price_usd": 30.00},
+    {"id": "uc_growth", "pack": "growth", "credits": 2000, "price_usd": 100.00},
+    {"id": "uc_scale", "pack": "scale", "credits": 5000, "price_usd": 200.00},
+    {"id": "uc_max", "pack": "max", "credits": 10000, "price_usd": 350.00},
 ]
 TOPUP_PACKS = {
     str(spec["id"]): {
@@ -461,7 +513,8 @@ TOPUP_PACKS = {
     }
     for spec in TOPUP_PACK_SPECS
 }
-PUBLIC_PLAN_IDS = ("free", "starter", "creator", "pro")
+# Public-facing membership is the unified two-tier model only.
+PUBLIC_PLAN_IDS = ("creator", "studio")
 PUBLIC_TOPUP_PACK_IDS = tuple(str(spec["id"]) for spec in TOPUP_PACK_SPECS)
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 

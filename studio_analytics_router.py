@@ -19,6 +19,7 @@ from long_form.catalyst_bridge import (
     fetch_channel_snapshot,
     shape_catalyst_insights,
 )
+from studio_agent.access import is_owner
 
 
 def _user_id(user: dict) -> str:
@@ -133,24 +134,26 @@ def build_studio_analytics_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/studio/analytics", tags=["studio-analytics"])
 
-    def _admin(user: dict = Depends(require_auth)) -> dict:
-        if is_admin_check and not is_admin_check(user):
-            raise HTTPException(403, "Studio analytics is admin-only during beta")
+    def _auth(user: dict = Depends(require_auth)) -> dict:
         return user
 
-    @router.get("/channels")
-    async def list_channels(user: dict = _admin):
-        try:
-            from youtube_connections_store import hydrate
-            from long_form.prompts.channels import CHANNELS
+    def _admin_only(user: dict = Depends(require_auth)) -> dict:
+        if _full_analytics_access(user):
+            return user
+        raise HTTPException(403, "Admin access required")
 
-            hyd = hydrate() or {}
-        except Exception as exc:
-            raise HTTPException(503, f"connection store unavailable: {exc}") from exc
+    def _full_analytics_access(user: dict) -> bool:
+        if is_owner(user, is_admin_check):
+            return True
+        return bool(is_admin_check and is_admin_check(user))
+
+    def _channels_payload(hyd: dict[str, Any], *, scope_user_id: str | None) -> list[dict[str, Any]]:
+        from long_form.prompts.channels import CHANNELS
 
         id_to_key = {v["channel_id"]: k for k, v in CHANNELS.items() if v.get("channel_id")}
         out: list[dict[str, Any]] = []
-        for u in hyd.values():
+        user_buckets = hyd.values() if scope_user_id is None else [hyd.get(scope_user_id) or {}]
+        for u in user_buckets:
             if not isinstance(u, dict):
                 continue
             for ch_id, rec in (u.get("channels") or {}).items():
@@ -171,11 +174,27 @@ def build_studio_analytics_router(
                     "registry_format": ch_meta.get("format", ""),
                 })
         out.sort(key=lambda c: (-int(c.get("subscriber_count") or 0), c.get("channel_title") or ""))
-        return {"channels": out, "total": len(out)}
+        return out
+
+    @router.get("/channels")
+    async def list_channels(user: dict = Depends(_auth)):
+        try:
+            from youtube_connections_store import hydrate
+
+            hyd = hydrate() or {}
+        except Exception as exc:
+            raise HTTPException(503, f"connection store unavailable: {exc}") from exc
+
+        uid = _user_id(user)
+        scope = None if _full_analytics_access(user) else uid
+        if scope is not None and not scope:
+            raise HTTPException(401, "sign in required")
+        out = _channels_payload(hyd, scope_user_id=scope)
+        return {"channels": out, "total": len(out), "scope": "all" if scope is None else "user"}
 
     @router.get("/channel")
     async def channel_analytics(
-        user: dict = _admin,
+        user: dict = Depends(_auth),
         channel_id: str = Query(""),
         registry_key: str = Query(""),
     ):
@@ -185,6 +204,18 @@ def build_studio_analytics_router(
             ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
         if not ch_id:
             raise HTTPException(400, "channel_id or registry_key required")
+
+        if not _full_analytics_access(user):
+            uid = _user_id(user)
+            try:
+                from youtube_connections_store import hydrate
+
+                bucket = (hydrate() or {}).get(uid) or {}
+                allowed = set((bucket.get("channels") or {}).keys())
+            except Exception:
+                allowed = set()
+            if ch_id not in allowed:
+                raise HTTPException(403, "channel not linked to your account")
 
         record = fetch_channel_snapshot(ch_id)
         insights = shape_catalyst_insights(record)
@@ -223,7 +254,7 @@ def build_studio_analytics_router(
 
     @router.get("/search-trends")
     async def search_trends(
-        user: dict = _admin,
+        user: dict = Depends(_auth),
         query: str = Query(""),
         days: int = Query(30, ge=7, le=90),
         registry_key: str = Query(""),
@@ -285,7 +316,7 @@ def build_studio_analytics_router(
         }
 
     @router.get("/product")
-    async def product_metrics(user: dict = _admin):
+    async def product_metrics(user: dict = Depends(_admin_only)):
         if not admin_analytics_fn:
             raise HTTPException(501, "Product analytics not wired")
         return await admin_analytics_fn(user)

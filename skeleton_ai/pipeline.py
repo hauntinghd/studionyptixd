@@ -24,6 +24,7 @@ import json
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from typing import Any
 
 from .scripting_grok import GrokClient, build_script_prompt
 from .canonical_edit import build_scene_edit_prompt, generate_still_edit
@@ -32,9 +33,21 @@ from .i2v_engine import (
     generate as gen_clip,
     resolve_video_model_chain,
 )
-from .voice_elevenlabs import ElevenLabsClient
+from .voice_fal import FalVoiceClient
 from .compose import probe_duration, trim_with_captions, concat_demuxer, mux_narration
 from .prompts.category_registry import get_category
+
+CANCEL_FLAG = "CANCELLED"
+
+
+class RenderCancelled(Exception):
+    """Raised inside a render loop when the user requests cancellation."""
+
+
+def check_cancelled(workspace: Path) -> None:
+    """Stop the render at the next checkpoint if a CANCELLED flag is present."""
+    if (Path(workspace) / CANCEL_FLAG).exists():
+        raise RenderCancelled("Render cancelled by user")
 
 
 @dataclass
@@ -132,8 +145,14 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
     return plan
 
 
-def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str,
-                        *, plan: dict | None = None) -> tuple[str, str, str]:
+def derive_beat_visuals(
+    grok: GrokClient,
+    narration: str,
+    category_label: str,
+    *,
+    plan: dict | None = None,
+    visual_brief: str | None = None,
+) -> tuple[str, str, str]:
     """Per-beat visuals for canonical skeleton Seedream edit (background/outfit/props only)."""
     plan = plan or {"characters": {}, "fallback_outfit": "charcoal hoodie and dark joggers"}
     chars_json = json.dumps(plan.get("characters", {}), ensure_ascii=False)
@@ -192,6 +211,26 @@ def derive_beat_visuals(grok: GrokClient, narration: str, category_label: str,
     )
 
 
+def _write_progress(workspace: Path, *, stage: str, progress: int, detail: str = "") -> None:
+    try:
+        payload = {
+            "stage": stage,
+            "progress": max(0, min(100, int(progress))),
+            "detail": str(detail or "")[:240],
+        }
+        (workspace / "progress.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        # Also bump heartbeat so status poller (and stale detector) sees liveness even between coarse stages.
+        try:
+            (workspace / "heartbeat.txt").touch(exist_ok=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def run(
     category_key: str,
     topic: str | None,
@@ -202,7 +241,7 @@ def run(
     visual_brief: str | None = None,
     beats_target: int = 12,
     grok: GrokClient | None = None,
-    el: ElevenLabsClient | None = None,
+    el: Any = None,
     voice_id: str | None = None,
     script_override: str | None = None,
     user_id: str | None = None,
@@ -218,7 +257,8 @@ def run(
         d.mkdir(exist_ok=True)
 
     grok = grok or GrokClient()
-    el = el or ElevenLabsClient()
+    el = el or FalVoiceClient()
+    _write_progress(workspace, stage="script", progress=8, detail="Writing script")
 
     # 1. Generate the script (or use user-edited override from Create panel).
     cat = get_category(category_key, user_id=user_id)
@@ -233,7 +273,14 @@ def run(
     # style sheet. Every beat that mentions the same subject will reuse the
     # identical outfit description, guaranteeing visual continuity across
     # all 12 beats. Works for the 4 idea-list categories AND custom topics.
-    plan = analyze_script(grok, script_text, category_label=cat["label"], topic=topic)
+    _write_progress(workspace, stage="scene_plan", progress=18, detail="Locking character sheet")
+    plan = analyze_script(
+        grok,
+        script_text,
+        category_label=cat["label"],
+        topic=topic,
+        visual_brief=visual_brief,
+    )
     (workspace / "scene_plan.json").write_text(
         json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -247,7 +294,11 @@ def run(
     beats: list[Beat] = []
     for i, narration in enumerate(sentences):
         outfit, action, motion = derive_beat_visuals(
-            grok, narration, cat["label"], plan=plan, visual_brief=vb
+            grok,
+            narration,
+            cat["label"],
+            plan=plan,
+            visual_brief=visual_brief,
         )
         beats.append(Beat(
             index=i,
@@ -261,7 +312,16 @@ def run(
     # 4. Render stills + clips per beat (canonical master edit — identity locked).
     trimmed_paths: list[Path] = []
     roster_cache: dict[str, Path] = {}
+    total_beats = max(len(beats), 1)
     for beat in beats:
+        check_cancelled(workspace)
+        pct = 25 + int((beat.index / total_beats) * 55)
+        _write_progress(
+            workspace,
+            stage="render",
+            progress=pct,
+            detail=f"Beat {beat.index + 1}/{total_beats} — stills + motion",
+        )
         sid = f"b{beat.index:02d}"
         outfit_key = (beat.outfit or "default").strip()[:120]
         extra_refs: list[str] = []
@@ -283,11 +343,16 @@ def run(
             visual_description=beat.scene_action,
             outfit=beat.outfit,
         )
-        still_path = generate_still_edit(
+        still_result = generate_still_edit(
             edit_prompt,
             stills_dir / f"{sid}.png",
             extra_refs=extra_refs,
             seed=420042 + beat.index,
+        )
+        still_path = Path(
+            still_result["local_path"]
+            if isinstance(still_result, dict)
+            else still_result
         )
         clip_path = gen_clip(
             still_path,
@@ -305,6 +370,7 @@ def run(
         )
         trimmed_paths.append(trimmed)
 
+    _write_progress(workspace, stage="narration", progress=88, detail="Voiceover")
     # 5. Narration audio (full script).
     narration_audio = el.synthesize(
         text=script_text,
@@ -312,6 +378,7 @@ def run(
         voice_id=voice_id,
     )
 
+    _write_progress(workspace, stage="compose", progress=94, detail="Muxing final MP4")
     # 6. Concat + mux.
     silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
     final = mux_narration(silent, narration_audio, workspace / "skeleton_short.mp4")

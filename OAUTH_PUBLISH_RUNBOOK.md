@@ -33,7 +33,7 @@ Open [Google Cloud Console → APIs & Services → OAuth consent screen](https:/
 | User Type | **External** |
 | App name | **NYPTID Studio** |
 | User support email | `atlassetter@nyptidindustries.com` |
-| App logo | Upload `ViralShorts-App/public/logo.png` (must be exactly 120×120 px, PNG/JPG/BMP, ≤1 MB) |
+| App logo | Upload `ViralShorts-App/public/logo-120.png` or `logo-oauth.jpg` (120×120 px, ≤1 MB) |
 | Application home page | `https://studio.nyptidindustries.com` |
 | Application privacy policy link | `https://studio.nyptidindustries.com/privacy` |
 | Application terms of service link | `https://studio.nyptidindustries.com/terms` |
@@ -84,11 +84,17 @@ Click **Save and continue** → **Back to dashboard**.
 
 Google requires proof you own `nyptidindustries.com` before publishing.
 
+**Full guide:** [GOOGLE_DOMAIN_VERIFICATION.md](GOOGLE_DOMAIN_VERIFICATION.md) (DNS TXT, HTML tag, HTML file).
+
+**Fast path (OAuth — all subdomains):**
+
 1. Go to [Google Search Console](https://search.google.com/search-console).
 2. Add **nyptidindustries.com** as a **Domain property** (not URL prefix — domain proves all subdomains).
-3. Verify via DNS TXT record (recommended — survives site moves). Google will show you the TXT value. Add it at your DNS provider for `nyptidindustries.com`.
+3. Verify via **DNS TXT** (recommended). Google shows `google-site-verification=…` — add it as a TXT record at your DNS host for `nyptidindustries.com`.
 4. Wait for DNS propagation (usually minutes). Click **Verify**.
-5. Back on the OAuth consent screen, the domain should now appear under **Verified domains**.
+5. Back on the OAuth consent screen, the domain should appear under **Verified domains**.
+
+**Alternate (studio subdomain only):** URL prefix `https://studio.nyptidindustries.com/` → **HTML tag** → set Vercel env `VITE_GOOGLE_SITE_VERIFICATION` to the token → redeploy. Or drop Google’s `.html` file in `ViralShorts-App/public/` and deploy.
 
 ---
 

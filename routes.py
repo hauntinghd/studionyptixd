@@ -289,6 +289,7 @@ def build_billing_router(
     admin_set_plan_endpoint,
     admin_cancel_subscription_endpoint,
     admin_refund_credits_endpoint,
+    admin_grant_unified_credits_endpoint,
     submit_feedback_endpoint,
     get_all_feedback_endpoint,
     get_admin_kpi_endpoint,
@@ -309,6 +310,7 @@ def build_billing_router(
     router.add_api_route("/api/admin/set-plan", admin_set_plan_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/cancel-subscription", admin_cancel_subscription_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/refund-credits", admin_refund_credits_endpoint, methods=["POST"])
+    router.add_api_route("/api/admin/grant-credits", admin_grant_unified_credits_endpoint, methods=["POST"])
     router.add_api_route("/api/feedback", submit_feedback_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/feedback", get_all_feedback_endpoint, methods=["GET"])
     router.add_api_route("/api/admin/kpi", get_admin_kpi_endpoint, methods=["GET"])
@@ -331,6 +333,12 @@ def build_assets_router(
     serve_public_thumbnail_share_endpoint,
     serve_generated_thumbnail_endpoint,
     generate_thumbnail_endpoint,
+    thumbnail_creator_gallery_endpoint,
+    thumbnail_upload_video_endpoint,
+    thumbnail_models_endpoint,
+    thumbnail_my_channels_endpoint,
+    thumbnail_extract_frame_endpoint,
+    thumbnail_serve_frame_endpoint,
     list_voices_endpoint,
     preview_voice_endpoint,
     create_demo_video_endpoint,
@@ -346,6 +354,12 @@ def build_assets_router(
     router.add_api_route("/api/public/thumbnail-share/{token}", serve_public_thumbnail_share_endpoint, methods=["GET"])
     router.add_api_route("/api/thumbnails/generated/{filename}", serve_generated_thumbnail_endpoint, methods=["GET"])
     router.add_api_route("/api/thumbnails/generate", generate_thumbnail_endpoint, methods=["POST"])
+    router.add_api_route("/api/thumbnails/creator-gallery", thumbnail_creator_gallery_endpoint, methods=["GET"])
+    router.add_api_route("/api/thumbnails/upload-video", thumbnail_upload_video_endpoint, methods=["POST"])
+    router.add_api_route("/api/thumbnails/models", thumbnail_models_endpoint, methods=["GET"])
+    router.add_api_route("/api/thumbnails/my-channels", thumbnail_my_channels_endpoint, methods=["GET"])
+    router.add_api_route("/api/thumbnails/extract-frame", thumbnail_extract_frame_endpoint, methods=["POST"])
+    router.add_api_route("/api/thumbnails/frame/{upload_id}", thumbnail_serve_frame_endpoint, methods=["GET"])
     router.add_api_route("/api/voices", list_voices_endpoint, methods=["GET"])
     router.add_api_route("/api/voices/preview", preview_voice_endpoint, methods=["POST"])
     router.add_api_route("/api/demo", create_demo_video_endpoint, methods=["POST"])

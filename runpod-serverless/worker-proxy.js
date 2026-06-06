@@ -19,7 +19,15 @@
 const ASYNC_PATHS = [
   "/api/render/",        // all video renders
   "/api/generate/",      // AI gen jobs
-  "/api/longform/",      // multi-minute processing
+  "/api/cliplab/",      // long-video clip intelligence + render
+  "/api/studio-agent/",  // agent chat/approve/stream (long OpenRouter turns)
+];
+
+/** Fly: agent sessions, YouTube OAuth, studio analytics (avoid RunPod 429 / cold sync). */
+const FLY_DIRECT_PREFIXES = [
+  "/api/studio-agent",
+  "/api/youtube/",
+  "/api/studio/analytics",
 ];
 
 // Allowed origins — must be exact matches because we also send Allow-Credentials.
@@ -73,6 +81,36 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    const flyDirect = FLY_DIRECT_PREFIXES.some((p) => url.pathname.startsWith(p));
+    if (flyDirect) {
+      const flyOrigin = (env.FLY_STUDIO_ORIGIN || "https://nyptid-studio.fly.dev").replace(/\/+$/, "");
+      const flyUrl = `${flyOrigin}${url.pathname}${url.search}`;
+      const hopHeaders = new Headers();
+      for (const [k, v] of request.headers) {
+        const lk = k.toLowerCase();
+        if (lk === "host" || lk.startsWith("cf-")) continue;
+        hopHeaders.set(k, v);
+      }
+      let flyResp;
+      try {
+        flyResp = await fetch(flyUrl, {
+          method: request.method,
+          headers: hopHeaders,
+          body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+          redirect: "manual",
+        });
+      } catch (fetchErr) {
+        return jsonResponse(
+          { error: "fly_agent_proxy_failed", detail: String(fetchErr).slice(0, 300) },
+          { status: 502, cors },
+        );
+      }
+      const outHeaders = new Headers(flyResp.headers);
+      for (const [k, v] of Object.entries(cors)) outHeaders.set(k, v);
+      return new Response(flyResp.body, { status: flyResp.status, headers: outHeaders });
+    }
+
     const apiKey = env.RUNPOD_API_KEY;
     const endpointId = env.RUNPOD_ENDPOINT_ID;
 

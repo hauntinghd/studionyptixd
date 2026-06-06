@@ -9,7 +9,7 @@ Six target channels (canonical specs in prompts/channels.py):
   2. Hidden Cortex       — psychology/consciousness/conspiracy docs
   3. PB Live             — criminal/CIA cases (photoreal)
   4. Lo-Fi Radio         — extended ambient music with looping cinematic visuals
-  5. Empire Magnates     — red-porcelain mannequin + photoreal financial scams
+  5. Empire Magnates     — yellow-porcelain mannequin + Fern fraud documentaries
   6. History Rewind      — 9-HOUR sleep documentaries
 
 Pipeline (v6, building on locked v5 from project_v5_pipeline_locked.md):

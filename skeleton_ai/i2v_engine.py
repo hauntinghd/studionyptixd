@@ -23,12 +23,15 @@ Pipeline:
 All via fal_client.subscribe.
 """
 from __future__ import annotations
+import concurrent.futures
 import os
 import time
 from pathlib import Path
 
 import fal_client
 import httpx
+
+FAL_SUBSCRIBE_TIMEOUT_SEC = int(os.getenv("FAL_I2V_SUBSCRIBE_TIMEOUT_SEC", "600"))
 
 
 class I2VError(RuntimeError):
@@ -204,9 +207,15 @@ def generate(
     for endpoint in chain:
         args = _build_args(endpoint, motion_prompt, image_url, duration_sec, aspect_ratio)
         try:
-            result = fal_client.subscribe(endpoint, arguments=args)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(fal_client.subscribe, endpoint, arguments=args)
+                result = fut.result(timeout=FAL_SUBSCRIBE_TIMEOUT_SEC)
             used_endpoint = endpoint
             break
+        except concurrent.futures.TimeoutError as e:
+            raise I2VError(
+                f"{endpoint} timed out after {FAL_SUBSCRIBE_TIMEOUT_SEC}s on {still_path.name}"
+            ) from e
         except Exception as e:
             last_exc = e
             if _is_content_policy_error(e) and endpoint != chain[-1]:

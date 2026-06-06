@@ -290,6 +290,43 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [pollResetKey, setPollResetKey] = useState(0);
     const [retryingProduction, setRetryingProduction] = useState(false);
     const [cancellingProduction, setCancellingProduction] = useState(false);
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+    // First-time Studio Agent greeting (only once per user, only for non-owners, and only if no channels connected).
+    // This runs on initial mount of the agent experience.
+    useEffect(() => {
+        const userEmail = (session as any)?.user?.email || '';
+        const isOwnerUser = ownerOverride || userEmail.toLowerCase().includes('omatic') || userEmail.toLowerCase().includes('hauntinghd');
+        if (isOwnerUser) return;
+
+        const seenKey = `studio_agent_first_greeting_seen_${(session as any)?.user?.id || userEmail || 'anon'}`;
+        const alreadySeen = typeof window !== 'undefined' && localStorage.getItem(seenKey) === 'true';
+        if (alreadySeen) return;
+
+        // Only trigger if we believe they have no channels connected yet.
+        // We do a lightweight check via the connect component status or just show — the message itself invites connecting.
+        // To avoid spamming every new chat, we mark as seen immediately.
+        const hasAnyHistory = history.length > 0 || messages.length > 0;
+        if (hasAnyHistory) {
+            // They've used it before in this session load — don't greet.
+            return;
+        }
+
+        // Inject the one-time greeting as the very first assistant message.
+        setMessages((prev) => {
+            if (prev.length > 0) return prev;
+            return [
+                {
+                    role: 'assistant' as const,
+                    content: "I notice you don't have any of your YouTube channels connected. Would you like to connect to YouTube channels or brainstorm video ideas?",
+                },
+            ];
+        });
+
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(seenKey, 'true');
+        }
+    }, [session, ownerOverride, history.length, messages.length]);
 
     const getToken = useCallback(async () => {
         const tok = session?.access_token;
@@ -1263,11 +1300,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         <History className="h-4 w-4" />
                     </button>
                     <div className="flex items-center gap-2">
-                        <Bot className="h-5 w-5 text-violet-400" />
+                        {/* Clean branding — no literal robot logo per user request */}
                         <h1 className="text-sm font-semibold text-white">Studio Agent</h1>
-                        <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-violet-300">
-                            Beta
-                        </span>
                         {accountBadge && (
                             <span
                                 className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
@@ -1378,31 +1412,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </div>
                             )}
                         </div>
-                        <div
-                            className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5"
-                            title="Animate: i2v motion per scene. Stills: still images with a gentle Ken Burns push (cheaper, no motion)."
-                        >
-                            {([['animate', 'Animate'], ['stills', 'Stills']] as const).map(([id, label]) => {
-                                const on = (id === 'animate') === animate;
-                                return (
-                                    <button
-                                        key={id}
-                                        type="button"
-                                        onClick={() => {
-                                            const next = id === 'animate';
-                                            setAnimate(next);
-                                            void patchSession({ animate: next });
-                                        }}
-                                        className={`rounded-md px-2 py-0.5 text-[9px] font-semibold uppercase transition ${
-                                            on ? 'bg-emerald-600/25 text-emerald-200' : 'text-gray-500 hover:text-gray-300'
-                                        }`}
-                                    >
-                                        {label}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        {/* Channels as a "window" (click to open, like model picker). Not always taking space in the main UI. */}
+                        {/* Channels (kept as requested) */}
                         <button
                             type="button"
                             onClick={() => setChannelsOpen((o) => !o)}
@@ -1420,6 +1430,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 </header>
 
                 <AgentProductionRail tracks={jobTracks} snapshots={snapshots} />
+
+                {/* Clean Grok-inspired empty state (no robot, premium feel) */}
+                {messages.length === 0 && !loading && (
+                    <div className="flex flex-1 items-center justify-center">
+                        <div className="text-center">
+                            <div className="mx-auto mb-4 h-9 w-9 rounded-full bg-white/90" />
+                            <div className="text-2xl font-semibold tracking-tight text-white">Studio Agent</div>
+                            <div className="mt-1 text-sm text-white/50">Your personal production partner</div>
+                            <div className="mt-6 text-xs text-white/40">Type anything to begin — or use the mic.</div>
+                        </div>
+                    </div>
+                )}
 
                 {/* Channel connect as a toggleable "window" (not always visible clutter). Matches the model picker pattern. */}
                 {channelsOpen && (

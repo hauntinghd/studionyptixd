@@ -120,6 +120,13 @@ class ThumbnailGenerateRequest(BaseModel):
     sketch_image_id: str = ""
     screenshot_description: str = ""
     style_preset: str = ""
+    video_title: str = ""
+    image_model: str = ""
+    reference_thumbnail_urls: list[str] = []
+    reference_creator: str = ""
+    video_upload_id: str = ""
+    channel_id: str = ""
+    frame_at_pct: float = 0.12
 
 
 class LongFormSessionCreateRequest(BaseModel):

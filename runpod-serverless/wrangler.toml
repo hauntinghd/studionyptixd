@@ -11,5 +11,9 @@ routes = [
 # Set via `wrangler secret put RUNPOD_API_KEY` and `wrangler secret put RUNPOD_ENDPOINT_ID`
 # DO NOT put secrets here.
 
+[vars]
+# Studio Agent chat/approve/sessions — proxied to Fly (persistent /var/data sessions).
+FLY_STUDIO_ORIGIN = "https://nyptid-studio.fly.dev"
+
 [observability]
 enabled = true

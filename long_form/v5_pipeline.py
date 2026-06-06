@@ -38,6 +38,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
+import fal_client
+
+from long_form.em_yellow_cast_kit import (
+    CAST_IDENTITY,
+    CAST_SEED,
+    LIGHTING_BIBLE,
+    NEG as EM_NEG,
+    SEEDREAM_EDIT_URL,
+)
 from long_form.pipeline import (
     LFRenderError,
     LF_OUTPUT_ROOT,
@@ -62,42 +71,71 @@ from long_form.pipeline import (
 )
 
 
+EM_CAST_KIT_DIR = Path(r"D:/recaps/empire_magnates/cast_kit_yellow/approved")
+EM_CAST_REF_NAMES = (
+    "cast_master_front.png",
+    "scene_archetype_presentation.png",
+    "scene_archetype_walk.png",
+)
+
+
+def _em_cast_ref_paths() -> list[Path]:
+    return [
+        p
+        for name in EM_CAST_REF_NAMES
+        if (p := EM_CAST_KIT_DIR / name).exists() and p.stat().st_size > 1024
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 — scenes (seedream v4.5 stills, EM uses seedream not ernie)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
-    """Generate a still via seedream v4.5 at 1920x1080. Strengthens the
-    visual_style enforcement so seedream doesn't drop in real human
-    faces alongside the porcelain mannequins (Casey's Peter Thiel
-    render had 1 of 3 sample frames showing a real face beside the
-    porcelain — channel grammar violation)."""
+    """Generate a still via Seedream v4.5 edit (approved cast refs) or t2i fallback."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    # PR #132: hard guard against real-face drift. seedream sometimes
-    # interprets "executive" / "trader" / "Thiel" as a real human face;
-    # prepend an explicit cast rule that overrides those defaults.
+
     cast_rule = (
-        "ABSOLUTE CAST RULE: every human in this image is a smooth red-porcelain "
-        "stylized mannequin (smooth red ceramic head, no facial features beyond "
-        "subtle sculpted eyebrows, real opaque tailored business attire). "
-        "ZERO real human faces. ZERO photographic-skin characters. NO mixed "
-        "human + porcelain casts. If the prompt names a real person (Thiel, "
-        "Sanjay Shah, etc.), render them AS the red-porcelain mannequin."
+        f"{CAST_IDENTITY} {LIGHTING_BIBLE} "
+        "ABSOLUTE CAST RULE: every human is the SAME yellow-porcelain mannequin "
+        "(saffron ceramic head and suit, white shirt, black tie, NO facial features). "
+        "ZERO real human faces. NO red porcelain. If the prompt names a real person, "
+        "render them AS this yellow-porcelain mannequin."
     )
     full_prompt = f"{cast_rule}\n\n{prompt}\n\nStyle: {visual_style}".strip()
-    data = _fal_post(
-        SEEDREAM_URL,
-        {
-            "prompt": full_prompt,
-            "image_size": {"width": 1920, "height": 1080},
-            "negative_prompt": (
-                "real human face, photographic skin, photorealistic person, "
-                "real eyes, real mouth, ordinary human, model, actor, realistic head"
-            ),
-        },
-        timeout_s=240,
-    )
+
+    refs = _em_cast_ref_paths()
+    if refs:
+        fal_key = (os.environ.get("FAL_AI_KEY") or os.environ.get("FAL_KEY") or "").strip()
+        if not fal_key:
+            raise LFRenderError("FAL_AI_KEY missing — cannot upload cast refs for Seedream edit")
+        os.environ["FAL_KEY"] = fal_key
+        image_urls = [fal_client.upload_file(str(p)) for p in refs]
+        data = _fal_post(
+            SEEDREAM_EDIT_URL,
+            {
+                "prompt": full_prompt[:3500],
+                "image_urls": image_urls,
+                "negative_prompt": EM_NEG,
+                "image_size": {"width": 1920, "height": 1080},
+                "seed": CAST_SEED,
+                "num_images": 1,
+            },
+            timeout_s=240,
+        )
+    else:
+        data = _fal_post(
+            SEEDREAM_URL,
+            {
+                "prompt": full_prompt,
+                "image_size": {"width": 1920, "height": 1080},
+                "negative_prompt": EM_NEG,
+                "seed": CAST_SEED,
+            },
+            timeout_s=240,
+        )
+
     images = data.get("images") or []
     if not images:
         raise LFRenderError(f"EM still gen returned no images: {data}")
@@ -118,9 +156,81 @@ def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
 #   "Application 'ltx-video-13b-098-distilled' not found".
 LTX_13B_ENDPOINT = "fal-ai/ltx-video-13b-distilled/image-to-video"
 
+# EM i2v clip length — LTX accepts 9–1441 frames (fal docs). Default 12s @ 24fps
+# gives headroom to trim in edit; VO stretch still pads if narration runs longer.
+EM_LTX_CLIP_SEC = max(5, min(15, int(os.environ.get("EM_LTX_CLIP_SEC", "12"))))
+EM_LTX_FPS = 24
+# fal Platform API bills LTX 13B distilled flat ~$0.04/video (not per-second).
+# See long_form.fal_pricing.get_pricing_snapshot().
+LTX_COST_PER_CLIP_USD = 0.04
+
+
+def _gen_em_thumbnails(outline: dict, thumbs_dir: Path) -> list[Path]:
+    """Use Casey-approved cast-kit thumbs — NOT generic t2i thumb_1/2/3."""
+    import shutil
+
+    from long_form.em_yellow_cast_kit import APPROVED_DIR, SEEDREAM_EDIT_URL, CAST_SEED, NEG, CAST_IDENTITY, LIGHTING_BIBLE
+
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    approved_map = {
+        "thumb_yellow_brex.png": "thumb_archetype_brex.png",
+        "thumb_yellow_presentation.png": "scene_archetype_presentation.png",
+        "thumb_yellow_walk.png": "scene_archetype_walk.png",
+    }
+    out_paths: list[Path] = []
+    title = (outline.get("title") or "").strip()
+    for out_name, src_name in approved_map.items():
+        out = thumbs_dir / out_name
+        src = APPROVED_DIR / src_name
+        if src.exists() and src.stat().st_size > 1024:
+            if not out.exists() or out.stat().st_size < 1024:
+                shutil.copy2(src, out)
+            out_paths.append(out)
+
+    # Optional: one title-specific edit if Bre-X title detected and ref exists.
+    if title and "bre-x" in title.lower() and (APPROVED_DIR / "cast_master_front.png").exists():
+        brex_edit = thumbs_dir / "thumb_brex_title_edit.png"
+        if not brex_edit.exists() or brex_edit.stat().st_size < 1024:
+            refs = [
+                APPROVED_DIR / "cast_master_front.png",
+                APPROVED_DIR / "thumb_archetype_brex.png",
+            ]
+            ref_paths = [p for p in refs if p.exists()]
+            if ref_paths:
+                fal_key = (os.environ.get("FAL_AI_KEY") or os.environ.get("FAL_KEY") or "").strip()
+                if fal_key:
+                    os.environ["FAL_KEY"] = fal_key
+                    import fal_client
+                    urls = [fal_client.upload_file(str(p)) for p in ref_paths]
+                    prompt = (
+                        f"{CAST_IDENTITY} {LIGHTING_BIBLE} "
+                        f"YouTube documentary thumbnail 16:9 for: {title}. "
+                        "Yellow porcelain mannequin left-third, dominant teal holographic "
+                        "jungle gold-drill wireframe, small UI badge 6B corner. "
+                        "Match approved Bre-X thumb style exactly."
+                    )
+                    data = _fal_post(
+                        SEEDREAM_EDIT_URL,
+                        {
+                            "prompt": prompt[:3500],
+                            "image_urls": urls,
+                            "negative_prompt": NEG,
+                            "image_size": {"width": 1920, "height": 1080},
+                            "seed": CAST_SEED,
+                            "num_images": 1,
+                        },
+                        timeout_s=240,
+                    )
+                    images = data.get("images") or []
+                    if images and images[0].get("url"):
+                        _download(images[0]["url"], brex_edit, timeout_s=120)
+        if brex_edit.exists() and brex_edit.stat().st_size > 1024:
+            out_paths.append(brex_edit)
+    return out_paths
+
 
 def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
-                 *, duration_sec: int = 5) -> Path:
+                 *, duration_sec: int | None = None) -> Path:
     """Animate the still via LTX 13B distilled (the v5_pipeline_locked recipe
     winner — 'not even a competition, fucking flawless' per Casey's
     2026-04-24 bakeoff).
@@ -130,12 +240,12 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     URL (was 404'ing) + uses fal_client.subscribe to handle LTX's async
     queue (calls take 20-60s, plain HTTP POST returns 202 → needs polling).
 
-    Payload mirrors Casey's wirecard_ltx.py exactly:
-        - resolution: '720p' (LTX's native max — compose ffmpeg upscales
-          to 1920x1080 in the final pass per PR #132's force_1080p logic)
-        - num_frames=300 + frame_rate=60 → 5sec @ 60fps native
-        - aspect_ratio: '16:9'
+    Clip length: EM_LTX_CLIP_SEC (default 12s) @ EM_LTX_FPS. LTX accepts
+    num_frames 9–1441 on fal — we were hard-coded to 300 frames (5s).
     """
+    clip_sec = duration_sec if duration_sec is not None else EM_LTX_CLIP_SEC
+    clip_sec = max(5, min(15, int(clip_sec)))
+    num_frames = clip_sec * EM_LTX_FPS
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
 
@@ -154,7 +264,7 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     full_prompt = (
         f"{motion}. Documentary cinematography, subtle realistic motion, "
         "no camera wobble, no subject deformation, stable composition, "
-        "photoreal documentary, red porcelain mannequin character preserved"
+        "photoreal documentary, yellow porcelain mannequin character preserved"
     )
     neg = (
         "blur, distort, low quality, static noise, face morphing, "
@@ -172,8 +282,8 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
                     "prompt": full_prompt,
                     "negative_prompt": neg,
                     "resolution": "720p",
-                    "num_frames": 300,        # 5sec at 60fps native
-                    "frame_rate": 60,
+                    "num_frames": num_frames,
+                    "frame_rate": EM_LTX_FPS,
                     "aspect_ratio": "16:9",
                 },
             )
@@ -354,20 +464,27 @@ def _gen_scene_sfx(prompt: str, duration_sec: float, out_path: Path) -> Path:
     return out_path
 
 
-def _stretch_video_to_duration(in_mp4: Path, out_mp4: Path, target_sec: float) -> Path:
-    """Stretch (or freeze-loop) a clip so it matches the VO duration.
+def _stretch_video_to_duration(in_mp4: Path, out_mp4: Path, target_sec: float, *, force: bool = False) -> Path:
+    """Match clip length to VO for storytelling sync.
 
-    EM v5 strategy: if VO ≤ clip, trim. If VO > clip, freeze the last frame.
-    Simpler than zoompan + segments and matches Wirecard's recipe.
+    - VO shorter than clip → hard trim to narration length (cut, don't pad).
+    - VO longer than clip → gentle setpts slow-down (documentary push-in feel)
+      instead of freezing on the last frame.
     """
-    if out_mp4.exists() and out_mp4.stat().st_size > 1024:
+    if (
+        not force
+        and out_mp4.exists()
+        and out_mp4.stat().st_size > 1024
+        and abs(_ffprobe_dur(out_mp4) - target_sec) < 0.15
+    ):
         return out_mp4
+    if out_mp4.exists():
+        out_mp4.unlink(missing_ok=True)
     clip_sec = _ffprobe_dur(in_mp4)
     if clip_sec <= 0:
         raise LFRenderError(f"clip {in_mp4} has zero duration")
     target_sec = max(2.0, target_sec)
     if target_sec <= clip_sec + 0.05:
-        # Trim.
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
             "-i", str(in_mp4),
@@ -377,14 +494,16 @@ def _stretch_video_to_duration(in_mp4: Path, out_mp4: Path, target_sec: float) -
             str(out_mp4),
         ]
     else:
-        # Tail-pad with last-frame freeze (tpad=stop_mode=clone).
-        extra = target_sec - clip_sec
+        # Slow motion to fill VO — multiply PTS so wall-clock duration stretches.
+        pts_mul = target_sec / clip_sec
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
             "-i", str(in_mp4),
-            "-vf", f"tpad=stop_mode=clone:stop_duration={extra:.3f}",
+            "-vf", f"setpts={pts_mul:.6f}*PTS",
+            "-fps_mode", "vfr",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-an",
+            "-t", f"{target_sec:.3f}",
             str(out_mp4),
         ]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -420,10 +539,11 @@ def _mix_vo_sfx_loudnorm(vo_mp3: Path, sfx_mp3: Path, out_mp3: Path,
 
 
 def _build_scene_mp4(scene_video: Path, scene_audio: Path, out_path: Path,
-                     *, fps: int = 24) -> Path:
+                     *, fps: int = 24, duration_sec: float | None = None) -> Path:
     """Mux the silent stretched clip with the loudness-normalized scene audio."""
     if out_path.exists() and out_path.stat().st_size > 1024:
-        return out_path
+        out_path.unlink(missing_ok=True)
+    dur_flag = ["-t", f"{duration_sec:.3f}"] if duration_sec and duration_sec > 0 else ["-shortest"]
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
         "-i", str(scene_video),
@@ -432,7 +552,7 @@ def _build_scene_mp4(scene_video: Path, scene_audio: Path, out_path: Path,
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
-        "-shortest",
+        *dur_flag,
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -502,23 +622,16 @@ def _process_scene(
     for d in (stills, clips, vo, sfx, scenes):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 1. Still (seedream)
+    # 1. Still (seedream) — cached from Stage 1
     still = stills / f"scene_{global_idx:04d}.png"
-    _gen_em_still(scene_brief["scene_prompt"], visual_style, still)
+    if not still.exists() or still.stat().st_size < 1024:
+        _gen_em_still(scene_brief["scene_prompt"], visual_style, still)
 
-    # 2. LTX clip (i2v)
-    clip = clips / f"clip_{sid}.mp4"
-    motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
-    _gen_em_clip(still, motion, clip, duration_sec=5)
-
-    # 3. VO (ElevenLabs)
+    # 2. VO first — clip length follows narration for storytelling sync
     vo_raw = vo / f"vo_{sid}_raw.mp3"
     text = scene_brief.get("narration") or ""
     if not text.strip():
-        # Skip-VO scenes get a 2s silence + still + clip duration default.
         target_sec = 4.0
-        # Generate a tiny silence MP3 placeholder so the rest of the pipeline
-        # has a file to mux.
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -530,15 +643,18 @@ def _process_scene(
     else:
         _gen_em_vo(text, vo_raw, voice_id=voice_id)
 
-    # 4. Silence-kill the VO
     vo_clean = vo / f"vo_{sid}_clean.mp3"
     _silence_kill(vo_raw, vo_clean)
     vo_dur = _ffprobe_dur(vo_clean)
     if vo_dur < 1.0:
-        # Pad to at least 2s so the scene doesn't flicker by.
         vo_dur = 2.0
 
-    # 5. Per-scene SFX
+    # 3. LTX clip — generate at EM_LTX_CLIP_SEC (12s+), trim/slow to VO below
+    clip = clips / f"clip_{sid}.mp4"
+    motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
+    _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
+
+    # 4. Per-scene SFX
     sfx_path = sfx / f"sfx_{sid}.mp3"
     sfx_prompt = _derive_sfx_prompt(scene_brief["scene_prompt"], text)
     _gen_scene_sfx(sfx_prompt, vo_dur + 1.0, sfx_path)
@@ -553,7 +669,7 @@ def _process_scene(
 
     # 8. Mux into final scene MP4
     scene_mp4 = scenes / f"scene_{sid}.mp4"
-    _build_scene_mp4(clip_stretched, audio_final, scene_mp4, fps=fps)
+    _build_scene_mp4(clip_stretched, audio_final, scene_mp4, fps=fps, duration_sec=vo_dur)
     return scene_mp4
 
 
@@ -895,7 +1011,7 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     state["phase"] = "thumbnails"
     save_state(job_id, state)
     thumbs = await loop.run_in_executor(
-        None, lambda: _gen_thumbnails(channel, outline, job_dir / "thumbnails", count=3)
+        None, lambda: _gen_em_thumbnails(outline, job_dir / "thumbnails")
     )
     state["thumbnails_generated"] = len(thumbs)
     state["percent"] = 92

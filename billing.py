@@ -452,7 +452,7 @@ def _estimate_job_cost_usd(job_state: dict) -> float:
     if total_scenes <= 0 and isinstance(job_state.get("scene_assets"), list):
         total_scenes = len(job_state.get("scene_assets", []))
     total_scenes = max(total_scenes, 1)
-    image_scene_cost = 0.03 if template == "skeleton" else 0.04
+    image_scene_cost = 0.04 if template == "skeleton" else 0.04
     video_scene_cost = 0.16 if resolution == "720p" else 0.25
     per_scene = image_scene_cost + (video_scene_cost if mode == "video" else 0.0)
     return round(total_scenes * per_scene, 3)

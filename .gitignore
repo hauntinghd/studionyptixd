@@ -32,3 +32,10 @@ long_form/output/
 *.db
 shadow_data*
 client_secrets.json
+.vercel
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

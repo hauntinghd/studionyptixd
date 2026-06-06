@@ -30,7 +30,7 @@ const hasPendingAuthRedirectArtifacts = (): boolean => {
 };
 
 function AppShell() {
-    const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage, waitlistOnlyMode } = useContext(AuthContext);
+    const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const resolvePageFromLocation = useCallback((): StudioPage | null => {
@@ -125,18 +125,10 @@ function AppShell() {
         // and when signed out (no forced-auth redirect). Google's OAuth verification flow
         // needs these URLs to load for any visitor, logged in or not.
         if (page === 'privacy' || page === 'terms') return;
-        // Waitlist pages are always reachable — that's the whole point.
-        if (page === 'waitlist' || page === 'waitlist_confirmation') return;
-        // WAITLIST GATE: when the backend flags waitlistOnlyMode=true, every
-        // non-admin user (signed in or not) gets redirected to /waitlist for
-        // any dashboard/settings/billing route. Admins keep full access so
-        // Casey can still debug + test behind the gate.
-        if (waitlistOnlyMode && role !== 'admin') {
-            const gatedPages: StudioPage[] = ['dashboard', 'account', 'settings', 'billing', 'subscription'];
-            if (gatedPages.includes(page)) {
-                setPage('waitlist');
-                return;
-            }
+        // Waitlist is retired — send visitors to sign-in or Studio.
+        if (page === 'waitlist' || page === 'waitlist_confirmation') {
+            setPage(session ? 'dashboard' : 'auth');
+            return;
         }
         const authRedirectPending = hasPendingAuthRedirectArtifacts();
         if (billingHost) {
@@ -167,7 +159,7 @@ function AppShell() {
         if (session && (page === 'landing' || page === 'auth')) {
             setPage('dashboard');
         }
-    }, [session, loading, page, role, backendOffline, billingHost, waitlistOnlyMode]);
+    }, [session, loading, page, role, backendOffline, billingHost]);
 
     return (
         <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">

@@ -66,7 +66,7 @@ services:
       - key: CHATSTORY_ELEVENLABS_MODEL_ID
         value: eleven_multilingual_v2
       - key: WAITLIST_ONLY_MODE
-        value: "true"
+        value: "false"
       - key: WAITLIST_REQUIRE_STRIPE_PAYMENT
         value: "false"
       - key: XAI_API_KEY

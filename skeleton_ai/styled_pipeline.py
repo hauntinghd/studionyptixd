@@ -14,7 +14,7 @@ from typing import Any
 
 from studio_agent.render_styles import RenderStyle, get_render_style
 
-from .compose import concat_demuxer, mux_narration, trim_with_captions
+from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
 from .i2v_engine import ac_cost_for_video_model, generate as gen_clip, resolve_video_model_chain
 from .pipeline import Beat, _write_progress, check_cancelled, split_script_into_beats
 from .prompts.category_registry import get_category

@@ -1,3 +1,12 @@
 **
 !ViralShorts-App
 !ViralShorts-App/**
+ViralShorts-App/node_modules
+ViralShorts-App/node_modules/**
+ViralShorts-App/dist
+ViralShorts-App/dist/**
+ViralShorts-App/.vercel
+ViralShorts-App/.vercel/**
+ViralShorts-App/ViralShorts-App
+ViralShorts-App/ViralShorts-App/**
+ViralShorts-App/tsconfig.tsbuildinfo

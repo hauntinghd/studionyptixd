@@ -46,7 +46,7 @@ const OWNER_ALL_ACCESS: Record<string, boolean> = {
 };
 
 function tabFromUrl(): DashboardTab {
-    if (typeof window === 'undefined') return 'home';
+    if (typeof window === 'undefined') return 'agent';
     try {
         const t = new URL(window.location.href).searchParams.get('tab');
         const allowed: DashboardTab[] = [
@@ -56,7 +56,9 @@ function tabFromUrl(): DashboardTab {
     } catch {
         /* ignore */
     }
-    return 'home';
+    // For regular users, default straight into Studio Agent chat (the primary experience).
+    // Admins/owners still get the rich home by default if they want the full dashboard.
+    return 'agent';
 }
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -85,6 +87,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     }, []);
 
     const canUseAgent = isAdmin || Boolean((laneAccess as Record<string, boolean>).agent);
+
+    // For regular paying users, Studio Agent is the primary experience (first thing they see).
+    // We still allow tab switching, but default + visual priority goes to the chat.
+    const isRegularUser = !isAdmin && canUseAgent;
 
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {

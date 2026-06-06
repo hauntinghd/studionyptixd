@@ -139,7 +139,7 @@ def build_scene_blueprint(
             "fetch_archival_for_video(topic, blueprint_job_id=job_id) — scene-matched archival B-roll URLs",
             "load_skill script-writing — draft narration beat-for-beat using scene story_beat labels",
             "load_skill thumbnail-design — 3 packaging variants before render",
-            "start_shortform_generate OR start_longform_render with visual_brief + approved outline",
+            "start_shortform_generate with render_style + visual_brief OR start_longform_render",
         ],
     }
 

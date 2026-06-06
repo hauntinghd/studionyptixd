@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 # Default font on Windows; deployment image will need to ship this font.
 DEFAULT_FONT = "C\\:/Windows/Fonts/arialbd.ttf"
-WATERMARK_TEXT = "Cryptic Science"
+WATERMARK_TEXT = "ZeroTier"  # Updated for ZeroTier channel (was Cryptic Science in tests)
 
 # Patterns that mark a word as Tier-1 KEY DATA (orange).
 KEY_PATTERNS = [
@@ -140,10 +140,10 @@ def caption_drawtext(
     )
 
 
-def watermark_drawtext(font: str = DEFAULT_FONT) -> str:
-    """Persistent 'Cryptic Science' watermark at bottom-center."""
+def watermark_drawtext(font: str = DEFAULT_FONT, watermark_text: str = WATERMARK_TEXT) -> str:
+    """Persistent channel watermark at bottom-center (ZeroTier for this channel)."""
     return (
-        f"drawtext=fontfile='{font}':text='{_esc(WATERMARK_TEXT)}':"
+        f"drawtext=fontfile='{font}':text='{_esc(watermark_text)}':"
         f"fontsize=36:fontcolor=white@0.85:"
         f"bordercolor=black@0.7:borderw=3:"
         f"x=(w-text_w)/2:y=h*0.93"

@@ -383,7 +383,7 @@ async def _run_turn_impl(
         messages[-1]["content"] = context_note + "\n\n" + user_text
 
         # Pre-load the current state of the video being re-edited so the model sees the exact scenes/stills/narrations
-        # immediately. This makes surgical decisions (which scene to tweak, what timing/CTA change) natural.
+        # immediately. Include as text in the note (avoids breaking chat message alternation with bare "tool" role).
         try:
             list_tool = "list_longform_scenes" if is_long else "list_production_scenes"
             pre_list = execute_tool_logged(
@@ -393,12 +393,8 @@ async def _run_turn_impl(
                 content_format=content_format,
                 session_id=sid,
             )
-            # Inject as a tool observation so the model starts with the structure of the video to re-edit.
-            messages.append({
-                "role": "tool",
-                "tool_call_id": f"pre_reply_{list_tool}",
-                "content": pre_list,
-            })
+            # Append the scene list as plain text observation so the model has the current state without format issues.
+            messages[-1]["content"] += f"\n\n[Current scenes state for this job (pre-loaded for surgical re-edit):\n{pre_list}\n]"
         except Exception as pre_exc:
             # Non-fatal; the model can still call list itself.
             pass
@@ -421,6 +417,13 @@ async def _run_turn_impl(
         messages.insert(0, {"role": "system", "content": sys_content})
 
     tools = tool_schemas()
+    # During a reply-to re-edit (user clicked the arrow on a specific video card),
+    # completely remove ALL high-level "start a whole new production" tools from what the model can call.
+    # This forces the surgical re-edit path on the exact prior job_id (list scenes + granular edits + re_edit_production + finalize).
+    # The model must reuse the existing stills/clips from the video the user is replying to.
+    if reply_to:
+        blocked_for_reedit = set(JOB_START_TOOLS)
+        tools = [t for t in tools if t.get("function", {}).get("name") not in blocked_for_reedit]
     pending: list[dict[str, Any]] = []
     active_jobs: list[dict[str, Any]] = []
     assistant_text = ""
@@ -471,7 +474,7 @@ async def _run_turn_impl(
                 # explicitly clicked "Reply & re-edit" on an existing video card. Force the surgical path
                 # on the exact prior job_id so we re-use the already-made stills/clips/video and only re-edit
                 # pacing, captions, CTA, timing, story packaging.
-                if reply_to and name in ("start_shortform_generate", "start_longform_render"):
+                if reply_to and name in JOB_START_TOOLS:
                     job_id = str(reply_to.get("job_id") or "")
                     kind = str(reply_to.get("kind") or "shortform")
                     # Use the original user instruction (the part after the injected context note)
@@ -695,6 +698,26 @@ async def _approve_action_impl(
     args = action.get("arguments") or {}
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, session)
+
+    # Defense for re-edit threads: if this pending action is a start tool but the conversation
+    # has an active reply-to re-edit context in recent messages, redirect to surgical re-edit
+    # instead of starting a brand new generation (user may have had a pending start from before the reply).
+    recent = "\n".join(str(m.get("content", "")) for m in (store.get_session(sid) or session).get("messages", [])[-3:])
+    if name in JOB_START_TOOLS and "[User is replying to their previous" in recent:
+        job_id = ""  # best effort; the re_edit will use what it can or the LLM will have specified
+        # Try to extract from the note if present in the action summary or messages
+        for m in reversed((store.get_session(sid) or session).get("messages", [])[-5:]):
+            if "[User is replying to their previous" in str(m.get("content", "")):
+                # crude extract
+                import re
+                m_job = re.search(r"job_id=([a-z0-9]+)", str(m.get("content", "")))
+                if m_job:
+                    job_id = m_job.group(1)
+                    break
+        kind = "shortform"
+        reedit_res = re_edit_production(job_id or "unknown", f"[From approved pending during re-edit thread] {args}", kind)
+        return {"session_id": sid, "assistant_message": "Redirected pending start to surgical re-edit for the replied-to video.", "result": reedit_res}
+
     tool_error = ""
     try:
         result = execute_tool_logged(

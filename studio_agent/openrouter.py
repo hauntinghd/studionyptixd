@@ -256,23 +256,67 @@ async def model_pricing(model_id: str) -> tuple[float | None, float | None]:
     return _price_per_mtok(pricing.get("prompt")), _price_per_mtok(pricing.get("completion"))
 
 
+REASONING_DEPTHS = ("fast", "balanced", "deep")
+
+
+def reasoning_params(
+    depth: str = "balanced",
+    *,
+    model: str | None = None,
+) -> tuple[float, dict[str, Any] | None]:
+    """Map UI thinking depth → OpenRouter reasoning + temperature."""
+    key = str(depth or "balanced").strip().lower()
+    if key not in REASONING_DEPTHS:
+        key = "balanced"
+    mid = str(model or "").lower()
+
+    if key == "fast":
+        return 0.25, None
+
+    if key == "deep":
+        temp = 0.35
+        reasoning: dict[str, Any] = {"enabled": True, "effort": "high"}
+        if "claude" in mid or "anthropic" in mid:
+            reasoning = {"enabled": True, "max_tokens": 10_000}
+        return temp, reasoning
+
+    # balanced
+    return 0.4, {"enabled": True, "effort": "low"}
+
+
 async def chat_completion(
     *,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     model: str | None = None,
-    temperature: float = 0.4,
+    temperature: float | None = None,
+    reasoning_depth: str = "balanced",
+    web_search: bool = False,
 ) -> dict[str, Any]:
+    temp, reasoning = reasoning_params(reasoning_depth, model=model or DEFAULT_MODEL)
+    if temperature is not None:
+        temp = float(temperature)
     payload: dict[str, Any] = {
         "model": model or DEFAULT_MODEL,
         "messages": messages,
-        "temperature": temperature,
+        "temperature": temp,
     }
+    if reasoning:
+        payload["reasoning"] = reasoning
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if web_search:
+        # OpenRouter's built-in web plugin: runs a live web search (Exa) and
+        # injects results before the model answers — works with any model slug.
+        try:
+            max_results = int(os.getenv("STUDIO_AGENT_WEB_MAX_RESULTS", "5"))
+        except (TypeError, ValueError):
+            max_results = 5
+        payload["plugins"] = [{"id": "web", "max_results": max(1, min(max_results, 10))}]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    timeout = 180.0 if reasoning_depth == "deep" else 120.0
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(
             f"{OPENROUTER_BASE}/chat/completions",
             headers=_headers(),

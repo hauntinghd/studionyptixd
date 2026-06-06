@@ -20,7 +20,7 @@ import jwt
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -93,6 +93,7 @@ from backend_settings import (
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
     STRIPE_TOPUP_PUBLIC_ENABLED,
+    BILLING_STRIPE_PRIMARY,
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
     PAYPAL_ENV,
@@ -115,6 +116,7 @@ from backend_settings import (
     WAITLIST_ONLY_MODE,
     WAITLIST_REQUIRE_STRIPE_PAYMENT,
     SKELETON_GLOBAL_REFERENCE_IMAGE_URL,
+    SKELETON_USE_SEEDREAM_EDIT,
     STORY_GLOBAL_REFERENCE_IMAGE_URL,
     MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL,
     USE_FAL_GROK_IMAGE,
@@ -178,6 +180,7 @@ from backend_settings import (
     TOPUP_PACKS,
     PUBLIC_PLAN_IDS,
     PUBLIC_TOPUP_PACK_IDS,
+    UNIFIED_PLANS,
     SUPABASE_SERVICE_KEY,
     OUTPUT_DIR,
     TEMP_DIR,
@@ -2312,6 +2315,45 @@ def _skeleton_default_identity_locked(session: dict | None) -> bool:
     return not _skeleton_session_has_explicit_reference(session)
 
 
+async def _generate_skeleton_canonical_edit_still(
+    *,
+    output_path: str,
+    topic: str,
+    visual_description: str,
+    session: dict | None = None,
+    scene_index: int = 0,
+) -> dict:
+    """One scene still via Seedream v4.5 edit from the canonical master (no T2I drift)."""
+    from skeleton_ai.canonical_edit import build_scene_edit_prompt, generate_still_edit_async
+
+    sess = dict(session or {})
+    master = (
+        str(sess.get("skeleton_reference_image") or "").strip()
+        or str(sess.get("reference_image_public_url") or "").strip()
+        or str(SKELETON_GLOBAL_REFERENCE_IMAGE_URL or "").strip()
+    )
+    extra_refs: list[str] = []
+    uniform_ref = str(sess.get("skeleton_uniform_ref") or sess.get("skeleton_roster_ref") or "").strip()
+    if uniform_ref:
+        extra_refs.append(uniform_ref)
+    outfit = str(sess.get("skeleton_outfit") or "").strip()
+    if not outfit and _skeleton_has_explicit_outfit_request(visual_description):
+        outfit = visual_description
+    edit_prompt = build_scene_edit_prompt(
+        topic=topic,
+        visual_description=visual_description,
+        outfit=outfit,
+    )
+    seed = 420042 + int(scene_index or 0)
+    return await generate_still_edit_async(
+        edit_prompt,
+        output_path,
+        master_url=master,
+        extra_refs=extra_refs,
+        seed=seed,
+    )
+
+
 def _reference_url_to_local_asset_path(reference_image_url: str) -> Path | None:
     source = str(reference_image_url or "").strip()
     if not source:
@@ -4425,8 +4467,8 @@ def _profile_plan_is_paid(plan: str) -> bool:
     return normalized in PLAN_LIMITS
 
 
-CHAT_STORY_ALLOWED_PLANS = {"starter", "creator", "pro"}
-DEFAULT_MEMBERSHIP_PLAN_ID = "starter"
+CHAT_STORY_ALLOWED_PLANS = {"creator", "studio", "starter", "pro"}
+DEFAULT_MEMBERSHIP_PLAN_ID = "creator"
 
 
 def _default_membership_plan_id() -> str:
@@ -4461,9 +4503,15 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
         bool((snapshot or {}).get("billing_active"))
         and membership_plan in CHAT_STORY_ALLOWED_PLANS
     )
+    agent_live = is_admin or (
+        bool((snapshot or {}).get("billing_active"))
+        and membership_plan in ("creator", "studio")
+    )
     return {
         "create": public_live,
+        "agent": agent_live,
         "thumbnails": is_admin,
+        "cliplab": is_admin,
         "clone": is_admin,
         "longform": is_admin,
         "chatstory": chatstory_live,
@@ -7691,7 +7739,13 @@ async def generate_scene_image(
     channel_context = dict(channel_context or {})
     channel_blocks_fal_scene = _channel_blocks_fal_scene_generation(channel_context)
     channel_prefers_fal_scene = _channel_prefers_fal_scene_generation(channel_context)
-    if template == "skeleton" and _is_template_default_reference(template, reference_image_url):
+    if (
+        template == "skeleton"
+        and SKELETON_USE_SEEDREAM_EDIT
+        and _is_template_default_reference(template, reference_image_url)
+    ):
+        log.info("Skeleton canonical edit lock: Seedream v4.5 edit from master reference")
+    elif template == "skeleton" and _is_template_default_reference(template, reference_image_url):
         log.info("Skeleton default style lock active: using reference DNA only and skipping direct image conditioning")
         reference_image_url = ""
     has_reference = bool(str(reference_image_url or "").strip())
@@ -7710,6 +7764,47 @@ async def generate_scene_image(
             negative_prompt = _relax_skeleton_negative_prompt_for_passthrough(negative_prompt, prompt)
         else:
             negative_prompt = _augment_skeleton_negative_prompt(negative_prompt, prompt)
+
+    skeleton_canonical_edit = (
+        template == "skeleton"
+        and SKELETON_USE_SEEDREAM_EDIT
+        and not named_human_support
+        and not prompt_passthrough
+        and (
+            not str(reference_image_url or "").strip()
+            or _is_template_default_reference(
+                template,
+                str(reference_image_url or SKELETON_GLOBAL_REFERENCE_IMAGE_URL or "").strip(),
+            )
+        )
+    )
+    if skeleton_canonical_edit:
+        visual = _extract_skeleton_scene_delta_for_fast_path(prompt) or _sanitize_skeleton_scene_delta(prompt)
+        edit_result = await _generate_skeleton_canonical_edit_still(
+            output_path=output_path,
+            topic="",
+            visual_description=visual,
+            session=None,
+            scene_index=0,
+        )
+        await _enforce_1080_image(output_path)
+        _ensure_generated_image_valid(output_path)
+        qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
+        qa_gate_ok, _qa_min = _image_quality_gate(
+            qa,
+            template=template,
+            lock_mode=lock_mode,
+            has_reference=True,
+            prompt=prompt,
+        )
+        return {
+            **edit_result,
+            "qa": qa,
+            "qa_ok": qa_gate_ok,
+            "provider_label": str(edit_result.get("provider_label") or "Seedream 4.5 Edit (canonical)"),
+            "repair_applied": False,
+            "salvage_applied": False,
+        }
 
     def _skeleton_repair_prompt(base_prompt: str) -> str:
         if template != "skeleton":
@@ -12173,49 +12268,54 @@ async def run_generation_pipeline(
             img_path = str(TEMP_DIR / (job_id + "_scene_" + str(i) + ".png"))
 
             if template == "skeleton":
-                # BYPASS generate_scene_image entirely for skeleton — call Imagen4 Preview directly
-                # Use the canonical anchor so cross-scene identity is locked from the SAME prompt fragment
-                # the rest of the pipeline uses (no two-source-of-truth drift).
-                skeleton_identity = _canonical_skeleton_anchor()
-                # Inject topic context so every scene has relevant environment
                 topic_context = str(topic or "").strip()
-                wardrobe_lock = _skeleton_outfit_coverage_lock(visual_desc) or _skeleton_outfit_coverage_lock(topic_context)
-                full_prompt = (
-                    f"{skeleton_identity} "
-                    f"TOPIC: {topic_context}. "
-                    f"SCENE: The canonical Studio skeleton figure in a setting directly related to {topic_context}. {visual_desc} "
-                    f"{wardrobe_lock} "
-                    "Negative: no glowing eyes, no cartoon style, no anime, no chibi, no missing bones, "
-                    "no bone color drift (bones must stay ivory-white), no skin opaqueness loss on the glass shell, "
-                    "no extra limbs, no melted face, no warped skull."
-                ).strip()
-                aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
-                # Call ERNIE-Image via fal_gate (concurrency-capped + retries on 429 / concurrent-limit).
-                _img_size = {"width": 720, "height": 1280} if aspect == "9:16" else {"width": 1280, "height": 720}
-                import fal_gate as _fal_gate
-                try:
-                    _img_json = await _fal_gate.post_with_retry(
-                        "https://fal.run/fal-ai/ernie-image",
-                        api_key=FAL_AI_KEY,
-                        json_body={"prompt": full_prompt, "num_images": 1, "image_size": _img_size},
-                        timeout_sec=60,
-                        max_attempts=5,
-                        source="ernie_scene_image",
+                job_state = dict(jobs.get(job_id) or {})
+                if SKELETON_USE_SEEDREAM_EDIT and _skeleton_default_identity_locked(job_state):
+                    img_result = await _generate_skeleton_canonical_edit_still(
+                        output_path=img_path,
+                        topic=topic_context,
+                        visual_description=visual_desc,
+                        session=job_state,
+                        scene_index=i,
                     )
-                except _fal_gate.FalFailed as exc:
-                    # Auto-soften: if fal flags the prompt on content-policy grounds,
-                    # try once more with a softened prompt before failing the pipeline.
-                    # This recovers users who used keywords like "Panama Papers" or
-                    # "cartel" without them having to abandon the render.
-                    _err_l = str(exc or "").lower()
-                    _is_content_policy = (
-                        "content" in _err_l or "policy" in _err_l or "flagged" in _err_l
+                    log.info(
+                        f"[{job_id}] Skeleton scene {i+1} via Seedream 4.5 edit "
+                        f"(canonical master, ~$0.04/scene)"
                     )
-                    if _is_content_policy:
-                        softened_prompt, _changed = _soften_content_policy_prompt(full_prompt)
-                        if _changed:
-                            log.info(f"[{job_id}] Skeleton scene {i+1} content-policy auto-soften triggered; retrying once")
-                            try:
+                elif not SKELETON_USE_SEEDREAM_EDIT:
+                    # Legacy ERNIE T2I path only when SKELETON_USE_SEEDREAM_EDIT=false.
+                    skeleton_identity = _canonical_skeleton_anchor()
+                    wardrobe_lock = _skeleton_outfit_coverage_lock(visual_desc) or _skeleton_outfit_coverage_lock(topic_context)
+                    full_prompt = (
+                        f"{skeleton_identity} "
+                        f"TOPIC: {topic_context}. "
+                        f"SCENE: The canonical Studio skeleton figure in a setting directly related to {topic_context}. {visual_desc} "
+                        f"{wardrobe_lock} "
+                        "Negative: no glowing eyes, no cartoon style, no anime, no chibi, no missing bones, "
+                        "no bone color drift (bones must stay ivory-white), no skin opaqueness loss on the glass shell, "
+                        "no extra limbs, no melted face, no warped skull."
+                    ).strip()
+                    aspect = "9:16" if not str(resolution or "").endswith("_landscape") else "16:9"
+                    _img_size = {"width": 720, "height": 1280} if aspect == "9:16" else {"width": 1280, "height": 720}
+                    import fal_gate as _fal_gate
+                    try:
+                        _img_json = await _fal_gate.post_with_retry(
+                            "https://fal.run/fal-ai/ernie-image",
+                            api_key=FAL_AI_KEY,
+                            json_body={"prompt": full_prompt, "num_images": 1, "image_size": _img_size},
+                            timeout_sec=60,
+                            max_attempts=5,
+                            source="ernie_scene_image",
+                        )
+                    except _fal_gate.FalFailed as exc:
+                        _err_l = str(exc or "").lower()
+                        _is_content_policy = (
+                            "content" in _err_l or "policy" in _err_l or "flagged" in _err_l
+                        )
+                        if _is_content_policy:
+                            softened_prompt, _changed = _soften_content_policy_prompt(full_prompt)
+                            if _changed:
+                                log.info(f"[{job_id}] Skeleton scene {i+1} content-policy auto-soften; retrying")
                                 _img_json = await _fal_gate.post_with_retry(
                                     "https://fal.run/fal-ai/ernie-image",
                                     api_key=FAL_AI_KEY,
@@ -12224,21 +12324,40 @@ async def run_generation_pipeline(
                                     max_attempts=3,
                                     source="ernie_scene_image_softened",
                                 )
-                            except _fal_gate.FalFailed as exc2:
-                                raise RuntimeError(f"ERNIE-Image failed after auto-soften: {exc2}") from exc2
+                            else:
+                                raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
                         else:
                             raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
-                    else:
-                        raise RuntimeError(f"ERNIE-Image failed: {exc}") from exc
-                _img_url = (_img_json or {}).get("images", [{}])[0].get("url", "") if isinstance(_img_json, dict) else ""
-                if not _img_url:
-                    raise RuntimeError("ERNIE-Image returned no image URL")
-                async with httpx.AsyncClient(timeout=60) as _dl_client:
-                    _img_data = await _dl_client.get(_img_url)
-                    with open(img_path, "wb") as _f:
-                        _f.write(_img_data.content)
-                img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "ernie_image"}
-                log.info(f"[{job_id}] Skeleton scene {i+1} generated via ERNIE-Image (direct API)")
+                    _img_url = (_img_json or {}).get("images", [{}])[0].get("url", "") if isinstance(_img_json, dict) else ""
+                    if not _img_url:
+                        raise RuntimeError("ERNIE-Image returned no image URL")
+                    async with httpx.AsyncClient(timeout=60) as _dl_client:
+                        _img_data = await _dl_client.get(_img_url)
+                        with open(img_path, "wb") as _f:
+                            _f.write(_img_data.content)
+                    img_result = {"local_path": img_path, "cdn_url": _img_url, "provider": "ernie_image"}
+                    log.info(f"[{job_id}] Skeleton scene {i+1} generated via ERNIE-Image (legacy T2I)")
+                else:
+                    full_prompt = _build_scene_prompt_with_reference(
+                        template=template,
+                        visual_description=visual_desc,
+                        quality_mode=quality_mode,
+                        skeleton_anchor=skeleton_anchor,
+                        reference_dna=reference_dna,
+                        reference_lock_mode=reference_lock_mode,
+                        art_style=art_style,
+                    )
+                    scene_reference_url = _resolve_reference_for_scene(job_state, template, i) or reference_image_url
+                    img_result = await generate_scene_image(
+                        full_prompt,
+                        img_path,
+                        resolution=resolution,
+                        negative_prompt=neg_prompt,
+                        template=template,
+                        channel_context=channel_context,
+                        reference_image_url=scene_reference_url,
+                        reference_lock_mode=reference_lock_mode,
+                    )
             else:
                 full_prompt = _build_scene_prompt_with_reference(
                     template=template,
@@ -18897,19 +19016,22 @@ async def _set_maintenance_banner_payload(body: dict, user: dict):
 
 async def _public_config_payload():
     public_plans = {
-        name: {k: v for k, v in limits.items()}
-        for name, limits in PLAN_LIMITS.items()
-        if name in PUBLIC_PLAN_IDS
+        plan_id: {
+            "monthly_credits": int(spec.get("monthly_credits", 0) or 0),
+            "price_usd": float(spec.get("price_usd", 0) or 0),
+            "name": str(spec.get("name") or plan_id),
+            "best_value": bool(spec.get("best_value")),
+        }
+        for plan_id, spec in UNIFIED_PLANS.items()
+        if plan_id in PUBLIC_PLAN_IDS
     }
     public_plan_features = {
-        name: list(features)
-        for name, features in PLAN_FEATURES.items()
-        if name in PUBLIC_PLAN_IDS
+        plan_id: ["studio_agent", "openrouter", "fal_render", "elevenlabs", "competitor_analysis"]
+        for plan_id in PUBLIC_PLAN_IDS
     }
     public_plan_prices = {
-        k: float(v)
-        for k, v in PLAN_PRICE_USD.items()
-        if k in PUBLIC_PLAN_IDS
+        plan_id: float((UNIFIED_PLANS.get(plan_id) or {}).get("price_usd", PLAN_PRICE_USD.get(plan_id, 0)))
+        for plan_id in PUBLIC_PLAN_IDS
     }
     public_topup_packs = [
         {"price_id": price_id, **meta}
@@ -18949,21 +19071,34 @@ async def _public_config_payload():
         },
         "billing_model": {
             "hybrid_enabled": True,
-            "model": "membership_plus_credits",
+            "model": "unified_credits",
             "default_membership_plan_id": _default_membership_plan_id(),
-            "membership_label": "Catalyst Membership",
-            "paypal_primary": True,
-            "slideshows_free": True,
-            "animated_credit_label": "Catalyst credits",
-            "non_animated_credit_label": "script/image/slideshow operations",
-            "overage_label": "credit wallet top-ups",
-            "hard_stop_on_animated_exhaustion": True,
+            "membership_label": "Studio credits",
+            "paypal_primary": not bool(BILLING_STRIPE_PRIMARY and STRIPE_SECRET_KEY),
+            "stripe_primary": bool(BILLING_STRIPE_PRIMARY and STRIPE_SECRET_KEY),
+            "slideshows_free": False,
+            "animated_credit_label": "Credits",
+            "non_animated_credit_label": "Credits",
+            "overage_label": "credit top-ups",
+            "hard_stop_on_animated_exhaustion": False,
             "waitlist_only_mode": bool(WAITLIST_ONLY_MODE),
             "waitlist_requires_stripe_payment": bool(WAITLIST_REQUIRE_STRIPE_PAYMENT),
             "kling21_standard_i2v_5s_usd": KLING21_STANDARD_I2V_5S_USD,
             "animation_markup_multiplier": ANIMATION_MARKUP_MULTIPLIER,
             "animation_credit_unit_usd": ANIMATION_CREDIT_UNIT_USD,
         },
+        "studio_agent_queue": __import__("studio_agent.queue", fromlist=["queue_config"]).queue_config(),
+        "unified_plans": [
+            {
+                "id": plan_id,
+                "name": str(spec.get("name") or plan_id),
+                "price_usd": float(spec.get("price_usd", 0) or 0),
+                "monthly_credits": int(spec.get("monthly_credits", 0) or 0),
+                "best_value": bool(spec.get("best_value")),
+            }
+            for plan_id, spec in UNIFIED_PLANS.items()
+            if plan_id in PUBLIC_PLAN_IDS
+        ],
         "youtube_integration": {
             "oauth_configured": _youtube_auth_configured(),
             "api_key_configured": bool(YOUTUBE_API_KEY),
@@ -20559,10 +20694,68 @@ app.include_router(
 
 def _price_id_for_plan_id(plan_id: str) -> str:
     normalized = str(plan_id or "").strip().lower()
+    unified = UNIFIED_PLANS.get(normalized) or {}
+    stripe_price_id = str(unified.get("stripe_price_id") or "").strip()
+    if stripe_price_id:
+        return stripe_price_id
     for price_id, mapped_plan in STRIPE_PRICE_TO_PLAN.items():
         if str(mapped_plan or "").strip().lower() == normalized:
             return str(price_id or "").strip()
     return ""
+
+
+async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: float) -> str:
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    normalized_plan = str(plan or "").strip().lower()
+    if normalized_plan not in CHAT_STORY_ALLOWED_PLANS:
+        raise HTTPException(400, "This membership plan is not available for checkout.")
+    unified = UNIFIED_PLANS.get(normalized_plan) or {}
+    monthly_credits = int(unified.get("monthly_credits", 0) or 0)
+    price_usd = float(unified.get("price_usd") or price_usd or 0.0)
+    if price_usd <= 0:
+        raise HTTPException(400, f"Membership pricing is not configured for {normalized_plan}.")
+    stripe_price_id = str(unified.get("stripe_price_id") or _price_id_for_plan_id(normalized_plan) or "").strip()
+    if stripe_price_id:
+        line_item = {"price": stripe_price_id, "quantity": 1}
+    else:
+        description = (
+            f"{monthly_credits:,} unified credits per month — Studio Agent, OpenRouter, fal, ElevenLabs."
+            if monthly_credits > 0
+            else f"NYPTID Studio {normalized_plan.title()} membership"
+        )
+        line_item = {
+            "price_data": {
+                "currency": "usd",
+                "product_data": {
+                    "name": f"NYPTID Studio {normalized_plan.title()}",
+                    "description": description,
+                },
+                "unit_amount": int(round(price_usd * 100)),
+                "recurring": {"interval": "month"},
+            },
+            "quantity": 1,
+        }
+    checkout_payload = {
+        "mode": "subscription",
+        "line_items": [line_item],
+        "success_url": (
+            f"{_billing_site_url()}?page=subscription&subscription=success&provider=stripe&plan={quote(normalized_plan)}"
+        ),
+        "cancel_url": f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=stripe",
+        "client_reference_id": user["id"],
+        "metadata": {"user_id": user["id"], "plan": normalized_plan},
+        "subscription_data": {"metadata": {"user_id": user["id"], "plan": normalized_plan}},
+    }
+    customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
+    if customer_id:
+        checkout_payload["customer"] = customer_id
+    else:
+        checkout_payload["customer_email"] = user["email"]
+    session = stripe_lib.checkout.Session.create(**checkout_payload)
+    if not session.url:
+        raise HTTPException(500, "Stripe checkout URL missing")
+    return str(session.url)
 
 
 async def _create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
@@ -20573,16 +20766,25 @@ async def _create_checkout(req: CheckoutRequest, user: dict = Depends(require_au
         requested_plan = _default_membership_plan_id()
     if requested_plan and not price_id:
         price_id = _price_id_for_plan_id(requested_plan)
-    if not price_id:
-        raise HTTPException(400, "Missing price id")
     plan = str(STRIPE_PRICE_TO_PLAN.get(price_id, requested_plan) or "").strip().lower()
+    if plan in UNIFIED_PLANS:
+        price_usd = float(UNIFIED_PLANS[plan]["price_usd"])
+    else:
+        price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
     if plan not in CHAT_STORY_ALLOWED_PLANS:
-        raise HTTPException(400, "This membership plan is not available for PayPal checkout.")
-    price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
+        raise HTTPException(400, "This membership plan is not available for checkout.")
     if price_usd <= 0:
         raise HTTPException(400, f"Membership pricing is not configured for {plan}.")
-    checkout_url = await _create_paypal_subscription_order(user, price_id, plan, price_usd)
-    return {"checkout_url": checkout_url}
+    if STRIPE_SECRET_KEY and BILLING_STRIPE_PRIMARY:
+        checkout_url = await _create_stripe_membership_checkout(user, plan, price_usd)
+        return {"checkout_url": checkout_url, "provider": "stripe"}
+    if _paypal_enabled():
+        checkout_url = await _create_paypal_subscription_order(user, price_id, plan, price_usd)
+        return {"checkout_url": checkout_url, "provider": "paypal"}
+    if STRIPE_SECRET_KEY:
+        checkout_url = await _create_stripe_membership_checkout(user, plan, price_usd)
+        return {"checkout_url": checkout_url, "provider": "stripe"}
+    raise HTTPException(503, "No payment provider configured")
 
 
 async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
@@ -20634,7 +20836,7 @@ async def _create_paypal_subscription_order(user: dict, price_id: str, plan: str
         raise HTTPException(400, "PayPal is not configured on this billing account yet.")
     normalized_plan = str(plan or "").strip().lower()
     if normalized_plan not in CHAT_STORY_ALLOWED_PLANS:
-        raise HTTPException(400, "Only Starter, Creator, and Pro legacy plan IDs can be sold through membership checkout.")
+        raise HTTPException(400, "Only Creator and Studio plans can be sold through membership checkout.")
     order_payload = {
         "intent": "CAPTURE",
         "purchase_units": [
@@ -20691,7 +20893,7 @@ async def _create_paypal_topup_order(user: dict, price_id: str, pack: dict) -> s
             {
                 "reference_id": str(price_id or ""),
                 "custom_id": str(user.get("id", "") or ""),
-                "description": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} AC Credits",
+                "description": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} Credits",
                 "amount": {
                     "currency_code": "USD",
                     "value": f"{float(pack.get('price_usd', 0.0) or 0.0):.2f}",
@@ -20762,6 +20964,16 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
             source=str(latest.get("pack", "paypal") or "paypal"),
             stripe_session_id=order_id,
         )
+        try:
+            import unified_credits as uc
+            uc.add_credits(
+                str(latest.get("user_id", "") or ""),
+                int(latest.get("credits", 0) or 0),
+                reason="paypal_topup",
+                metadata={"order_id": order_id, "pack": str(latest.get("pack", "") or "")},
+            )
+        except Exception as uc_err:
+            log.warning(f"Unified wallet top-up mirror failed for {order_id}: {uc_err}")
         latest["credited"] = True
         latest["capture_id"] = capture_id
         latest["captured_at"] = time.time()
@@ -20840,6 +21052,12 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
         _save_paypal_orders()
     if user_id:
         await _supabase_set_user_plan(user_id, plan)
+        if plan in UNIFIED_PLANS:
+            try:
+                import unified_credits as uc
+                uc.set_plan(user_id, plan, grant_now=True)
+            except Exception as uc_err:
+                log.warning(f"Unified plan grant failed for {user_id[:12]} plan={plan}: {uc_err}")
         # Phase 3 BUG #2 fix: reset monthly AC usage on subscription
         # activation. Before this patch, a user upgrading from a lower tier
         # (or reactivating after a cancellation) kept their old
@@ -20882,14 +21100,16 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
         raise HTTPException(400, "Invalid top-up pack")
     if user.get("email", "") in ADMIN_EMAILS:
         raise HTTPException(400, "Admin account does not require top-up packs")
-    preferred_method = str(getattr(req, "preferred_method", "paypal") or "paypal").strip().lower()
+    preferred_method = str(getattr(req, "preferred_method", "") or "").strip().lower()
     if preferred_method not in {"card", "paypal"}:
-        preferred_method = "paypal"
+        preferred_method = "card" if (STRIPE_SECRET_KEY and STRIPE_TOPUP_PUBLIC_ENABLED) else "paypal"
     if preferred_method == "card" and not STRIPE_TOPUP_PUBLIC_ENABLED:
-        raise HTTPException(400, "Stripe checkout is coming soon. Use PayPal for now.")
+        raise HTTPException(400, "Stripe checkout is not enabled yet.")
     if preferred_method == "paypal":
+        if not _paypal_enabled():
+            raise HTTPException(400, "PayPal is not configured. Use card checkout.")
         checkout_url = await _create_paypal_topup_order(user, req.price_id, pack)
-        return {"checkout_url": checkout_url}
+        return {"checkout_url": checkout_url, "provider": "paypal"}
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")
     try:
@@ -20901,8 +21121,8 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
                 "price_data": {
                     "currency": "usd",
                     "product_data": {
-                        "name": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} AC Credits",
-                        "description": f"{int(pack.get('credits', 0) or 0)} animation credits",
+                        "name": f"NYPTID Studio {str(pack.get('pack', '') or '').title()} Credits",
+                        "description": f"{int(pack.get('credits', 0) or 0):,} unified credits",
                     },
                     "unit_amount": int(round(float(pack.get("price_usd", 0.0) or 0.0) * 100)),
                 },
@@ -20912,8 +21132,8 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
         checkout_payload = {
             "mode": "payment",
             "line_items": [line_item],
-            "success_url": f"{_billing_site_url()}?topup=success",
-            "cancel_url": f"{_billing_site_url()}?topup=cancelled",
+            "success_url": f"{_billing_site_url()}?topup=success&provider=stripe",
+            "cancel_url": f"{_billing_site_url()}?topup=cancelled&provider=stripe",
             "client_reference_id": user["id"],
             "metadata": {
                 "user_id": user["id"],
@@ -20927,11 +21147,8 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
             checkout_payload["customer"] = customer_id
         else:
             checkout_payload["customer_email"] = user["email"]
-        session = stripe_lib.checkout.Session.create(
-            **checkout_payload,
-            payment_method_types=["card"],
-        )
-        return {"checkout_url": session.url}
+        session = stripe_lib.checkout.Session.create(**checkout_payload)
+        return {"checkout_url": session.url, "provider": "stripe"}
     except Exception as e:
         log.error(f"Stripe top-up checkout error: {e}")
         raise HTTPException(500, f"Payment error: {str(e)}")
@@ -21630,7 +21847,7 @@ async def _stripe_webhook(request: Request):
             or ""
         )
         if mode == "subscription":
-            plan = metadata.get("plan", "starter")
+            plan = str(metadata.get("plan") or "creator").strip().lower()
             if user_id and SUPABASE_URL:
                 svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
                 try:
@@ -21648,6 +21865,12 @@ async def _stripe_webhook(request: Request):
                     log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
                 except Exception as e:
                     log.error(f"Failed to update plan for {user_id}: {e}")
+            if user_id and plan in UNIFIED_PLANS:
+                try:
+                    import unified_credits as uc
+                    uc.set_plan(user_id, plan, grant_now=True)
+                except Exception as uc_err:
+                    log.warning(f"Unified wallet plan grant failed for {user_id[:12]}: {uc_err}")
             await _append_landing_notification(
                 event_type="subscription",
                 plan=str(plan or "starter"),
@@ -21680,6 +21903,19 @@ async def _stripe_webhook(request: Request):
                     source=str(metadata.get("topup_pack", "topup") or "topup"),
                     stripe_session_id=str(session_data.get("id", "") or ""),
                 )
+                try:
+                    import unified_credits as uc
+                    uc.add_credits(
+                        user_id,
+                        topup_credits,
+                        reason="stripe_topup",
+                        metadata={
+                            "session_id": str(session_data.get("id", "") or ""),
+                            "pack": str(metadata.get("topup_pack", "") or ""),
+                        },
+                    )
+                except Exception as uc_err:
+                    log.warning(f"Unified wallet top-up mirror failed for {user_id[:12]}: {uc_err}")
                 log.info(f"Stripe webhook: credited {topup_credits} top-up credits to {user_id}")
                 await _append_landing_notification(
                     event_type="topup",
@@ -21719,6 +21955,12 @@ async def _stripe_webhook(request: Request):
                 log.info(f"Subscription deleted; downgraded {customer_email} -> none")
             elif status in {"active", "trialing", "past_due"} and mapped_plan:
                 await _supabase_set_user_plan(target_id, mapped_plan)
+                if mapped_plan in UNIFIED_PLANS:
+                    try:
+                        import unified_credits as uc
+                        uc.set_plan(target_id, mapped_plan, grant_now=True)
+                    except Exception as uc_err:
+                        log.warning(f"Unified wallet subscription sync failed for {customer_email}: {uc_err}")
                 log.info(f"Subscription lifecycle sync: {customer_email} -> {mapped_plan} ({status})")
             elif status in {"canceled", "unpaid", "incomplete_expired"}:
                 await _supabase_set_user_plan(target_id, "none")
@@ -21753,6 +21995,12 @@ async def _stripe_webhook(request: Request):
             plan = STRIPE_PRICE_TO_PLAN.get(price_id, "")
             if plan:
                 await _supabase_set_user_plan(target_id, plan)
+                if plan in UNIFIED_PLANS:
+                    try:
+                        import unified_credits as uc
+                        uc.set_plan(target_id, plan, grant_now=True)
+                    except Exception as uc_err:
+                        log.warning(f"Unified wallet invoice renewal failed for {customer_email}: {uc_err}")
                 log.info(f"Invoice payment succeeded; ensured {customer_email} -> {plan}")
 
     return {"status": "ok"}
@@ -21933,6 +22181,75 @@ async def _admin_refund_credits(body: dict, user: dict = Depends(require_auth)):
         pass
     log.info(f"Admin refund: {credits} AC to {target_email} (source={applied_source}) by {user.get('email', '?')}")
     return {"ok": True, "email": target_email, "credits": credits, "source": applied_source}
+
+
+async def _admin_grant_unified_credits(body: dict, user: dict = Depends(require_auth)):
+    """Grant unified Studio credits to a user by email (support / early access).
+
+    Body: {"email": str, "credits": int, "reason": str (optional)}
+    """
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    target_email = str((body or {}).get("email", "") or "").strip().lower()
+    if not target_email:
+        raise HTTPException(400, "email required")
+    try:
+        credits = int((body or {}).get("credits", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "credits must be an integer")
+    if credits <= 0 or credits > 100000:
+        raise HTTPException(400, "credits must be between 1 and 100000")
+    reason = str((body or {}).get("reason", "") or "").strip()[:400] or "admin_grant"
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL:
+        raise HTTPException(500, "Supabase not configured")
+    target_id = ""
+    async with httpx.AsyncClient(timeout=15) as client:
+        users_resp = await client.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+            headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+        )
+        if users_resp.status_code == 200:
+            users_data = users_resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+            for u in user_list:
+                if str(u.get("email", "") or "").lower() == target_email:
+                    target_id = str(u.get("id", "") or "")
+                    break
+    if not target_id:
+        raise HTTPException(404, f"No Supabase user found for {target_email}")
+    try:
+        import unified_credits as uc
+        wallet = uc.add_credits(
+            target_id,
+            credits,
+            reason=reason,
+            metadata={"admin_email": str(user.get("email", "") or ""), "target_email": target_email},
+        )
+    except Exception as grant_exc:
+        log.error(f"Admin unified credit grant failed for {target_email}: {grant_exc}")
+        raise HTTPException(500, f"Grant failed: {grant_exc}") from grant_exc
+    try:
+        await _credit_topup_wallet(
+            user_id=target_id,
+            credits=credits,
+            source="admin_grant",
+            stripe_session_id="",
+        )
+    except Exception as legacy_err:
+        log.warning(f"Legacy topup wallet mirror failed for {target_email}: {legacy_err}")
+    log.info(
+        f"Admin unified grant: {credits} credits to {target_email} "
+        f"(balance={wallet.get('balance')}) by {user.get('email', '?')}"
+    )
+    return {
+        "ok": True,
+        "email": target_email,
+        "user_id": target_id,
+        "credits": credits,
+        "balance": int(wallet.get("balance", 0) or 0),
+        "reason": reason,
+    }
 
 
 # â"€â"€â"€ User Feedback Collection â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -22168,6 +22485,7 @@ app.include_router(
         admin_set_plan_endpoint=_admin_set_plan,
         admin_cancel_subscription_endpoint=_admin_cancel_subscription,
         admin_refund_credits_endpoint=_admin_refund_credits,
+        admin_grant_unified_credits_endpoint=_admin_grant_unified_credits,
         submit_feedback_endpoint=_submit_feedback,
         get_all_feedback_endpoint=_get_all_feedback,
         get_admin_kpi_endpoint=_get_admin_kpi,
@@ -23022,29 +23340,425 @@ THUMBNAIL_STYLE_PRESET_HINTS = {
 }
 
 
-async def _generate_thumbnail_prompt(req: ThumbnailGenerateRequest) -> dict:
+THUMBNAIL_VISION_EXTRACT_PROMPT = """You are a YouTube thumbnail packaging analyst. You receive reference thumbnail images from successful creators.
+
+Extract ONLY what matters for replication (not copying): layout grid, text treatment, color palette, subject placement, emotional hook, negative space, badge/panel usage, face vs object ratio, mobile readability.
+
+Output MUST be valid JSON:
+{
+  "composition": "Where subjects/text sit on the 16:9 canvas",
+  "color_palette": "Dominant colors and contrast strategy",
+  "text_style": "Font energy, size, stroke, word count patterns",
+  "emotional_hook": "What feeling the thumb sells in 1 second",
+  "patterns": ["pattern1", "pattern2", "pattern3"],
+  "do_not_copy": "Specific branded elements to avoid cloning",
+  "generation_directive": "One paragraph art direction for a NEW thumb in this lane",
+  "ctr_score": 0,
+  "score_reason": "Why this reference thumb would or would not click on mobile"
+}"""
+
+THUMBNAIL_MAX_REFERENCE_URLS = 4
+THUMBNAIL_MAX_VISION_IMAGES = 4
+
+SEEDREAM_THUMB_EDIT_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/edit"
+THUMBNAIL_VISION_CACHE_DIR = THUMBNAIL_DIR / "vision_cache"
+THUMBNAIL_FRAME_DIR = THUMBNAIL_DIR / "frames"
+THUMBNAIL_VISION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAIL_FRAME_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _thumbnail_upload_path(user: Optional[dict], upload_id: str) -> Path | None:
+    uid = str(upload_id or "").strip()
+    if not uid:
+        return None
+    safe_user = _storage_safe_user_segment(user)
+    base = THUMBNAIL_VIDEO_UPLOAD_DIR / safe_user
+    if not base.exists():
+        return None
+    for p in base.iterdir():
+        if p.is_file() and p.stem == uid:
+            return p
+    return None
+
+
+def _thumbnail_frame_path(user: Optional[dict], upload_id: str) -> Path:
+    safe_user = _storage_safe_user_segment(user)
+    out_dir = THUMBNAIL_FRAME_DIR / safe_user
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"{upload_id}.jpg"
+
+
+async def _thumbnail_download_url_to_path(url: str, dest: Path) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+            resp = await client.get(str(url or "").strip())
+        if resp.status_code != 200 or not resp.content:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(resp.content)
+        return dest.exists() and dest.stat().st_size > 0
+    except Exception:
+        return False
+
+
+async def _thumbnail_collect_reference_paths(
+    user: Optional[dict],
+    ref_urls: list[str],
+    frame_path: str = "",
+) -> list[str]:
+    paths: list[str] = []
+    if frame_path and Path(frame_path).exists():
+        paths.append(frame_path)
+    cache_dir = THUMBNAIL_VISION_CACHE_DIR / _storage_safe_user_segment(user)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for i, url in enumerate(_thumbnail_clamp_reference_urls(ref_urls)):
+        dest = cache_dir / f"ref_{int(time.time())}_{i}.jpg"
+        if await _thumbnail_download_url_to_path(url, dest):
+            paths.append(str(dest))
+    return paths
+
+
+async def _thumbnail_vision_analyze(image_paths: list[str], context: str) -> dict:
+    if not image_paths:
+        return {}
+    try:
+        return await _fal_any_llm_vision_json_completion(
+            THUMBNAIL_VISION_EXTRACT_PROMPT,
+            f"Analyze these reference thumbnails for packaging patterns.\n\nNEW VIDEO CONTEXT:\n{context}",
+            image_paths=image_paths[:THUMBNAIL_MAX_VISION_IMAGES],
+            temperature=0.35,
+            timeout_sec=90,
+        )
+    except Exception as exc:
+        log.warning("Thumbnail vision analyze failed: %s", str(exc)[:200])
+        return {"error": str(exc)[:200]}
+
+
+def _thumbnail_clamp_reference_urls(urls: list[str]) -> list[str]:
+    clean = [str(u or "").strip() for u in list(urls or []) if str(u or "").strip()]
+    return clean[:THUMBNAIL_MAX_REFERENCE_URLS]
+
+
+def _score_vision_analysis(analysis: dict, catalyst_ctx: dict | None = None) -> float:
+    if not analysis or analysis.get("error"):
+        return 0.0
+    score = 0.0
+    try:
+        score += max(0.0, min(100.0, float(analysis.get("ctr_score") or 0))) * 0.55
+    except Exception:
+        pass
+    for field, weight in (
+        ("composition", 8),
+        ("color_palette", 6),
+        ("text_style", 6),
+        ("emotional_hook", 10),
+        ("generation_directive", 12),
+    ):
+        if str(analysis.get(field) or "").strip():
+            score += weight
+    patterns = [str(v).strip() for v in list(analysis.get("patterns") or []) if str(v).strip()]
+    score += min(12.0, len(patterns) * 3.0)
+    if catalyst_ctx:
+        pkg = " ".join(str(v) for v in list(catalyst_ctx.get("packaging_learnings") or [])[:6]).lower()
+        hook = str(analysis.get("emotional_hook") or "").lower()
+        directive = str(analysis.get("generation_directive") or "").lower()
+        if pkg:
+            overlap = sum(1 for token in pkg.split() if len(token) > 4 and token in f"{hook} {directive}")
+            score += min(10.0, overlap * 2.0)
+    return round(min(100.0, score), 2)
+
+
+def _score_thumbnail_prompt_variant(variant: dict, vision_analysis: dict | None = None) -> float:
+    if not variant:
+        return 0.0
+    score = 0.0
+    prompt = str(variant.get("prompt") or "").strip()
+    title_text = str(variant.get("title_text") or "").strip()
+    style_notes = str(variant.get("style_notes") or "").strip()
+    if len(prompt) >= 120:
+        score += 18
+    elif len(prompt) >= 60:
+        score += 10
+    words = [w for w in title_text.split() if w]
+    if 2 <= len(words) <= 6:
+        score += 16
+    elif title_text:
+        score += 6
+    if style_notes:
+        score += 8
+    if str(variant.get("negative_prompt") or "").strip():
+        score += 4
+    vision = dict(vision_analysis or {})
+    if vision and not vision.get("error"):
+        score += _score_vision_analysis(vision) * 0.25
+    patterns = list(variant.get("patterns_detected") or [])
+    score += min(8.0, len(patterns) * 2.0)
+    return round(score, 2)
+
+
+async def _thumbnail_vision_analyze_scored(
+    image_paths: list[str],
+    context: str,
+    catalyst_ctx: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Per-reference vision pass with CTR scoring; returns merged winner + ranked refs."""
+    paths = [p for p in list(image_paths or []) if p and Path(p).exists()][:THUMBNAIL_MAX_VISION_IMAGES]
+    if not paths:
+        return {}, []
+    ranked: list[dict] = []
+    for idx, path in enumerate(paths):
+        try:
+            row = await _fal_any_llm_vision_json_completion(
+                THUMBNAIL_VISION_EXTRACT_PROMPT,
+                f"Analyze this ONE reference thumbnail for packaging patterns.\n\nNEW VIDEO CONTEXT:\n{context}",
+                image_paths=[path],
+                temperature=0.3,
+                timeout_sec=60,
+            )
+        except Exception as exc:
+            row = {"error": str(exc)[:200], "source_index": idx}
+        row["source_index"] = idx
+        row["vision_score"] = _score_vision_analysis(row, catalyst_ctx)
+        ranked.append(row)
+    ranked.sort(key=lambda item: -float(item.get("vision_score") or 0))
+    if not ranked:
+        return {}, []
+    top = dict(ranked[0])
+    merged_patterns: list[str] = []
+    for item in ranked[:3]:
+        for pat in list(item.get("patterns") or []):
+            token = str(pat or "").strip()
+            if token and token not in merged_patterns:
+                merged_patterns.append(token)
+    merged = {
+        "composition": top.get("composition", ""),
+        "color_palette": top.get("color_palette", ""),
+        "text_style": top.get("text_style", ""),
+        "emotional_hook": top.get("emotional_hook", ""),
+        "generation_directive": top.get("generation_directive", ""),
+        "patterns": merged_patterns[:8],
+        "do_not_copy": top.get("do_not_copy", ""),
+        "ctr_score": top.get("ctr_score", 0),
+        "score_reason": top.get("score_reason", ""),
+        "vision_score": top.get("vision_score", 0),
+        "reference_scores": [
+            {
+                "index": int(item.get("source_index") or 0),
+                "vision_score": float(item.get("vision_score") or 0),
+                "ctr_score": item.get("ctr_score", 0),
+                "score_reason": str(item.get("score_reason") or "")[:180],
+            }
+            for item in ranked
+        ],
+    }
+    return merged, ranked
+
+
+def _thumbnail_catalyst_packaging(user: Optional[dict], channel_id: str = "") -> dict:
+    try:
+        from long_form.catalyst_bridge import fetch_channel_snapshot, shape_catalyst_insights
+    except Exception:
+        return {}
+    target_id = str(channel_id or "").strip()
+    if not target_id and user:
+        try:
+            from youtube_connections_store import hydrate
+            uid = str((user or {}).get("id") or "")
+            urec = (hydrate() or {}).get(uid) or {}
+            ch_map = urec.get("channels") or {}
+            if isinstance(ch_map, dict) and ch_map:
+                target_id = str(next(iter(ch_map.keys()), "") or "")
+        except Exception:
+            target_id = ""
+    if not target_id:
+        return {}
+    rec = fetch_channel_snapshot(target_id)
+    if not rec:
+        return {}
+    ins = shape_catalyst_insights(rec)
+    snap = dict(rec.get("analytics_snapshot") or {})
+    return {
+        "channel_id": target_id,
+        "channel_title": str(rec.get("title") or rec.get("channel_handle") or ""),
+        "packaging_learnings": list(snap.get("packaging_learnings") or [])[:8] or list(ins.get("hook_patterns") or [])[:8],
+        "title_pattern_hints": list(snap.get("title_pattern_hints") or [])[:6] or list(ins.get("hook_patterns") or [])[:6],
+        "top_titles": [t.get("title", "") for t in list(ins.get("top_titles") or [])[:5] if t.get("title")],
+    }
+
+
+async def _thumbnail_extract_frame_impl(user: dict, upload_id: str, pct: float = 0.12) -> dict:
+    src = _thumbnail_upload_path(user, upload_id)
+    if not src or not src.exists():
+        raise HTTPException(404, "Video upload not found")
+    pct_f = max(0.01, min(float(pct or 0.12), 0.95))
+    out = _thumbnail_frame_path(user, upload_id)
+    duration = 0.0
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        duration = float(str(stdout.decode().strip() or "0") or 0)
+    except Exception:
+        duration = 0.0
+    seek = max(0.0, duration * pct_f) if duration > 0 else 3.0
+    cmd = [
+        "ffmpeg", "-y", "-ss", str(seek), "-i", str(src),
+        "-frames:v", "1", "-q:v", "2",
+        "-vf", "scale=1280:-1",
+        str(out),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not out.exists():
+        raise HTTPException(500, f"Frame extract failed: {stderr.decode()[-200:]}")
+    return {
+        "upload_id": upload_id,
+        "frame_path": str(out),
+        "preview_url": f"/api/thumbnails/frame/{upload_id}",
+        "seek_sec": round(seek, 2),
+        "duration_sec": round(duration, 1),
+    }
+
+
+async def _thumbnail_extract_frame(
+    user: dict = Depends(require_auth),
+    upload_id: str = Query(""),
+    pct: float = Query(0.12, ge=0.01, le=0.95),
+):
+    return await _thumbnail_extract_frame_impl(user, upload_id, pct)
+
+
+async def _thumbnail_serve_frame(upload_id: str, user: dict = Depends(require_auth)):
+    path = _thumbnail_frame_path(user, upload_id)
+    if not path.exists():
+        raise HTTPException(404, "Frame not found — extract first")
+    return FileResponse(str(path), media_type="image/jpeg")
+
+
+async def _thumbnail_my_channels(user: dict = Depends(require_auth)):
+    payload = await _list_connected_youtube_channels_for_user(user, sync=False)
+    channels = []
+    for ch in list(payload.get("channels") or []):
+        if not isinstance(ch, dict):
+            continue
+        cid = str(ch.get("channel_id") or ch.get("id") or "").strip()
+        if not cid:
+            continue
+        cat = _thumbnail_catalyst_packaging(user, cid)
+        channels.append({
+            "channel_id": cid,
+            "title": str(ch.get("title") or ch.get("channel_title") or cat.get("channel_title") or cid),
+            "packaging_learnings": cat.get("packaging_learnings") or [],
+            "title_pattern_hints": cat.get("title_pattern_hints") or [],
+        })
+    return {"channels": channels, "total": len(channels)}
+
+
+async def _generate_thumbnail_prompt(
+    req: ThumbnailGenerateRequest,
+    *,
+    vision_analysis: dict | None = None,
+    catalyst_ctx: dict | None = None,
+    temperature: float = 0.7,
+    packaging_first: bool = False,
+) -> dict:
     style_preset_hint = THUMBNAIL_STYLE_PRESET_HINTS.get(str(req.style_preset or "").strip().lower(), "")
+    ref_lines: list[str] = []
+    for url in _thumbnail_clamp_reference_urls(list(req.reference_thumbnail_urls or [])):
+        ref_lines.append(f"- reference thumb: {url}")
+    if req.reference_creator:
+        ref_lines.append(f"- style lane creator: {req.reference_creator}")
+    ref_block = "\n".join(ref_lines)
+    video_title = str(req.video_title or "").strip()
     if req.mode == "style_transfer":
         system_prompt = THUMBNAIL_STYLE_TRANSFER_PROMPT
         user_msg = f"STYLE REFERENCE: {req.description}\n\nNEW THUMBNAIL CONTENT: {req.screenshot_description or req.description}"
     elif req.mode == "screenshot_analysis":
         system_prompt = THUMBNAIL_SCREENSHOT_PROMPT
-        user_msg = f"CHANNEL THUMBNAIL ANALYSIS: {req.screenshot_description or req.description}\n\nNEW VIDEO TO MAKE THUMBNAIL FOR: {req.description}"
+        user_msg = (
+            f"CHANNEL THUMBNAIL ANALYSIS:\n{req.screenshot_description or req.description}\n\n"
+            f"NEW VIDEO TO MAKE THUMBNAIL FOR:\n{req.description}"
+        )
     else:
         system_prompt = THUMBNAIL_ANALYSIS_PROMPT
         user_msg = f"Create a viral YouTube thumbnail for: {req.description}"
+    if video_title:
+        user_msg += f"\n\nVIDEO TITLE ON YOUTUBE: {video_title}"
+    if ref_block:
+        user_msg += f"\n\nCREATOR REFERENCE THUMBNAILS (match layout/energy, not a clone):\n{ref_block}"
     if style_preset_hint:
         user_msg += f"\n\nPREFERRED STYLE DIRECTION: {style_preset_hint}"
+    if catalyst_ctx:
+        pkg = [str(v).strip() for v in list(catalyst_ctx.get("packaging_learnings") or []) if str(v).strip()]
+        hints = [str(v).strip() for v in list(catalyst_ctx.get("title_pattern_hints") or []) if str(v).strip()]
+        tops = [str(v).strip() for v in list(catalyst_ctx.get("top_titles") or []) if str(v).strip()]
+        if pkg:
+            user_msg += f"\n\nYOUR CHANNEL PACKAGING LEARNINGS (Catalyst):\n" + "\n".join(f"- {p}" for p in pkg[:6])
+        if hints:
+            user_msg += f"\n\nTITLE PATTERNS THAT WORK ON YOUR CHANNEL:\n" + "\n".join(f"- {h}" for h in hints[:5])
+        if tops:
+            user_msg += f"\n\nTOP PERFORMING TITLES ON YOUR CHANNEL:\n" + "\n".join(f"- {t}" for t in tops[:5])
+    if vision_analysis and not vision_analysis.get("error"):
+        user_msg += (
+            f"\n\nVISION ANALYSIS OF REFERENCE THUMBNAILS:\n"
+            f"Composition: {vision_analysis.get('composition', '')}\n"
+            f"Colors: {vision_analysis.get('color_palette', '')}\n"
+            f"Text: {vision_analysis.get('text_style', '')}\n"
+            f"Hook: {vision_analysis.get('emotional_hook', '')}\n"
+            f"Directive: {vision_analysis.get('generation_directive', '')}\n"
+            f"Patterns: {', '.join(list(vision_analysis.get('patterns') or [])[:5])}\n"
+            f"Avoid cloning: {vision_analysis.get('do_not_copy', '')}"
+        )
+    if packaging_first and catalyst_ctx:
+        user_msg += (
+            "\n\nPACKAGING BIAS: Prioritize this channel's proven packaging wins over copying reference thumbnails."
+        )
 
-    # Thumbnail prompt gen runs through the same fal any-llm path as script gen
-    # so we don't need XAI credits for any text-completion work. Using the
-    # dedicated helper keeps logging, timeouts, and response parsing unified.
     return await _fal_any_llm_json_completion(
         system_prompt,
         user_msg,
-        temperature=0.7,
-        timeout_sec=60,
+        temperature=temperature,
+        timeout_sec=90,
     )
+
+
+async def _generate_thumbnail_prompt_ab(
+    req: ThumbnailGenerateRequest,
+    *,
+    vision_analysis: dict | None = None,
+    catalyst_ctx: dict | None = None,
+) -> dict:
+    """Generate two prompt variants and pick the higher-scoring packaging direction."""
+    variant_a = await _generate_thumbnail_prompt(
+        req,
+        vision_analysis=vision_analysis,
+        catalyst_ctx=catalyst_ctx,
+        temperature=0.65,
+        packaging_first=False,
+    )
+    variant_b = await _generate_thumbnail_prompt(
+        req,
+        vision_analysis=vision_analysis,
+        catalyst_ctx=catalyst_ctx,
+        temperature=0.85,
+        packaging_first=True,
+    )
+    score_a = _score_thumbnail_prompt_variant(variant_a, vision_analysis)
+    score_b = _score_thumbnail_prompt_variant(variant_b, vision_analysis)
+    picked = "a" if score_a >= score_b else "b"
+    winner = variant_a if picked == "a" else variant_b
+    winner["ab_scoring"] = {
+        "picked": picked,
+        "variant_a_score": score_a,
+        "variant_b_score": score_b,
+        "vision_score": float((vision_analysis or {}).get("vision_score") or 0),
+    }
+    return winner
 
 
 async def _check_lora_exists() -> bool:
@@ -23188,6 +23902,155 @@ def _thumbnail_fal_model_candidates() -> list[str]:
     return deduped
 
 
+THUMBNAIL_MODEL_CREDITS: dict[str, int] = {
+    "ernie_image": 3,
+    "seedream45": 5,
+    "seedream_45": 5,
+    "imagen4_fast": 4,
+    "recraft_v4": 5,
+    "grok_imagine": 6,
+}
+THUMBNAIL_DEFAULT_CREDITS = 5
+THUMBNAIL_VIDEO_UPLOAD_DIR = THUMBNAIL_DIR / "video_uploads"
+THUMBNAIL_VIDEO_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _thumbnail_credit_cost(image_model: str = "") -> int:
+    key = str(image_model or "").strip().lower()
+    return int(THUMBNAIL_MODEL_CREDITS.get(key, THUMBNAIL_DEFAULT_CREDITS))
+
+
+def _thumbnail_model_catalog() -> list[dict]:
+    out: list[dict] = []
+    for model_id in _thumbnail_fal_model_candidates():
+        profile = dict(CREATIVE_IMAGE_MODEL_MAP.get(model_id) or {})
+        out.append({
+            "id": model_id,
+            "label": str(profile.get("label") or model_id),
+            "credits": _thumbnail_credit_cost(model_id),
+        })
+    if not out:
+        out.append({"id": "seedream45", "label": "Seedream 4.5", "credits": 5})
+    return out
+
+
+def _parse_youtube_channel_ref(raw: str) -> tuple[str, str]:
+    import re
+
+    s = str(raw or "").strip()
+    if not s:
+        return "", ""
+    m = re.search(r"youtube\.com/channel/(UC[\w-]{10,})", s, re.I)
+    if m:
+        return "", m.group(1)
+    m = re.search(r"youtube\.com/@([\w.-]+)", s, re.I)
+    if m:
+        return f"https://www.youtube.com/@{m.group(1)}", ""
+    if s.startswith("@"):
+        return f"https://www.youtube.com/{s.lstrip('/')}", ""
+    if s.startswith("UC") and len(s) >= 20:
+        return "", s
+    if "youtube.com" in s:
+        return s, ""
+    return f"https://www.youtube.com/@{s.lstrip('@')}", ""
+
+
+async def _thumbnail_creator_gallery(
+    url: str = Query(""),
+    max_results: int = Query(36, ge=6, le=60),
+    user: dict = Depends(require_auth),
+):
+    channel_url, channel_id = _parse_youtube_channel_ref(url)
+    if not channel_url and not channel_id:
+        raise HTTPException(400, "Paste a YouTube channel URL or @handle")
+    rows = await _youtube_fetch_public_channel_page_videos(
+        "",
+        channel_url=channel_url,
+        channel_id=channel_id,
+        max_results=max_results,
+    )
+    if not rows:
+        raise HTTPException(404, "Could not load videos for that channel — check the URL is public")
+    channel_title = ""
+    for row in rows:
+        channel_title = str(row.get("channel_title") or row.get("channel") or "").strip()
+        if channel_title:
+            break
+    videos = []
+    for row in rows:
+        vid = str(row.get("video_id") or "").strip()
+        if not vid:
+            continue
+        thumb = str(row.get("thumbnail_url") or "").strip()
+        if not thumb:
+            thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        videos.append({
+            "video_id": vid,
+            "title": str(row.get("title") or ""),
+            "views": int(float(row.get("views") or row.get("view_count") or 0) or 0),
+            "thumbnail_url": thumb,
+            "watch_url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    videos.sort(key=lambda v: v.get("views", 0), reverse=True)
+    return {
+        "channel_url": channel_url or (f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""),
+        "channel_id": channel_id,
+        "channel_title": channel_title or url,
+        "videos": videos,
+        "total": len(videos),
+    }
+
+
+async def _thumbnail_upload_video(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_auth),
+):
+    if not file or not file.filename:
+        raise HTTPException(400, "No video file")
+    safe_user = _storage_safe_user_segment(user)
+    out_dir = THUMBNAIL_VIDEO_UPLOAD_DIR / safe_user
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename).suffix.lower() or ".mp4"
+    if ext not in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}:
+        raise HTTPException(400, "Unsupported video format — use MP4, MOV, MKV, or WebM")
+    upload_id = f"vid_{int(time.time())}_{random.randint(1000, 9999)}"
+    dest = out_dir / f"{upload_id}{ext}"
+    size = 0
+    with dest.open("wb") as fh:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            fh.write(chunk)
+    duration_sec = 0.0
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(dest),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        duration_sec = float(str(stdout.decode().strip() or "0") or 0)
+    except Exception:
+        duration_sec = 0.0
+    return {
+        "upload_id": upload_id,
+        "filename": file.filename,
+        "size_mb": round(size / (1024 * 1024), 2),
+        "duration_sec": round(duration_sec, 1),
+        "duration_label": f"{int(duration_sec // 3600)}h {int((duration_sec % 3600) // 60)}m" if duration_sec >= 3600 else f"{int(duration_sec // 60)}m {int(duration_sec % 60)}s",
+    }
+
+
+async def _list_thumbnail_models(user: dict = Depends(require_auth)):
+    return {
+        "models": _thumbnail_model_catalog(),
+        "default_credits": THUMBNAIL_DEFAULT_CREDITS,
+        "max_reference_urls": THUMBNAIL_MAX_REFERENCE_URLS,
+    }
+
+
 async def _generate_thumbnail_image(
     prompt: str,
     negative_prompt: str,
@@ -23195,6 +24058,8 @@ async def _generate_thumbnail_image(
     user: Optional[dict],
     mode: str = "describe",
     style_ref_path: str = "",
+    image_model: str = "",
+    reference_image_paths: list[str] | None = None,
 ) -> dict:
     """Generate a thumbnail via fal.ai first, then fallback to Pikzels."""
     mode_normalized = str(mode or "describe").strip().lower()
@@ -23209,7 +24074,51 @@ async def _generate_thumbnail_image(
         )
 
     fal_errors: list[str] = []
-    for model_id in _thumbnail_fal_model_candidates():
+    preferred = str(image_model or "").strip().lower()
+    ref_paths = [p for p in list(reference_image_paths or []) if p and Path(p).exists()]
+    if ref_paths and FAL_AI_KEY and preferred in {"seedream45", "seedream_45", ""}:
+        try:
+            import fal_client
+            import fal_gate
+            urls = [fal_client.upload_file(p) for p in ref_paths[:4]]
+            body = {
+                "prompt": composed_prompt[:4000],
+                "image_urls": urls,
+                "image_size": "auto_2K",
+                "num_images": 1,
+            }
+            if negative_prompt:
+                body["negative_prompt"] = negative_prompt[:500]
+            data = await fal_gate.post_with_retry(
+                SEEDREAM_THUMB_EDIT_URL,
+                api_key=FAL_AI_KEY,
+                json_body=body,
+                timeout_sec=180,
+                max_attempts=3,
+                source="thumbnail_seedream_edit",
+            )
+            images = list((data or {}).get("images") or [])
+            if images:
+                image_value = str((images[0] or {}).get("url") or "").strip()
+                cdn_url = await _write_fal_image_result_to_path(image_value, output_path)
+                return {
+                    "path": output_path,
+                    "output_url": cdn_url or image_value,
+                    "request_id": "",
+                    "style_id": "",
+                    "provider_mode": "fal_seedream_edit",
+                    "provider": "seedream45",
+                    "provider_label": "Seedream 4.5 Edit",
+                }
+        except Exception as edit_err:
+            fal_errors.append(f"seedream_edit: {edit_err}")
+
+    candidates = _thumbnail_fal_model_candidates()
+    if preferred and preferred in candidates:
+        candidates = [preferred] + [m for m in candidates if m != preferred]
+    elif preferred:
+        candidates = [preferred] + candidates
+    for model_id in candidates:
         try:
             fal_result = await _generate_image_fal_selected_model(
                 model_id,
@@ -23285,8 +24194,32 @@ async def _generate_thumbnail_image(
 async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
     if not FAL_AI_KEY and not PIKZELS_API_KEY:
         raise HTTPException(500, "Thumbnail image backend not configured (set FAL_AI_KEY or PIKZELS_API_KEY)")
+    ref_urls = _thumbnail_clamp_reference_urls(list(req.reference_thumbnail_urls or []))
+    if len(list(req.reference_thumbnail_urls or [])) > THUMBNAIL_MAX_REFERENCE_URLS:
+        req = req.model_copy(update={"reference_thumbnail_urls": ref_urls})
     library_dir = _thumbnail_library_dir_for_user(user)
     output_dir = _thumbnail_output_dir_for_user(user)
+    image_model = str(req.image_model or "").strip().lower()
+    credit_cost = _thumbnail_credit_cost(image_model)
+    user_id = str(user.get("id", "") or "")
+    try:
+        import unified_credits as uc
+        if user_id and not uc.can_afford(user_id, credit_cost):
+            raise HTTPException(402, f"Need {credit_cost} credits for this thumbnail model")
+        if user_id:
+            ok, _bal = uc.debit_credits(
+                user_id,
+                credit_cost,
+                reason="thumbnail_generate",
+                metadata={"model": image_model or "default", "mode": req.mode},
+                allow_negative=False,
+            )
+            if not ok:
+                raise HTTPException(402, f"Need {credit_cost} credits")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
 
     job_id = f"thumb_{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
@@ -23295,9 +24228,9 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
         "type": "thumbnail",
         "lane": "thumbnails",
         "mode": req.mode,
-        "credit_cost": 0,
-        "billing_source": "workspace_access",
-        "user_id": str(user.get("id", "") or ""),
+        "credit_cost": credit_cost,
+        "billing_source": "unified_credits",
+        "user_id": user_id,
         "created_at": time.time(),
     }
 
@@ -23307,7 +24240,41 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
             jobs[job_id]["progress"] = 10
             log.info(f"[{job_id}] Thumbnail gen: mode={req.mode}")
 
-            ai_result = await _generate_thumbnail_prompt(req)
+            frame_path = ""
+            upload_id = str(req.video_upload_id or "").strip()
+            if upload_id:
+                fp = _thumbnail_frame_path(user, upload_id)
+                if not fp.exists():
+                    try:
+                        await _thumbnail_extract_frame_impl(user, upload_id, req.frame_at_pct or 0.12)
+                    except Exception as frame_err:
+                        log.warning("[%s] frame extract skipped: %s", job_id, str(frame_err)[:120])
+                if fp.exists():
+                    frame_path = str(fp)
+
+            ref_paths = await _thumbnail_collect_reference_paths(
+                user,
+                ref_urls,
+                frame_path=frame_path,
+            )
+            context = " ".join(
+                x for x in [str(req.video_title or ""), str(req.description or ""), str(req.reference_creator or "")]
+                if str(x).strip()
+            )
+            jobs[job_id]["progress"] = 18
+            catalyst_ctx = _thumbnail_catalyst_packaging(user, str(req.channel_id or "").strip())
+            if ref_paths:
+                vision_analysis, _ranked_refs = await _thumbnail_vision_analyze_scored(
+                    ref_paths, context, catalyst_ctx=catalyst_ctx,
+                )
+            else:
+                vision_analysis = {}
+
+            ai_result = await _generate_thumbnail_prompt_ab(
+                req,
+                vision_analysis=vision_analysis,
+                catalyst_ctx=catalyst_ctx,
+            )
             thumb_prompt = ai_result.get("prompt", req.description)
             thumb_negative = ai_result.get("negative_prompt", NEGATIVE_PROMPT)
             title_text = ai_result.get("title_text", "")
@@ -23320,7 +24287,10 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
             jobs[job_id]["ai_analysis"] = {
                 "title_text": title_text,
                 "style_notes": style_notes,
-                "patterns": ai_result.get("patterns_detected", []),
+                "patterns": ai_result.get("patterns_detected", []) or vision_analysis.get("patterns", []),
+                "vision": vision_analysis,
+                "catalyst_channel": catalyst_ctx.get("channel_title", ""),
+                "ab_scoring": ai_result.get("ab_scoring") or {},
             }
 
             style_ref_path = ""
@@ -23338,6 +24308,8 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
                 user=user,
                 mode=req.mode,
                 style_ref_path=style_ref_path,
+                image_model=image_model,
+                reference_image_paths=ref_paths,
             )
 
             await _enforce_thumbnail_1080(output_path)
@@ -23374,9 +24346,15 @@ async def _generate_thumbnail(req: ThumbnailGenerateRequest, background_tasks: B
             log.error(f"[{job_id}] Thumbnail pipeline failed: {e}", exc_info=True)
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
+            try:
+                import unified_credits as uc
+                if user_id and credit_cost:
+                    uc.add_credits(user_id, credit_cost, reason="thumbnail_refund", metadata={"job_id": job_id})
+            except Exception:
+                pass
 
     background_tasks.add_task(_run_thumbnail_pipeline)
-    return {"status": "accepted", "job_id": job_id}
+    return {"status": "accepted", "job_id": job_id, "credit_cost": credit_cost}
 
 
 COMPRESS_THRESHOLD_MB = 50
@@ -23789,6 +24767,12 @@ app.include_router(
         serve_public_thumbnail_share_endpoint=_serve_public_thumbnail_share,
         serve_generated_thumbnail_endpoint=_serve_generated_thumbnail,
         generate_thumbnail_endpoint=_generate_thumbnail,
+        thumbnail_creator_gallery_endpoint=_thumbnail_creator_gallery,
+        thumbnail_upload_video_endpoint=_thumbnail_upload_video,
+        thumbnail_models_endpoint=_list_thumbnail_models,
+        thumbnail_my_channels_endpoint=_thumbnail_my_channels,
+        thumbnail_extract_frame_endpoint=_thumbnail_extract_frame,
+        thumbnail_serve_frame_endpoint=_thumbnail_serve_frame,
         list_voices_endpoint=_list_voices,
         preview_voice_endpoint=_preview_voice,
         create_demo_video_endpoint=_create_demo_video,
@@ -23904,13 +24888,39 @@ except Exception as _long_form_err:
 
 try:
     from studio_agent_router import build_studio_agent_router
+    def _studio_agent_lane_access(user: dict) -> bool:
+        return bool((_public_lane_access_for_user(user) or {}).get("agent"))
+
     app.include_router(build_studio_agent_router(
         require_auth=require_auth,
         is_admin_check=_is_admin_user,
+        lane_access_check=_studio_agent_lane_access,
     ))
-    log.info("Studio Agent router mounted at /api/studio-agent (admin-only beta)")
+    log.info("Studio Agent router mounted at /api/studio-agent (Creator/Studio + owner)")
 except Exception as _studio_agent_err:
     log.warning(f"Studio Agent router NOT mounted: {_studio_agent_err}")
+
+try:
+    from cliplab_router import build_cliplab_router
+
+    def _cliplab_debit(user_id: str, amount: int, reason: str, metadata: dict) -> bool:
+        try:
+            import unified_credits as uc
+            ok, _ = uc.debit_credits(user_id, amount, reason=reason, metadata=metadata, allow_negative=False)
+            return bool(ok)
+        except Exception:
+            return False
+
+    app.include_router(build_cliplab_router(
+        require_auth=require_auth,
+        jobs=jobs,
+        fal_json_completion=_fal_any_llm_json_completion,
+        fal_ai_key=FAL_AI_KEY or "",
+        debit_credits=_cliplab_debit,
+    ))
+    log.info("ClipLab router mounted at /api/cliplab (admin-only beta)")
+except Exception as _cliplab_err:
+    log.warning(f"ClipLab router NOT mounted: {_cliplab_err}")
 
 try:
     from studio_analytics_router import build_studio_analytics_router

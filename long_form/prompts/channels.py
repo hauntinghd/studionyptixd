@@ -247,7 +247,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
     "empire_magnates": {
         "key": "empire_magnates",
         "label": "Empire Magnates",
-        "tagline": "Red porcelain mannequin + photoreal financial-scam epics",
+        "tagline": "Yellow porcelain mannequin + Fern-style fraud documentaries",
         "icon": "💼",
         "format": "long_form",
         "channel_id": "UCA_cn0-EW2UbBsyEA0TahNA",
@@ -279,75 +279,77 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "system_prompt": (
             "You write 20-minute photoreal financial-fraud / corporate-empire "
             "documentary scripts for the Empire Magnates channel. Tone: "
-            "Lume-emulating long-form (porcelain-mannequin cast inside "
-            "documentary methodology). Hook formula MUST be: "
-            "'In [year], a [profession] walked into a [mundane location] "
-            "and legally [verb] $[amount] from [target].' "
+            "Fern-style armchair documentary — yellow-porcelain mannequin cast "
+            "in photoreal 3D environments with teal holographic data overlays. "
+            "Optional Act -1 contrast open (15 sec max): acknowledge the spectacle "
+            "blueprint on financial YouTube, then pivot — 'And then there's this "
+            "mechanism.' "
+            "Cold open MUST be in medias res: "
+            "'It's [Month] [Day], [Year]. [Specific room or place]. [One physical "
+            "action]. [Visual surprise]. [Question hook].' "
+            "Then explain the loophole, the grift, the crack, the collapse. "
             "Use real names. Dollar amounts to the cent. Diegetic narration."
         ),
         "visual_style": (
-            "Photoreal cinematic 24fps. Red-porcelain stylized mannequin "
-            "characters integrated INTO real-world environments (boardrooms, "
-            "courtrooms, trading floors). Red porcelain heads, real opaque "
-            "tailored clothing. Coldfusion color grade — deep blacks, neutral "
-            "midtones, restrained saturation."
+            "Photoreal cinematic 24fps Fern documentary grade. Saffron-yellow "
+            "golden porcelain mannequin characters (matte ceramic head and suit, "
+            "white shirt, black tie, NO facial features) integrated INTO "
+            "photoreal environments. Lighting LOCK: warm overhead spotlight on "
+            "mannequin + cool teal cyan hologram fill + deep black shadows + "
+            "reflective floors. Teal wireframe UI overlays for fraud mechanisms. "
+            "NOT illustration, NOT comic."
         ),
-        # Title pattern decoded from Lume's gold-standard "The Trader Who
-        # Legally Stole $440M From Citibank in 18 Seconds" — the
-        # 'Loophole / Legally Stole' magic-words pattern in
-        # project_fern_lume_formulas.md. Profession + Verb + $ amount + Target
-        # compresses the entire hook into 8-12 words and triggers high CTR
-        # at small-channel scale (Casey's <100k tier).
+        # Default title family T2 (Fern date anchor) — anti-spectacle packaging.
+        # T1 Loophole remains valid for repacks (Wirecard winner) but not default.
         "title_template": (
-            "The {profession} Who Legally {verb} ${amount} From {target}"
+            "{Month} {Day}, {Year}: When {Company} Lost ${Amount}"
         ),
         "title_examples": [
-            "The Trader Who Legally Stole $440M From Citibank",
-            "The Auditor Who Legally Drained $1.6B From Wirecard",
-            "The CEO Who Legally Vanished $12B From Sanjay Shah's Treasury Empire",
+            "March 19, 1997: When Bre-X Lost $6 Billion",
+            "January 2020: When Luckin Coffee Lost $4 Billion",
+            "June 2020: When Wirecard Lost $1.9 Billion",
         ],
         "title_avoid": [
             "Rise and Fall",      # zero-velocity pattern
             "Full Documentary",   # zero-velocity pattern
             "The Story of",       # generic
             "Inside the",         # generic
+            "SHOCKING",           # spectacle bait
+            "EXPOSED",            # tabloid
+            "You Won't Believe",  # tabloid
+            "INSANE",             # outrage bait
+            "Destroyed",          # rage bait unless factual legal term
         ],
         "description_tail": (
-            "\n\nA Loophole Files investigation. "
-            "Subscribe for new fraud + financial-empire deep dives weekly."
+            "\n\nLoophole Files — fraud mechanisms explained honestly. "
+            "Same cast, same room. New investigation when the next one is ready."
         ),
         "thumbnail_style_prompt": (
-            "ABSOLUTE CAST RULE: the only character in this thumbnail is a "
-            "smooth red-porcelain stylized mannequin (red ceramic head, no "
-            "facial features beyond subtle sculpted brow, real tailored navy "
-            "suit). ZERO real human faces. ZERO photographic-skin people. "
-            "ZERO additional characters.\n\n"
-            "Photoreal cinematic 16:9 thumbnail. The lone red-porcelain "
-            "mannequin executive stands center-frame or center-right at "
-            "MEDIUM-PORTRAIT scale (subject fills ~40-55% of frame height — "
-            "NOT a wide establishing shot), looking at the camera, in a "
-            "richly-lit boardroom, trading floor, or vault. Coldfusion color "
-            "grade — deep blacks, neutral midtones, restrained saturation, "
-            "single warm key light + cold backlight. "
-            "BOLD WHITE SANS-SERIF text overlay top: '$[AMOUNT]' in huge type, "
-            "secondary line below: '[TARGET COMPANY]' in smaller red caps. "
-            "High click-through documentary-thriller cover. No watermarks, "
-            "no logos other than overlay text."
+            "ABSOLUTE CAST RULE: the only character is a smooth saffron-yellow "
+            "golden porcelain mannequin (yellow ceramic head and suit, NO facial "
+            "features, white shirt, black tie). ZERO real human faces.\n\n"
+            "Photoreal cinematic 16:9 Fern-style documentary thumbnail. "
+            "Yellow-porcelain mannequin at podium or left-third, DOMINANT teal "
+            "holographic wireframe display filling the frame (fraud-specific: "
+            "vault schematic, drill site map, wire transfer flow). "
+            "Warm spotlight + cool teal fill + reflective floor. "
+            "Dollar amount in small UI badge corner (teal chrome) — NOT giant "
+            "floating white text. High click-through. No watermarks."
         ),
     },
     "history_rewind": {
         "key": "history_rewind",
         "label": "History Rewind",
-        "tagline": "9-hour sleep documentaries — premium fal MiniMax narration",
+        "tagline": "Sleep history docs — Grok Imagine + ElevenLabs voice",
         "icon": "🏛️",
         "format": "long_form",
         "channel_id": "UCHmwsIGud6CeZ3CIs5cuaUA",
-        "default_minutes": 540,                       # 9 hours
+        "default_minutes": 0,                         # 0 = script-driven length, not forced 9hr
         "fps": 30,
-        "image_model_default": "seedream_45",
+        "image_model_default": "grok_imagine_quality",
         "i2v_model_default": "ken_burns",              # zoom/pan stills, no real i2v
-        "voice_provider_default": "fal_minimax",
-        "voice_id_default": "",
+        "voice_provider_default": "elevenlabs",
+        "voice_id_default": "Zu82ovvOlZd6iX0xbEzd",
         # Real cost: fal MiniMax (~478k chars × $0.10/1k = $47.80)
         # + 540 ernie-image scenes × $0.03 = $16.20
         # + 18 chapter LLM passes ($9) + outline/ambient/thumbnails ($0.40)
@@ -423,11 +425,11 @@ CHANNELS: dict[str, dict[str, Any]] = {
     "zerotier": {
         "key": "zerotier",
         "label": "ZeroTier",
-        "tagline": "Comic-book / DC-character shorts — Conflict Arc retention formula",
+        "tagline": "Comic-book shorts — Pope hook doctrine, data-driven",
         "icon": "⚡",
         "format": "shorts",
         "channel_id": "UC9Gth_4MVet6rdPH7MHJf-g",
-        "default_minutes": 0.6,                        # ~36s shorts
+        "default_minutes": 0.55,                       # ~33s Pope benchmark
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "kling_v21_standard",
@@ -435,10 +437,11 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "voice_id_default": "",
         "cost_estimate_usd": 1.40,                     # standard skeleton-AI shorts cost
         "system_prompt": (
-            "ZeroTier is a comic-book / DC-character shorts channel. The "
-            "render path for shorts goes through the Skeleton AI pipeline "
-            "in the Create tab, not Long Form. This entry exists so Catalyst "
-            "data for the channel surfaces in the Long Form analytics view."
+            "ZeroTier is a comic-book / DC-character shorts channel. "
+            "Pope doctrine: optimize stayed-to-watch (hook) + retention (pacing). "
+            "Titles reinforce frame-1 hook; 4-scene / ~33s Tier A Ken Burns. "
+            "Render path: zerotier_private/build_pope_*.py or Create tab. "
+            "Handoff: D:/recaps/ZeroTier/pope_doctrine_handoff.md"
         ),
         "visual_style": (
             "See skeleton_ai/prompts/base_style.py — anatomical white skull "
@@ -448,23 +451,47 @@ CHANNELS: dict[str, dict[str, Any]] = {
     "cryptic_science": {
         "key": "cryptic_science",
         "label": "Cryptic Science",
-        "tagline": "Skeleton AI shorts (Human Limits / Marvel vs DC / etc.)",
-        "icon": "💀",
-        "format": "shorts",
+        "tagline": "Verified high-RPM explainers — tax/IRS/banking + SS/Medicare",
+        "icon": "📋",
+        "format": "long_form",
         "channel_id": "UCOHnksm14B-9AqGhlpRxG5A",
-        "default_minutes": 1.0,                        # ~60s shorts
+        "default_minutes": 12,
         "fps": 30,
         "image_model_default": "seedream_45",
-        "i2v_model_default": "seedance_2_0",
+        "i2v_model_default": "creatify_aurora",
         "voice_provider_default": "elevenlabs",
-        "voice_id_default": "",
-        "cost_estimate_usd": 1.40,
+        "voice_id_default": "onwK4e9ZLuTAKqWW03F9",
+        "cost_estimate_usd": 22.0,
+        "pipeline_kind": "cryptic_verified_rook",
         "system_prompt": (
-            "Cryptic Science is the skeleton-AI shorts channel. Render path "
-            "is the Skeleton AI pipeline in the Create tab. This entry exists "
-            "so Catalyst data surfaces alongside the long-form channels."
+            "You write 10–14 minute verified explainer scripts for CrypticScience — "
+            "a US finance/benefits channel in the Markus Graves search-intent lane, "
+            "but every claim must trace to a primary .gov source (IRS, FinCEN, SSA, CMS). "
+            "Tone: calm authority, no fear-mongering, no unsourced 'they don't want you to know' "
+            "hooks unless the title is reframed as verified fact-check. "
+            "Structure: hook → official definition → who is affected → scenarios → "
+            "what the agency did NOT say → checklist + educational disclaimer. "
+            "~145 wpm. No legal/tax advice — educational only."
         ),
-        "visual_style": "See skeleton_ai/prompts/base_style.py for the locked spec.",
+        "visual_style": (
+            "Photoreal AI host — charcoal studio, navy shirt, lapel mic (Creatify Aurora). "
+            "Motion graphics: source_proof cards (quoted .gov line + URL + date), "
+            "stat counters for dollar thresholds, checklists for do/don't. "
+            "No stock B-roll. Reference: long_form/cryptic_verified_lanes.py"
+        ),
+        "title_template": (
+            "The {Specific_Rule_or_Amount} Explained — What {Agency} Actually {Posted|Requires} (Verified)"
+        ),
+        "title_examples": [
+            "The $10,000 Bank Rule Explained — What Banks Actually Report (Verified)",
+            "Social Security COLA 2026 — What SSA Actually Posted (Verified)",
+            "Medicare Part B Premium 2026 — CMS Numbers Explained (Verified)",
+        ],
+        "description_tail": (
+            "\n\nPRIMARY SOURCES ONLY — CrypticScience verification policy.\n"
+            "Educational only. Not tax, legal, or financial advice.\n"
+            "#IRS #SocialSecurity #Medicare #Retirement #TaxTips #CrypticScience"
+        ),
     },
     "lexi_manhwa": {
         "key": "lexi_manhwa",
@@ -487,6 +514,11 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "visual_style": "Manhwa recap pipeline (project_manhwa_recap_pipeline.md).",
     },
 }
+
+
+from long_form.prompts.creator_doctrine import apply_doctrine_to_channels
+
+apply_doctrine_to_channels(CHANNELS)
 
 
 def list_channels(format_filter: str | None = None) -> list[dict[str, Any]]:

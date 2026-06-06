@@ -97,36 +97,29 @@ class LFRenderError(RuntimeError):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Real fal.ai pricing — verified against Casey's other scripts in /recaps/
-# (wirecard_ltx, parmalat, olympus, zt shorts) + project memos
-# (project_ltx_i2v_winner.md, channel registry costs).
-# Updated 2026-05-08. If fal changes pricing, edit this dict in one place.
+# fal.ai pricing — live via Platform API (long_form.fal_pricing), with static
+# fallbacks when FAL_KEY is missing or API is unreachable.
 # ─────────────────────────────────────────────────────────────────────────────
 
-FAL_PRICING_USD: dict[str, float] = {
-    # Per-scene image gen
-    "seedream_v45_per_image": 0.04,        # 1920x1080 still or thumbnail
-    "ernie_per_image": 0.03,               # cheaper, used by sleep_doc
+from long_form.fal_pricing import (  # noqa: E402
+    FALLBACK_USD as _FAL_FALLBACK,
+    get_pricing_snapshot,
+    i2v_cost_per_clip as _i2v_cost_per_clip,
+    unit_cost as _fal_unit_cost,
+)
 
-    # Per-scene i2v animation
-    "ltx_13b_distilled_per_clip": 0.04,    # 5sec 720p — confirmed in
-                                           # E:/recaps/empire_magnates/wirecard/wirecard_ltx.py
-                                           # ('Budget: ${len(scenes) * 0.04:.2f}')
-    "kling_v21_pro_per_clip": 0.30,        # premium tier (Lacuna fallback)
-    "pixverse_v6_per_clip": 0.225,         # ZT shorts default
+# Back-compat alias for scripts that import FAL_PRICING_USD directly.
+FAL_PRICING_USD: dict[str, float] = dict(_FAL_FALLBACK)
+FAL_PRICING_USD.update({
+    "seedream_v45_per_image": _FAL_FALLBACK["seedream_v45_per_image"],
+    "ltx_13b_distilled_per_clip": _FAL_FALLBACK["ltx_13b_distilled_per_clip"],
+    "ltx_13b_per_second": 0.02,  # legacy; v5 uses flat $0.04/clip from API
+    "mmaudio_v2_per_call": _FAL_FALLBACK["mmaudio_v2_per_second"] * 8,
+    "grok_chapter_expand": 0.0,
+    "grok_outline": 0.0,
+})
 
-    # Per-call audio gen
-    "mmaudio_v2_per_call": 0.05,           # text-to-audio variant
-    "fal_minimax_per_1k_chars": 0.10,      # speech-02-hd
-    "elevenlabs_per_1k_chars": 0.10,       # turbo / multilingual
-
-    # Per-Grok call (any-llm Sonnet 4.5, ~16k tokens out per chapter)
-    "grok_chapter_expand": 0.50,           # rough avg per chapter
-    "grok_outline": 0.20,                  # one-shot outline
-
-    # Cushion percentage for retries / overage
-    "cushion_pct": 0.15,                   # 15% buffer over computed total
-}
+MMAUDIO_DEFAULT_SEC = float(os.environ.get("LF_MMAUDIO_SEC", "8"))
 
 
 def compute_render_cost(
@@ -134,105 +127,165 @@ def compute_render_cost(
     outline: dict | None = None,
     *,
     scenes_per_chapter_override: int | None = None,
+    force_refresh_pricing: bool = False,
 ) -> dict:
-    """Estimate render cost using ACTUAL fal.ai pricing + the outline's
-    chapter list. PR #137 replaces the hardcoded channel.cost_estimate_usd
-    ceiling with a per-render dynamic calculation.
+    """Estimate render cost using live fal Platform API pricing when available.
 
     Returns a dict shaped for the frontend kickoff/gate display:
         {
-            "stage_1_usd": float,        # chapters + stills + thumbnails
-            "stage_2_usd": float,        # i2v + VO + SFX (or narration + ambient for sleep_doc)
-            "total_usd": float,          # stage_1 + stage_2 + cushion
-            "breakdown": {step: usd},    # itemized
-            "n_scenes": int,
-            "pipeline_kind": str,
+            "stage_1_usd": float,        # stills + thumbnails (fal wallet)
+            "stage_2_usd": float,        # i2v + fal VO + SFX
+            "total_usd": float,          # fal wallet only, incl. cushion
+            "breakdown": {step: usd},
+            "non_fal_breakdown": {...},   # ElevenLabs / xAI script (not fal)
+            "pricing_source": str,
+            "pricing_fetched_at": float,
+            ...
         }
 
-    Falls back to channel.cost_estimate_usd / 2 split if outline is None
-    (e.g. cost shown on the channel-pick tab before user generates outline).
+    Falls back to channel.cost_estimate_usd if pipeline_kind is unknown.
     """
     pipeline_kind = (channel.get("pipeline_kind") or "").strip()
     chapters_list = list((outline or {}).get("chapters") or [])
     n_chapters = max(1, len(chapters_list))
 
-    # Cushion factor wraps everything at the end.
+    pricing = get_pricing_snapshot(force_refresh=force_refresh_pricing)
+    cushion_pct = float(FAL_PRICING_USD.get("cushion_pct", 0.15))
+
     def with_cushion(x: float) -> float:
-        return round(x * (1 + FAL_PRICING_USD["cushion_pct"]), 2)
+        return round(x * (1 + cushion_pct), 2)
+
+    def _cost_meta(extra: dict) -> dict:
+        return {
+            **extra,
+            "pricing_source": pricing.get("source"),
+            "pricing_fetched_at": pricing.get("fetched_at"),
+            "pricing_error": pricing.get("error"),
+        }
 
     # ── v5_episode (EM, Lacuna, PB Live, Hidden Cortex) ──────────────────
     if pipeline_kind == "v5_episode":
         scenes_per_chapter = scenes_per_chapter_override or 12
         n_scenes = n_chapters * scenes_per_chapter
-        # Estimate VO chars: ~200 per scene (one or two sentences)
         total_vo_chars = n_scenes * 200
+        vo_k = total_vo_chars / 1000.0
+
+        clip_sec = float(os.environ.get("EM_LTX_CLIP_SEC", "12"))
+        # v5_pipeline.py always renders LTX 13B distilled today.
+        i2v_model = "ltx_13b"
+        per_clip, i2v_note = _i2v_cost_per_clip(
+            pricing, i2v_model=i2v_model, clip_sec=clip_sec
+        )
+
+        still_per, _ = _fal_unit_cost(
+            pricing, "seedream_v45", fallback_key="seedream_v45_per_image", quantity=1.0
+        )
+        sfx_per, _ = _fal_unit_cost(
+            pricing,
+            "mmaudio_v2",
+            fallback_key="mmaudio_v2_per_second",
+            quantity=MMAUDIO_DEFAULT_SEC,
+        )
+
+        voice_provider = (channel.get("voice_provider_default") or "fal_minimax").strip()
+        non_fal: dict[str, float] = {}
+        fal_vo = 0.0
+        if voice_provider == "fal_minimax":
+            fal_vo, _ = _fal_unit_cost(
+                pricing,
+                "minimax_speech",
+                fallback_key="fal_minimax_per_1k_chars",
+                quantity=vo_k,
+            )
+        elif voice_provider == "elevenlabs":
+            non_fal["elevenlabs_vo"] = round(
+                vo_k * FAL_PRICING_USD["elevenlabs_per_1k_chars"], 2
+            )
+
+        is_em = (channel.get("key") or "") == "empire_magnates"
+        thumb_count = 0 if is_em else 3
 
         breakdown = {
-            "chapters_grok": n_chapters * FAL_PRICING_USD["grok_chapter_expand"],
-            "stills_seedream": n_scenes * FAL_PRICING_USD["seedream_v45_per_image"],
-            "thumbnails_seedream": 3 * FAL_PRICING_USD["seedream_v45_per_image"],
-            "ltx_i2v_clips": n_scenes * FAL_PRICING_USD["ltx_13b_distilled_per_clip"],
-            "mmaudio_sfx_per_scene": n_scenes * FAL_PRICING_USD["mmaudio_v2_per_call"],
-            "fal_minimax_vo": (total_vo_chars / 1000) * FAL_PRICING_USD["fal_minimax_per_1k_chars"],
+            "stills_seedream": round(n_scenes * still_per, 2),
+            "thumbnails_seedream": round(thumb_count * still_per, 2),
+            "ltx_i2v_clips": round(n_scenes * per_clip, 2),
+            "mmaudio_sfx_per_scene": round(n_scenes * sfx_per, 2),
+            "fal_minimax_vo": round(fal_vo, 2),
         }
-        stage_1 = (
-            breakdown["chapters_grok"]
-            + breakdown["stills_seedream"]
-            + breakdown["thumbnails_seedream"]
-        )
+        stage_1 = breakdown["stills_seedream"] + breakdown["thumbnails_seedream"]
         stage_2 = (
             breakdown["ltx_i2v_clips"]
             + breakdown["mmaudio_sfx_per_scene"]
             + breakdown["fal_minimax_vo"]
         )
-        return {
+        fal_sub = stage_1 + stage_2
+        return _cost_meta({
             "stage_1_usd": with_cushion(stage_1),
             "stage_2_usd": with_cushion(stage_2),
-            "total_usd": with_cushion(stage_1 + stage_2),
-            "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
+            "total_usd": with_cushion(fal_sub),
+            "fal_subtotal_usd": round(fal_sub, 2),
+            "non_fal_usd": round(sum(non_fal.values()), 2),
+            "all_in_usd": round(fal_sub + sum(non_fal.values()), 2),
+            "breakdown": breakdown,
+            "non_fal_breakdown": non_fal,
             "n_scenes": n_scenes,
             "n_chapters": n_chapters,
             "pipeline_kind": pipeline_kind,
-        }
+            "i2v_model_billed": i2v_model,
+            "i2v_billing_note": i2v_note,
+            "mmaudio_sec_per_scene": MMAUDIO_DEFAULT_SEC,
+        })
 
     # ── sleep_doc (HR 9hr) ────────────────────────────────────────────────
     if pipeline_kind == "sleep_doc":
         scenes_per_chapter = scenes_per_chapter_override or 30
         n_scenes = n_chapters * scenes_per_chapter
-        # Estimate total narration chars from target duration.
         target_sec = float((outline or {}).get("target_duration_sec", 0) or 0)
         if target_sec <= 0:
-            # Fall back to channel.default_minutes
             target_sec = float(channel.get("default_minutes", 540) or 540) * 60
-        # ~120 wpm calm narration, ~5 chars/word
         total_words = (target_sec / 60.0) * 120
         total_vo_chars = total_words * 5
+        vo_k = total_vo_chars / 1000.0
+
+        still_per = FAL_PRICING_USD["ernie_per_image"]
+        seed_per, _ = _fal_unit_cost(
+            pricing, "seedream_v45", fallback_key="seedream_v45_per_image", quantity=1.0
+        )
+        sfx_ambient, _ = _fal_unit_cost(
+            pricing,
+            "mmaudio_v2",
+            fallback_key="mmaudio_v2_per_second",
+            quantity=30.0,
+        )
+        fal_narr, _ = _fal_unit_cost(
+            pricing,
+            "minimax_speech",
+            fallback_key="fal_minimax_per_1k_chars",
+            quantity=vo_k,
+        )
 
         breakdown = {
-            "chapters_grok": n_chapters * FAL_PRICING_USD["grok_chapter_expand"],
-            "stills_ernie": n_scenes * FAL_PRICING_USD["ernie_per_image"],
-            "thumbnails_seedream": 3 * FAL_PRICING_USD["seedream_v45_per_image"],
-            "fal_minimax_narration": (total_vo_chars / 1000) * FAL_PRICING_USD["fal_minimax_per_1k_chars"],
-            "mmaudio_ambient_bed": 1 * FAL_PRICING_USD["mmaudio_v2_per_call"],
+            "stills_ernie": round(n_scenes * still_per, 2),
+            "thumbnails_seedream": round(3 * seed_per, 2),
+            "fal_minimax_narration": round(fal_narr, 2),
+            "mmaudio_ambient_bed": round(sfx_ambient, 2),
         }
-        stage_1 = (
-            breakdown["chapters_grok"]
-            + breakdown["stills_ernie"]
-            + breakdown["thumbnails_seedream"]
-        )
-        stage_2 = (
-            breakdown["fal_minimax_narration"]
-            + breakdown["mmaudio_ambient_bed"]
-        )
-        return {
+        stage_1 = breakdown["stills_ernie"] + breakdown["thumbnails_seedream"]
+        stage_2 = breakdown["fal_minimax_narration"] + breakdown["mmaudio_ambient_bed"]
+        fal_sub = stage_1 + stage_2
+        return _cost_meta({
             "stage_1_usd": with_cushion(stage_1),
             "stage_2_usd": with_cushion(stage_2),
-            "total_usd": with_cushion(stage_1 + stage_2),
-            "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
+            "total_usd": with_cushion(fal_sub),
+            "fal_subtotal_usd": round(fal_sub, 2),
+            "non_fal_usd": 0.0,
+            "all_in_usd": round(fal_sub, 2),
+            "breakdown": breakdown,
+            "non_fal_breakdown": {},
             "n_scenes": n_scenes,
             "n_chapters": n_chapters,
             "pipeline_kind": pipeline_kind,
-        }
+        })
 
     # Unknown pipeline_kind — preserve channel registry fallback.
     fallback = float(channel.get("cost_estimate_usd", 0) or 0)

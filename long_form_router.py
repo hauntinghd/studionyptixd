@@ -162,6 +162,41 @@ def build_long_form_router(
         # omit to get all 9.
         return {"channels": list_channels(format_filter=format)}
 
+    @router.get("/fal-pricing")
+    async def fal_pricing_route(
+        user: dict = auth_dep,
+        refresh: bool = False,
+        channel_key: str | None = None,
+        target_minutes: int | None = None,
+    ):
+        """Live fal Platform API prices + optional channel cost preview."""
+        _gate_admin(user)
+        from long_form import fal_pricing as fp
+
+        snap = fp.get_pricing_snapshot(force_refresh=refresh)
+        out: dict[str, Any] = {
+            "status": fp.pricing_status(),
+            "prices": snap.get("prices"),
+            "endpoints": snap.get("endpoints"),
+        }
+        if channel_key:
+            try:
+                channel = get_channel(channel_key)
+            except ValueError as e:
+                raise HTTPException(404, str(e)) from e
+            minutes = int(target_minutes or channel.get("default_minutes") or 15)
+            n_ch = max(3, min(20, round(minutes / 5)))
+            outline = {
+                "chapters": [{"title": f"Ch{i}"} for i in range(n_ch)],
+                "target_duration_sec": minutes * 60,
+            }
+            out["cost_preview"] = lf_pipeline.compute_render_cost(
+                channel,
+                outline,
+                force_refresh_pricing=refresh,
+            )
+        return out
+
     @router.get("/connected-channels")
     async def connected_channels(user: dict = auth_dep):
         """

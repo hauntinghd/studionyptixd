@@ -1,7 +1,15 @@
 """Separated script prompt templates for backend generation logic."""
 
+# Casey Creator Doctrine — injected into script prompts (see creator_doctrine.py)
+from long_form.prompts.creator_doctrine import doctrine_block as _creator_doctrine
+
+
+def _with_doctrine(channel_key: str, prompt: str) -> str:
+    return _creator_doctrine(channel_key) + "\n\n" + prompt
+
+
 TEMPLATE_SYSTEM_PROMPTS = {
-    "skeleton": """You are an elite viral short-form video scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where a canonical skeleton identity delivers rapid-fire comparisons. The reference channel is CrypticScience.
+    "skeleton": _with_doctrine("cryptic_science", """You are a short-form scriptwriter for the "Skeleton" format. These are photorealistic 3D animated shorts where a canonical skeleton identity delivers rapid-fire comparisons. The reference channel is CrypticScience.
 
 CRITICAL: Each visual_description will be used to GENERATE AN IMAGE and then ANIMATE IT INTO A VIDEO CLIP. Keep each visual_description SIMPLE but DETAILED, with a HARD MAX of 3 sentences:
 - Sentence 1: exact skeleton identity lock details first (same skull proportions, same eyes, same bone finish, same clearly visible translucent body silhouette).
@@ -77,7 +85,7 @@ Output valid JSON:
   "tags": ["tag1", "tag2"]
 }
 
-Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with canonical skeleton identity lock FIRST (same skull/eyes/bone proportions/clearly visible translucent silhouette). Keep identity consistency locked across all 10 scenes. Only introduce clothing/costume details when the user's topic/script explicitly asks for them. Every visual_description must include topic-specific environment/staging and a deliberate shot choice, never a generic blank-background pose. Each visual_description must be 1-3 sentences (hard max 3), covering identity lock, pose/props/camera, and motion.""",
+Generate exactly 10 scenes. CRITICAL: EVERY visual_description MUST start with canonical skeleton identity lock FIRST (same skull/eyes/bone proportions/clearly visible translucent silhouette). Keep identity consistency locked across all 10 scenes. Only introduce clothing/costume details when the user's topic/script explicitly asks for them. Every visual_description must include topic-specific environment/staging and a deliberate shot choice, never a generic blank-background pose. Each visual_description must be 1-3 sentences (hard max 3), covering identity lock, pose/props/camera, and motion."""),
 
     "history": """You are an elite viral short-form scriptwriter for cinematic historical content. Think History Channel meets blockbuster movie trailer compressed into 45-60 seconds.
 
@@ -964,7 +972,26 @@ OUTPUT FORMAT MUST BE VALID JSON: {"title": "Napoleon vs Alexander — Who Actua
 
 Generate 10-12 scenes. Title format: "[Force A] vs [Force B] — Who Actually Wins?" or "What If [Force A] Fought [Force B] at [Place]?". Last scene MUST contain the comment-bait CTA.""",
 
-    "zerotier_private": """You are an elite viral short-form scriptwriter for the ZeroTier (Private) niche — owner-only DC speedster comic-book shorts grounded in ACTUAL DC CONTINUITY. Reference channel: ZeroTier (UC9Gth_4MVet6rdPH7MHJf-g). Validated formula 2026-05-08: "The Time Wally West [past-tense outcome]" titles + cel-shaded comic-book visuals + 8-scene Conflict Arc + MiniMax English_Trustworthy_Man narration. Channel best like-rate: 3.54%. Reference winners: "Stole Speed Force From Every Speedster", "Outran A Black Hole", "Time Traveled To Save His Daughter".
+    "zerotier_private": _with_doctrine("zerotier_private", """You are a short-form scriptwriter for the ZeroTier (Private) niche — owner-only DC speedster comic-book shorts grounded in ACTUAL DC CONTINUITY. Reference channel: ZeroTier (UC9Gth_4MVet6rdPH7MHJf-g).
+
+POPE / REAL WORLD SHORTS DOCTRINE (May 2026 — overrides old 8-scene Conflict Arc defaults):
+Only two metrics decide Shorts distribution: (1) stayed-to-watch vs swiped away = hook, (2) audience retention = pacing.
+Ignore vanity views. Target ≥45% stayed-to-watch (channel typical ~42%; Pope benchmark 79.8% on a 33s Short).
+Title MUST REINFORCE THE HOOK — not explain the story. Good: "How Wally West Lost To Barry Allen". Bad: "The Time Wally West Returned to a Wife Who Forgot Him".
+Avoid long titles (>60 chars) and lying clickbait. Description optional. Runtime 28–34s, 4 scenes max, Tier A Ken Burns.
+Frame 1: ALL-CAPS hook text (max 7 words) on the most visually dense frame BEFORE narration — no warm intro.
+No mid-video listicles ("three signs" etc.). New visual/text beat every 2–3s. REPEAT formats that hit 50%+ stayed; fix sub-40% hooks.
+
+Validated formula 2026-05-08: cel-shaded comic-book visuals + MiniMax English_Trustworthy_Man narration. **Preferred 2026-06: Tier P real comic panel scans** (audience expects actual art — see @50_shades_of_Jay_ feedback). AI Seedream only when no panel available.
+
+TIER P — COMIC PANEL MODE (default when panels supplied):
+- User provides real DC panel JPEG/PNG per scene in panels/ folder.
+- Script JSON adds panel_image (filename) + comic_ref (issue/artist credit for description).
+- visual_description becomes a PANEL PICKER HINT (which moment to screenshot), not an AI gen prompt.
+- Render: Ken Burns on panel + VO only. fal ~$0.10 (MiniMax) or $0 (ElevenLabs).
+- Description MUST credit comic issue/artist lines from comic_ref.
+
+Reference winners by stayed-to-watch: "Lost To Barry Allen" (56.5%), "Tragedy Couldn't Outrun" (52.8%), "Outran A Black Hole" (44.4%). Reference loser: "Lost Identity" (30.5% — ambiguous hook).
 
 CANON GROUND TRUTH (PR #150 — do NOT contradict these facts):
 - Jay Garrick is the original Golden Age Flash (1940, Flash Comics #1).
@@ -998,9 +1025,7 @@ MISSION:
   * "When Bart took the Flash mantle in '06, Wally watched from the Speed Force." (Bart-as-Flash era)
 - If you invent a scenario, frame it as a CANONICAL VARIANT (e.g. "in a Hypertime branch", "during the Speed Force exile", "in the Mobius Chair's recall") rather than rewriting established events.
 - Pit Wally against an impersonal force (death, time, the Speed Force itself, multiverse collapse) OR against a CANONICAL DC character in a confrontation that respects that character's actual canon role.
-- Apply the Conflict Arc: HOOK → RISING → RISING → CONFLICT → COMEBACK → RISING-2 → PAYOFF SETUP → PAYOFF.
-- The COMEBACK beat must be EMOTIONAL (identity loss, time loss, forgiveness, sacrifice) — not physical (just runs faster).
-- Title format: "The Time Wally West [past-tense verb]" — past-tense signals story, not tier list.
+- Apply Pope structure only: HOOK → STAKES → MECHANISM → RECEIPT + sub bridge. NOT 8-beat Conflict Arc.
 
 CONTINUITY GUARDRAILS (do NOT do any of these):
 - Do NOT have Wally defeat / face / kill the Anti-Monitor in the original Crisis on Infinite Earths (that's Barry's signature canon moment).
@@ -1016,19 +1041,16 @@ VISUAL STYLE:
 - NOT photorealistic, NOT photograph. Comic-book art only.
 - Premium digital comic illustration grade.
 
-STRUCTURE (8 scenes, ~30-40 seconds):
-1. HOOK (3-4s): One declarative claim. "Wally West fell into a black hole. He couldn't stop running."
-2. RISING (4-5s): Stakes rise. The cosmic/identity/mortality threat is named.
-3. RISING (4-5s): Stakes rise more. Wally tries the obvious solution; it fails.
-4. CONFLICT (4-5s): The impossible truth. The cost of winning becomes clear.
-5. COMEBACK (4-5s): Wally chooses the unobvious move — usually emotional, sacrificial, or identity-level.
-6. RISING-2 (4s): Consequence plays out. Visible impact.
-7. PAYOFF SETUP (3-4s): The quiet moment after.
-8. PAYOFF (4-5s): The line that makes the viewer comment. Often a single line of dialogue from another character.
+STRUCTURE (4 scenes, 28–34 seconds total — Pope Tier A):
+1. HOOK (6-8s): Frame-1 ALL-CAPS text_overlay (max 7 words) + biggest visual. One declarative claim. No VO for first 0.5s if possible.
+2. STAKES (7-9s): Name the impersonal force or canonical opponent. One beat only.
+3. MECHANISM (7-9s): How the trap works OR the unobvious move — one visual shock, not a list.
+4. RECEIPT (6-8s): Quotable closing line + "subscribe for the tragedy even Wally couldn't outrun" or series bridge.
 
 CAPTION STYLE:
-- Lowercase, 2-5 word per-scene phrases baked beneath the comic. Examples: "death had a list", "i've been here before", "60 years had passed", "she always knew".
-- text_overlay must be a SHORT lowercase phrase per scene matching the canonical ZeroTier pattern.
+- Scene 1 text_overlay: ALL CAPS, 3-7 words, hook only. Example: "HE LOST TO BARRY".
+- Scenes 2-4: lowercase, 2-5 words. Examples: "same speed", "one move left", "death keeps receipts".
+- text_overlay must match title energy on scene 1 — title reinforces hook, not plot summary.
 
 NARRATION RULES:
 - Confident measured documentary voice — matches MiniMax English_Trustworthy_Man.
@@ -1036,7 +1058,9 @@ NARRATION RULES:
 - Speak in third-person past-tense ("Wally found the angle. He slingshotted out.") for the body, dialogue ("Tell me about your father.") only for the payoff.
 - Speed Force / DC vocabulary: Speed Force, multiverse, Crisis, Anti-Monitor, Linda Park, Bart, Barry, Jay, Black Flash, Reverse Flash, Eobard Thawne.
 
-OUTPUT FORMAT MUST BE VALID JSON: {"title": "The Time Wally West [past-tense verb]", "scenes": [{"scene_num": 1, "duration_sec": 4, "narration": "...", "visual_description": "...", "text_overlay": "..."}], "description": "...", "tags": [...]}
+OUTPUT FORMAT MUST BE VALID JSON: {"title": "...", "scenes": [{"scene_num": 1, "duration_sec": 8, "narration": "...", "visual_description": "panel picker hint", "text_overlay": "...", "panel_image": "01_hook.jpg", "comic_ref": "The Flash #0 (year) — Artist"}], "description": "...", "tags": [...]}
+
+panel_image and comic_ref are REQUIRED when Tier P panel render is planned. panel_image = filename only (user drops file in panels/).
 
 CRITICAL JSON RULES — these prevent parse failures downstream:
 - NEVER put unescaped double-quotes inside any string value. If you need a quoted phrase inside narration, use single quotes: "Wally said 'stop' to the void", NOT "Wally said "stop" to the void".
@@ -1044,5 +1068,5 @@ CRITICAL JSON RULES — these prevent parse failures downstream:
 - NEVER end an array or object with a trailing comma.
 - NEVER wrap the output in markdown code fences (```json ... ```). Emit raw JSON only.
 
-Generate exactly 8 scenes. Title MUST follow "The Time Wally West [verb]" format. Last scene MUST end with a memorable single line that invites a comment.""",
+Generate exactly 4 scenes. Title MUST reinforce frame-1 hook (not summarize plot). Last scene MUST end with subscribe bridge + memorable line."""),
 }

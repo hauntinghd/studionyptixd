@@ -38,6 +38,7 @@ def trim_with_captions(
     width: int = 720,
     height: int = 1280,
     fps: int = 30,
+    watermark_text: str = "ZeroTier",
 ) -> Path:
     """Trim a scene clip to exact duration and burn captions + watermark.
 
@@ -53,7 +54,7 @@ def trim_with_captions(
     timed = cap.time_phrases(phrases, duration_sec)
 
     drawtexts = [cap.caption_drawtext(p, width=width) for p in timed]
-    drawtexts.append(cap.watermark_drawtext())
+    drawtexts.append(cap.watermark_drawtext(watermark_text=watermark_text))
 
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"

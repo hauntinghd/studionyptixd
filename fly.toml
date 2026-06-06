@@ -30,6 +30,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   TRAINING_DATA_DIR = "/var/data/training_data"
   THUMBNAIL_DIR = "/var/data/thumbnails"
   DEMO_UPLOAD_DIR = "/var/data/demo_uploads"
+  SKELETON_AI_OUTPUT_ROOT = "/var/data/skeleton_output"
   # Redis disabled at launch — Render had REDIS_QUEUE_ENABLED=true but the
   # connection wasn't actually working (live /api/config reported
   # queue_mode: "inprocess"). In-process queue has been the de-facto behavior.
@@ -37,6 +38,11 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   # then flip this flag to "true".
   REDIS_QUEUE_ENABLED = "false"
   REDIS_QUEUE_PREFIX = "studio"
+  # Studio Agent OpenRouter + fal concurrency gate (per worker when Redis off).
+  STUDIO_AGENT_QUEUE_ENABLED = "true"
+  STUDIO_AGENT_MAX_CONCURRENT = "500"
+  STUDIO_AGENT_MAX_QUEUE_DEPTH = "500"
+  STUDIO_AGENT_QUEUE_MAX_WAIT_SEC = "900"
   JOB_QUEUE_WORKERS = "1"
   RUN_EMBEDDED_WORKER = "true"
   SITE_URL = "https://studio.nyptidindustries.com"

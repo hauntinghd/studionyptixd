@@ -1,0 +1,113 @@
+{
+  "topic": "The $10,000 Bank Rule + Social Security Deposits",
+  "verified_as_of": "2026-05-27",
+  "style_notes": "Markus Graves search hook + Graham Stephan 'what this means for you' + CrypticScience source proof",
+  "primary_sources": [
+    {
+      "id": "fdic_ctr",
+      "title": "FDIC — Currency Transaction Reporting (FinCEN guidance)",
+      "author": "FDIC / FinCEN",
+      "date": "2024-03",
+      "url": "https://www.fdic.gov/sites/default/files/2024-03/fil21012c.pdf"
+    },
+    {
+      "id": "fincen_bsa",
+      "title": "FinCEN — Bank Secrecy Act",
+      "author": "Financial Crimes Enforcement Network",
+      "date": "2026-05-27",
+      "url": "https://www.fincen.gov/resources/statutes-and-regulations/bank-secrecy-act"
+    },
+    {
+      "id": "fincen_ctr_overview",
+      "title": "FinCEN — Currency Transaction Report (CTR) overview",
+      "author": "FinCEN",
+      "date": "2026-05-27",
+      "url": "https://www.fincen.gov/resources/statutes-regulations/guidance/ctr-qa"
+    },
+    {
+      "id": "ssa_cola_press",
+      "title": "Social Security Announces 2.8 Percent Benefit Increase for 2026",
+      "author": "Social Security Administration",
+      "date": "2025-10-24",
+      "url": "https://www.ssa.gov/news/en/press/releases/2025-10-24.html"
+    },
+    {
+      "id": "ssa_cola_factsheet",
+      "title": "2026 Cost-of-Living Adjustment (COLA) Fact Sheet",
+      "author": "Social Security Administration",
+      "date": "2025-10-24",
+      "url": "https://www.ssa.gov/news/en/cola/factsheets/2026.html"
+    },
+    {
+      "id": "ssa_cola_faq",
+      "title": "How much will the COLA amount be for 2026?",
+      "author": "Social Security Administration",
+      "date": "2025-10-24",
+      "url": "https://www.ssa.gov/faqs/en/questions/KA-01951.html"
+    },
+    {
+      "id": "whitehouse_eo_may19",
+      "title": "Restoring Integrity to America's Financial System (Executive Order)",
+      "author": "The White House",
+      "date": "2026-05-19",
+      "url": "https://www.whitehouse.gov/presidential-actions/2026/05/restoring-integrity-to-americas-financial-system/"
+    },
+    {
+      "id": "federal_register_cola",
+      "title": "Federal Register — 2026 Social Security COLA determination",
+      "author": "Social Security Administration",
+      "date": "2025-11-03",
+      "url": "https://www.govinfo.gov/content/pkg/FR-2025-11-03/html/2025-19763.htm"
+    }
+  ],
+  "verified_claims": [
+    {
+      "claim": "Financial institutions must file a Currency Transaction Report (CTR) for cash transactions exceeding $10,000 in one business day (aggregate rule applies).",
+      "source_id": "fdic_ctr"
+    },
+    {
+      "claim": "CTRs must be filed electronically with FinCEN; institutions generally have 15 calendar days after the transaction to file.",
+      "source_id": "fdic_ctr"
+    },
+    {
+      "claim": "The $10,000 CTR threshold is fixed by statute/regulation and has not been inflation-adjusted (GAO and FinCEN have reviewed this).",
+      "source_id": "fincen_bsa"
+    },
+    {
+      "claim": "Structuring — breaking up cash deposits to evade CTR reporting — is prohibited under federal law (31 U.S.C. § 5324).",
+      "source_id": "fincen_bsa"
+    },
+    {
+      "claim": "Social Security and SSI benefits increase 2.8 percent in 2026 (COLA).",
+      "source_id": "ssa_cola_press"
+    },
+    {
+      "claim": "On average, Social Security retirement benefits increase by about $56 per month starting January 2026.",
+      "source_id": "ssa_cola_press"
+    },
+    {
+      "claim": "Estimated average monthly Social Security benefit for all retired workers: $2,071 after the 2026 COLA (was $2,015).",
+      "source_id": "ssa_cola_factsheet"
+    },
+    {
+      "claim": "2026 maximum taxable earnings for Social Security (OASDI): $184,500 (up from $176,100 in 2025).",
+      "source_id": "ssa_cola_factsheet"
+    },
+    {
+      "claim": "On May 19, 2026, the White House signed an executive order directing Treasury to propose BSA/customer-due-diligence changes within 90 days — proposals, not live new deposit rules as of May 27.",
+      "source_id": "whitehouse_eo_may19"
+    }
+  ],
+  "not_claimed_by_sources": [
+    "Depositing a normal Social Security direct deposit does NOT by itself trigger a CTR — CTR applies to cash, not ACH/direct deposit.",
+    "The May 19, 2026 executive order did NOT change the $10,000 CTR threshold overnight.",
+    "This video does not state specific criminal penalties unless quoted from statute — consult an attorney for your situation.",
+    "Banks filing a CTR does not mean you committed a crime — CTR is an informational report."
+  ],
+  "fresh_news_hook": {
+    "date": "2026-05-19",
+    "headline": "White House EO directs Treasury/FinCEN BSA review within 90 days",
+    "source_id": "whitehouse_eo_may19",
+    "framing": "Proposed regulatory process — separate from the existing $10,000 cash CTR rule that is already law."
+  }
+}

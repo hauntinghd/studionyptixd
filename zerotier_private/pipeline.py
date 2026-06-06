@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -110,8 +111,12 @@ def _normalize_scenes(script_json: Any) -> tuple[list[dict], str]:
         narration = str(raw.get("narration", "") or "").strip()
         if not narration:
             continue
-        caption_raw = str(raw.get("text_overlay", "") or "").strip().lower()
-        caption = re.sub(r"\s+", " ", caption_raw)[:60] or _slugify(narration[:30])
+        caption_raw = str(raw.get("text_overlay", "") or "").strip()
+        # Scene 1 = Pope hook: ALL CAPS, center-frame overlay in compose.
+        if i == 0:
+            caption = re.sub(r"\s+", " ", caption_raw.upper())[:60] or _slugify(narration[:30]).upper()
+        else:
+            caption = re.sub(r"\s+", " ", caption_raw.lower())[:60] or _slugify(narration[:30])
         visual = str(raw.get("visual_description", "") or "").strip()
         if not visual:
             visual = narration  # fall back to narration as visual seed
@@ -137,6 +142,8 @@ def _normalize_scenes(script_json: Any) -> tuple[list[dict], str]:
             "duration": duration,
             "visual_prompt": full_visual_prompt,
             "motion_prompt": motion_prompt,
+            "panel_image": str(raw.get("panel_image", "") or "").strip(),
+            "comic_ref": str(raw.get("comic_ref", "") or "").strip(),
         })
 
     if not out:
@@ -438,7 +445,21 @@ def _gen_clip_pixverse(scene: dict, still_path: Path, clips_dir: Path) -> Path:
     duration = float(scene.get("duration", scene.get("duration_sec", 5.0)) or 5.0)
     _ffmpeg_ken_burns_clip(still_path, out, duration_sec=duration)
     return out
-    raise ZTRenderError(f"pixverse timeout for {scene['id']} after 240s")
+
+
+def _gen_clip_ken_burns(scene: dict, still_path: Path, clips_dir: Path) -> Path:
+    """Ken Burns only — no Pixverse spend. Tier A budget renders."""
+    out = clips_dir / f"{scene['id']}.mp4"
+    if out.exists() and out.stat().st_size > 1024:
+        try:
+            _validate_clip_or_delete(out, sid=scene["id"])
+            return out
+        except ZTRenderError:
+            pass
+    duration = float(scene.get("duration", scene.get("duration_sec", 5.0)) or 5.0)
+    _ffmpeg_ken_burns_clip(still_path, out, duration_sec=duration)
+    return out
+
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -677,7 +698,7 @@ def _compose(scenes: list[dict], clips: list[Path], vo: Path,
     trimmed_dir = workspace / "trimmed"
     trimmed_dir.mkdir(exist_ok=True)
     trimmed: list[Path] = []
-    for scene, clip in zip(scenes, clips):
+    for scene_idx, (scene, clip) in enumerate(zip(scenes, clips)):
         sid = scene["id"]
         duration = scene["duration"]
         caption = scene["caption"]
@@ -691,11 +712,18 @@ def _compose(scenes: list[dict], clips: list[Path], vo: Path,
         )
         font_path = "C\\:/Windows/Fonts/arialbd.ttf"
         clean_len = len(caption)
-        font_size = 68 if clean_len <= 16 else (56 if clean_len <= 22 else 46)
+        is_hook = scene_idx == 0
+        # Pope hook: center 80% safe zone, large caps. Body: lower third.
+        if is_hook:
+            font_size = 72 if clean_len <= 18 else (58 if clean_len <= 28 else 48)
+            y_expr = "(h-text_h)/2"
+        else:
+            font_size = 68 if clean_len <= 16 else (56 if clean_len <= 22 else 46)
+            y_expr = "h*0.75"
         drawtext = (
             f"drawtext=fontfile='{font_path}':text='{caption_text}':"
             f"fontsize={font_size}:fontcolor=white:bordercolor=black:borderw=5:"
-            f"x=(w-text_w)/2:y=h*0.82"
+            f"x=(w-text_w)/2:y={y_expr}"
         )
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
@@ -920,6 +948,217 @@ def render_finalize(
         "fal_cost_estimate_usd": fal_cost_est,
         "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
     }
+
+
+def render_ken_burns_short(
+    *,
+    script_json: Any,
+    workspace: Path,
+    final_filename: str = "ZeroTier_short.mp4",
+) -> dict:
+    """Tier A render: Seedream stills + Ken Burns pans + MiniMax VO only.
+
+    Skips Pixverse i2v and mmaudio SFX to stay under ~$0.35 for a 4-scene short.
+    """
+    from zerotier_private.pope_doctrine import validate_pope_script
+
+    _ensure_fal()
+    workspace = Path(workspace)
+    stills_dir = workspace / "stills"
+    clips_dir = workspace / "clips"
+    vo_dir = workspace / "vo"
+    for d in (workspace, stills_dir, clips_dir, vo_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    raw_data = script_json if isinstance(script_json, dict) else json.loads(script_json)
+    for issue in validate_pope_script(raw_data):
+        print(f"  [pope:warn] {issue}", flush=True)
+
+    scenes, title = _normalize_scenes(raw_data)
+    scenes_path = workspace / "scenes.json"
+    scenes_path.write_text(
+        json.dumps({"title": title, "scenes": scenes}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    stills: list[Path] = [None] * len(scenes)  # type: ignore
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(_gen_still, s, stills_dir): i for i, s in enumerate(scenes)}
+        for fut in as_completed(futs):
+            stills[futs[fut]] = fut.result()
+
+    clips: list[Path] = [None] * len(scenes)  # type: ignore
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {
+            ex.submit(_gen_clip_ken_burns, scenes[i], stills[i], clips_dir): i
+            for i in range(len(scenes))
+        }
+        for fut in as_completed(futs):
+            clips[futs[fut]] = fut.result()
+
+    vo = _gen_vo(scenes, vo_dir)
+    final_mp4 = workspace / final_filename
+    _compose(scenes, clips, vo, workspace, final_mp4)
+
+    expected_total = sum(s["duration"] for s in scenes)
+    actual_total = _probe_duration_sec(final_mp4)
+    if actual_total < expected_total * 0.7:
+        raise ZTRenderError(
+            f"compose produced an MP4 too short: got {actual_total:.1f}s, "
+            f"expected ~{expected_total:.1f}s"
+        )
+
+    fal_cost_est = round(len(scenes) * 0.04 + 0.10, 2)
+
+    return {
+        "mp4_path": str(final_mp4),
+        "title": title,
+        "scene_count": len(scenes),
+        "duration_total_sec": round(actual_total, 1),
+        "fal_cost_estimate_usd": fal_cost_est,
+        "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
+    }
+
+
+def _resolve_panel_path(scene: dict, panels_dir: Path) -> Path:
+    """Resolve a scene's panel_image to an on-disk file under panels_dir."""
+    name = str(scene.get("panel_image", "") or "").strip()
+    if not name:
+        raise ZTRenderError(
+            f"scene {scene['id']} missing panel_image — drop scans in {panels_dir} "
+            f"and set panel_image in script.json"
+        )
+    candidate = Path(name)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    for p in (panels_dir / name, panels_dir / candidate.name):
+        if p.exists() and p.stat().st_size > 1024:
+            return p
+    raise ZTRenderError(
+        f"panel not found for {scene['id']}: {name!r} (looked in {panels_dir})"
+    )
+
+
+def render_comic_panel_short(
+    *,
+    script_json: Any,
+    workspace: Path,
+    final_filename: str = "ZeroTier_short.mp4",
+    vo_provider: str = "minimax",
+) -> dict:
+    """Tier P: real comic panel scans + Ken Burns + VO only (~$0.10 fal).
+
+    No Seedream, Pixverse, or mmaudio. User supplies panel JPEG/PNG per scene
+    in workspace/panels/ (see panel_image in script JSON).
+
+    vo_provider: 'minimax' (fal, default) or 'elevenlabs' (no fal for VO).
+    """
+    from zerotier_private.pope_doctrine import validate_pope_script
+
+    workspace = Path(workspace)
+    panels_dir = workspace / "panels"
+    stills_dir = workspace / "stills"
+    clips_dir = workspace / "clips"
+    vo_dir = workspace / "vo"
+    for d in (workspace, panels_dir, stills_dir, clips_dir, vo_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    raw_data = script_json if isinstance(script_json, dict) else json.loads(script_json)
+    for issue in validate_pope_script(raw_data):
+        print(f"  [pope:warn] {issue}", flush=True)
+
+    scenes, title = _normalize_scenes(raw_data)
+    missing = [s["id"] for s in scenes if not s.get("panel_image")]
+    if missing:
+        raise ZTRenderError(
+            f"Tier P requires panel_image on every scene; missing: {missing}"
+        )
+
+    scenes_path = workspace / "scenes.json"
+    scenes_path.write_text(
+        json.dumps({"title": title, "scenes": scenes, "render_tier": "P_panels"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    stills: list[Path] = []
+    for scene in scenes:
+        panel = _resolve_panel_path(scene, panels_dir)
+        still_out = stills_dir / f"{scene['id']}{panel.suffix.lower()}"
+        if not still_out.exists() or still_out.stat().st_mtime < panel.stat().st_mtime:
+            shutil.copy2(panel, still_out)
+        stills.append(still_out)
+        ref = scene.get("comic_ref") or panel.name
+        print(f"  [panel] {scene['id']} <- {ref}", flush=True)
+
+    clips: list[Path] = [None] * len(scenes)  # type: ignore
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {
+            ex.submit(_gen_clip_ken_burns, scenes[i], stills[i], clips_dir): i
+            for i in range(len(scenes))
+        }
+        for fut in as_completed(futs):
+            clips[futs[fut]] = fut.result()
+
+    if vo_provider == "elevenlabs":
+        vo = _gen_vo_elevenlabs(scenes, vo_dir)
+        fal_cost_est = 0.0
+    else:
+        _ensure_fal()
+        vo = _gen_vo(scenes, vo_dir)
+        fal_cost_est = 0.10
+
+    final_mp4 = workspace / final_filename
+    _compose(scenes, clips, vo, workspace, final_mp4)
+
+    expected_total = sum(s["duration"] for s in scenes)
+    actual_total = _probe_duration_sec(final_mp4)
+    if actual_total < expected_total * 0.7:
+        raise ZTRenderError(
+            f"compose produced an MP4 too short: got {actual_total:.1f}s, "
+            f"expected ~{expected_total:.1f}s"
+        )
+
+    credits = [s.get("comic_ref") for s in scenes if s.get("comic_ref")]
+    (workspace / "comic_credits.txt").write_text(
+        "Panel sources:\n" + "\n".join(f"- {c}" for c in credits) + "\n",
+        encoding="utf-8",
+    )
+
+    return {
+        "mp4_path": str(final_mp4),
+        "title": title,
+        "scene_count": len(scenes),
+        "duration_total_sec": round(actual_total, 1),
+        "fal_cost_estimate_usd": fal_cost_est,
+        "render_tier": "P_panels",
+        "comic_credits": credits,
+        "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
+    }
+
+
+def _gen_vo_elevenlabs(scenes: list[dict], vo_dir: Path) -> Path:
+    """ElevenLabs VO — zero fal spend for Tier P."""
+    out = vo_dir / "narration.mp3"
+    if out.exists() and out.stat().st_size > 1024:
+        return out
+    from skeleton_ai.voice_elevenlabs import ElevenLabsClient
+
+    key = os.environ.get("ELEVENLABS_STUDIO_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
+    if not key:
+        raise ZTRenderError("ELEVENLABS_API_KEY missing for vo_provider=elevenlabs")
+    el = ElevenLabsClient(api_key=key)
+    full_text = " ".join(s["narration"] for s in scenes).strip()
+    if out.exists():
+        out.unlink()
+    el.synthesize(
+        full_text, out,
+        voice_id="onwK4e9ZLuTAKqWW03F9",
+        model_id="eleven_multilingual_v2",
+        speed=0.95,
+        stability=0.58,
+        similarity_boost=0.82,
+    )
+    return out
 
 
 def render_zerotier_short(
