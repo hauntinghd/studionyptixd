@@ -1,4 +1,4 @@
-import { resolveStudioBackendUrl } from '../shared';
+import { resolveStudioBackendUrl } from '../shared.tsx';
 
 const agentApi = (path: string) => resolveStudioBackendUrl(path);
 

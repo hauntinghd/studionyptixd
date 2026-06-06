@@ -1,4 +1,4 @@
-import { resolveStudioBackendUrl } from '../shared';
+import { resolveStudioBackendUrl } from '../shared.tsx';
 
 export type AgentStreamEvent =
     | { event: 'status'; message?: string }

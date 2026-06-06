@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Youtube } from 'lucide-react';
-import { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } from '../../shared';
+import { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } from '../../shared.tsx';
 
 type ChannelRow = {
     channel_id: string;

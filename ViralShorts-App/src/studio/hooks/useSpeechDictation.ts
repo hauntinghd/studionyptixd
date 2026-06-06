@@ -4,7 +4,7 @@
  * - Firefox and others without SpeechRecognition: MediaRecorder + server whisper.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { resolveStudioBackendUrl } from '../shared';
+import { resolveStudioBackendUrl } from '../shared.tsx';
 
 export type DictationEngine = 'webspeech' | 'record' | 'none';
 

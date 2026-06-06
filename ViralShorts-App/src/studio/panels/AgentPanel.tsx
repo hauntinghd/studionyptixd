@@ -26,7 +26,7 @@ import {
 } from '../lib/agentProduction';
 import { streamAgentChat, toolLabel, type AgentStreamEvent } from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
-import { AuthContext, resolveStudioBackendUrl } from '../shared';
+import { AuthContext, resolveStudioBackendUrl } from '../shared.tsx';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
