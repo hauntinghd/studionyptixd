@@ -424,11 +424,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         pollResetKey,
         getToken,
         onProgress: upsertProgressLine,
-        onJobComplete: (snap) => {
+        onJobComplete: (snap: AgentJobSnapshot) => {
             setDockDismissed(false);
             appendJobDeliverable(snap);
         },
-        onJobFailed: (snap) => {
+        onJobFailed: (snap: AgentJobSnapshot) => {
             setPending([]);
             setDockDismissed(false);
             setError(snap.error || 'Production failed');
