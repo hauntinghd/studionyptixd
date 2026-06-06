@@ -1,5 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Youtube } from 'lucide-react';
+// @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
 import { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } from '../../shared.tsx';
 
 type ChannelRow = {

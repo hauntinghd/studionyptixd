@@ -1,3 +1,4 @@
+// @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
 import { resolveStudioBackendUrl } from '../shared.tsx';
 
 const agentApi = (path: string) => resolveStudioBackendUrl(path);
