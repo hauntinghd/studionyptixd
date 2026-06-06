@@ -1230,7 +1230,15 @@ def animate_production_scenes(job_id: str, scene_indices: list[int] | None = Non
 def finalize_production(job_id: str) -> str:
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import finalize_stage
-    result = finalize_stage(ws, tier="standard")
+    # Try to pick up a reedit_instruction sidecar if this finalize is part of a re-edit flow
+    reedit = None
+    try:
+        p = ws / "reedit_instruction.txt"
+        if p.exists():
+            reedit = p.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    result = finalize_stage(ws, tier="standard", reedit_instruction=reedit)
     return json.dumps({
         "status": "started_finalize",
         "job_id": job_id,
@@ -1287,14 +1295,14 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
     # Drive a re-finalize on the *existing* workspace (re-uses stills, existing clips, scenes.json).
     # The per-scene VO + trim_with_captions + CTA logic inside finalize will produce the "properly re-edited" video.
     from skeleton_ai.styled_pipeline import finalize_stage
-    result = finalize_stage(ws, tier="standard")
+    result = finalize_stage(ws, tier="standard", reedit_instruction=instruction)
 
     return json.dumps({
         "status": "reedit_finalize_started",
         "job_id": job_id,
         "kind": "shortform",
         "video_path": result.get("video_path"),
-        "note": "Re-editing existing production (re-using prior stills/clips). New MP4 + package will have improved pacing, 3-word captions, subscribe CTA, and lockstep per the instruction. Poll the job until complete.",
+        "note": "Re-editing existing production (re-using prior stills/clips from the video the user replied to). New MP4 + package will have improved pacing, 3-word captions, subscribe CTA, and lockstep per the instruction. Poll the job until complete.",
     }, indent=2)
 
 

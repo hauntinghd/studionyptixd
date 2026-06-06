@@ -377,10 +377,31 @@ async def _run_turn_impl(
             "Treat the following message as instructions to RE-EDIT **that exact video** the user was just shown (do not start a brand new generation or regenerate all stills unless they explicitly say 'start over' or 'new visual style'). "
             "Goal: proper editing, pacing, storytelling, packaging + a clear subscribe CTA at the end. "
             f"First inspect with list_production_scenes (or list_longform_scenes). Use targeted edits only where the instruction requires (edit_production_scene_still for V4.5 edits on specific scenes, set_production_scene_duration, set_production_scenes_animate for selective animation). "
-            "Then call the dedicated re_edit_production(job_id, instruction=the user's exact request, kind=...) tool — this is the correct surgical path that re-uses the prior stills/clips/video the user already has and only re-assembles with better timing, lockstep VO, 3-word captions, and CTA. "
+            "Then call the dedicated re_edit_production(job_id, instruction=the user's exact request, kind=...) tool — this is the correct surgical path that re-uses the prior stills/clips/video the user already has and only re-assembles with better timing, lockstep VO, 3-word captions, and CTA. NEVER call start_shortform_generate or start_longform_render during a reply-to re-edit — those create brand new jobs and full visual regeneration. "
             "After it finishes, the new improved deliverable (same job) will appear in chat for the user.]"
         )
         messages[-1]["content"] = context_note + "\n\n" + user_text
+
+        # Pre-load the current state of the video being re-edited so the model sees the exact scenes/stills/narrations
+        # immediately. This makes surgical decisions (which scene to tweak, what timing/CTA change) natural.
+        try:
+            list_tool = "list_longform_scenes" if is_long else "list_production_scenes"
+            pre_list = execute_tool_logged(
+                list_tool,
+                {"job_id": job_id},
+                user_id=user_id,
+                content_format=content_format,
+                session_id=sid,
+            )
+            # Inject as a tool observation so the model starts with the structure of the video to re-edit.
+            messages.append({
+                "role": "tool",
+                "tool_call_id": f"pre_reply_{list_tool}",
+                "content": pre_list,
+            })
+        except Exception as pre_exc:
+            # Non-fatal; the model can still call list itself.
+            pass
     telemetry.record_session_turn(
         user_id, sid, role="user", content_preview=user_text,
         model=session.get("model"), content_format=content_format,
@@ -445,6 +466,24 @@ async def _run_turn_impl(
                     args = {}
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
+
+                # HARD GUARD for reply-to re-edit: never allow a full new production start when the user
+                # explicitly clicked "Reply & re-edit" on an existing video card. Force the surgical path
+                # on the exact prior job_id so we re-use the already-made stills/clips/video and only re-edit
+                # pacing, captions, CTA, timing, story packaging.
+                if reply_to and name in ("start_shortform_generate", "start_longform_render"):
+                    job_id = str(reply_to.get("job_id") or "")
+                    kind = str(reply_to.get("kind") or "shortform")
+                    # Use the original user instruction (the part after the injected context note)
+                    raw_user = user_text
+                    reedit_res = re_edit_production(job_id, raw_user, kind)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": reedit_res,
+                    })
+                    await _fire_event(emit, "tool_end", tool=name, status="redirected_to_reedit")
+                    continue
 
                 await _fire_event(
                     emit,
