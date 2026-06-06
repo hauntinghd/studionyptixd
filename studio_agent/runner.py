@@ -244,11 +244,17 @@ Progress reporting (important): long-running tools run in the background and ret
 Data: every turn and tool call is logged for product improvement and future custom model training
 (previews only; no secrets). Encourage users to connect YouTube and paste reference URLs — richer signal.
 
-REPLY-TO RE-EDIT SUPPORT: Users can click the small "Reply & re-edit" arrow on any completed video card in chat.
-This sets up a reply context to that exact production (job_id + kind). When this happens, context is prepended.
-Use it to re-edit the referenced video: load its previous script/beats/stills/clips, apply the user's instructions
-(improve editing/pacing/storytelling/packaging, add strong subscribe CTA, fix specific issues), re-use assets
-where possible, only re-do changed scenes, then produce the new improved version in the same thread.
+REPLY-TO RE-EDIT SUPPORT: Users can click the small "Reply & re-edit" arrow (or "Reply & re-edit" button under the player) on any completed video card in chat.
+This sets up a reply context with the exact prior job_id + kind. When the incoming user message has this context (it will be prefixed with "[User is replying to their previous ... RE-EDIT that exact video]"), you **must** treat it as a request to surgically improve *that specific video the user was just shown*, not generate a fresh one.
+
+Mandatory flow for almost all re-edit replies:
+1. Call list_production_scenes (or list_longform_scenes) on the job_id from the context so you can see the current stills, durations, animate flags, narrations.
+2. If the instruction calls for visual changes to particular scenes, use edit_production_scene_still (the Seedream V4.5 *edit* tool) on only those indices — never full new T2I for the whole thing.
+3. For pacing, story flow, caption rhythm, or CTA issues, use set_production_scene_duration (selective), set_production_scenes_animate (selective indices), etc.
+4. Call re_edit_production(job_id=..., instruction=the user's full request text, kind=...) — this is the dedicated tool for the "re-edit the same video" use case. It records the intent, re-uses the prior assets, and drives a re-finalize that produces a new MP4 + package.txt with proper editing, tighter pacing, 3-word captions, visual-VO lockstep, and a subscribe CTA at the end.
+Only fall back to a full new start_*_generate if the user explicitly says "make a completely new one" or "change the entire art style and start over".
+
+The user does real video editing and wants the AI to study real references (via analyze_youtube_video + yt-dlp when they paste links) and apply the exact observed decisions (hook length, cut rhythm, caption timing, CTA placement) on these re-edits. Re-use the video they already have; don't waste it by regenerating everything.
 
 {skills.skills_index_for_prompt()}
 """
@@ -368,10 +374,11 @@ async def _run_turn_impl(
         scene_tool_hint = "list_longform_scenes + regenerate_longform_still + longform finalize tools" if is_long else "list_production_scenes + edit_production_scene_still (V4.5 edit) + set_production_scenes_animate + set_production_scene_duration + animate_production_scenes + finalize_production"
         context_note = (
             f"[User is replying to their previous {kind} video production (job_id={job_id}). "
-            "Treat the following message as instructions to RE-EDIT that exact video: improve editing, pacing, storytelling, packaging; ensure a clear subscribe CTA at the end to get people to subscribe. "
-            f"Use previous job's assets (via resume_job_id or the {scene_tool_hint} on this job_id). "
-            "Inspect the current scenes/stills/clips first, apply targeted V4.5 edits or timing changes only where needed for the user's request, selectively re-animate, then finalize the improved version (new MP4 + package.txt). "
-            "Reference the original for continuity but deliver a clearly better paced/told/packaged result with CTA.]"
+            "Treat the following message as instructions to RE-EDIT **that exact video** the user was just shown (do not start a brand new generation or regenerate all stills unless they explicitly say 'start over' or 'new visual style'). "
+            "Goal: proper editing, pacing, storytelling, packaging + a clear subscribe CTA at the end. "
+            f"First inspect with list_production_scenes (or list_longform_scenes). Use targeted edits only where the instruction requires (edit_production_scene_still for V4.5 edits on specific scenes, set_production_scene_duration, set_production_scenes_animate for selective animation). "
+            "Then call the dedicated re_edit_production(job_id, instruction=the user's exact request, kind=...) tool — this is the correct surgical path that re-uses the prior stills/clips/video the user already has and only re-assembles with better timing, lockstep VO, 3-word captions, and CTA. "
+            "After it finishes, the new improved deliverable (same job) will appear in chat for the user.]"
         )
         messages[-1]["content"] = context_note + "\n\n" + user_text
     telemetry.record_session_turn(

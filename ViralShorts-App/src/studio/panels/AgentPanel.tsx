@@ -1363,7 +1363,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                             ) : (
                                                                 <div className="h-14 w-full bg-white/5" />
                                                             )}
-                                                            <div className="px-1 py-0.5 text-[9px] text-white/90 group-hover:text-white truncate">{s.label}</div>
+                                                            <div className="px-1 py-0.5 leading-tight">
+                                                                <div className="text-[9px] text-white/90 group-hover:text-white truncate">{s.label}</div>
+                                                                {s.description ? (
+                                                                    <div className="text-[7px] text-white/50 truncate leading-[9px]">{s.description}</div>
+                                                                ) : null}
+                                                            </div>
                                                         </button>
                                                     ))}
                                                 </div>
