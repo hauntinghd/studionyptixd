@@ -5,7 +5,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 // @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
-import { resolveStudioBackendUrl } from '../shared.tsx';
+import * as Shared from '../shared.tsx';
+const { resolveStudioBackendUrl } = Shared;
 
 export type DictationEngine = 'webspeech' | 'record' | 'none';
 

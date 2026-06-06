@@ -27,7 +27,8 @@ import {
 import { streamAgentChat, toolLabel, type AgentStreamEvent } from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
 // @ts-ignore - TS module resolution issue with shared exports in Vercel tsc build; exports exist at runtime
-import { AuthContext, resolveStudioBackendUrl } from '../shared.tsx';
+import * as Shared from '../shared.tsx';
+const { AuthContext, resolveStudioBackendUrl } = Shared;
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
