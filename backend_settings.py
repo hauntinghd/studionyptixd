@@ -244,6 +244,9 @@ PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
+if FAL_AI_KEY and not os.getenv("FAL_KEY"):
+    # fal_client reads FAL_KEY, while the platform secret is FAL_AI_KEY.
+    os.environ["FAL_KEY"] = FAL_AI_KEY.strip()
 FAL_IMAGE_BACKUP_MODEL = str(os.getenv("FAL_IMAGE_BACKUP_MODEL", "ernie_image") or "ernie_image").strip().lower()
 XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")

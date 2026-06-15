@@ -439,7 +439,7 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     The scope controls preservation for premium character/background passes.
     """
     import fal_client
-    from .canonical_edit import generate_still_edit
+    from .canonical_edit import _ensure_fal, generate_still_edit
 
     workspace = Path(workspace)
     stills_dir, _c, _t, _w = _setup_dirs(workspace)
@@ -451,6 +451,7 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     if not still_target.exists():
         raise RuntimeError(f"scene {index} has no still to edit")
 
+    _ensure_fal()
     current_url = fal_client.upload_file(str(still_target))
     edit_prompt, normalized_scope = _scoped_edit_prompt(
         str(sc.get("prompt") or ""),
