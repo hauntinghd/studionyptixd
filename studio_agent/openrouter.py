@@ -18,6 +18,10 @@ ANTHROPIC_FALLBACK_MODELS = [
     if model.strip()
 ]
 ANTHROPIC_FALLBACK_MODEL = ANTHROPIC_FALLBACK_MODELS[0] if ANTHROPIC_FALLBACK_MODELS else "claude-haiku-4-5"
+ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET", "360000"))
+ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES", "28"))
+ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "9000"))
+ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "32000"))
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
@@ -341,6 +345,79 @@ def _content_to_text(content: Any) -> str:
     return json.dumps(content, ensure_ascii=False)
 
 
+def _clip_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n\n[trimmed {len(text) - max_chars} chars for fallback context budget]"
+
+
+def _message_text_size(msg: dict[str, Any]) -> int:
+    return len(str(msg.get("role") or "")) + len(_content_to_text(msg.get("content"))) + len(
+        json.dumps(msg.get("tool_calls") or [], ensure_ascii=False)
+    )
+
+
+def _compact_messages_for_anthropic_fallback(messages: list[dict[str, Any]], *, hard: bool = False) -> list[dict[str, Any]]:
+    """Build a bounded fallback prompt without deleting persisted chat history.
+
+    Anthropic direct fallback has a smaller hard context limit than some OpenRouter
+    routes. Keep the recent working turn and a compact note about older saved
+    state so a long Studio Agent chat does not hard-fail at the model boundary.
+    """
+    keep_recent = max(8, ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES // (2 if hard else 1))
+    budget = max(80000, ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET // (2 if hard else 1))
+    max_message_chars = max(2500, ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS // (2 if hard else 1))
+    max_system_chars = max(8000, ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS // (2 if hard else 1))
+
+    system_parts: list[str] = []
+    non_system: list[dict[str, Any]] = []
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        text = _content_to_text(msg.get("content")).strip()
+        if role == "system":
+            if text:
+                system_parts.append(text)
+            continue
+        if not text and not msg.get("tool_calls"):
+            continue
+        clean_role = role if role in {"user", "assistant", "tool"} else "user"
+        if clean_role == "tool":
+            tool_id = str(msg.get("tool_call_id") or msg.get("id") or "tool")
+            text = f"Tool result context ({tool_id}):\n{text}"
+            clean_role = "user"
+        non_system.append({"role": clean_role, "content": _clip_text(text, max_message_chars)})
+
+    compacted: list[dict[str, Any]] = []
+    if system_parts:
+        compacted.append({"role": "system", "content": _clip_text("\n\n".join(system_parts), max_system_chars)})
+
+    omitted = max(0, len(non_system) - keep_recent)
+    if omitted:
+        compacted.append(
+            {
+                "role": "system",
+                "content": (
+                    f"{omitted} older Studio Agent messages were omitted only from this Anthropic fallback request "
+                    "because the provider rejected the full prompt as too long. The complete chat, approvals, "
+                    "scene/job state, and production assets remain persisted server-side. Use available tool/state "
+                    "results as source of truth; do not claim a tool ran unless its result is present."
+                ),
+            }
+        )
+
+    compacted.extend(non_system[-keep_recent:])
+
+    while sum(_message_text_size(m) for m in compacted) > budget and len(compacted) > 3:
+        # Drop the oldest non-system working message first. System instructions and
+        # the newest user turn are more important than stale chat turns.
+        drop_idx = next((idx for idx, msg in enumerate(compacted[:-2]) if msg.get("role") != "system"), 1)
+        compacted.pop(drop_idx)
+
+    if not any(m.get("role") != "system" for m in compacted):
+        compacted.append({"role": "user", "content": "Continue from the saved Studio Agent state."})
+    return compacted
+
+
 def _json_obj(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -446,7 +523,8 @@ async def _anthropic_chat_completion(
     key = anthropic_api_key()
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-    system_text, anth_messages = _anthropic_payload_messages(messages)
+    compacted_messages = _compact_messages_for_anthropic_fallback(messages)
+    system_text, anth_messages = _anthropic_payload_messages(compacted_messages)
     payload_base: dict[str, Any] = {
         "messages": anth_messages,
         "max_tokens": int(os.getenv("ANTHROPIC_FALLBACK_MAX_TOKENS", "2048")),
@@ -471,6 +549,17 @@ async def _anthropic_chat_completion(
             payload = dict(payload_base)
             payload["model"] = model
             r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
+            if r.status_code == 400 and "prompt is too long" in r.text.lower():
+                hard_messages = _compact_messages_for_anthropic_fallback(messages, hard=True)
+                hard_system_text, hard_anth_messages = _anthropic_payload_messages(hard_messages)
+                payload = dict(payload_base)
+                payload["model"] = model
+                payload["messages"] = hard_anth_messages
+                if hard_system_text:
+                    payload["system"] = hard_system_text
+                else:
+                    payload.pop("system", None)
+                r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
             if r.status_code < 400:
                 data = r.json()
                 break
