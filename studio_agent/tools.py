@@ -1,10 +1,11 @@
-"""Studio Agent tool registry + execution."""
+﻿"""Studio Agent tool registry + execution."""
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from studio_agent import production_budget
 from studio_agent import skills as skill_loader
 from studio_agent import telemetry
 
@@ -20,10 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 SKELETON_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-# Tools that mutate state or spend money — require confirm mode approval.
+# Tools that mutate state or spend money â€” require confirm mode approval.
 APPROVAL_REQUIRED = frozenset({
     "start_longform_render",
     "start_shortform_generate",
+    "set_production_scenes_animate",
+    "animate_production_scenes",
+    "finalize_production",
     "finalize_longform_render",
     "run_build_script",
     "write_project_file",
@@ -40,6 +45,204 @@ def _run_async(coro):
         return asyncio.run(coro)
     fut = _async_pool.submit(asyncio.run, coro)
     return fut.result(timeout=120)
+
+
+def _compact_video_metric_rows(rows: list[dict[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        video_id = str(row.get("video_id") or "").strip()
+        if not title and not video_id:
+            continue
+        item = {
+            "video_id": video_id,
+            "title": title,
+            "published_at": str(row.get("published_at") or "").strip(),
+            "views": int(float(row.get("views", row.get("view_count", 0)) or 0)),
+            "average_view_duration_sec": int(float(row.get("average_view_duration_sec", 0) or 0)),
+            "average_view_percentage": round(float(row.get("average_view_percentage", 0.0) or 0.0), 2),
+            "impressions": int(float(row.get("impressions", 0) or 0)),
+            "impression_click_through_rate": round(float(row.get("impression_click_through_rate", 0.0) or 0.0), 2),
+            "is_short": bool(row.get("is_short") or row.get("shorts") or row.get("is_youtube_short")),
+        }
+        if row.get("duration_sec") is not None:
+            item["duration_sec"] = int(float(row.get("duration_sec") or 0))
+            if item["duration_sec"] <= 180:
+                item["is_short"] = True
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _video_metric_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    uploaded = [dict(v or {}) for v in list((snapshot or {}).get("uploaded_videos") or []) if isinstance(v, dict)]
+    top_videos = [dict(v or {}) for v in list((snapshot or {}).get("top_videos") or []) if isinstance(v, dict)]
+    retention_videos = [dict(v or {}) for v in list((snapshot or {}).get("retention_videos") or []) if isinstance(v, dict)]
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    for row in [*uploaded, *top_videos, *retention_videos]:
+        video_id = str(row.get("video_id") or "").strip()
+        key = video_id or str(row.get("title") or "").strip().lower()
+        if not key:
+            continue
+        merged = dict(rows_by_id.get(key) or {})
+        merged.update({k: v for k, v in row.items() if v not in (None, "", [], {})})
+        rows_by_id[key] = merged
+    rows = list(rows_by_id.values())
+    rows_with_retention = [
+        row for row in rows
+        if float(row.get("average_view_percentage", 0.0) or 0.0) > 0
+        or float(row.get("average_view_duration_sec", 0.0) or 0.0) > 0
+    ]
+    by_retention = sorted(
+        rows_with_retention,
+        key=lambda row: (
+            -float(row.get("average_view_percentage", 0.0) or 0.0),
+            -int(float(row.get("views", row.get("view_count", 0)) or 0)),
+        ),
+    )
+    short_candidates = [
+        row for row in rows_with_retention
+        if bool(row.get("is_short") or row.get("shorts") or row.get("is_youtube_short"))
+        or (row.get("duration_sec") is not None and int(float(row.get("duration_sec") or 0)) <= 180)
+    ]
+    by_views = sorted(
+        rows,
+        key=lambda row: -int(float(row.get("views", row.get("view_count", 0)) or 0)),
+    )
+    return {
+        "video_rows_available": len(rows),
+        "video_level_retention_available": bool(rows_with_retention),
+        "retention_rows_available": len(rows_with_retention),
+        "top_by_retention": _compact_video_metric_rows(by_retention, limit=12),
+        "top_shorts_by_retention": _compact_video_metric_rows(short_candidates, limit=12),
+        "top_by_views": _compact_video_metric_rows(by_views, limit=12),
+    }
+
+
+def _channel_match_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _channel_registry_aliases(registry_key: str) -> set[str]:
+    raw: set[Any] = {registry_key}
+    try:
+        from long_form.prompts.channels import CHANNELS
+
+        cfg = dict(CHANNELS.get(registry_key) or {})
+        raw.update({
+            cfg.get("key", ""),
+            cfg.get("label", ""),
+            cfg.get("channel_id", ""),
+            cfg.get("tagline", ""),
+        })
+    except Exception:
+        pass
+    hard_aliases = {
+        "zerotier": ["ZeroTier", "zero tier", "@zerotierr", "zerotierr"],
+        "empire_magnates": ["Empire Magnates", "@empiremagnates", "empiremagnates"],
+        "cryptic_science": ["CrypticScience", "Cryptic Science", "@crypticscience"],
+        "history_rewind": ["History Rewind", "@historyyyrewinddd"],
+        "pb_live": ["PB Lies", "PB Live", "@pblies"],
+    }
+    raw.update(hard_aliases.get(registry_key, []))
+    return {_channel_match_token(v) for v in raw if _channel_match_token(v)}
+
+
+def _connected_channel_tokens(channel_key: str, record: dict[str, Any]) -> set[str]:
+    rec = dict(record or {})
+    values: list[Any] = [
+        channel_key,
+        rec.get("channel_id"),
+        rec.get("title"),
+        rec.get("channel_title"),
+        rec.get("custom_url"),
+        rec.get("channel_handle"),
+        rec.get("handle"),
+        rec.get("channel_url"),
+    ]
+    return {_channel_match_token(v) for v in values if _channel_match_token(v)}
+
+
+def _resolve_user_channel_connection(
+    user_id: str,
+    requested_channel_id: str,
+    registry_key: str,
+) -> dict[str, Any]:
+    """Resolve Studio's selected channel to the actual connected OAuth row."""
+    requested = str(requested_channel_id or "").strip()
+    reg_key = str(registry_key or "").strip()
+    fallback_id = requested
+    try:
+        from long_form.catalyst_bridge import CHANNEL_KEY_TO_ID
+
+        if not fallback_id and reg_key:
+            fallback_id = str(CHANNEL_KEY_TO_ID.get(reg_key, "") or "").strip()
+    except Exception:
+        pass
+
+    out = {
+        "requested_channel_id": requested,
+        "requested_registry_key": reg_key,
+        "lookup_channel_id": fallback_id,
+        "analytics_channel_id": fallback_id,
+        "snapshot_channel_id": fallback_id,
+        "matched": False,
+        "matched_by": "none",
+        "corrected": False,
+        "record": {},
+    }
+    uid = str(user_id or "").strip()
+    if not uid:
+        return out
+
+    channels: dict[str, Any] = {}
+    try:
+        from youtube_connections_store import hydrate
+
+        bucket = dict((hydrate() or {}).get(uid) or {})
+        channels = dict(bucket.get("channels") or {})
+    except Exception:
+        channels = {}
+    if not channels:
+        return out
+
+    def _match(channel_key: str, record: dict[str, Any], matched_by: str) -> dict[str, Any]:
+        rec = dict(record or {})
+        lookup_id = str(channel_key or fallback_id).strip()
+        canonical_id = str(rec.get("channel_id") or lookup_id or fallback_id).strip()
+        return {
+            **out,
+            "lookup_channel_id": lookup_id,
+            "analytics_channel_id": canonical_id or lookup_id,
+            "snapshot_channel_id": lookup_id,
+            "matched": True,
+            "matched_by": matched_by,
+            "corrected": bool(fallback_id and lookup_id and lookup_id != fallback_id),
+            "record": rec,
+        }
+
+    if fallback_id and fallback_id in channels and isinstance(channels.get(fallback_id), dict):
+        return _match(fallback_id, channels[fallback_id], "exact_channel_id")
+
+    requested_token = _channel_match_token(fallback_id)
+    for channel_key, record in channels.items():
+        if not isinstance(record, dict):
+            continue
+        if requested_token and requested_token in _connected_channel_tokens(str(channel_key), record):
+            return _match(str(channel_key), record, "normalized_channel_id")
+
+    aliases = _channel_registry_aliases(reg_key)
+    if aliases:
+        for channel_key, record in channels.items():
+            if not isinstance(record, dict):
+                continue
+            if aliases.intersection(_connected_channel_tokens(str(channel_key), record)):
+                return _match(str(channel_key), record, "registry_alias")
+
+    return out
 
 
 def tool_schemas() -> list[dict[str, Any]]:
@@ -145,6 +348,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": "JSON string: {title, chapters:[{title, beats}]}",
                         },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap. Studio refuses to start if estimated provider spend is higher.",
+                        },
                     },
                     "required": ["channel_key", "title", "topic"],
                 },
@@ -167,7 +374,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "list_skeleton_categories",
                 "description": (
                     "List Skeleton AI script categories: 20 YouTube-aligned built-ins "
-                    "(outcast, people_blogs, gaming, …) plus this user's custom categories. "
+                    "(outcast, people_blogs, gaming, â€¦) plus this user's custom categories. "
                     "Call before start_shortform_generate when category is non-obvious."
                 ),
                 "parameters": {"type": "object", "properties": {}, "required": []},
@@ -206,7 +413,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "list_render_styles",
                 "description": (
                     "List Studio shortform render styles (cinematic, comic book, Ghibli, skeleton host, etc.). "
-                    "ALWAYS pass render_style to start_shortform_generate — default to the user's session "
+                    "ALWAYS pass render_style to start_shortform_generate â€” default to the user's session "
                     "picker unless they explicitly choose another. skeleton_host = Skeleton niche art style. "
                     "Returns visual preview URLs for a gallery grid (like the reference style cards)."
                 ),
@@ -229,6 +436,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "job_id": {"type": "string"},
                         "count": {"type": "integer", "description": "1-3 thumbnails"},
                         "feedback": {"type": "string", "description": "Reprompt instruction for edit"},
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for thumbnail generation.",
+                        },
                     },
                     "required": ["job_id"],
                 },
@@ -241,7 +452,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "Queue a styled shortform render (9:16, ~12 beats). "
                     "REQUIRED: render_style from list_render_styles or the user's session Art Style picker. "
-                    "Default cinematic/photoreal for documentaries and real people — NOT skeleton unless "
+                    "Default cinematic/photoreal for documentaries and real people â€” NOT skeleton unless "
                     "render_style=skeleton_host. Comic/history/anime/etc. each have their own T2I look. "
                     "Call list_skeleton_video_models for video_model; list_skeleton_categories for script tone. "
                     "After starting (for non-skeleton styles), the job goes to a review gate where you can use "
@@ -273,7 +484,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": (
                                 "Scene-level creative lock: characters, era, wardrobe, palette, "
-                                "composition notes — applied every beat."
+                                "composition notes â€” applied every beat."
                             ),
                         },
                         "animate": {
@@ -283,9 +494,31 @@ def tool_schemas() -> list[dict[str, Any]]:
                                 "with set_production_scenes_animate for precise control (recommended for docs and custom pacing)."
                             ),
                         },
+                        "captions_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "Whether to burn captions into the Short. Default true. If true, captions must be "
+                                "word-level unless the user explicitly asks for another mode."
+                            ),
+                        },
+                        "caption_mode": {
+                            "type": "string",
+                            "enum": ["word", "off"],
+                            "description": (
+                                "Caption mode for burned captions. Use word for one caption per spoken word in sync. "
+                                "Use off only when the user explicitly says no captions."
+                            ),
+                        },
                         "_full_auto": {
                             "type": "boolean",
                             "description": "If true, bypass review gate and auto-finalize (faster but less control). Default false for creative work."
+                        },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": (
+                                "Hard preflight budget cap for this render. Studio refuses to start if the estimated "
+                                "provider spend is above this amount."
+                            ),
                         },
                     },
                     "required": ["category_key", "topic", "video_model", "render_style"],
@@ -318,7 +551,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "Use Seedream V4.5 *edit* (image-to-image edit) to modify ONE specific scene's still with natural language. "
                     "Example: 'make the background a rainy cyberpunk alley at night, add neon reflections on the wet ground'. "
                     "This is the primary way to get pixel-perfect creative control and iterate a scene until it is exactly right before deciding to animate it. "
-                    "The previous clip (if any) is invalidated so you can re-animate after the edit."
+                    "Use scope='character' to change only the subject/mannequin/skeleton, scope='background' to preserve the subject and change only the world, "
+                    "or scope='props' for held items/screens/objects. The previous clip (if any) is invalidated so you can re-animate after the edit."
                 ),
                 "parameters": {
                     "type": "object",
@@ -329,8 +563,56 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": "Natural language description of the desired change. Will be applied via V4.5 edit on the current still."
                         },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["character", "background", "props", "full"],
+                            "description": "What to edit while preserving everything else. Use character first, then background for identity-consistent multi-pass scenes.",
+                            "default": "full",
+                        },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for this scene edit.",
+                        },
                     },
                     "required": ["job_id", "scene_index", "instruction"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_production_scenes_still",
+                "description": (
+                    "Use Seedream V4.5 edit to apply the same visual change to MULTIPLE shortform scene stills. "
+                    "Use this when the user says every scene/all scenes or gives a global wardrobe/character rule. "
+                    "Example: 'put the skeleton in a proper doctor's uniform, black pants, white T-shirt, white tux coat'. "
+                    "This edits stills only and does not animate/finalize; the user must review the updated stills first."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "instruction": {
+                            "type": "string",
+                            "description": "Natural language change to apply to each target scene."
+                        },
+                        "scene_indices": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "0-based scene indices to edit. Omit or pass empty to edit every scene."
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["character", "background", "props", "full"],
+                            "description": "Use character for wardrobe/body/pose edits, background for location-only edits.",
+                            "default": "character",
+                        },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for the full batch.",
+                        },
+                    },
+                    "required": ["job_id", "instruction"],
                 },
             },
         },
@@ -344,6 +626,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "properties": {
                         "job_id": {"type": "string"},
                         "scene_index": {"type": "integer"},
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for this still regeneration.",
+                        },
                     },
                     "required": ["job_id", "scene_index"],
                 },
@@ -378,7 +664,7 @@ def tool_schemas() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "set_production_scene_duration",
-                "description": "Override the duration (in seconds) for one or more specific scenes. Useful for pacing control — shorter for punchy beats, longer for emotional moments.",
+                "description": "Override the duration (in seconds) for one or more specific scenes. Useful for pacing control â€” shorter for punchy beats, longer for emotional moments.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -408,6 +694,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "items": {"type": "integer"},
                             "description": "Specific scenes to animate right now. If omitted, animates every scene that has animate=true."
                         },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for this animation batch.",
+                        },
                     },
                     "required": ["job_id"],
                 },
@@ -426,6 +716,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "string"},
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for final compose/missing motion.",
+                        },
                     },
                     "required": ["job_id"],
                 },
@@ -439,8 +733,9 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "THE PREFERRED TOOL for reply-to re-edit requests ('re-edit this video', 'fix the pacing/story/CTA/packaging on the one you just made', "
                     "'make the editing proper on the short you showed me', etc.). "
                     "Takes the *exact same prior production* (job_id + its existing stills/clips/scenes.json/video the user already saw), "
-                    "records the re-edit instruction, and re-finalizes a new version with improved editing, pacing, storytelling, 3-word captions, "
-                    "visual-narration lockstep, and a clear subscribe CTA at the end — *without* throwing away the video and regenerating everything from scratch. "
+                    "records the re-edit instruction, and re-finalizes a new version with improved editing, pacing, storytelling, instruction-matched captions "
+                    "(captions off when requested; otherwise word-level captions by default), "
+                    "visual-narration lockstep, and a clear subscribe CTA at the end â€” *without* throwing away the video and regenerating everything from scratch. "
                     "The LLM should usually call list_production_scenes (or list_longform_scenes) + any needed targeted edit_production_scene_still / set_*_duration first, "
                     "then call this. Only creates a full new generation if the user explicitly asks to 'start over' or 'change the entire visual style'."
                 ),
@@ -448,8 +743,12 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "string", "description": "The exact job_id from the reply_to context or the video card the user is replying to."},
-                        "instruction": {"type": "string", "description": "The user's full re-edit request (e.g. 'make the pacing tighter, 3-word captions on every scene, strong subscribe CTA at the very end, better story flow on the police station beat')."},
+                        "instruction": {"type": "string", "description": "The user's full re-edit request (e.g. 'make the pacing tighter, one word per caption on every scene, strong subscribe CTA at the very end, better story flow on the police station beat')."},
                         "kind": {"type": "string", "description": "shortform or longform (defaults to shortform)."},
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for the re-edit pass.",
+                        },
                     },
                     "required": ["job_id", "instruction"],
                 },
@@ -499,6 +798,51 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "get_perpetual_memory",
+                "description": (
+                    "Read durable Studio Agent memory for this user and optionally a specific YouTube channel. "
+                    "Use before channel strategy, packaging, visual defaults, and production planning."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {"type": "string"},
+                        "registry_key": {"type": "string"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember_channel_preference",
+                "description": (
+                    "Persist a durable user/channel preference, rule, lesson, or strategy note. "
+                    "Use when the user says remember/always/never, when analytics reveals a lesson, "
+                    "or after production feedback changes the channel playbook."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {"type": "string"},
+                        "scope": {"type": "string", "enum": ["global", "channel"], "default": "channel"},
+                        "channel_id": {"type": "string"},
+                        "registry_key": {"type": "string"},
+                        "title": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "description": "preference, rule, visual_style, packaging, pacing, lesson, strategy",
+                        },
+                        "importance": {"type": "integer", "default": 4},
+                    },
+                    "required": ["note"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_studio_credits",
                 "description": (
                     "Unified credit wallet balance, plan, recent ledger. "
@@ -513,7 +857,9 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "get_channel_analytics",
                 "description": (
                     "Channel intelligence: Catalyst harvest + live YouTube Analytics (90d Reporting API: "
-                    "views, CTR, AVD, top titles, series arcs) and latest upload velocity when OAuth is connected."
+                    "views, CTR, AVD, per-video retention rows when available, top titles, series arcs) "
+                    "and latest upload velocity when OAuth is connected. If video_level_retention_available "
+                    "is false, do not infer which specific video had high AVD."
                 ),
                 "parameters": {
                     "type": "object",
@@ -525,6 +871,33 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                     },
                     "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_youtube_public",
+                "description": (
+                    "Search public YouTube for reference videos by channel/name/topic when the user asks to "
+                    "look something up but did not provide a URL. This uses public YouTube Data API keys only; "
+                    "it does not return private analytics like AVD or retention."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search phrase, e.g. 'Lume finance documentary' or 'Jake Tran best videos'",
+                        },
+                        "max_results": {"type": "integer", "default": 8},
+                        "order": {
+                            "type": "string",
+                            "enum": ["relevance", "date", "viewCount"],
+                            "default": "relevance",
+                        },
+                    },
+                    "required": ["query"],
                 },
             },
         },
@@ -577,7 +950,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "topic + scene blueprint, fan-out Internet Archive (Prelinger/stock), LOC film, "
                     "NASA video, Wikimedia, NPS, FBI. Resolves direct MP4/download URLs. "
                     "Call after build_scene_blueprint_from_reference or with topic + registry_key. "
-                    "Use BEFORE fal generation — Lume/Magnates docs are ~90% archival stills+B-roll."
+                    "Use BEFORE fal generation â€” Lume/Magnates docs are ~90% archival stills+B-roll."
                 ),
                 "parameters": {
                     "type": "object",
@@ -707,7 +1080,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "build_scene_blueprint_from_reference",
                 "description": (
                     "After analyze_reference_video completes: map keyframes + pacing into per-scene "
-                    "rows (1–5 characters), Seedream v4.5 edit fields, i2v duration, BGM cues, audio mix."
+                    "rows (1â€“5 characters), Seedream v4.5 edit fields, i2v duration, BGM cues, audio mix."
                 ),
                 "parameters": {
                     "type": "object",
@@ -738,13 +1111,14 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "For creators who don't know what to film: merge channel analytics (if connected), "
                     "growth playbook, and public search trends into ranked topic + niche recommendations. "
-                    "Does not imply Skeleton AI — recommend format-appropriate pipelines (short script, long-form, "
+                    "Does not imply Skeleton AI â€” recommend format-appropriate pipelines (short script, long-form, "
                     "reference blueprint, or skeleton only if user wants that visual)."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "registry_key": {"type": "string"},
+                        "channel_id": {"type": "string"},
                         "niche_query": {"type": "string"},
                         "days": {"type": "integer", "default": 30},
                     },
@@ -796,6 +1170,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "string"},
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Hard preflight budget cap for final long-form render.",
+                        },
                     },
                     "required": ["job_id"],
                 },
@@ -824,7 +1202,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "record_production_feedback",
                 "description": (
                     "Log what worked or failed on a published video for NYPTID model improvement. "
-                    "Internal training signal only — never sold to advertisers."
+                    "Internal training signal only â€” never sold to advertisers."
                 ),
                 "parameters": {
                     "type": "object",
@@ -879,7 +1257,7 @@ def _allow_write(path: Path) -> None:
     parts = rel.parts
     allowed_roots = ("studio", "long_form", "recaps")
     if not parts or parts[0] not in allowed_roots:
-        raise ValueError(f"writes only allowed under studio/, long_form/, recaps/ — got {rel}")
+        raise ValueError(f"writes only allowed under studio/, long_form/, recaps/ â€” got {rel}")
 
 
 ALLOWED_BUILD_SCRIPTS = frozenset({
@@ -903,9 +1281,9 @@ def _build_outline_from_args(args: dict[str, Any]) -> dict[str, Any]:
             {
                 "title": topic,
                 "beats": [
-                    {"text": f"Intro: {topic}", "visual": f"Cinematic opening — {topic}"},
-                    {"text": f"Core story: {topic}", "visual": f"Documentary still — {topic}"},
-                    {"text": f"Conclusion: {topic}", "visual": f"Closing frame — {topic}"},
+                    {"text": f"Intro: {topic}", "visual": f"Cinematic opening â€” {topic}"},
+                    {"text": f"Core story: {topic}", "visual": f"Documentary still â€” {topic}"},
+                    {"text": f"Conclusion: {topic}", "visual": f"Closing frame â€” {topic}"},
                 ],
             }
         ],
@@ -954,6 +1332,35 @@ def _session_render_style(session_id: str | None) -> str | None:
     return style or None
 
 
+def _session_channel_brand(session_id: str | None) -> str:
+    fallback_by_registry = {
+        "zerotier": "ZeroTier",
+        "empire_magnates": "Empire Magnates",
+        "cryptic_science": "CrypticScience",
+        "history_rewind": "History Rewind",
+        "nyptid_clips": "NYPTID Clips",
+        "mrskelewelly": "MrSkelewelly",
+        "mr_skelewelly": "MrSkelewelly",
+        "skeleton_ai": "Skeleton AI",
+    }
+    if not session_id:
+        return "Studio"
+    from studio_agent import store
+
+    session = store.get_session(session_id) or {}
+    for key in ("channel_title", "channel_name", "brand_name"):
+        value = str(session.get(key) or "").strip()
+        if value:
+            return value[:48]
+    registry = str(session.get("registry_key") or "").strip()
+    if registry:
+        return fallback_by_registry.get(registry, registry.replace("_", " ").title())[:48]
+    handle = str(session.get("channel_handle") or "").strip().lstrip("@")
+    if handle:
+        return handle[:48]
+    return "Studio"
+
+
 def _spawn_shortform_job(
     *,
     category_key: str,
@@ -965,6 +1372,9 @@ def _spawn_shortform_job(
     render_style: str,
     user_id: str | None = None,
     animate: bool = True,
+    watermark_text: str = "Studio",
+    captions_enabled: bool = True,
+    caption_mode: str = "word",
     resume_job_id: str | None = None,
 ) -> str:
     # Resume: reuse the prior job's workspace so finished stills/clips/VO are
@@ -976,10 +1386,22 @@ def _spawn_shortform_job(
         job_id = uuid.uuid4().hex[:12]
     workspace = (ROOT / SKELETON_OUTPUT / job_id).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    # A fresh/resumed run must not be pre-cancelled by a stale flag.
+    # A fresh/resumed run must not be pre-cancelled by stale terminal markers.
+    # Re-edit/retry may intentionally reuse the same workspace; if an old
+    # result.json says "cancelled" the UI will show a false failure even while
+    # the new worker is producing a valid MP4.
     try:
         (workspace / "CANCELLED").unlink(missing_ok=True)
     except OSError:
+        pass
+    try:
+        prior_result = workspace / "result.json"
+        if prior_result.exists():
+            prior = json.loads(prior_result.read_text(encoding="utf-8"))
+            prior_status = str(prior.get("status") or "").lower()
+            if prior_status in {"cancelled", "failed"}:
+                prior_result.unlink(missing_ok=True)
+    except Exception:
         pass
     spec = {
         "job_id": job_id,
@@ -991,6 +1413,9 @@ def _spawn_shortform_job(
         "visual_brief": visual_brief,
         "render_style": render_style,
         "animate": animate,
+        "watermark_text": watermark_text,
+        "captions_enabled": captions_enabled,
+        "caption_mode": caption_mode,
         "user_id": user_id,
         "started_at": time.time(),
     }
@@ -1008,7 +1433,7 @@ def _spawn_shortform_job(
     # Seed an initial progress.json so the job doesn't look completely dead in the first 1-2 minutes
     # while the thread imports, allocates GrokClient, hits first LLM, etc.
     try:
-        init_prog = {"stage": "queued", "progress": 5, "detail": "Job accepted — starting script + visuals worker."}
+        init_prog = {"stage": "queued", "progress": 5, "detail": "Job accepted â€” starting script + visuals worker."}
         (workspace / "progress.json").write_text(json.dumps(init_prog, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -1026,44 +1451,24 @@ def _spawn_shortform_job(
             # Touch heartbeat immediately so even the first long script/plan call is covered.
             hb_path.touch(exist_ok=True)
 
-            if is_skeleton_style(render_style):
-                from skeleton_ai.pipeline import run as run_pipeline
+            # Studio Agent must not burn image-to-video before still approval.
+            # First pass always stops at the scene-review gate. The user/agent can
+            # edit stills cheaply, then explicitly approve scenes and run
+            # animate_production_scenes/finalize_production.
+            from skeleton_ai.styled_pipeline import plan_scenes
 
-                result = run_pipeline(
-                    category_key=category_key,
-                    topic=topic,
-                    workspace=workspace,
-                    tier=tier,
-                    video_model=video_model,
-                    visual_brief=visual_brief,
-                    script_override=script,
-                    user_id=user_id,
-                )
-                payload = {"status": "complete", "job_id": job_id, **result}
-                (workspace / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            else:
-                # For Studio Agent flows we want a complete MP4 (self-learning videos, outreach content,
-                # cold-email niche reels). Use the straight-through auto path instead of the interactive
-                # "awaiting_scene_review" gate (the gate is for the Studio Create panel where humans tweak per scene).
-                from skeleton_ai.styled_pipeline import run_styled
-
-                result = run_styled(
-                    category_key=category_key,
-                    topic=topic,
-                    workspace=workspace,
-                    render_style=render_style,
-                    tier=tier,
-                    video_model=video_model,
-                    visual_brief=visual_brief,
-                    script_override=script,
-                    user_id=user_id,
-                    animate=animate,
-                )
-                # run_styled already writes result.json with status=complete (or may raise).
-                # Ensure we have a top-level marker too.
-                if not (workspace / "result.json").exists():
-                    payload = {"status": "complete", "job_id": job_id, **(result or {})}
-                    (workspace / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            plan_scenes(
+                category_key=category_key,
+                topic=topic,
+                workspace=workspace,
+                render_style=render_style,
+                tier=tier,
+                video_model=video_model,
+                visual_brief=visual_brief,
+                script_override=script,
+                user_id=user_id,
+                default_animate=False,
+            )
         except Exception as exc:
             from skeleton_ai.pipeline import RenderCancelled
             if isinstance(exc, RenderCancelled):
@@ -1091,7 +1496,7 @@ def _spawn_shortform_job(
                 pass
 
     # Non-daemon so the thread has a chance to finish / write result on clean shutdown.
-    # Still vulnerable to hard process kills (Fly deploy, OOM, health restart) — the heartbeat + resume
+    # Still vulnerable to hard process kills (Fly deploy, OOM, health restart) â€” the heartbeat + resume
     # on retry + on-boot re-claim mitigate.
     t = threading.Thread(target=_work, daemon=False, name=f"sf-{job_id}")
     t.start()
@@ -1107,7 +1512,7 @@ def _heartbeat_loop(stop_event, hb_path: Path, interval: float = 20.0) -> None:
             pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Granular per-scene creative control helpers (full creative control for Agent)
 # These give the LLM the power to: list scenes, edit any still with natural-language
 # V4.5 edit (exactly as the user described), toggle animate on arbitrary subsets of
@@ -1115,7 +1520,7 @@ def _heartbeat_loop(stop_event, hb_path: Path, interval: float = 20.0) -> None:
 # ones, and finally compose the mixed video. This is the "30-minute documentary,
 # animate exactly 20 minutes, re-iterate scene 7 with V4.5 edit until perfect, then
 # animate only the three hero scenes" workflow.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _shortform_workspace(job_id: str) -> Path:
     jid = str(job_id or "").strip()
@@ -1141,7 +1546,9 @@ def list_production_scenes(job_id: str) -> str:
             "index": sc.get("index"),
             "sid": sc.get("sid"),
             "narration": sc.get("narration"),
-            "animate": bool(sc.get("animate", True)),
+            "animate": bool(sc.get("animate", False)),
+            "approved_for_video": bool(sc.get("approved_for_video", False)),
+            "approved_for_animation": bool(sc.get("approved_for_animation", False)),
             "duration_sec": float(sc.get("duration_sec", 5.0)),
             "video_model": sc.get("video_model"),
             "status": sc.get("status"),
@@ -1180,11 +1587,64 @@ def generate_longform_thumbnails(job_id: str, count: int = 3, feedback: str = ""
     }, indent=2)
 
 
-def edit_production_scene_still(job_id: str, scene_index: int, instruction: str) -> str:
+def edit_production_scene_still(job_id: str, scene_index: int, instruction: str, scope: str = "full") -> str:
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import edit_scene
-    res = edit_scene(ws, int(scene_index), str(instruction))
-    return json.dumps({"ok": True, "job_id": job_id, "scene": res, "note": "Still updated via Seedream V4.5 edit. Prior clip invalidated. Re-animate this scene when ready."}, indent=2)
+    res = edit_scene(ws, int(scene_index), str(instruction), scope=str(scope or "full"))
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "scene": res,
+        "note": (
+            "Still updated via Seedream V4.5 edit. Prior clip invalidated. "
+            "For identity-consistent videos, use character edits first, then background edits, then re-animate this scene when ready."
+        ),
+    }, indent=2)
+
+
+def edit_production_scenes_still(
+    job_id: str,
+    instruction: str,
+    scene_indices: list[int] | None = None,
+    scope: str = "character",
+) -> str:
+    ws = _shortform_workspace(job_id)
+    from skeleton_ai.styled_pipeline import edit_scene, load_scenes
+
+    scenes = load_scenes(ws)
+    requested = {int(x) for x in scene_indices} if scene_indices else None
+    targets: list[int] = []
+    for sc in scenes:
+        idx = int(sc.get("index", -1))
+        if idx < 0:
+            continue
+        if requested is None or idx in requested:
+            targets.append(idx)
+
+    if not targets:
+        raise ValueError("no scenes matched for bulk still edit")
+
+    changed = []
+    errors = []
+    edit_scope = str(scope or "character")
+    for idx in targets:
+        try:
+            changed.append(edit_scene(ws, idx, str(instruction), scope=edit_scope))
+        except Exception as exc:
+            errors.append({"scene_index": idx, "error": str(exc)})
+
+    return json.dumps({
+        "ok": not errors,
+        "job_id": job_id,
+        "affected": targets,
+        "changed_count": len(changed),
+        "errors": errors,
+        "scenes": changed,
+        "note": (
+            "Bulk still edit complete. Prior clips for changed scenes were invalidated. "
+            "Review the updated stills in chat; do not animate or finalize until the user approves them."
+        ),
+    }, indent=2)
 
 
 def regenerate_production_scene_still(job_id: str, scene_index: int) -> str:
@@ -1203,9 +1663,18 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
     for sc in scenes:
         if idx_set is None or sc.get("index") in idx_set:
             sc["animate"] = bool(animate)
+            sc["approved_for_video"] = True
+            sc["approved_for_animation"] = bool(animate)
             changed.append(sc.get("index"))
     save_scenes(ws, scenes)
-    return json.dumps({"ok": True, "job_id": job_id, "affected": changed, "animate": animate}, indent=2)
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "affected": changed,
+        "animate": animate,
+        "approved_for_video": changed,
+        "note": "Selected scenes are now approved for video. animate=true scenes can use i2v; animate=false scenes will use the still/Ken Burns path at finalize.",
+    }, indent=2)
 
 
 def set_production_scene_duration(job_id: str, scene_index: int, duration_sec: float) -> str:
@@ -1222,14 +1691,93 @@ def set_production_scene_duration(job_id: str, scene_index: int, duration_sec: f
 
 def animate_production_scenes(job_id: str, scene_indices: list[int] | None = None) -> str:
     ws = _shortform_workspace(job_id)
-    from skeleton_ai.styled_pipeline import animate_scenes_stage
+    from skeleton_ai.styled_pipeline import animate_scenes_stage, load_scenes, save_scenes
+    scenes = load_scenes(ws)
+    idx_set = set(scene_indices) if scene_indices else None
+    targets: list[int] = []
+    for sc in scenes:
+        idx = int(sc.get("index", -1))
+        if idx_set is not None and idx not in idx_set:
+            continue
+        if not sc.get("approved_for_video"):
+            continue
+        sc["animate"] = True
+        sc["approved_for_animation"] = True
+        targets.append(idx)
+    if not targets:
+        raise ValueError(
+            "no approved scenes to animate. Review the stills first, then approve scenes before running i2v."
+        )
+    save_scenes(ws, scenes)
+    scene_indices = targets
     res = animate_scenes_stage(ws, indices=scene_indices, tier="standard")
-    return json.dumps({"ok": True, "job_id": job_id, "animated": res.get("animated")}, indent=2)
+    scenes_after = load_scenes(ws)
+    failed = [
+        int(sc.get("index", -1))
+        for sc in scenes_after
+        if int(sc.get("index", -1)) in set(targets) and str(sc.get("status") or "") == "error"
+    ]
+    return json.dumps({
+        "ok": not failed,
+        "job_id": job_id,
+        "animated": res.get("animated"),
+        "failed": failed,
+        "note": (
+            "Animation completed for approved scenes."
+            if not failed
+            else "Some scenes failed animation. Edit/regenerate those stills or retry animation before finalizing."
+        ),
+    }, indent=2)
+
+
+def _shortform_job_spec_options(ws: Path) -> dict[str, Any]:
+    try:
+        spec = json.loads((Path(ws) / "job_spec.json").read_text(encoding="utf-8"))
+        if isinstance(spec, dict):
+            caption_mode = str(spec.get("caption_mode") or "word").strip().lower()
+            captions_enabled = bool(spec.get("captions_enabled", True))
+            if caption_mode == "off":
+                captions_enabled = False
+                caption_mode = "word"
+            elif caption_mode not in {"word", "single_word", "one_word"}:
+                caption_mode = "word"
+            return {
+                "watermark_text": (str(spec.get("watermark_text") or "Studio").strip() or "Studio")[:48],
+                "captions_enabled": captions_enabled,
+                "caption_mode": caption_mode,
+            }
+    except Exception:
+        pass
+    return {"watermark_text": "Studio", "captions_enabled": True, "caption_mode": "word"}
+
+
+def _apply_caption_instruction_to_options(ws: Path, instruction: str, opts: dict[str, Any]) -> dict[str, Any]:
+    text = (instruction or "").lower()
+    if any(mark in text for mark in ("no captions", "captions off", "without captions", "remove captions")):
+        opts["captions_enabled"] = False
+        opts["caption_mode"] = "word"
+    elif any(mark in text for mark in ("one word", "single word", "word-by-word", "each word", "every word")):
+        opts["captions_enabled"] = True
+        opts["caption_mode"] = "word"
+    try:
+        spec_path = Path(ws) / "job_spec.json"
+        spec = {}
+        if spec_path.exists():
+            loaded = json.loads(spec_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                spec = loaded
+        spec["watermark_text"] = opts.get("watermark_text") or "Studio"
+        spec["captions_enabled"] = bool(opts.get("captions_enabled", True))
+        spec["caption_mode"] = str(opts.get("caption_mode") or "word")
+        spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return opts
 
 
 def finalize_production(job_id: str) -> str:
     ws = _shortform_workspace(job_id)
-    from skeleton_ai.styled_pipeline import finalize_stage
+    from skeleton_ai.styled_pipeline import finalize_stage, load_scenes
     # Try to pick up a reedit_instruction sidecar if this finalize is part of a re-edit flow
     reedit = None
     try:
@@ -1238,13 +1786,46 @@ def finalize_production(job_id: str) -> str:
             reedit = p.read_text(encoding="utf-8")
     except Exception:
         pass
-    result = finalize_stage(ws, tier="standard", reedit_instruction=reedit)
+    opts = _shortform_job_spec_options(ws)
+    try:
+        scenes = load_scenes(ws)
+        pending_animated = []
+        for sc in scenes:
+            if not sc.get("animate"):
+                continue
+            clip_rel = str(sc.get("clip_rel") or f"clips/{sc.get('sid')}.mp4")
+            clip_path = (ws / clip_rel).resolve()
+            if not clip_path.is_file() or clip_path.stat().st_size <= 0:
+                pending_animated.append(int(sc.get("index", -1)))
+        if pending_animated:
+            return json.dumps({
+                "status": "awaiting_animation",
+                "job_id": job_id,
+                "pending_animated_scenes": [
+                    idx for idx in pending_animated if idx >= 0
+                ],
+                "note": (
+                    "These scenes are marked for animation but do not have i2v clips yet. "
+                    "Run animate_production_scenes first, then finalize_production. "
+                    "Studio will not silently downgrade requested animation into still-only video."
+                ),
+            }, indent=2)
+    except Exception:
+        # If scene inspection itself fails, let finalize_stage surface the canonical error.
+        pass
+    result = finalize_stage(ws, tier="standard", reedit_instruction=reedit, **opts)
+    status = str(result.get("status") or "complete").lower()
     return json.dumps({
-        "status": "started_finalize",
+        "status": status if status in {"complete", "completed", "ready"} else "running",
         "job_id": job_id,
         "video_path": result.get("video_path"),
+        "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
+        "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
         "animated_scenes": result.get("animated_scenes"),
-        "note": "Finalize running. Poll job status until complete for MP4.",
+        "watermark_text": opts.get("watermark_text"),
+        "captions_enabled": opts.get("captions_enabled"),
+        "caption_mode": "word" if opts.get("captions_enabled") else "off",
+        "note": "Finalize complete. The Studio UI can display/download the MP4." if result.get("video_path") else "Finalize running. Poll job status until complete for MP4.",
     }, indent=2)
 
 
@@ -1295,14 +1876,22 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
     # Drive a re-finalize on the *existing* workspace (re-uses stills, existing clips, scenes.json).
     # The per-scene VO + trim_with_captions + CTA logic inside finalize will produce the "properly re-edited" video.
     from skeleton_ai.styled_pipeline import finalize_stage
-    result = finalize_stage(ws, tier="standard", reedit_instruction=instruction)
+    opts = _shortform_job_spec_options(ws)
+    opts = _apply_caption_instruction_to_options(ws, instruction, opts)
+    result = finalize_stage(ws, tier="standard", reedit_instruction=instruction, **opts)
+    status = str(result.get("status") or "complete").lower()
 
     return json.dumps({
-        "status": "reedit_finalize_started",
+        "status": status if status in {"complete", "completed", "ready"} else "running",
         "job_id": job_id,
         "kind": "shortform",
         "video_path": result.get("video_path"),
-        "note": "Re-editing existing production (re-using prior stills/clips from the video the user replied to). New MP4 + package will have improved pacing, 3-word captions, subscribe CTA, and lockstep per the instruction. Poll the job until complete.",
+        "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
+        "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
+        "watermark_text": opts.get("watermark_text"),
+        "captions_enabled": opts.get("captions_enabled"),
+        "caption_mode": "word" if opts.get("captions_enabled") else "off",
+        "note": "Re-edit complete (re-used prior stills/clips from the video the user replied to). The new MP4 is ready in the Studio UI." if result.get("video_path") else "Re-edit is still running. Poll job status until complete for MP4.",
     }, indent=2)
 
 
@@ -1384,35 +1973,20 @@ def _reclaim_orphaned_shortform_jobs() -> int:
                 try:
                     hb2.touch(exist_ok=True)
                     rstyle = str(s.get("render_style") or "cinematic")
-                    if _is_skel(rstyle):
-                        from skeleton_ai.pipeline import run as _runp
-                        res = _runp(
-                            category_key=str(s.get("category_key")),
-                            topic=s.get("topic"),
-                            workspace=w,
-                            tier=str(s.get("tier") or "standard"),
-                            video_model=s.get("video_model"),
-                            visual_brief=s.get("visual_brief"),
-                            script_override=s.get("script"),
-                            user_id=s.get("user_id"),
-                        )
-                        (w / "result.json").write_text(json.dumps({"status": "complete", "job_id": s.get("job_id"), **res}, indent=2), encoding="utf-8")
-                    else:
-                        from skeleton_ai.styled_pipeline import run_styled as _runstyled
-                        res = _runstyled(
-                            category_key=str(s.get("category_key")),
-                            topic=s.get("topic"),
-                            workspace=w,
-                            render_style=rstyle,
-                            tier=str(s.get("tier") or "standard"),
-                            video_model=s.get("video_model"),
-                            visual_brief=s.get("visual_brief"),
-                            script_override=s.get("script"),
-                            user_id=s.get("user_id"),
-                            animate=bool(s.get("animate", True)),
-                        )
-                        if not (w / "result.json").exists():
-                            (w / "result.json").write_text(json.dumps({"status": "complete", "job_id": s.get("job_id"), **(res or {})}, indent=2), encoding="utf-8")
+                    from skeleton_ai.styled_pipeline import plan_scenes as _plan_scenes
+
+                    _plan_scenes(
+                        category_key=str(s.get("category_key")),
+                        topic=s.get("topic"),
+                        workspace=w,
+                        render_style=rstyle,
+                        tier=str(s.get("tier") or "standard"),
+                        video_model=s.get("video_model"),
+                        visual_brief=s.get("visual_brief"),
+                        script_override=s.get("script"),
+                        user_id=s.get("user_id"),
+                        default_animate=False,
+                    )
                 except Exception as e2:
                     try:
                         (w / "job.log").write_text(f"RECLAIM FAILED {time.time()}\n{e2}\n{_tb2.format_exc()}", encoding="utf-8")
@@ -1502,7 +2076,7 @@ def execute_tool(
         max_chars = int(args.get("max_chars") or 12000)
         text = path.read_text(encoding="utf-8", errors="replace")
         if len(text) > max_chars:
-            text = text[:max_chars] + "\n… truncated"
+            text = text[:max_chars] + "\nâ€¦ truncated"
         return text
 
     if name == "write_project_file":
@@ -1522,7 +2096,7 @@ def execute_tool(
         job_id = lf_pipeline.start_render(channel, outline)
         billing = _debit_fal_for_outline(user_id, outline, job_id=job_id, kind="longform")
         return json.dumps({
-            "status": "started",
+            "status": "awaiting_scene_review",
             "job_id": job_id,
             "channel_key": channel_key,
             "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
@@ -1543,7 +2117,7 @@ def execute_tool(
                     "model": "seedream_v45_edit",
                     "locked": True,
                     "rule": (
-                        "Every scene edits the canonical skeleton master — same identity; "
+                        "Every scene edits the canonical skeleton master â€” same identity; "
                         "change background, clothes, muscles-on-shell, props only."
                     ),
                 },
@@ -1591,7 +2165,7 @@ def execute_tool(
                 "styles": list_render_styles(),
                 "rule": (
                     "Pass render_style on every start_shortform_generate. "
-                    "skeleton_host is the Skeleton niche — same weight as comic_book or cinematic. "
+                    "skeleton_host is the Skeleton niche â€” same weight as comic_book or cinematic. "
                     "Use the visual gallery with preview_url for style selection (distinct Seedream previews per style)."
                 ),
             },
@@ -1628,11 +2202,19 @@ def execute_tool(
         _, resolved_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
         animate_arg = args.get("animate")
         if animate_arg is None:
-            from studio_agent import store as _store
-            _sess = _store.get_session(session_id) if session_id else None
-            animate = bool(_sess.get("animate", True)) if _sess else True
+            animate = False
         else:
-            animate = bool(animate_arg)
+            # First pass is always still-review only. Image-to-video requires
+            # explicit scene approval after the user sees the generated stills.
+            animate = False
+        caption_mode = str(args.get("caption_mode") or "word").strip().lower()
+        captions_enabled = bool(args.get("captions_enabled", True))
+        if caption_mode == "off":
+            captions_enabled = False
+            caption_mode = "word"
+        elif caption_mode not in {"word", "single_word", "one_word"}:
+            caption_mode = "word"
+        watermark_text = _session_channel_brand(session_id)
         resume_job_id = str(args.get("_resume_job_id") or "").strip() or None
         job_id = _spawn_shortform_job(
             category_key=category_key,
@@ -1644,6 +2226,9 @@ def execute_tool(
             render_style=style.key,
             user_id=uid,
             animate=animate,
+            watermark_text=watermark_text,
+            captions_enabled=captions_enabled,
+            caption_mode=caption_mode,
             resume_job_id=resume_job_id,
         )
         stills_model = (
@@ -1652,13 +2237,17 @@ def execute_tool(
             else f"seedream_v45_t2i_{style.key}"
         )
         if is_skeleton_style(style):
-            pipeline_note = f"Skeleton host — canonical master + Seedream edit; i2v {resolved_vm}."
-        elif animate:
-            pipeline_note = f"{style.label} — Seedream T2I per scene; i2v {resolved_vm}. Real characters, not skeleton."
+            pipeline_note = (
+                f"Skeleton host - canonical master + Seedream edit stills only. "
+                f"No image-to-video runs until scenes are approved. Later video model: {resolved_vm}."
+            )
         else:
-            pipeline_note = f"{style.label} — Seedream T2I per scene; STILLS + Ken Burns (no motion). Real characters, not skeleton."
+            pipeline_note = (
+                f"{style.label} - Seedream stills only. "
+                f"No image-to-video runs until scenes are approved. Later video model: {resolved_vm}."
+            )
         return json.dumps({
-            "status": "started",
+            "status": "awaiting_scene_review",
             "job_id": job_id,
             "category_key": category_key,
             "topic": topic,
@@ -1667,8 +2256,11 @@ def execute_tool(
             "render_style_label": style.label,
             "video_model": resolved_vm,
             "stills_model": stills_model,
+            "watermark_text": watermark_text,
+            "captions_enabled": captions_enabled,
+            "caption_mode": "word" if captions_enabled else "off",
             "poll_url": f"/api/skeleton-ai/jobs/{job_id}",
-            "note": pipeline_note + " Poll until result.json is complete or failed. For full creative control (edit specific scenes with V4.5 edit, choose exactly which scenes to animate, set durations, selective re-animate, then finalize the mix) use the scene control tools: list_production_scenes, edit_production_scene_still, set_production_scenes_animate, animate_production_scenes, finalize_production etc.",
+            "note": pipeline_note + f" Channel watermark/package is locked to {watermark_text}. Captions are {'word-level and enabled' if captions_enabled else 'disabled'}. Poll until result.json reaches awaiting_scene_review. Then list scenes, edit artifacted stills, approve scenes with set_production_scenes_animate, optionally animate approved scenes, and only then finalize_production.",
         }, indent=2)
 
     # === Granular scene control tools (full creative control) ===
@@ -1680,6 +2272,17 @@ def execute_tool(
             str(args.get("job_id") or ""),
             int(args.get("scene_index") or 0),
             str(args.get("instruction") or ""),
+            str(args.get("scope") or "full"),
+        )
+
+    if name == "edit_production_scenes_still":
+        raw_idx = args.get("scene_indices")
+        indices = [int(x) for x in raw_idx] if isinstance(raw_idx, list) else None
+        return edit_production_scenes_still(
+            str(args.get("job_id") or ""),
+            str(args.get("instruction") or ""),
+            indices,
+            str(args.get("scope") or "character"),
         )
 
     if name == "regenerate_production_scene_still":
@@ -1754,7 +2357,7 @@ def execute_tool(
 
         doc = ROOT / "studio" / "docs" / "YOUTUBE_OAUTH_SCOPES.md"
         body = doc.read_text(encoding="utf-8") if doc.exists() else (
-            "Connect YouTube in Studio → Settings → Channels (or the banner in Studio Agent). "
+            "Connect YouTube in Studio â†’ Settings â†’ Channels (or the banner in Studio Agent). "
             "Scopes: youtube.readonly, yt-analytics.readonly, youtube.force-ssl, youtube.upload. "
             "See OAUTH_PUBLISH_RUNBOOK.md for Google Cloud Console steps."
         )
@@ -1778,7 +2381,7 @@ def execute_tool(
         except Exception as exc:
             state = {"balance": 0, "error": str(exc)}
         if int(state.get("balance") or 0) < 15:
-            state["top_up_hint"] = "Low balance — user can add credits anytime in Studio → Wallet (unlimited top-ups)."
+            state["top_up_hint"] = "Low balance â€” user can add credits anytime in Studio â†’ Wallet (unlimited top-ups)."
         return json.dumps(state, indent=2)
 
     if name == "list_youtube_channels":
@@ -1807,6 +2410,45 @@ def execute_tool(
                 })
         return json.dumps({"channels": out, "total": len(out)}, indent=2)
 
+    if name == "get_perpetual_memory":
+        from studio_agent import memory
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise ValueError("sign in required")
+        summary = memory.summarize_for_prompt(
+            uid,
+            channel_id=str(args.get("channel_id") or "").strip(),
+            registry_key=str(args.get("registry_key") or "").strip(),
+        )
+        return json.dumps({
+            "ok": True,
+            "summary": summary,
+            "profile": memory.public_profile(uid),
+        }, indent=2, ensure_ascii=False)
+
+    if name == "remember_channel_preference":
+        from studio_agent import memory
+
+        uid = str(user_id or "").strip()
+        note = str(args.get("note") or "").strip()
+        if not uid:
+            raise ValueError("sign in required")
+        if not note:
+            raise ValueError("note required")
+        item = memory.remember(
+            uid,
+            note,
+            scope=str(args.get("scope") or "channel"),
+            channel_id=str(args.get("channel_id") or "").strip(),
+            registry_key=str(args.get("registry_key") or "").strip(),
+            title=str(args.get("title") or "").strip(),
+            kind=str(args.get("kind") or "preference").strip(),
+            source="agent_tool",
+            importance=int(args.get("importance") or 4),
+        )
+        return json.dumps({"ok": True, "memory": item}, indent=2, ensure_ascii=False)
+
     if name == "get_channel_analytics":
         async def _fetch():
             from long_form.catalyst_bridge import (
@@ -1822,10 +2464,28 @@ def execute_tool(
                 ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
             if not ch_id:
                 raise ValueError("channel_id or registry_key required")
-            record = fetch_channel_snapshot(ch_id) or {}
+            channel_resolution = _resolve_user_channel_connection(
+                str(user_id or "").strip(),
+                ch_id,
+                reg_key,
+            )
+            lookup_channel_id = str(channel_resolution.get("lookup_channel_id") or ch_id).strip()
+            analytics_channel_id = str(channel_resolution.get("analytics_channel_id") or lookup_channel_id).strip()
+            snapshot_channel_id = str(channel_resolution.get("snapshot_channel_id") or lookup_channel_id).strip()
+            ch_id = analytics_channel_id or ch_id
+            record = (
+                dict(channel_resolution.get("record") or {})
+                or fetch_channel_snapshot(snapshot_channel_id)
+                or fetch_channel_snapshot(ch_id)
+                or {}
+            )
             insights = shape_catalyst_insights(record)
-            harvest = bool((record.get("analytics_snapshot") or {}))
+            snapshot = record.get("analytics_snapshot") or {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            harvest = bool(snapshot)
             growth = assess_channel_growth(insights, harvest_present=harvest)
+            video_metrics = _video_metric_summary(snapshot)
 
             velocity: dict[str, Any] = {}
             live_analytics: dict[str, Any] = {}
@@ -1838,8 +2498,8 @@ def execute_tool(
                         youtube_get_latest_video_velocity,
                     )
 
-                    access_token, _rec = await _youtube_connected_channel_access_token(
-                        {"id": uid}, ch_id
+                    access_token, rec = await _youtube_connected_channel_access_token(
+                        {"id": uid}, lookup_channel_id or ch_id
                     )
                     if access_token:
                         velocity = await youtube_get_latest_video_velocity(
@@ -1848,16 +2508,23 @@ def execute_tool(
                         )
                         snap = await _youtube_fetch_channel_analytics(access_token, ch_id)
                         if isinstance(snap, dict) and snap:
+                            live_video_metrics = _video_metric_summary(snap)
                             live_analytics = {
                                 "oauth_connected": True,
-                                "period": "90d",
+                                "period": "90d channel aggregate + lifetime retention-ranked videos",
                                 "source": "youtube_data_v3+youtube_analytics_reporting",
                                 "channel_summary": snap.get("channel_summary"),
                                 "recent_upload_titles": (snap.get("recent_upload_titles") or [])[:10],
                                 "top_video_titles": (snap.get("top_video_titles") or [])[:10],
+                                "retention_video_titles": [
+                                    str((row or {}).get("title") or "").strip()
+                                    for row in list(snap.get("retention_videos") or [])[:10]
+                                    if isinstance(row, dict) and str((row or {}).get("title") or "").strip()
+                                ],
                                 "packaging_learnings": snap.get("packaging_learnings") or [],
                                 "retention_learnings": snap.get("retention_learnings") or [],
                                 "title_pattern_hints": snap.get("title_pattern_hints") or [],
+                                "video_metrics": live_video_metrics,
                                 "series_clusters": [
                                     {
                                         "label": c.get("label"),
@@ -1867,8 +2534,91 @@ def execute_tool(
                                     if isinstance(c, dict)
                                 ],
                             }
+                    else:
+                        oauth_error = str((rec or {}).get("last_sync_error") or "No usable YouTube OAuth token found for this selected channel.")[:240]
+                        oauth_error_lower = oauth_error.lower()
+                        live_analytics = {
+                            "oauth_connected": False,
+                            "error": oauth_error,
+                            "record_found": bool(rec),
+                            "reconnect_required": any(
+                                needle in oauth_error_lower
+                                for needle in (
+                                    "youtube_reconnect_required",
+                                    "invalid_grant",
+                                    "authorization expired",
+                                    "token refresh failed",
+                                    "reconnect this channel",
+                                )
+                            ),
+                            "channel_id": ch_id,
+                            "lookup_channel_id": lookup_channel_id,
+                        }
                 except Exception as exc:
-                    live_analytics = {"oauth_connected": False, "error": str(exc)[:240]}
+                    oauth_error = str(exc)[:240]
+                    oauth_error_lower = oauth_error.lower()
+                    live_analytics = {
+                        "oauth_connected": False,
+                        "error": oauth_error,
+                        "reconnect_required": any(
+                            needle in oauth_error_lower
+                            for needle in (
+                                "youtube_reconnect_required",
+                                "invalid_grant",
+                                "authorization expired",
+                                "token refresh failed",
+                                "reconnect this channel",
+                            )
+                        ),
+                    }
+
+            live_metrics = (live_analytics.get("video_metrics") or {}) if isinstance(live_analytics, dict) else {}
+            live_retention_rows = int((live_metrics or {}).get("retention_rows_available") or 0)
+            harvest_retention_rows = int((video_metrics or {}).get("retention_rows_available") or 0)
+            use_live_metrics = bool(live_analytics.get("oauth_connected")) and live_retention_rows >= harvest_retention_rows
+            effective_video_metrics = (
+                live_metrics
+                if use_live_metrics
+                else video_metrics
+            )
+            oauth_error = str(live_analytics.get("error") or "").strip()
+            oauth_error_lower = oauth_error.lower()
+            oauth_record_found = bool(live_analytics.get("record_found"))
+            oauth_reconnect_required = bool(live_analytics.get("reconnect_required")) or any(
+                needle in oauth_error_lower
+                for needle in (
+                    "youtube_reconnect_required",
+                    "invalid_grant",
+                    "authorization expired",
+                    "token refresh failed",
+                    "reconnect this channel",
+                )
+            )
+            if bool(live_analytics.get("oauth_connected")):
+                oauth_status = "live_private_analytics_connected"
+            elif oauth_reconnect_required:
+                oauth_status = "selected_channel_token_reconnect_required"
+            elif oauth_record_found:
+                oauth_status = "selected_channel_record_found_but_private_analytics_unavailable"
+            else:
+                oauth_status = "selected_channel_private_analytics_not_connected"
+
+            limitation_parts: list[str] = []
+            if oauth_reconnect_required:
+                limitation_parts.append(
+                    "A saved connection exists for this selected channel, but Google rejected the refresh token. "
+                    "Reconnect this exact channel/account in Settings before Studio Agent can use private YouTube Analytics."
+                )
+            elif not bool(live_analytics.get("oauth_connected")):
+                limitation_parts.append(
+                    "Studio Agent only has cached/public channel data for this selected channel; private YouTube Analytics did not connect in this tool call."
+                )
+            if not bool(effective_video_metrics.get("video_level_retention_available")):
+                limitation_parts.append(
+                    "No per-video retention rows were returned to Studio Agent. To identify a specific 50-60% AVD short, refresh channel intelligence "
+                    "after YouTube Analytics reconnects, or upload a YouTube Studio screenshot/export for that video."
+                )
+            limitation = " ".join(part for part in limitation_parts if part).strip()
 
             return {
                 "channel_id": ch_id,
@@ -1879,6 +2629,42 @@ def execute_tool(
                 "channel_title": record.get("title") or record.get("channel_handle") or "",
                 "insights": insights,
                 "growth_playbook": growth,
+                "analytics_data_quality": {
+                    "harvest_present": harvest,
+                    "oauth_connected": bool(live_analytics.get("oauth_connected")),
+                    "oauth_status": oauth_status,
+                    "oauth_record_found": oauth_record_found,
+                    "oauth_reconnect_required": oauth_reconnect_required,
+                    "video_rows_available": int(effective_video_metrics.get("video_rows_available") or 0),
+                    "video_level_retention_available": bool(
+                        effective_video_metrics.get("video_level_retention_available")
+                    ),
+                    "retention_rows_available": int(
+                        effective_video_metrics.get("retention_rows_available") or 0
+                    ),
+                    "effective_source": (
+                        "youtube_analytics_live"
+                        if use_live_metrics
+                        else "catalyst_harvest_snapshot"
+                    ),
+                    "requested_channel_id": str(args.get("channel_id") or "").strip(),
+                    "resolved_channel_id": ch_id,
+                    "lookup_channel_id": lookup_channel_id,
+                    "snapshot_channel_id": snapshot_channel_id,
+                    "requested_registry_key": reg_key,
+                    "channel_resolution": {
+                        "matched": bool(channel_resolution.get("matched")),
+                        "matched_by": str(channel_resolution.get("matched_by") or "none"),
+                        "corrected": bool(channel_resolution.get("corrected")),
+                        "requested_channel_id": str(channel_resolution.get("requested_channel_id") or ""),
+                        "lookup_channel_id": lookup_channel_id,
+                        "analytics_channel_id": ch_id,
+                    },
+                    "oauth_error": oauth_error,
+                    "limitation": limitation,
+                },
+                "video_metrics": effective_video_metrics,
+                "harvest_video_metrics": video_metrics,
                 "youtube_analytics_live": live_analytics,
                 "latest_video_velocity": velocity,
             }
@@ -1920,6 +2706,84 @@ def execute_tool(
                 niche_keywords=niche_keywords or queries,
             )
             return {"window_days": days, "queries": queries, "videos": rows[:20], "predicted_topics": predictions}
+
+        return json.dumps(_run_async(_fetch()), indent=2)
+
+    if name == "search_youtube_public":
+        async def _fetch():
+            from youtube import _youtube_fetch_public_videos_api_key, _youtube_public_api_get
+
+            query = str(args.get("query") or "").strip()
+            if not query:
+                raise ValueError("query required")
+            max_results = max(1, min(int(args.get("max_results") or 8), 15))
+            order = str(args.get("order") or "relevance").strip() or "relevance"
+            if order not in {"relevance", "date", "viewCount"}:
+                order = "relevance"
+            payload, active_key = await _youtube_public_api_get(
+                "/search",
+                params={
+                    "part": "snippet",
+                    "type": "video",
+                    "q": query,
+                    "order": order,
+                    "maxResults": max_results,
+                    "relevanceLanguage": "en",
+                    "safeSearch": "none",
+                },
+                timeout_sec=25,
+                quota_kind="interactive",
+                quota_note=f"studio_agent_public_youtube_search:{query[:48]}",
+            )
+            video_ids: list[str] = []
+            search_items: dict[str, dict[str, Any]] = {}
+            for item in list(payload.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                vid = str(((item.get("id") or {}).get("videoId") or "")).strip()
+                if not vid:
+                    continue
+                snippet = dict(item.get("snippet") or {})
+                video_ids.append(vid)
+                search_items[vid] = {
+                    "video_id": vid,
+                    "title": str(snippet.get("title", "") or "").strip(),
+                    "channel_title": str(snippet.get("channelTitle", "") or "").strip(),
+                    "channel_id": str(snippet.get("channelId", "") or "").strip(),
+                    "published_at": str(snippet.get("publishedAt", "") or "").strip(),
+                    "description": str(snippet.get("description", "") or "").strip(),
+                    "thumbnail_url": str((((snippet.get("thumbnails") or {}).get("high") or {}).get("url") or "")).strip(),
+                    "watch_url": f"https://www.youtube.com/watch?v={vid}",
+                }
+            hydrated = await _youtube_fetch_public_videos_api_key(video_ids)
+            hydrated_by_id = {str(row.get("video_id") or ""): row for row in hydrated if isinstance(row, dict)}
+            videos: list[dict[str, Any]] = []
+            for vid in video_ids:
+                base = dict(search_items.get(vid) or {})
+                stats = hydrated_by_id.get(vid) or {}
+                if stats:
+                    base.update(
+                        {
+                            "views": stats.get("views"),
+                            "likes": stats.get("likes"),
+                            "comments": stats.get("comments"),
+                            "duration_sec": stats.get("duration_sec"),
+                            "tags": stats.get("tags") or [],
+                        }
+                    )
+                videos.append(base)
+            return {
+                "source": "youtube_data_api_public_search",
+                "query": query,
+                "order": order,
+                "private_analytics": False,
+                "active_key": "(cache)" if active_key == "(cache)" else "configured",
+                "videos": videos,
+                "note": (
+                    "Use these public results to choose a reference URL. Do not claim private AVD, CTR, "
+                    "or retention from this tool."
+                ),
+            }
 
         return json.dumps(_run_async(_fetch()), indent=2)
 
@@ -2010,13 +2874,13 @@ def execute_tool(
             max_frames=int(args.get("max_frames") or 40),
         )
         out = {
-            "status": "started",
+            "status": "awaiting_scene_review",
             "job_id": job_id,
             "kind": "competitor",
             "stages": [s[0] for s in competitor.STAGES],
             "note": (
-                "Poll poll_render_job(job_id, kind='competitor'): metadata → download → keyframes → "
-                "pacing → audio → complete. Then build_scene_blueprint_from_reference."
+                "Poll poll_render_job(job_id, kind='competitor'): metadata â†’ download â†’ keyframes â†’ "
+                "pacing â†’ audio â†’ complete. Then build_scene_blueprint_from_reference."
             ),
         }
         return json.dumps(out, indent=2)
@@ -2055,21 +2919,22 @@ def execute_tool(
             from studio_analytics_router import _fetch_public_search_videos, _predict_topics
 
             reg_key = str(args.get("registry_key") or "").strip()
+            selected_channel_id = str(args.get("channel_id") or "").strip()
             niche = str(args.get("niche_query") or "").strip()
             days = int(args.get("days") or 30)
 
             channel_block: dict[str, Any] = {}
-            if reg_key:
-                ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
-                if ch_id:
-                    rec = fetch_channel_snapshot(ch_id)
-                    ins = shape_catalyst_insights(rec)
-                    harvest = bool((rec or {}).get("analytics_snapshot"))
-                    channel_block = {
-                        "registry_key": reg_key,
-                        "insights": ins,
-                        "growth_playbook": assess_channel_growth(ins, harvest_present=harvest),
-                    }
+            ch_id = selected_channel_id or (CHANNEL_KEY_TO_ID.get(reg_key, "") if reg_key else "")
+            if ch_id:
+                rec = fetch_channel_snapshot(ch_id)
+                ins = shape_catalyst_insights(rec)
+                harvest = bool((rec or {}).get("analytics_snapshot"))
+                channel_block = {
+                    "registry_key": reg_key or next((k for k, v in CHANNEL_KEY_TO_ID.items() if v == ch_id), ""),
+                    "channel_id": ch_id,
+                    "insights": ins,
+                    "growth_playbook": assess_channel_growth(ins, harvest_present=harvest),
+                }
 
             queries = [niche] if niche else (
                 [reg_key.replace("_", " ")] if reg_key else ["YouTube documentary viral 2026"]
@@ -2091,7 +2956,7 @@ def execute_tool(
             playbook = channel_block.get("growth_playbook") or {}
             stage = playbook.get("stage", "unknown")
             framing = (
-                "You don't need a topic yet — here's your positioning sprint."
+                "You don't need a topic yet â€” here's your positioning sprint."
                 if stage in ("brand_new", "early") and not channel_titles
                 else "Double down on what's already working on your channel."
             )
@@ -2204,10 +3069,25 @@ def execute_tool(
             payload,
             session_id=session_id,
         )
+        try:
+            from studio_agent import memory
+
+            memory.record_feedback_memory(
+                str(user_id or ""),
+                channel_id=ch_id,
+                outcome=outcome,
+                video_id=payload["video_id"],
+                notes=payload["notes"],
+                views=payload["views"],
+                ctr_percent=payload["ctr_percent"],
+            )
+        except Exception:
+            pass
         return json.dumps({
             "ok": True,
             "recorded": True,
-            "message": "Logged for NYPTID training and channel recommendations.",
+            "memory_saved": True,
+            "message": "Logged for NYPTID training, channel recommendations, and Studio Agent memory.",
         }, indent=2)
 
     if name == "poll_render_job":
@@ -2250,10 +3130,13 @@ def execute_tool_logged(
     session_id: str | None = None,
 ) -> str:
     """Wrapper that records telemetry then runs the tool."""
+    budget_estimate = None
     try:
+        budget_estimate = production_budget.enforce_budget(name, arguments)
         result = execute_tool(
             name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
         )
+        result = production_budget.with_budget_metadata(result, budget_estimate)
     except Exception as exc:
         telemetry.record_tool_call(
             user_id, name, arguments, session_id=session_id, result_preview=f"error: {exc}"
@@ -2265,3 +3148,4 @@ def execute_tool_logged(
 
 def requires_approval(name: str) -> bool:
     return name in APPROVAL_REQUIRED
+

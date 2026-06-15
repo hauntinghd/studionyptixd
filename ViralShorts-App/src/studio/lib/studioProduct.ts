@@ -20,6 +20,7 @@ export type DashboardTab =
     | 'home'
     | 'create'
     | 'agent'
+    | 'campus'
     | 'longform'
     | 'thumbnails'
     | 'cliplab'
@@ -27,7 +28,10 @@ export type DashboardTab =
     | 'analytics'
     | 'catalyst'
     | 'refunds'
-    | 'waitlist';
+    | 'waitlist'
+    | 'network'
+    | 'wins'
+    | 'leaderboard';
 
 export interface RenderTier {
     id: RenderTierId;
@@ -55,7 +59,7 @@ export interface StudioTool {
     title: string;
     desc: string;
     badge?: string;
-    action: 'create' | 'longform' | 'style_clone' | 'automate' | 'playground' | 'agent' | 'thumbnails' | 'cliplab';
+    action: 'create' | 'longform' | 'style_clone' | 'automate' | 'playground' | 'agent' | 'campus' | 'thumbnails' | 'cliplab';
     comingSoon?: boolean;
 }
 
@@ -173,6 +177,13 @@ export const STUDIO_TOOLS: StudioTool[] = [
         desc: 'Chat-first production — long-form, shorts, analytics',
         badge: 'Beta',
         action: 'agent',
+    },
+    {
+        id: 'campus',
+        title: 'Studio Hub',
+        desc: 'Creator growth, business ads, network, ranks',
+        badge: 'New',
+        action: 'campus',
     },
     {
         id: 'thumbnails',

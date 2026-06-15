@@ -365,6 +365,32 @@ def _load_youtube_connections() -> None:
     _youtube_connections = {}
 
 
+def _reload_youtube_connections_from_supabase() -> bool:
+    """Force-refresh the in-memory YouTube connection cache from Supabase."""
+    global _youtube_connections, _youtube_connections_hydrated_from_supabase
+    try:
+        import youtube_connections_store as _yc_store
+
+        if not _yc_store.configured():
+            return False
+        hydrated = _yc_store.hydrate()
+        if not hydrated:
+            return False
+        _youtube_connections = hydrated
+        _youtube_connections_hydrated_from_supabase = True
+        try:
+            YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            YOUTUBE_CONNECTIONS_FILE.write_text(
+                json.dumps(_youtube_connections, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def _save_youtube_connections() -> None:
     """Persist `_youtube_connections`.
 
@@ -1197,16 +1223,19 @@ async def _youtube_fetch_channel_search(access_token: str, channel_id: str, orde
     video_ids: list[str] = []
     seen_ids: set[str] = set()
     while remaining > 0:
+        params = {
+            "part": "snippet",
+            "channelId": clean_channel_id,
+            "order": order,
+            "maxResults": min(50, remaining),
+            "type": "video",
+        }
+        if page_token:
+            params["pageToken"] = page_token
         payload = await _youtube_api_get(
             access_token,
             "/search",
-            params={
-                "part": "snippet",
-                "channelId": clean_channel_id,
-                "order": order,
-                "maxResults": min(50, remaining),
-                "type": "video",
-            },
+            params=params,
         )
         for raw in list(payload.get("items") or []):
             if not isinstance(raw, dict):
@@ -1378,6 +1407,44 @@ def _youtube_order_inventory_rows(rows: list[dict] | None) -> list[dict]:
             reverse=True,
         )
     return ordered_rows
+
+
+def _youtube_parse_analytics_video_rows(
+    rows: list,
+    headers: list[str],
+    video_meta: dict[str, dict],
+) -> list[dict]:
+    parsed_rows: list[dict] = []
+    for row in list(rows or []):
+        if not isinstance(row, list) or not row:
+            continue
+        video_id = str(row[0] or "").strip()
+        if not video_id:
+            continue
+        metrics_map: dict[str, float] = {}
+        for idx, header in enumerate(list(headers or [])):
+            if idx >= len(row):
+                continue
+            try:
+                metrics_map[str(header or "")] = float(row[idx] or 0)
+            except Exception:
+                pass
+        meta = dict(video_meta.get(video_id) or {})
+        parsed_rows.append(
+            {
+                "video_id": video_id,
+                "title": str(meta.get("title", "") or "").strip(),
+                "published_at": str(meta.get("published_at", "") or "").strip(),
+                "thumbnail_url": str(meta.get("thumbnail_url", "") or "").strip(),
+                "duration_sec": int(float(meta.get("duration_sec", 0) or 0)),
+                "views": int(metrics_map.get("views", meta.get("views", 0) or 0) or 0),
+                "average_view_duration_sec": int(metrics_map.get("averageViewDuration", 0) or 0),
+                "average_view_percentage": round(float(metrics_map.get("averageViewPercentage", 0.0) or 0.0), 2),
+                "impressions": int(metrics_map.get("impressions", 0) or 0),
+                "impression_click_through_rate": round(float(metrics_map.get("impressionClickThroughRate", 0.0) or 0.0), 2),
+            }
+        )
+    return parsed_rows
 
 
 def _slugify_file_component(value: str, fallback: str = "item", max_len: int = 64) -> str:
@@ -2179,33 +2246,50 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
 
     top_video_ids = [str(row[0] or "").strip() for row in top_rows if isinstance(row, list) and row]
     top_video_meta = {str(v.get("video_id", "")): v for v in await _youtube_fetch_videos(access_token, top_video_ids)}
-    analytics_top_videos: list[dict] = []
-    for row in top_rows:
-        if not isinstance(row, list) or not row:
+    analytics_top_videos = _youtube_parse_analytics_video_rows(top_rows, top_header_names, top_video_meta)
+
+    retention_rows: list = []
+    retention_header_names: list[str] = []
+    retention_start_date = date(2005, 1, 1)
+    for metrics in (
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
+        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
+    ):
+        try:
+            retention_payload = await _youtube_api_get(
+                access_token,
+                "/reports",
+                analytics=True,
+                params={
+                    "ids": f"channel=={channel_id}",
+                    "startDate": retention_start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                    "dimensions": "video",
+                    "sort": "-averageViewPercentage,-views",
+                    "maxResults": 50,
+                    "metrics": metrics,
+                },
+            )
+            retention_rows = list(retention_payload.get("rows") or [])
+            retention_header_names = [
+                str((col or {}).get("name", "") or "")
+                for col in list(retention_payload.get("columnHeaders") or [])
+            ]
+            break
+        except Exception:
+            retention_rows = []
+            retention_header_names = []
             continue
-        video_id = str(row[0] or "").strip()
-        metrics_map: dict[str, float] = {}
-        for idx, header in enumerate(top_header_names):
-            if idx >= len(row):
-                continue
-            try:
-                metrics_map[header] = float(row[idx] or 0)
-            except Exception:
-                pass
-        meta = dict(top_video_meta.get(video_id) or {})
-        analytics_top_videos.append(
-            {
-                "video_id": video_id,
-                "title": str(meta.get("title", "") or "").strip(),
-                "published_at": str(meta.get("published_at", "") or "").strip(),
-                "thumbnail_url": str(meta.get("thumbnail_url", "") or "").strip(),
-                "views": int(metrics_map.get("views", meta.get("views", 0) or 0) or 0),
-                "average_view_duration_sec": int(metrics_map.get("averageViewDuration", 0) or 0),
-                "average_view_percentage": round(float(metrics_map.get("averageViewPercentage", 0.0) or 0.0), 2),
-                "impressions": int(metrics_map.get("impressions", 0) or 0),
-                "impression_click_through_rate": round(float(metrics_map.get("impressionClickThroughRate", 0.0) or 0.0), 2),
-            }
-        )
+    retention_video_ids = [str(row[0] or "").strip() for row in retention_rows if isinstance(row, list) and row]
+    retention_video_meta = {
+        str(v.get("video_id", "")): v
+        for v in await _youtube_fetch_videos(access_token, retention_video_ids)
+    }
+    analytics_retention_videos = _youtube_parse_analytics_video_rows(
+        retention_rows,
+        retention_header_names,
+        retention_video_meta,
+    )
 
     upload_inventory_target = max(int(float(channel_meta.get("video_count", 0) or 0)), 50)
     upload_inventory_target = min(upload_inventory_target, 500)
@@ -2352,13 +2436,18 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             *[str((row or {}).get("video_id", "") or "").strip() for row in list(recent_uploads or [])],
             *[str((row or {}).get("video_id", "") or "").strip() for row in list(popular_uploads or [])],
             *[str((row or {}).get("video_id", "") or "").strip() for row in list(analytics_top_videos or [])],
+            *[str((row or {}).get("video_id", "") or "").strip() for row in list(analytics_retention_videos or [])],
         ],
         max_items=80,
         max_chars=24,
     )
     bulk_source_rows = {
         str((row or {}).get("video_id", "") or "").strip(): dict(row or {})
-        for row in [*list(inventory_rows or []), *list(analytics_top_videos or [])]
+        for row in [
+            *list(inventory_rows or []),
+            *list(analytics_top_videos or []),
+            *list(analytics_retention_videos or []),
+        ]
         if isinstance(row, dict) and str((row or {}).get("video_id", "") or "").strip()
     }
     bulk_video_metrics = await _youtube_fetch_video_analytics_bulk(
@@ -2367,7 +2456,7 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         candidate_video_ids,
         video_meta=bulk_source_rows,
     )
-    for bucket in (inventory_rows, recent_uploads, popular_uploads, analytics_top_videos):
+    for bucket in (inventory_rows, recent_uploads, popular_uploads, analytics_top_videos, analytics_retention_videos):
         for row in list(bucket or []):
             if not isinstance(row, dict):
                 continue
@@ -2396,7 +2485,18 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
                 " ".join(list(row.get("tags") or [])),
                 niche_key=str(row.get("niche_key", "") or "").strip().lower(),
             )
-    top_videos = [dict(v or {}) for v in list(popular_uploads or recent_uploads or analytics_top_videos) if isinstance(v, dict)]
+    top_videos = [
+        dict(v or {})
+        for v in list(popular_uploads or recent_uploads or analytics_top_videos or analytics_retention_videos)
+        if isinstance(v, dict)
+    ]
+    retention_videos = sorted(
+        [dict(v or {}) for v in list(analytics_retention_videos or []) if isinstance(v, dict)],
+        key=lambda row: (
+            -float(row.get("average_view_percentage", 0.0) or 0.0),
+            -int(float(row.get("views", 0) or 0)),
+        ),
+    )
     popular_titles = [str(v.get("title", "") or "").strip() for v in top_videos if str(v.get("title", "") or "").strip()]
     recent_titles = [str(v.get("title", "") or "").strip() for v in recent_uploads if str(v.get("title", "") or "").strip()]
     series_clusters = _youtube_catalyst_build_channel_series_clusters(
@@ -2472,7 +2572,12 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         "recent_upload_titles": recent_titles[:12],
         "top_video_titles": popular_titles[:12],
         "top_videos": top_videos[:10],
-        "uploaded_videos": [dict(v or {}) for v in list(inventory_rows or recent_uploads or [])[:250] if isinstance(v, dict)],
+        "retention_videos": retention_videos[:25],
+        "uploaded_videos": [
+            dict(v or {})
+            for v in list(_youtube_merge_public_video_rows(inventory_rows or recent_uploads or [], retention_videos))[:250]
+            if isinstance(v, dict)
+        ],
         "packaging_learnings": _youtube_dedupe_clip_list(packaging_learnings, max_items=6),
         "retention_learnings": _youtube_dedupe_clip_list(retention_learnings, max_items=6),
         "title_pattern_hints": _youtube_dedupe_clip_list(title_pattern_hints, max_items=6),
@@ -2669,16 +2774,91 @@ async def _youtube_connected_channel_access_token(user: dict, channel_id: str) -
     chosen_id = str(channel_id or "").strip()
     if not user_id or not chosen_id:
         return "", {}
+    def _token(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    def _record_tokens(row_key: str, row: dict) -> set[str]:
+        return {
+            token
+            for token in (
+                _token(row_key),
+                _token(row.get("channel_id")),
+                _token(row.get("title")),
+                _token(row.get("channel_title")),
+                _token(row.get("channel_handle")),
+                _token(row.get("handle")),
+                _token(row.get("custom_url")),
+                _token(row.get("channel_url")),
+            )
+            if token
+        }
+
+    def _find_channel_record(channels: dict, requested_id: str) -> tuple[str, dict]:
+        selected_id = str(requested_id or "").strip()
+        record = dict(channels.get(selected_id) or {})
+        if record:
+            return selected_id, record
+        requested_token = _token(selected_id)
+        for sibling_id, sibling in channels.items():
+            if not isinstance(sibling, dict):
+                continue
+            if requested_token and requested_token in _record_tokens(str(sibling_id), sibling):
+                return str(sibling_id or selected_id).strip(), dict(sibling or {})
+        return selected_id, {}
+
     async with _youtube_connections_lock:
         _load_youtube_connections()
         bucket = _youtube_bucket_for_user(user_id)
-        record = dict((bucket.get("channels") or {}).get(chosen_id) or {})
+        channels = dict(bucket.get("channels") or {})
+        chosen_id, record = _find_channel_record(channels, chosen_id)
+        if not record and _reload_youtube_connections_from_supabase():
+            bucket = _youtube_bucket_for_user(user_id)
+            channels = dict(bucket.get("channels") or {})
+            chosen_id, record = _find_channel_record(channels, chosen_id)
     if not record:
         return "", {}
     try:
         access_token, updated = await _youtube_ensure_access_token(record)
-    except Exception:
-        return "", record
+    except Exception as exc:
+        # A live worker can hold an old in-memory token while the OAuth callback
+        # or another worker has already written a repaired token to Supabase.
+        # Force one fresh read before declaring a selected channel disconnected.
+        if _google_oauth_error_suggests_reconnect_required(str(exc)) and _reload_youtube_connections_from_supabase():
+            fresh_chosen_id = chosen_id
+            fresh_record: dict = {}
+            async with _youtube_connections_lock:
+                bucket = _youtube_bucket_for_user(user_id)
+                channels = dict(bucket.get("channels") or {})
+                fresh_chosen_id, fresh_record = _find_channel_record(channels, chosen_id)
+            if fresh_record:
+                try:
+                    access_token, updated = await _youtube_ensure_access_token(fresh_record)
+                    chosen_id = fresh_chosen_id
+                except Exception as fresh_exc:
+                    record = fresh_record
+                    exc = fresh_exc
+                else:
+                    async with _youtube_connections_lock:
+                        bucket = _youtube_bucket_for_user(user_id)
+                        bucket["channels"][chosen_id] = updated
+                        _save_youtube_connections()
+                    return str(access_token or "").strip(), dict(updated or {})
+
+        repaired_record: dict = {}
+        repair_channel_id = str(record.get("channel_id") or chosen_id).strip()
+        try:
+            repaired_record = await _youtube_repair_channel_record_from_sibling(user_id, repair_channel_id, record)
+        except Exception:
+            repaired_record = {}
+        if not repaired_record and _google_oauth_error_suggests_reconnect_required(str(exc)):
+            return "", {**record, "last_sync_error": _clip_text(str(exc), 220)}
+        if repaired_record:
+            try:
+                access_token, updated = await _youtube_ensure_access_token(repaired_record)
+            except Exception as repaired_exc:
+                return "", {**repaired_record, "last_sync_error": _clip_text(str(repaired_exc), 220)}
+        else:
+            return "", {**record, "last_sync_error": _clip_text(str(exc), 220)}
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_id)
         bucket["channels"][chosen_id] = updated
@@ -2821,13 +3001,18 @@ async def _list_connected_youtube_channels_for_user(user: dict, sync: bool = Tru
         channels = {str(k): dict(v or {}) for k, v in dict(bucket.get("channels") or {}).items()}
     if (not default_channel_id or default_channel_id not in channels) and channels:
         default_channel_id = str(next(iter(channels.keys())) or "").strip()
-    if sync and default_channel_id in channels:
-        try:
-            channels[default_channel_id] = await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
-        except Exception as e:
-            stale = dict(channels.get(default_channel_id) or {})
-            stale["last_sync_error"] = _clip_text(str(e), 220)
-            channels[default_channel_id] = stale
+    if sync and channels:
+        ordered_channel_ids = []
+        if default_channel_id in channels:
+            ordered_channel_ids.append(default_channel_id)
+        ordered_channel_ids.extend([cid for cid in channels.keys() if cid not in ordered_channel_ids])
+        for channel_id in ordered_channel_ids:
+            try:
+                channels[channel_id] = await _youtube_sync_and_persist_for_user(user_id, channel_id)
+            except Exception as e:
+                stale = dict(channels.get(channel_id) or {})
+                stale["last_sync_error"] = _clip_text(str(e), 220)
+                channels[channel_id] = stale
     public_channels = []
     for _channel_id, record in channels.items():
         if "analytics_snapshot" in record or "access_token" in record:

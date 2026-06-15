@@ -177,7 +177,19 @@ def build_studio_analytics_router(
         return out
 
     @router.get("/channels")
-    async def list_channels(user: dict = Depends(_auth)):
+    async def list_channels(
+        user: dict = Depends(_auth),
+        sync: bool = Query(True),
+    ):
+        if sync:
+            try:
+                from youtube import _list_connected_youtube_channels_for_user
+
+                await _list_connected_youtube_channels_for_user(user, sync=True)
+            except Exception:
+                # Fall back to the most recent stored snapshot; this endpoint
+                # should keep the dashboard usable even if YouTube is throttled.
+                pass
         try:
             from youtube_connections_store import hydrate
 

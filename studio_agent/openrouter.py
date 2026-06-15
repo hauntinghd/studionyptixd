@@ -9,17 +9,19 @@ import httpx
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "anthropic/claude-sonnet-4")
+ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+ANTHROPIC_FALLBACK_MODEL = os.getenv("ANTHROPIC_FALLBACK_MODEL", "claude-3-5-haiku-latest")
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
     "anthropic/claude-sonnet-4",
-    "anthropic/claude-3.5-sonnet",
     "openai/gpt-4o",
-    "openai/gpt-4o-mini",
     "google/gemini-2.5-pro-preview",
     "google/gemini-2.0-flash-001",
-    "meta-llama/llama-3.3-70b-instruct",
+    "x-ai/grok-4",
     "deepseek/deepseek-chat",
+    "moonshotai/kimi-k2",
+    "meta-llama/llama-3.3-70b-instruct",
     "qwen/qwen-2.5-72b-instruct",
 ]
 
@@ -102,7 +104,36 @@ CURATED_META: dict[str, dict[str, Any]] = {
 
 def _provider_from_id(model_id: str) -> str:
     slug = model_id.split("/")[0] if "/" in model_id else model_id
-    return slug.replace("-", " ").title()
+    labels = {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "google": "Google",
+        "x-ai": "xAI",
+        "deepseek": "DeepSeek",
+        "moonshotai": "Moonshot",
+        "meta-llama": "Meta",
+        "qwen": "Qwen",
+        "z-ai": "Z AI",
+        "mistralai": "Mistral",
+        "nvidia": "Nvidia",
+        "minimax": "MiniMax",
+        "alibaba": "Alibaba",
+        "bytedance": "ByteDance",
+        "cohere": "Cohere",
+        "perplexity": "Perplexity",
+    }
+    return labels.get(slug, slug.replace("-", " ").title())
+
+
+def _is_alias_or_redirect(model_id: str, live_row: dict[str, Any] | None = None) -> bool:
+    """Hide OpenRouter alias rows such as ~anthropic/claude-opus-latest."""
+    mid = model_id.lower().strip()
+    if mid.startswith("~"):
+        return True
+    row = live_row or {}
+    name = str(row.get("name") or "").lower()
+    desc = str(row.get("description") or "").lower()
+    return "latest" in mid and ("redirect" in desc or "redirect" in name)
 
 
 def _price_per_mtok(raw: Any) -> float | None:
@@ -130,7 +161,7 @@ def _infer_speed(model_id: str, prompt_ppm: float | None) -> int | None:
 
 def _infer_intelligence(model_id: str, prompt_ppm: float | None) -> int | None:
     slug = model_id.lower()
-    if any(k in slug for k in ("opus", "o1", "o3", "sonnet-4", "gpt-4o", "gemini-2.5-pro")):
+    if any(k in slug for k in ("opus", "o1", "o3", "o4", "sonnet-4", "gpt-4", "gpt-5", "gemini", "grok-4", "kimi-k2")):
         return 5
     if any(k in slug for k in ("mini", "nano", "lite", "8b", "7b")):
         return 3
@@ -165,13 +196,15 @@ def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[s
     live_by_id: dict[str, dict[str, Any]] = {}
     for item in live or []:
         mid = str(item.get("id") or "")
-        if mid:
+        if mid and not _is_alias_or_redirect(mid, item):
             live_by_id[mid] = item
 
     catalog: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     for mid in RECOMMENDED_MODELS:
+        if _is_alias_or_redirect(mid):
+            continue
         seen.add(mid)
         live_row = live_by_id.get(mid, {"id": mid})
         row = _catalog_row(mid, live_row)
@@ -183,15 +216,51 @@ def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[s
     for mid, live_row in live_by_id.items():
         if mid in seen:
             continue
+        if _is_alias_or_redirect(mid, live_row):
+            continue
         arch = live_row.get("architecture") if isinstance(live_row.get("architecture"), dict) else {}
         modality = str(arch.get("modality") or "").lower()
         if modality and "text" not in modality:
             continue
         extras.append(_catalog_row(mid, live_row))
 
-    extras.sort(key=lambda r: (r.get("provider") or "", r.get("name") or r["id"]))
+    _mark_dynamic_recommendations(extras, existing=catalog)
+    extras.sort(key=lambda r: (
+        0 if r.get("recommended") else 1,
+        r.get("provider") or "",
+        -(int(r.get("intelligence") or 0)),
+        r.get("name") or r["id"],
+    ))
     catalog.extend(extras)
     return catalog
+
+
+def _mark_dynamic_recommendations(extras: list[dict[str, Any]], *, existing: list[dict[str, Any]]) -> None:
+    """Pick strong current models from the live catalog without hard-coding one tiny era."""
+    already = {str(r.get("provider") or "") for r in existing if r.get("recommended")}
+    preferred_terms = (
+        "opus", "sonnet", "claude", "gpt-5", "gpt-4", "gemini", "grok",
+        "kimi", "deepseek", "llama", "qwen", "glm", "mistral", "command",
+    )
+    by_provider: dict[str, list[dict[str, Any]]] = {}
+    for row in extras:
+        mid = str(row.get("id") or "").lower()
+        provider = str(row.get("provider") or "Other")
+        if any(bad in mid for bad in ("free", "vision-preview", "moderation", "embedding", "rerank")):
+            continue
+        if not any(term in mid for term in preferred_terms):
+            continue
+        by_provider.setdefault(provider, []).append(row)
+    for provider, rows in by_provider.items():
+        if provider in already and provider not in {"Moonshotai", "Moonshot Ai", "X Ai", "Xai"}:
+            continue
+        rows.sort(key=lambda r: (
+            -(int(r.get("intelligence") or 0)),
+            int(r.get("speed") or 0),
+            float(r.get("prompt_price_per_m") or 9999),
+        ))
+        for row in rows[:1]:
+            row["recommended"] = True
 
 
 def api_key() -> str:
@@ -206,6 +275,10 @@ def api_key() -> str:
     return key
 
 
+def anthropic_api_key() -> str:
+    return os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+
 def _headers() -> dict[str, str]:
     h = {
         "Authorization": f"Bearer {api_key()}",
@@ -218,6 +291,208 @@ def _headers() -> dict[str, str]:
     if title:
         h["X-Title"] = title
     return h
+
+
+def _should_try_anthropic(status_code: int, detail: str) -> bool:
+    detail_l = (detail or "").lower()
+    if status_code in {402, 429}:
+        return True
+    if status_code in {401, 403} and any(
+        needle in detail_l
+        for needle in ("quota", "credit", "balance", "limit", "rate", "insufficient")
+    ):
+        return True
+    return any(
+        needle in detail_l
+        for needle in (
+            "insufficient",
+            "quota",
+            "credit",
+            "balance",
+            "rate limit",
+            "too many requests",
+        )
+    )
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item.get("text")))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                parts.append(str(item))
+        return "\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _json_obj(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _anthropic_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in tools or []:
+        if not isinstance(row, dict):
+            continue
+        fn = row.get("function") if isinstance(row.get("function"), dict) else {}
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        schema = fn.get("parameters")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+        out.append(
+            {
+                "name": name,
+                "description": str(fn.get("description") or ""),
+                "input_schema": schema,
+            }
+        )
+    return out
+
+
+def _anthropic_payload_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+    system_parts: list[str] = []
+    out: list[dict[str, Any]] = []
+    known_tool_ids: set[str] = set()
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        text = _content_to_text(msg.get("content")).strip()
+        if role == "system":
+            if text:
+                system_parts.append(text)
+            continue
+        if role == "tool":
+            tool_use_id = str(msg.get("tool_call_id") or msg.get("id") or f"tool_{len(out)}")
+            if tool_use_id in known_tool_ids:
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": text or "",
+                            }
+                        ],
+                    }
+                )
+            elif text:
+                out.append({"role": "user", "content": f"Tool result context ({tool_use_id}):\n{text}"})
+            continue
+        if role == "assistant":
+            blocks: list[dict[str, Any]] = []
+            if text:
+                blocks.append({"type": "text", "text": text})
+            for idx, call in enumerate(msg.get("tool_calls") or []):
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = str(fn.get("name") or "").strip()
+                if not name:
+                    continue
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(call.get("id") or f"toolu_{len(out)}_{idx}"),
+                        "name": name,
+                        "input": _json_obj(fn.get("arguments")),
+                    }
+                )
+                known_tool_ids.add(str(call.get("id") or f"toolu_{len(out)}_{idx}"))
+            if blocks:
+                out.append({"role": "assistant", "content": blocks})
+            continue
+        if text:
+            out.append({"role": "user", "content": text})
+    if not out:
+        out.append({"role": "user", "content": "Continue."})
+    elif out[0].get("role") != "user":
+        out.insert(0, {"role": "user", "content": "Continue from the saved Studio Agent state."})
+    return ("\n\n".join(system_parts) if system_parts else None), out
+
+
+async def _anthropic_chat_completion(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    temperature: float,
+    timeout: float,
+) -> dict[str, Any]:
+    key = anthropic_api_key()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+    system_text, anth_messages = _anthropic_payload_messages(messages)
+    payload: dict[str, Any] = {
+        "model": ANTHROPIC_FALLBACK_MODEL,
+        "messages": anth_messages,
+        "max_tokens": int(os.getenv("ANTHROPIC_FALLBACK_MAX_TOKENS", "2048")),
+        "temperature": temperature,
+    }
+    if system_text:
+        payload["system"] = system_text
+    anth_tools = _anthropic_tools(tools)
+    if anth_tools:
+        payload["tools"] = anth_tools
+        payload["tool_choice"] = {"type": "auto"}
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:2000]}")
+        data = r.json()
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for idx, block in enumerate(data.get("content") or []):
+        if isinstance(block, dict) and block.get("type") == "text":
+            text_parts.append(str(block.get("text") or ""))
+        elif isinstance(block, dict) and block.get("type") == "tool_use":
+            tool_calls.append(
+                {
+                    "id": str(block.get("id") or f"toolu_{idx}"),
+                    "type": "function",
+                    "function": {
+                        "name": str(block.get("name") or ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    message: dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts).strip()}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return {
+        "id": data.get("id"),
+        "model": data.get("model") or ANTHROPIC_FALLBACK_MODEL,
+        "provider": "anthropic_fallback",
+        "choices": [{"message": message}],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0),
+        },
+    }
 
 
 async def list_models() -> list[dict[str, Any]]:
@@ -259,6 +534,43 @@ async def model_pricing(model_id: str) -> tuple[float | None, float | None]:
 REASONING_DEPTHS = ("fast", "balanced", "deep")
 
 
+def _env_int(name: str, default: int, *, floor: int = 1, ceiling: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    value = max(floor, value)
+    if ceiling is not None:
+        value = min(value, ceiling)
+    return value
+
+
+def _completion_token_cap(depth: str, *, has_tools: bool) -> int:
+    """Always send an explicit output cap so low OpenRouter credit cannot request huge defaults."""
+    key = str(depth or "balanced").strip().lower()
+    default = 4096
+    if has_tools:
+        default = 2048
+    elif key == "deep":
+        default = 6144
+    elif key == "fast":
+        default = 2048
+    return _env_int("STUDIO_AGENT_MAX_COMPLETION_TOKENS", default, floor=512, ceiling=8192)
+
+
+def _reasoning_token_cap(depth: str) -> int:
+    key = str(depth or "balanced").strip().lower()
+    default = 3072 if key == "deep" else 1024
+    return _env_int("STUDIO_AGENT_REASONING_MAX_TOKENS", default, floor=256, ceiling=4096)
+
+
+def _is_openrouter_credit_limit(status_code: int, detail: str) -> bool:
+    if status_code != 402:
+        return False
+    text = str(detail or "").lower()
+    return "requires more credits" in text or "can only afford" in text or "credits" in text
+
+
 def reasoning_params(
     depth: str = "balanced",
     *,
@@ -277,11 +589,11 @@ def reasoning_params(
         temp = 0.35
         reasoning: dict[str, Any] = {"enabled": True, "effort": "high"}
         if "claude" in mid or "anthropic" in mid:
-            reasoning = {"enabled": True, "max_tokens": 10_000}
+            reasoning = {"enabled": True, "max_tokens": _reasoning_token_cap(key)}
         return temp, reasoning
 
     # balanced
-    return 0.4, {"enabled": True, "effort": "low"}
+    return 0.4, {"enabled": True, "effort": "low", "max_tokens": _reasoning_token_cap(key)}
 
 
 async def chat_completion(
@@ -300,6 +612,7 @@ async def chat_completion(
         "model": model or DEFAULT_MODEL,
         "messages": messages,
         "temperature": temp,
+        "max_tokens": _completion_token_cap(reasoning_depth, has_tools=bool(tools)),
     }
     if reasoning:
         payload["reasoning"] = reasoning
@@ -317,14 +630,42 @@ async def chat_completion(
 
     timeout = 180.0 if reasoning_depth == "deep" else 120.0
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(
-            f"{OPENROUTER_BASE}/chat/completions",
-            headers=_headers(),
-            json=payload,
-        )
+        r = await client.post(f"{OPENROUTER_BASE}/chat/completions", headers=_headers(), json=payload)
+        if _is_openrouter_credit_limit(r.status_code, r.text):
+            # Retry once with a cheap answer budget. Keep tools enabled so normal
+            # Studio tool routing can still work, but disable reasoning because it
+            # is the easiest hidden multiplier on low balances.
+            retry_payload = dict(payload)
+            retry_payload["max_tokens"] = min(int(retry_payload.get("max_tokens") or 2048), 1024)
+            retry_payload.pop("reasoning", None)
+            r = await client.post(f"{OPENROUTER_BASE}/chat/completions", headers=_headers(), json=retry_payload)
         if r.status_code >= 400:
             detail = r.text[:2000]
-            raise RuntimeError(f"OpenRouter {r.status_code}: {detail}")
+            if anthropic_api_key() and _should_try_anthropic(r.status_code, detail):
+                fallback_messages = messages
+                if web_search:
+                    fallback_messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "OpenRouter web search is unavailable because the primary provider hit "
+                                "credits or rate limits. Continue with available Studio tools only. "
+                                "Do not claim live web search or private analytics unless a tool result "
+                                "is present in this turn."
+                            ),
+                        },
+                    ]
+                return await _anthropic_chat_completion(
+                    messages=fallback_messages,
+                    tools=tools,
+                    temperature=temp,
+                    timeout=timeout,
+                )
+            suffix = ""
+            if _should_try_anthropic(r.status_code, detail) and not anthropic_api_key():
+                suffix = " Anthropic fallback is not configured on this backend (ANTHROPIC_API_KEY missing)."
+            raise RuntimeError(f"OpenRouter {r.status_code}: {detail}{suffix}")
         return r.json()
 
 

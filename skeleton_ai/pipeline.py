@@ -60,6 +60,18 @@ class Beat:
     duration_sec: float
 
 
+def _retime_beats_to_narration(beats: list[Beat], total_duration: float) -> None:
+    """Set beat durations from the real voiceover length instead of fixed 5s blocks."""
+    if not beats or total_duration <= 0:
+        return
+    weights = [max(1, len(re.findall(r"\w+", beat.narration or ""))) for beat in beats]
+    total_weight = max(1, sum(weights))
+    raw = [max(2.4, total_duration * (w / total_weight)) for w in weights]
+    scale = total_duration / max(0.001, sum(raw))
+    for beat, dur in zip(beats, raw):
+        beat.duration_sec = max(2.0, dur * scale)
+
+
 def split_script_into_beats(script_text: str, target_count: int = 12) -> list[str]:
     """Naive sentence split — Grok prompt told it to write one sentence per beat."""
     sentences = re.split(r"(?<=[.!?])\s+", script_text.strip())
@@ -245,6 +257,9 @@ def run(
     voice_id: str | None = None,
     script_override: str | None = None,
     user_id: str | None = None,
+    watermark_text: str = "Studio",
+    captions_enabled: bool = True,
+    caption_mode: str = "word",
 ) -> dict:
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
@@ -306,8 +321,17 @@ def run(
             outfit=outfit,
             scene_action=action,
             motion_prompt=motion,
-            duration_sec=5.0,  # uniform; refined later if we measure TTS chunks
+            duration_sec=5.0,
         ))
+
+    _write_progress(workspace, stage="narration", progress=23, detail="Voiceover timing")
+    narration_audio = el.synthesize(
+        text=script_text,
+        out_path=workspace / "narration.mp3",
+        voice_id=voice_id,
+    )
+    narration_duration = probe_duration(narration_audio)
+    _retime_beats_to_narration(beats, narration_duration)
 
     # 4. Render stills + clips per beat (canonical master edit — identity locked).
     trimmed_paths: list[Path] = []
@@ -360,23 +384,19 @@ def run(
             clips_dir / f"{sid}.mp4",
             tier=tier,
             video_model=video_model,
-            duration_sec=int(beat.duration_sec),
+            duration_sec=10 if float(beat.duration_sec or 0) > 5 else 5,
         )
         trimmed = trim_with_captions(
             clip_path,
             trimmed_dir / f"{sid}.mp4",
             duration_sec=beat.duration_sec,
             narration_text=beat.narration,
+            watermark_text=watermark_text,
+            caption_mode=caption_mode,
+            captions_enabled=captions_enabled,
+            force=True,
         )
         trimmed_paths.append(trimmed)
-
-    _write_progress(workspace, stage="narration", progress=88, detail="Voiceover")
-    # 5. Narration audio (full script).
-    narration_audio = el.synthesize(
-        text=script_text,
-        out_path=workspace / "narration.mp3",
-        voice_id=voice_id,
-    )
 
     _write_progress(workspace, stage="compose", progress=94, detail="Muxing final MP4")
     # 6. Concat + mux.
@@ -399,4 +419,55 @@ def run(
         "topic": topic,
     }
     (workspace / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    safe_topic = str(topic or cat["label"] or "Skeleton Short").strip()
+    safe_topic_tag = re.sub(r"[^a-z0-9]+", "", safe_topic.lower())[:32] or "shorts"
+    brand_tag = re.sub(r"[^a-z0-9]+", "", str(watermark_text or "").lower())[:32]
+    timestamps: list[str] = []
+    cursor = 0.0
+    for beat in beats:
+        mm = int(cursor // 60)
+        ss = int(cursor % 60)
+        label = re.sub(r"\s+", " ", beat.narration).strip()[:70].rstrip(" .,")
+        timestamps.append(f"{mm:02d}:{ss:02d} - {label or f'Beat {beat.index + 1}'}")
+        cursor += float(beat.duration_sec or 0)
+    tags = list(dict.fromkeys([
+        safe_topic_tag,
+        category_key,
+        "shorts",
+        "youtube shorts",
+        "ai video",
+        "nyptid studio",
+        brand_tag,
+    ]))
+    brand_hashtag = f" #{brand_tag}" if brand_tag else ""
+    pkg = f"""Title:
+{safe_topic}
+
+Alternate Titles:
+1. {safe_topic}
+2. {safe_topic} | Full Story in 60 Seconds
+3. The Part Everyone Missed About {safe_topic[:70]}
+
+Description:
+{safe_topic}
+
+Watch the full story unfold in a fast, tightly edited short. Subscribe to {watermark_text} for more.
+
+Timestamps:
+{chr(10).join(timestamps) if timestamps else "00:00 - Full short"}
+
+Tags:
+{", ".join(t for t in tags if t)}
+
+Hashtags:
+#shorts #{safe_topic_tag} #nyptidstudio{brand_hashtag}
+
+Thumbnail:
+Not generated for short-form by default. Use the strongest frame/cover from the finished Short unless the user explicitly asks for a custom thumbnail.
+
+CTA:
+Subscribe for more.
+
+"""
+    (workspace / "package.txt").write_text(pkg, encoding="utf-8")
     return result

@@ -11,6 +11,22 @@ export type AgentJobTrack = {
     started_at?: number;
 };
 
+export type AgentSceneSnapshot = {
+    index: number;
+    sid?: string | null;
+    narration?: string | null;
+    scene_action?: string | null;
+    duration_sec?: number;
+    status?: string | null;
+    animate?: boolean;
+    approved_for_video?: boolean;
+    approved_for_animation?: boolean;
+    has_clip?: boolean;
+    video_model?: string | null;
+    last_edit?: unknown;
+    still_preview_url?: string;
+};
+
 export type AgentJobSnapshot = {
     job_id: string;
     kind: AgentJobKind;
@@ -24,7 +40,11 @@ export type AgentJobSnapshot = {
     title?: string;
     mp4_url?: string;
     download_url?: string;
+    package_url?: string;
     preview_url?: string;
+    model_url?: string;
+    model_urls?: string[];
+    asset_urls?: string[];
     current_scene?: number;
     total_scenes?: number;
     current_chapter?: number;
@@ -33,6 +53,7 @@ export type AgentJobSnapshot = {
     can_finalize?: boolean;
     still_count?: number;
     still_preview_urls?: string[];
+    scenes?: AgentSceneSnapshot[];
     pacing?: {
         avg_shot_sec?: number | null;
         cut_count?: number;
@@ -54,6 +75,10 @@ export type ProductionProgressUpdate = {
 
 export function agentJobStillUrl(jobId: string, sceneIdx: number) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/still/${sceneIdx}`);
+}
+
+export function agentJobSceneApprovalUrl(jobId: string, sceneIdx: number) {
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/approval`);
 }
 
 export function agentJobFinalizeUrl(jobId: string) {
@@ -102,6 +127,10 @@ export function mediaUrl(path: string, accessToken: string) {
 /** Agent media route uses session Bearer; video tag cannot — fetch via blob in component if needed. */
 export function agentJobMediaUrl(jobId: string, kind: AgentJobKind) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/media?kind=${kind}`);
+}
+
+export function agentJobPackageUrl(jobId: string, kind: AgentJobKind) {
+    return agentApi(`/api/studio-agent/jobs/${jobId}/package?kind=${kind}`);
 }
 
 export function agentJobPollUrl(jobId: string, kind: AgentJobKind, sessionId: string) {

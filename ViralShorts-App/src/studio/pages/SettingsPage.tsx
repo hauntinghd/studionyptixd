@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
-import { ArrowLeft, Bell, Globe2, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
+import { ArrowLeft, Bell, CheckCircle2, Globe2, ShieldCheck, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
 import StudioShell from '../components/layout/StudioShell';
 import { type PageNav } from '../components/NavBar';
 import { API, AuthContext, BILLING_SITE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
@@ -69,15 +69,19 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
 
     return (
         <StudioShell onNavigate={onNavigate}>
-            <div className="mx-auto max-w-5xl space-y-8">
-                <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-br from-cyan-950/20 via-[#0c0c10] to-violet-950/30 p-6 sm:p-8">
+            <div className="mx-auto max-w-6xl space-y-8">
+                <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-[radial-gradient(circle_at_14%_0%,rgba(6,182,212,0.18),transparent_32%),linear-gradient(135deg,rgba(8,47,73,0.25),rgba(9,9,11,0.96)_48%,rgba(46,16,101,0.32))] p-6 shadow-2xl shadow-black/30 sm:p-8">
                     <div className="relative z-10 flex flex-wrap items-end justify-between gap-4">
                         <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Workspace</p>
+                            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">Workspace controls</p>
                             <h1 className="mt-2 text-2xl font-bold text-white sm:text-3xl">Settings</h1>
                             <p className="mt-2 max-w-xl text-sm text-gray-400">
                                 YouTube connections, defaults, and billing shortcuts — same shell as the rest of Studio v2.
                             </p>
+                        </div>
+                        <div className="grid min-w-[260px] grid-cols-2 gap-2">
+                            <MiniStatus label="YouTube" value={youtubeChannels.length ? `${youtubeChannels.length} live` : 'Not linked'} active={youtubeChannels.length > 0} />
+                            <MiniStatus label="Access" value={isAdmin ? 'Owner' : 'User'} active />
                         </div>
                         <button
                             type="button"
@@ -151,7 +155,7 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                     )}
                 </SettingsBlock>
 
-                <div className="grid gap-6 md:grid-cols-2">
+                <div className="grid gap-4 md:grid-cols-2">
                     <SettingsBlock
                         icon={Globe2}
                         iconClass="text-cyan-300"
@@ -211,10 +215,10 @@ function SettingsBlock({
     children?: React.ReactNode;
 }) {
     return (
-        <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-6">
+        <section className="rounded-2xl border border-white/[0.08] bg-gradient-to-br from-white/[0.04] to-white/[0.015] p-6 shadow-sm shadow-black/25">
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="flex gap-3">
-                    <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-black/30 ${iconClass}`}>
+                    <div className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-black/35 ${iconClass}`}>
                         <Icon className="h-4 w-4" />
                     </div>
                     <div>
@@ -226,6 +230,18 @@ function SettingsBlock({
             </div>
             {children && <div className="mt-4 space-y-3">{children}</div>}
         </section>
+    );
+}
+
+function MiniStatus({ label, value, active }: { label: string; value: string; active?: boolean }) {
+    return (
+        <div className="rounded-xl border border-white/[0.08] bg-black/25 px-3 py-3">
+            <div className="flex items-center gap-2">
+                {active ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" /> : <ShieldCheck className="h-3.5 w-3.5 text-gray-500" />}
+                <p className="text-[10px] uppercase tracking-wider text-gray-500">{label}</p>
+            </div>
+            <p className="mt-1 text-sm font-semibold text-white">{value}</p>
+        </div>
     );
 }
 

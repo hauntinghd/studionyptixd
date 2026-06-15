@@ -33,14 +33,18 @@ IDENTITY_LOCK = (
 ARTIFACT_GUARD = (
     "Exactly ONE canonical skeleton host in frame unless the scene explicitly "
     "requires background people. Anatomically correct hands, no extra limbs, "
-    "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render."
+    "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render. "
+    "Wardrobe must be physically coherent and complete: shirts cover the torso as a real shirt, "
+    "pants cover both legs as real pants, shoes fit both feet, sleeves and hems are clean, "
+    "fabric never melts into bones or glass, no half-clothes, no floating straps, no torn accidental seams."
 )
 
 NEG_EDIT = (
     "different character, redesigned skeleton, alternate mascot, chibi, anime, "
     "cartoon eyes, glowing eyes, missing bones, exposed ribcage outside shell, "
     "opaque skin replacing glass, duplicate skeleton, twin bodies, "
-    "low quality, blurry, watermark, text overlay"
+    "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
+    "extra fingers, broken hands, low quality, blurry, watermark, text overlay"
 )
 
 
@@ -100,15 +104,15 @@ def resolve_master_reference_urls(
     urls: list[str] = []
     master = str(master_url or os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")).strip()
     if not master:
-        local_default = (
-            Path(__file__).resolve().parents[1]
-            / "ViralShorts-App"
-            / "public"
-            / "canonical-skeleton-master.png"
-        )
-        if local_default.is_file():
-            master = str(local_default)
-        else:
+        public_dir = Path(__file__).resolve().parents[1] / "ViralShorts-App" / "public"
+        for local_default in (
+            public_dir / "canonical-skeleton-master-hires.png",
+            public_dir / "canonical-skeleton-master.png",
+        ):
+            if local_default.is_file():
+                master = str(local_default)
+                break
+        if not master:
             raise CanonicalEditError("SKELETON_GLOBAL_REFERENCE_IMAGE_URL not configured")
 
     local = _reference_url_to_local(master)
@@ -144,7 +148,9 @@ def build_scene_edit_prompt(
         parts.append(
             f"WARDROBE / BODY EDIT ONLY on the SAME canonical skeleton: {outfit}. "
             "Clothes, muscle definition, armor, or props are layered ON the existing glass shell and bones — "
-            "never replace the skeleton, never swap to a human or new character, never remove the glass shell."
+            "never replace the skeleton, never swap to a human or new character, never remove the glass shell. "
+            "If clothing is requested, render real finished garments: complete shirt/jacket, complete pants, "
+            "matching shoes when visible, clean edges, believable fabric folds, no partial transparent fabric errors."
         )
     if topic:
         parts.append(f"TOPIC CONTEXT: {topic}.")

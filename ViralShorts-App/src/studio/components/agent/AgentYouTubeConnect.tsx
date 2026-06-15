@@ -2,10 +2,11 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Youtube } from 'lucide-react';
 import { AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect, studioAgentOAuthReturnUrl } from '../../shared';
 
-type ChannelRow = {
+export type ChannelRow = {
     channel_id: string;
     title: string;
     channel_handle?: string;
+    registry_key?: string;
 };
 
 export default function AgentYouTubeConnect({
@@ -112,8 +113,6 @@ export default function AgentYouTubeConnect({
     if (!accessToken) return null;
 
     const connected = channels.length > 0;
-    const primary = channels[0];
-
     return (
         <div
             className={`shrink-0 rounded-xl border px-3 py-2.5 ${
@@ -125,16 +124,18 @@ export default function AgentYouTubeConnect({
             <div className="flex flex-wrap items-center gap-2">
                 <Youtube className={`h-4 w-4 shrink-0 ${connected ? 'text-red-300' : 'text-amber-300'}`} />
                 {connected ? (
-                    <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold text-white">{primary.title}</p>
-                        {primary.channel_handle && (
-                            <p className="text-[10px] text-gray-400">{primary.channel_handle}</p>
-                        )}
-                        {channels.length > 1 && (
-                            <p className="text-[10px] text-gray-500">
-                                +{channels.length - 1} more channel{channels.length > 2 ? 's' : ''}
-                            </p>
-                        )}
+                    <div className="min-w-0 flex-1 space-y-1">
+                        {channels.map((ch) => (
+                            <div
+                                key={ch.channel_id}
+                                className="rounded-lg border border-white/[0.06] bg-black/20 px-2.5 py-2"
+                            >
+                                <p className="truncate text-xs font-semibold text-white">{ch.title}</p>
+                                <p className="truncate text-[10px] text-gray-400">
+                                    {ch.channel_handle || ch.channel_id}
+                                </p>
+                            </div>
+                        ))}
                     </div>
                 ) : (
                     <p className="min-w-0 flex-1 text-xs text-amber-100/90">

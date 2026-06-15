@@ -10,8 +10,155 @@ PipelineKind = Literal["skeleton_host", "styled_t2i"]
 
 DEFAULT_RENDER_STYLE = "cinematic"
 
-STYLE_PREVIEW_DIR = Path(os.getenv("STYLE_PREVIEW_DIR", "ref_frames/style_previews"))
+def _default_preview_root() -> Path:
+    app_data = os.getenv("APP_DATA_DIR")
+    if app_data:
+        return Path(app_data) / "studio_agent_style_previews"
+    return Path("ref_frames/style_previews")
+
+
+STYLE_PREVIEW_DIR = Path(os.getenv("STYLE_PREVIEW_DIR", str(_default_preview_root())))
 STYLE_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+STYLE_PREVIEW_VIDEO_DIR = Path(os.getenv("STYLE_PREVIEW_VIDEO_DIR", str(STYLE_PREVIEW_DIR / "video")))
+STYLE_PREVIEW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+STYLE_PREVIEW_SEED = 424242
+STYLE_PREVIEW_VERSION = "v2"
+
+STYLE_PREVIEW_SCENE = (
+    "A single faceless red mannequin hacker seated at a glowing computer workstation in a dark intelligence room, "
+    "one hand on the keyboard, one monitor showing abstract green code, cinematic desk light, clean premium composition. "
+    "No readable text, no letters, no logos."
+)
+
+STYLE_PREVIEW_MOTION = (
+    "Subtle premium motion: slow camera push-in, monitor glow flickers softly, the mannequin shifts one hand on the keyboard, "
+    "background lights pulse gently. Preserve the exact art style and character identity."
+)
+
+STYLE_PREVIEW_SUBJECTS: dict[str, str] = {
+    "cinematic": (
+        "A non-human faceless red mannequin investigator with smooth plastic surface and no human skin, seated at a "
+        "glowing computer workstation in a dark intelligence room, premium cinematic desk light, dramatic shadows, "
+        "serious film still energy."
+    ),
+    "ultra_realism": (
+        "A real adult human investigative analyst at a glowing computer workstation in a modern intelligence room, "
+        "natural skin, realistic eyes, believable clothing, documentary-grade realism."
+    ),
+    "historical_18th_century": (
+        "An adult 18th-century gentleman scholar alive in the 1700s, powdered hair, linen shirt, waistcoat and coat, "
+        "studying papers by candlelight in a period room with old instruments and ledgers."
+    ),
+    "comic_realism": (
+        "An original modern comic protagonist, expressive adult detective with a sharp jacket, seated at a workstation, "
+        "grounded proportions with comic-rendered lighting and dramatic panel composition."
+    ),
+    "comic_book": (
+        "An original colorful comic book hero analyst, bold costume-inspired jacket, expressive face, action-panel pose "
+        "at a glowing workstation, saturated inks and dynamic comic energy."
+    ),
+    "bw_comic": (
+        "An original black-and-white noir comic detective, trench coat, strong silhouette, seated at a moody workstation, "
+        "inked shadows and cross-hatched atmosphere."
+    ),
+    "dark_comic": (
+        "An original dark comic antihero analyst, brooding adult character in a black coat, intense eyes, eerie workstation "
+        "lighting, gritty graphic-novel mood."
+    ),
+    "dark_cartoon": (
+        "An original stylized dark cartoon hacker character, oversized expressive eyes, angular hoodie, spooky workstation "
+        "in a shadowy room, playful but ominous."
+    ),
+    "adult_cartoon": (
+        "An original mature animated sitcom-style adult analyst, casual jacket, dry expression, seated at a workstation "
+        "with clean animated staging."
+    ),
+    "cute_anime": (
+        "An original adult anime tech analyst with bright expressive eyes and soft hair, stylish jacket, seated at a glowing "
+        "workstation in a cozy high-tech room."
+    ),
+    "studio_ghibli": (
+        "An original gentle adult inventor-scholar in a hand-painted study, warm lamp light, soft expressive face, papers "
+        "and small machines around a humble workstation."
+    ),
+    "pixar": (
+        "An original appealing 3D animated adult inventor character with expressive face and stylized proportions, seated "
+        "at a polished workstation with warm cinematic lighting."
+    ),
+    "claymation": (
+        "An original handmade clay stop-motion adult detective figure with visible clay texture, tiny jacket, seated at a "
+        "miniature workstation set with practical lights."
+    ),
+    "disney_90s": (
+        "An original 1990s hand-drawn adventure hero analyst, expressive adult face, crisp jacket, animated workstation "
+        "scene with classic cel-animation charm."
+    ),
+    "simpsons": (
+        "An original yellow-skin satirical cartoon adult analyst, simple rounded shapes, seated at a workstation in a "
+        "clean comedic animated room."
+    ),
+    "creepy_cartoon_v1": (
+        "An original eerie cartoon investigator with long limbs, hollow-eyed expression, hunched at a glowing workstation "
+        "inside a strange dim room."
+    ),
+    "creepy_cartoon_v2": (
+        "An original surreal creepy cartoon researcher, warped smile, stylized face, seated at a workstation with odd "
+        "dreamlike shadows."
+    ),
+    "illustrated_book": (
+        "An original illustrated storybook scholar, gentle adult character with layered clothing, reading notes beside a "
+        "small glowing workstation in a richly illustrated room."
+    ),
+    "whiteboard": (
+        "A simple original adult presenter character drawn in clean marker lines beside a sketched computer workstation, "
+        "clear whiteboard explainer composition."
+    ),
+    "lego": (
+        "An original toy brick minifigure detective with tiny jacket and simple face, seated at a brick-built computer "
+        "workstation in a miniature investigation room."
+    ),
+    "minecraft": (
+        "An original blocky voxel adventurer analyst, square head and pixel clothing, seated at a block-built computer "
+        "workstation in a voxel intelligence room."
+    ),
+    "low_poly": (
+        "An original low-poly adult tech analyst, faceted face and jacket, seated at a geometric computer workstation "
+        "with clean angular lighting."
+    ),
+    "hand_drawn_2d": (
+        "An original hand-drawn 2D adult investigator, visible pencil and ink lines, seated at a workstation in a storyboard "
+        "panel with expressive pose."
+    ),
+}
+
+STYLE_PREVIEW_MOTIONS: dict[str, str] = {
+    "cinematic": "slow camera push-in, monitor glow flickers softly, mannequin hand shifts on keyboard",
+    "ultra_realism": "subtle breathing, small eye movement, fingers tap once, realistic monitor glow",
+    "historical_18th_century": "candlelight flickers, scholar turns slightly toward the papers, soft camera drift",
+    "comic_realism": "comic-panel push-in, character eyes narrow, light streaks move across the frame",
+    "comic_book": "dynamic comic zoom, cape/jacket edge flicks, bold color glow pulses",
+    "bw_comic": "noir shadows slide, slow detective glance, cross-hatched lighting shimmer",
+    "dark_comic": "moody push-in, eyes glint, background shadows pulse subtly",
+    "dark_cartoon": "cartoon blink, monitor glow bounces, spooky room sway",
+    "adult_cartoon": "small comedic blink, hand gesture, clean animated camera drift",
+    "cute_anime": "soft anime blink, hair moves slightly, gentle glowing particles",
+    "studio_ghibli": "warm lamp flicker, soft hand movement, paper edges rustle gently",
+    "pixar": "expressive eyebrow raise, hand taps keyboard, polished 3D camera push",
+    "claymation": "stop-motion style tiny head turn, practical light flicker, handmade camera nudge",
+    "disney_90s": "classic animation blink, hand gesture, warm cel-light shimmer",
+    "simpsons": "simple cartoon blink, head tilt, monitor glow flicker",
+    "creepy_cartoon_v1": "slow unsettling head tilt, shadows crawl, monitor glow pulses",
+    "creepy_cartoon_v2": "surreal blink, warped shadow movement, dreamlike camera drift",
+    "illustrated_book": "storybook parallax, lamp flicker, page edges move gently",
+    "whiteboard": "marker-line drawing animates subtly, presenter hand moves, simple camera pan",
+    "lego": "toy minifigure head turns, brick light flickers, tiny stop-motion movement",
+    "minecraft": "blocky head turn, pixel light pulses, stepped camera movement",
+    "low_poly": "geometric camera orbit, faceted light shifts, small hand movement",
+    "hand_drawn_2d": "pencil-line shimmer, hand-drawn blink, storyboard camera push",
+    "skeleton_host": "skeleton eyes shift, bony fingers tap keyboard, glass body catches light",
+}
 
 
 @dataclass(frozen=True)
@@ -218,6 +365,19 @@ _register(RenderStyle(
 ))
 
 _register(RenderStyle(
+    key="claymation",
+    label="Claymation",
+    group="Animation",
+    pipeline="styled_t2i",
+    description="Handmade stop-motion clay look — tactile models, fingerprints, miniature sets.",
+    prompt_prefix=(
+        "Premium claymation stop-motion animation still, tactile clay character surfaces, "
+        "subtle fingerprints and handmade model texture, miniature set lighting, charming physical craft. "
+    ),
+    negative_prompt=_styled(", photoreal photograph, smooth CGI, anime"),
+))
+
+_register(RenderStyle(
     key="disney_90s",
     label="90s Disney",
     group="Animation",
@@ -369,6 +529,11 @@ def list_render_styles() -> list[dict[str, Any]]:
         # Include preview URL so frontend can render visual grid like the reference style galleries.
         # Previews generated on-demand (very cheap 1x Seedream per style) and cached.
         d["preview_url"] = f"/api/studio-agent/style-preview/{style.key}"
+        d["preview_video_url"] = f"/api/studio-agent/style-preview/{style.key}/video"
+        still_path = _style_preview_path(style.key)
+        video_path = _style_preview_video_path(style.key)
+        d["preview_ready"] = still_path.is_file() and still_path.stat().st_size > 1024
+        d["preview_video_ready"] = video_path.is_file() and video_path.stat().st_size > 1024
         groups.setdefault(style.group, []).append(d)
     ordered = []
     for group in ("Realism", "Comic", "Animation", "Specialty", "Niche"):
@@ -410,42 +575,83 @@ def is_skeleton_style(style: RenderStyle | str) -> bool:
         return False
 
 
+def _style_preview_path(key: str) -> Path:
+    return STYLE_PREVIEW_DIR / f"{key}-{STYLE_PREVIEW_VERSION}.png"
+
+
+def _style_preview_video_path(key: str) -> Path:
+    return STYLE_PREVIEW_VIDEO_DIR / f"{key}-{STYLE_PREVIEW_VERSION}.mp4"
+
+
+def _style_preview_prompt(style: RenderStyle) -> str:
+    subject = STYLE_PREVIEW_SUBJECTS.get(style.key, STYLE_PREVIEW_SCENE)
+    base_visual = (
+        "Single high-quality vertical 9:16 keyframe, premium showcase still that demonstrates the exact art style, "
+        "distinct original subject designed for this specific style category, no text, no typography, no letters, "
+        "no logos, no watermarks, no speech bubbles, clean edges, high visual impact for a style reference gallery. "
+    )
+    return (style.prompt_prefix.strip() + " " + base_visual + subject).strip()[:3500]
+
+
 def get_style_preview_path(key: str) -> Path:
     """Generate (or return cached) a single hero preview still for the style picker grid.
     Uses cheap Seedream v4.5 (or canonical edit for skeleton) so we can show visual cards
     like the reference grids. One image per style is sufficient and very cheap.
     """
-    path = STYLE_PREVIEW_DIR / f"{key}.png"
-    # Always (re)generate on access for now so that prompt improvements (better visual hero examples, explicit "no text")
-    # take effect immediately after deploy. One cheap Seedream per style is the design point; caching is secondary.
-    # if path.exists() and path.stat().st_size > 1024: return path
+    path = _style_preview_path(key)
+    if path.exists() and path.stat().st_size > 1024:
+        return path
 
     style = get_render_style(key)
-    # Force a concrete, visual "hero example" frame that demonstrates the style,
-    # not a typography card. Explicitly ban text/labels so the preview is a pure visual sample.
-    base_visual = (
-        "Single high-quality vertical 9:16 keyframe, striking central subject or character in a dramatic but clear composition, "
-        "premium showcase still that demonstrates the exact art style, no text, no typography, no letters, no logos, no watermarks, "
-        "no speech bubbles, clean edges, high visual impact for style reference gallery."
-    )
-    hero = (style.prompt_prefix.strip() + " " + base_visual).strip()
 
     if is_skeleton_style(style):
         from skeleton_ai.canonical_edit import generate_still_edit
-        # For skeleton, force the glass anatomical look from the provided example
+
         skel_prompt = (
-            "Glass transparent anatomical skeleton with ivory bones, realistic eyes, "
-            "dynamic hero pose holding a basketball on a professional court at night, "
-            "cinematic lighting through the glass shell, premium 3D render reference, "
-            "no text, no labels. "
-        ) + base_visual
-        generate_still_edit(skel_prompt, path, seed=424242)
+            "Glass transparent anatomical skeleton with ivory bones and realistic eyes, same NYPTID skeleton host, "
+            "wearing a black hoodie and black pants, seated at a glowing computer workstation in a dark intelligence room. "
+            "Edit only wardrobe, pose, props, and background; preserve the exact skeleton identity. No text, no labels."
+        )
+        generate_still_edit(skel_prompt, path, seed=STYLE_PREVIEW_SEED)
     else:
         from skeleton_ai.styled_stills import generate_still_t2i
+
         generate_still_t2i(
-            hero,
+            _style_preview_prompt(style),
             path,
-            negative_prompt=style.negative_prompt + ", text, typography, letters, words, watermark, logo",
-            seed=424242,
+            negative_prompt=(
+                style.negative_prompt
+                + ", text, typography, letters, words, watermark, logo"
+                + ("" if style.key == "cinematic" else ", mannequin, faceless mannequin, red mannequin, plastic dummy")
+            ),
+            seed=STYLE_PREVIEW_SEED,
         )
     return path
+
+
+def get_style_preview_video_path(key: str) -> Path:
+    """Generate or return a cached i2v preview clip for one art style.
+
+    This is intentionally separate from still preview generation so opening the
+    style picker does not automatically burn 24 i2v jobs. The frontend requests
+    the clip when a user hovers/focuses a style card.
+    """
+    video_path = _style_preview_video_path(key)
+    if video_path.exists() and video_path.stat().st_size > 1024:
+        return video_path
+
+    still_path = get_style_preview_path(key)
+    from skeleton_ai.i2v_engine import generate as generate_i2v
+
+    generate_i2v(
+        still_path,
+        (
+            "Subtle premium motion: "
+            + STYLE_PREVIEW_MOTIONS.get(key, STYLE_PREVIEW_MOTION)
+            + ". Preserve the exact art style and character identity."
+        ),
+        video_path,
+        video_model=os.getenv("STYLE_PREVIEW_VIDEO_MODEL", "seedance"),
+        duration_sec=int(os.getenv("STYLE_PREVIEW_VIDEO_SECONDS", "4")),
+    )
+    return video_path

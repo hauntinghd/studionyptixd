@@ -1,5 +1,19 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChevronDown, LogOut, MessageSquarePlus, Settings, User, WalletCards } from 'lucide-react';
+import {
+    Bell,
+    ChevronDown,
+    Gift,
+    Layers,
+    LogOut,
+    Megaphone,
+    MessageSquarePlus,
+    Settings,
+    Share2,
+    ShieldCheck,
+    User,
+    UserCircle,
+    WalletCards,
+} from 'lucide-react';
 import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
 
 export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'waitlist' | 'waitlist_confirmation') => void;
@@ -53,6 +67,8 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
     const topupHref = buildPageHref('billing', { section: 'topups' }, 'topup-packs');
     const subscriptionHref = buildPageHref('subscription');
     const dashboardHref = buildPageHref('dashboard');
+    const campusHref = buildPageHref('dashboard', { tab: 'campus' });
+    const whatsNewHref = buildPageHref('dashboard', { tab: 'campus' }, 'whats-new');
     const accountHref = buildPageHref('account');
     const settingsHref = buildPageHref('settings');
     const billingPageHref = buildPageHref('billing');
@@ -87,7 +103,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
             window.location.href = brandHref;
             return;
         }
-        onNavigate(session ? 'dashboard' : 'landing');
+        navigateToUrl(session ? dashboardHref : buildPageHref('landing'));
     };
 
     const handleTopupClick = (e: React.MouseEvent) => {
@@ -113,7 +129,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
             window.location.href = STUDIO_SITE_URL;
             return;
         }
-        onNavigate('dashboard');
+        navigateToUrl(dashboardHref);
     };
 
     const handleAccountClick = (e: React.MouseEvent) => {
@@ -273,22 +289,49 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                                         Dashboard
                                     </a>
                                     <a href={accountHref} onClick={(e) => { setMenuOpen(false); handleAccountClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
-                                        <User className="w-4 h-4 text-violet-300" />
+                                        <UserCircle className="w-4 h-4 text-violet-300" />
                                         Account
+                                    </a>
+                                    <a href={accountHref} onClick={(e) => { setMenuOpen(false); handleAccountClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <User className="w-4 h-4 text-cyan-300" />
+                                        Profile
                                     </a>
                                     <a href={settingsHref} onClick={(e) => { setMenuOpen(false); handleSettingsClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <Settings className="w-4 h-4 text-amber-300" />
                                         Settings
                                     </a>
+                                    <a href={subscriptionHref} onClick={(e) => { setMenuOpen(false); handleSubscriptionClick(e); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <ShieldCheck className="w-4 h-4 text-emerald-300" />
+                                        My Membership
+                                    </a>
                                     <a href={billingPageHref} onClick={handleBillingMenuClick} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <WalletCards className="w-4 h-4 text-cyan-300" />
                                         Billing
+                                    </a>
+                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <Share2 className="w-4 h-4 text-emerald-300" />
+                                        Affiliate Dashboard
+                                    </a>
+                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <Gift className="w-4 h-4 text-rose-300" />
+                                        Refer a Friend
+                                    </a>
+                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <Megaphone className="w-4 h-4 text-violet-300" />
+                                        Provide Feedback
+                                    </a>
+                                    <a href={whatsNewHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(whatsNewHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
+                                        <Layers className="w-4 h-4 text-cyan-300" />
+                                        What's New
                                     </a>
                                     <div className="my-2 border-t border-white/[0.06]" />
                                     <button type="button" onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-red-300 transition hover:bg-red-500/10">
                                         <LogOut className="w-4 h-4" />
                                         Log out
                                     </button>
+                                    <p className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-[0.16em] text-gray-600">
+                                        build {import.meta.env.VITE_APP_VERSION || 'studio-web'}
+                                    </p>
                                 </div>
                             )}
                         </div>

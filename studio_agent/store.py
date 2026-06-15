@@ -15,7 +15,11 @@ DEFAULT_RENDER_STYLE = "cinematic"
 
 # Cap context sent to OpenRouter (full transcript still stored on disk).
 MAX_MESSAGES_FOR_MODEL = 80
+COMPACT_AT_MESSAGES = int(MAX_MESSAGES_FOR_MODEL * 0.8)
 MAX_SYNC_PENDING_SCAN = 400
+MAX_RUN_EVENTS = 120
+ACTIVE_RUN_STATUSES = {"queued", "running", "stream_disconnected"}
+STALE_RUN_AFTER_SEC = int(__import__("os").environ.get("STUDIO_AGENT_STALE_RUN_SEC", "180") or "180")
 
 ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_SESSIONS = ROOT / "data" / "studio_agent_sessions"
@@ -25,6 +29,9 @@ if _APP_DATA.is_dir():
 SESSIONS_DIR = Path(
     __import__("os").environ.get("STUDIO_AGENT_SESSIONS_DIR", str(_DEFAULT_SESSIONS))
 )
+ARCHIVE_DIR = Path(
+    __import__("os").environ.get("STUDIO_AGENT_ARCHIVE_DIR", str(SESSIONS_DIR.parent / "studio_agent_session_archive"))
+)
 
 
 def _now() -> float:
@@ -33,6 +40,87 @@ def _now() -> float:
 
 def _session_path(session_id: str) -> Path:
     return SESSIONS_DIR / f"{session_id}.json"
+
+
+def _message_text(message: dict[str, Any], *, limit: int = 900) -> str:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, dict):
+                chunks.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                chunks.append(str(item))
+        content = " ".join(chunks)
+    return " ".join(str(content).split())[:limit]
+
+
+def _compact_transcript(messages: list[dict[str, Any]], *, omitted_count: int) -> str:
+    """Cheap deterministic compaction. Full raw messages remain stored on disk."""
+    older = [m for m in messages if m.get("role") != "system"][:omitted_count]
+    if not older:
+        return ""
+    user_goals: list[str] = []
+    assistant_facts: list[str] = []
+    tool_facts: list[str] = []
+    for msg in older:
+        role = str(msg.get("role") or "")
+        text = _message_text(msg)
+        if not text:
+            continue
+        if role == "user":
+            user_goals.append(text)
+        elif role == "assistant":
+            assistant_facts.append(text)
+        elif role == "tool":
+            tool_facts.append(text)
+    parts = [
+        f"Compacted transcript memory ({omitted_count} older messages summarized; raw transcript is still stored):",
+    ]
+    if user_goals:
+        parts.append("User instructions/preferences:")
+        parts.extend(f"- {x}" for x in user_goals[-10:])
+    if assistant_facts:
+        parts.append("Prior agent decisions/results:")
+        parts.extend(f"- {x}" for x in assistant_facts[-8:])
+    if tool_facts:
+        parts.append("Tool observations:")
+        parts.extend(f"- {x}" for x in tool_facts[-6:])
+    return "\n".join(parts)[:9000]
+
+
+def _channel_label(session: dict[str, Any]) -> str:
+    return (
+        str(session.get("channel_title") or "").strip()
+        or str(session.get("registry_key") or "").strip()
+        or str(session.get("channel_id") or "").strip()
+    )
+
+
+def compact_session_if_needed(session_id: str) -> dict[str, Any] | None:
+    """Persist a rolling summary once a chat reaches 80% of the model message cap."""
+    session = get_session(session_id)
+    if not session:
+        return None
+    messages = list(session.get("messages") or [])
+    tail_start = 1 if messages and messages[0].get("role") == "system" else 0
+    non_system_count = max(0, len(messages) - tail_start)
+    if non_system_count < COMPACT_AT_MESSAGES:
+        return session
+    keep_recent = max(20, MAX_MESSAGES_FOR_MODEL // 2)
+    omitted = max(0, non_system_count - keep_recent)
+    if omitted <= 0 or int(session.get("compacted_message_count") or 0) >= omitted:
+        return session
+    summary = _compact_transcript(messages[tail_start:], omitted_count=omitted)
+    if not summary:
+        return session
+    channel = _channel_label(session)
+    if channel:
+        summary = f"Selected YouTube channel for this chat: {channel}\n{summary}"
+    session["context_summary"] = summary
+    session["compacted_message_count"] = omitted
+    _save(session)
+    return session
 
 
 def trim_messages_for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -53,6 +141,42 @@ def trim_messages_for_model(messages: list[dict[str, Any]]) -> list[dict[str, An
         "content": (
             f"[Earlier conversation truncated — {omitted} older messages omitted from model context. "
             "The full transcript is still saved in this session.]"
+        ),
+    }
+    if head:
+        return [head[0], note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
+    return [note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
+
+
+_legacy_trim_messages_for_model = trim_messages_for_model
+
+
+def trim_messages_for_model(
+    messages: list[dict[str, Any]],
+    *,
+    session: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep system row + compacted memory + recent turns so long chats stay within model limits."""
+    if len(messages) <= MAX_MESSAGES_FOR_MODEL + 1:
+        return messages
+    head: list[dict[str, Any]] = []
+    tail_start = 0
+    if messages and messages[0].get("role") == "system":
+        head = [messages[0]]
+        tail_start = 1
+    tail = messages[tail_start:]
+    if len(tail) <= MAX_MESSAGES_FOR_MODEL:
+        return head + tail
+    omitted = len(tail) - MAX_MESSAGES_FOR_MODEL
+    summary = str((session or {}).get("context_summary") or "").strip()
+    if not summary:
+        summary = _compact_transcript(tail, omitted_count=omitted)
+    note = {
+        "role": "system",
+        "content": (
+            f"[Earlier conversation compacted - {omitted} older messages are represented below. "
+            "The full raw transcript is still saved in this session.]\n"
+            f"{summary}"
         ),
     }
     if head:
@@ -94,6 +218,8 @@ def list_sessions(user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
             continue
         if session.get("user_id") != user_id:
             continue
+        if session.get("deleted_at"):
+            continue
         rows.append(session)
     rows.sort(key=lambda s: float(s.get("updated_at") or 0), reverse=True)
     return rows[: max(1, min(limit, 200))]
@@ -119,6 +245,9 @@ def rollover_session(session_id: str, *, user_id: str) -> dict[str, Any] | None:
         render_style=old.get("render_style") or DEFAULT_RENDER_STYLE,
         web_search=bool(old.get("web_search", True)),
         animate=bool(old.get("animate", True)),
+        channel_id=str(old.get("channel_id") or ""),
+        registry_key=str(old.get("registry_key") or ""),
+        channel_title=str(old.get("channel_title") or ""),
     )
     prior = list(old.get("messages") or [])
     prior.append({
@@ -147,6 +276,11 @@ def create_session(
     render_style: str = DEFAULT_RENDER_STYLE,
     web_search: bool = True,
     animate: bool = True,
+    captions_enabled: bool = True,
+    caption_mode: str = "word",
+    channel_id: str = "",
+    registry_key: str = "",
+    channel_title: str = "",
 ) -> dict[str, Any]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     sid = f"sa_{uuid.uuid4().hex[:16]}"
@@ -158,17 +292,173 @@ def create_session(
         "content_format": content_format,
         "reasoning_depth": reasoning_depth,
         "render_style": render_style or DEFAULT_RENDER_STYLE,
+        "channel_id": str(channel_id or "").strip(),
+        "registry_key": str(registry_key or "").strip(),
+        "channel_title": str(channel_title or "").strip(),
         "web_search": bool(web_search),
         "animate": bool(animate),
+        "captions_enabled": bool(captions_enabled),
+        "caption_mode": "off" if str(caption_mode or "").strip().lower() == "off" else "word",
         "created_at": _now(),
         "updated_at": _now(),
         "title": "",
         "messages": [],
         "pending_actions": [],
         "active_jobs": [],
+        "runs": [],
+        "context_summary": "",
+        "compacted_message_count": 0,
     }
     _save(session)
     return session
+
+
+def _public_run(run: dict[str, Any], *, include_events: bool = True) -> dict[str, Any]:
+    events = list(run.get("events") or [])
+    out = {
+        "run_id": str(run.get("run_id") or ""),
+        "session_id": str(run.get("session_id") or ""),
+        "status": str(run.get("status") or "running"),
+        "message_preview": str(run.get("message_preview") or ""),
+        "created_at": float(run.get("created_at") or 0),
+        "updated_at": float(run.get("updated_at") or 0),
+        "completed_at": run.get("completed_at"),
+        "last_event": events[-1] if events else None,
+        "event_count": len(events),
+    }
+    if include_events:
+        out["events"] = events[-MAX_RUN_EVENTS:]
+    if run.get("error"):
+        out["error"] = str(run.get("error") or "")
+    return out
+
+
+def _normalize_runs(session: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = session.setdefault("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+        session["runs"] = runs
+    return runs
+
+
+def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
+    """Mark deploy-killed/disconnected chat runs terminal so UI does not spin forever."""
+    now = _now()
+    changed = False
+    for run in _normalize_runs(session):
+        status = str(run.get("status") or "running")
+        if status not in ACTIVE_RUN_STATUSES:
+            continue
+        updated = float(run.get("updated_at") or run.get("created_at") or 0)
+        if updated and now - updated <= STALE_RUN_AFTER_SEC:
+            continue
+        run["status"] = "interrupted"
+        run["updated_at"] = now
+        run["completed_at"] = now
+        run["error"] = "Run was interrupted during a deploy or stream disconnect. Send Resume or retry the last message."
+        run.setdefault("events", []).append({
+            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event": "interrupted",
+            "created_at": now,
+            "data": {"message": run["error"]},
+        })
+        changed = True
+    if changed:
+        _save(session)
+    return session
+
+
+def create_run(session_id: str, *, user_text: str) -> dict[str, Any]:
+    session = get_session(session_id)
+    if not session:
+        raise KeyError(session_id)
+    run = {
+        "run_id": f"run_{uuid.uuid4().hex[:16]}",
+        "session_id": session_id,
+        "status": "running",
+        "message_preview": str(user_text or "").strip().replace("\n", " ")[:220],
+        "created_at": _now(),
+        "updated_at": _now(),
+        "events": [],
+    }
+    runs = _normalize_runs(session)
+    runs.append(run)
+    session["runs"] = runs[-80:]
+    _save(session)
+    return run
+
+
+def get_run(session_id: str, run_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+    session = get_session(session_id, user_id=user_id)
+    if not session:
+        return None
+    session = reconcile_stale_runs(session)
+    for run in _normalize_runs(session):
+        if run.get("run_id") == run_id:
+            return _public_run(run)
+    return None
+
+
+def list_runs(session_id: str, *, user_id: str | None = None, active_only: bool = False) -> list[dict[str, Any]]:
+    session = get_session(session_id, user_id=user_id)
+    if not session:
+        return []
+    session = reconcile_stale_runs(session)
+    rows = [_public_run(run, include_events=False) for run in _normalize_runs(session)]
+    if active_only:
+        rows = [r for r in rows if r.get("status") in ACTIVE_RUN_STATUSES]
+    rows.sort(key=lambda r: float(r.get("updated_at") or 0), reverse=True)
+    return rows
+
+
+def active_runs(session: dict[str, Any]) -> list[dict[str, Any]]:
+    session = reconcile_stale_runs(session)
+    rows = [_public_run(run, include_events=False) for run in _normalize_runs(session)]
+    return [r for r in rows if r.get("status") in ACTIVE_RUN_STATUSES]
+
+
+def append_run_event(session_id: str, run_id: str, event: str, data: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    session = get_session(session_id)
+    if not session:
+        return None
+    now = _now()
+    for run in _normalize_runs(session):
+        if run.get("run_id") != run_id:
+            continue
+        payload = {
+            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event": str(event or "status"),
+            "created_at": now,
+            "data": data or {},
+        }
+        run.setdefault("events", []).append(payload)
+        run["events"] = list(run.get("events") or [])[-MAX_RUN_EVENTS:]
+        run["updated_at"] = now
+        if event == "stream_disconnected":
+            run["status"] = "stream_disconnected"
+        elif run.get("status") in {"queued", "running", "stream_disconnected"}:
+            run["status"] = "running"
+        _save(session)
+        return _public_run(run)
+    return None
+
+
+def finish_run(session_id: str, run_id: str, *, status: str = "complete", error: str = "") -> dict[str, Any] | None:
+    session = get_session(session_id)
+    if not session:
+        return None
+    now = _now()
+    for run in _normalize_runs(session):
+        if run.get("run_id") != run_id:
+            continue
+        run["status"] = status
+        run["updated_at"] = now
+        run["completed_at"] = now
+        if error:
+            run["error"] = error
+        _save(session)
+        return _public_run(run)
+    return None
 
 
 def get_session(session_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
@@ -204,6 +494,8 @@ def append_messages(session_id: str, new_messages: list[dict[str, Any]]) -> dict
         raise KeyError(session_id)
     session.setdefault("messages", []).extend(new_messages)
     _save(session)
+    compact_session_if_needed(session_id)
+    session = get_session(session_id) or session
     return session
 
 
@@ -450,13 +742,81 @@ def sync_pending_from_messages(session_id: str) -> list[dict[str, Any]]:
     return rebuilt or list(latest.get("pending_actions") or [])
 
 
+def archive_session_context(session: dict[str, Any]) -> dict[str, Any] | None:
+    """Archive a session summary before deletion so channel memory survives."""
+    sid = str(session.get("session_id") or "").strip()
+    if not sid:
+        return None
+    messages = list(session.get("messages") or [])
+    summary = str(session.get("context_summary") or "").strip()
+    if not summary:
+        summary = _compact_transcript(messages, omitted_count=len(messages))
+    archive = {
+        "session_id": sid,
+        "user_id": session.get("user_id"),
+        "title": derive_title(session),
+        "channel_id": session.get("channel_id") or "",
+        "registry_key": session.get("registry_key") or "",
+        "channel_title": session.get("channel_title") or "",
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "archived_at": _now(),
+        "message_count": len(messages),
+        "summary": summary[:9000],
+        "messages": messages,
+    }
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    (ARCHIVE_DIR / f"{sid}.json").write_text(
+        json.dumps(archive, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return archive
+
+
+def channel_archive_context(
+    user_id: str,
+    *,
+    channel_id: str = "",
+    registry_key: str = "",
+    channel_title: str = "",
+    limit: int = 3,
+) -> str:
+    """Return recent archived chat summaries for the selected channel."""
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for path in ARCHIVE_DIR.glob("sa_*.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(row.get("user_id") or "") != str(user_id or ""):
+            continue
+        if channel_id and str(row.get("channel_id") or "") != channel_id:
+            continue
+        if registry_key and str(row.get("registry_key") or "") != registry_key:
+            continue
+        if not channel_id and not registry_key and channel_title:
+            if str(row.get("channel_title") or "").strip().lower() != channel_title.strip().lower():
+                continue
+        rows.append(row)
+    rows.sort(key=lambda r: float(r.get("archived_at") or r.get("updated_at") or 0), reverse=True)
+    if not rows:
+        return ""
+    parts = ["Archived chat memory for this selected channel:"]
+    for row in rows[: max(1, min(limit, 8))]:
+        title = str(row.get("title") or "Deleted chat").strip()
+        parts.append(f"- {title}: {str(row.get('summary') or '').strip()[:1600]}")
+    return "\n".join(parts)[:7000]
+
+
 def delete_session(session_id: str, *, user_id: str | None = None) -> bool:
-    """Remove a session file. Returns False if missing or not owned by user."""
+    """Archive then remove a session file. Returns False if missing or not owned by user."""
     session = get_session(session_id, user_id=user_id)
     if not session:
         return False
     path = _session_path(session_id)
     try:
+        archive_session_context(session)
         path.unlink(missing_ok=True)
     except OSError:
         return False

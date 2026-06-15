@@ -239,6 +239,7 @@ def plan_scenes(
     """Write the script, plan beats, render one Seedream still per scene, then
     stop at the awaiting_scene_review gate so the user can edit/animate per scene."""
     style = get_render_style(render_style)
+    is_skeleton = style.pipeline == "skeleton_host"
     workspace = Path(workspace)
     stills_dir, _clips, _trim, _work = _setup_dirs(workspace)
     grok = grok or GrokClient()
@@ -256,10 +257,21 @@ def plan_scenes(
     (workspace / "script.txt").write_text(script_text, encoding="utf-8")
 
     _write_progress(workspace, stage="scene_plan", progress=16, detail=f"Planning {style.label} scenes")
-    plan = analyze_script_styled(
-        grok, script_text, style=style, category_label=cat["label"],
-        topic=topic, visual_brief=visual_brief,
-    )
+    if is_skeleton:
+        from .pipeline import analyze_script
+
+        plan = analyze_script(
+            grok,
+            script_text,
+            category_label=cat["label"],
+            topic=topic,
+            visual_brief=visual_brief,
+        )
+    else:
+        plan = analyze_script_styled(
+            grok, script_text, style=style, category_label=cat["label"],
+            topic=topic, visual_brief=visual_brief,
+        )
     (workspace / "scene_plan.json").write_text(
         json.dumps({**plan, "render_style": style.key}, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -283,22 +295,46 @@ def plan_scenes(
         action = prev.get("scene_action")
         motion = prev.get("motion_prompt")
         if not prompt:
-            outfit, action, motion = derive_beat_visuals_styled(
-                grok, narration, cat["label"], style=style, plan=plan, visual_brief=visual_brief,
-            )
-            prompt = build_styled_scene_prompt(
-                style_prefix=style.prompt_prefix, scene_action=action, outfit=outfit,
-                topic=topic or cat["label"], visual_brief=visual_brief or "",
-            )
+            if is_skeleton:
+                from .canonical_edit import build_scene_edit_prompt
+                from .pipeline import derive_beat_visuals
+
+                outfit, action, motion = derive_beat_visuals(
+                    grok,
+                    narration,
+                    cat["label"],
+                    plan=plan,
+                    visual_brief=visual_brief,
+                )
+                prompt = build_scene_edit_prompt(
+                    topic=topic or cat["label"],
+                    visual_description=action,
+                    outfit=outfit,
+                )
+            else:
+                outfit, action, motion = derive_beat_visuals_styled(
+                    grok, narration, cat["label"], style=style, plan=plan, visual_brief=visual_brief,
+                )
+                prompt = build_styled_scene_prompt(
+                    style_prefix=style.prompt_prefix, scene_action=action, outfit=outfit,
+                    topic=topic or cat["label"], visual_brief=visual_brief or "",
+                )
         sid = f"b{i:02d}"
         still_target = stills_dir / f"{sid}.png"
         if not (still_target.exists() and still_target.stat().st_size > 0):
-            generate_still_t2i(prompt, still_target, negative_prompt=style.negative_prompt, seed=420042 + i)
+            if is_skeleton:
+                from .canonical_edit import generate_still_edit
+
+                generate_still_edit(prompt, still_target, seed=420042 + i)
+            else:
+                generate_still_t2i(prompt, still_target, negative_prompt=style.negative_prompt, seed=420042 + i)
         scenes.append({
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
             "outfit": outfit, "scene_action": action, "motion_prompt": motion,
             "still_rel": f"stills/{sid}.png", "clip_rel": None,
             "animate": bool(prev.get("animate", default_animate)),
+            "approved_for_video": bool(prev.get("approved_for_video", False)),
+            "approved_for_animation": bool(prev.get("approved_for_animation", False)),
             "video_model": prev.get("video_model") or resolved_default_vm,
             "status": "still_ready", "duration_sec": float(prev.get("duration_sec", 5.0)),
         })
@@ -308,7 +344,7 @@ def plan_scenes(
     _write_result(workspace, {
         "status": "awaiting_scene_review", "job_id": workspace.name,
         "render_style": style.key, "render_style_label": style.label,
-        "stills_model": f"seedream_v45_t2i_{style.key}",
+        "stills_model": "seedream_v45_edit_canonical" if is_skeleton else f"seedream_v45_t2i_{style.key}",
         "category": category_key, "topic": topic, "tier": tier,
         "scene_count": len(scenes),
     })
@@ -328,23 +364,79 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
     style = _style_for(workspace)
     still_target = stills_dir / f"{sc['sid']}.png"
     still_target.unlink(missing_ok=True)
-    generate_still_t2i(
-        sc["prompt"], still_target, negative_prompt=style.negative_prompt,
-        seed=int(seed if seed is not None else (990000 + index)),
-    )
+    if style.pipeline == "skeleton_host":
+        from .canonical_edit import generate_still_edit
+
+        generate_still_edit(
+            sc["prompt"],
+            still_target,
+            seed=int(seed if seed is not None else (990000 + index)),
+        )
+    else:
+        generate_still_t2i(
+            sc["prompt"], still_target, negative_prompt=style.negative_prompt,
+            seed=int(seed if seed is not None else (990000 + index)),
+        )
     # New still invalidates any existing animation for this scene.
     (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
     sc["clip_rel"] = None
     sc["status"] = "still_ready"
+    sc["approved_for_video"] = False
+    sc["approved_for_animation"] = False
     save_scenes(workspace, scenes)
     return {"index": index, "still_rel": sc["still_rel"], "status": "still_ready"}
 
 
-def edit_scene(workspace: Path, index: int, instruction: str) -> dict[str, Any]:
+def _scoped_edit_prompt(scene_prompt: str, instruction: str, scope: str) -> tuple[str, str]:
+    raw_scope = (scope or "full").strip().lower().replace("-", "_")
+    aliases = {
+        "subject": "character",
+        "person": "character",
+        "wardrobe": "character",
+        "environment": "background",
+        "setting": "background",
+        "prop": "props",
+    }
+    normalized = aliases.get(raw_scope, raw_scope)
+    if normalized not in {"character", "background", "props", "full"}:
+        normalized = "full"
+
+    guardrails = {
+        "character": (
+            "Edit only the foreground character or subject. Preserve the current background, "
+            "camera angle, lens, lighting direction, composition, and scene continuity unless "
+            "the instruction explicitly says otherwise. Keep identity consistent while changing "
+            "wardrobe, pose, expression, body color, or held items requested by the instruction."
+        ),
+        "background": (
+            "Edit only the background/environment. Preserve the foreground character identity, "
+            "face/head shape, body shape, clothing, pose, props, camera framing, and lighting on "
+            "the subject. Do not redesign the character."
+        ),
+        "props": (
+            "Edit only the requested object, prop, screen content, or held item. Preserve the "
+            "character identity, clothing, pose, background, camera angle, and lighting."
+        ),
+        "full": (
+            "Apply the requested change while preserving as much scene continuity, character "
+            "identity, camera framing, and visual style as possible."
+        ),
+    }[normalized]
+    prompt = (
+        f"Original scene intent:\n{scene_prompt.strip()}\n\n"
+        f"Edit scope: {normalized}.\n"
+        f"Continuity rules: {guardrails}\n\n"
+        f"Requested change:\n{instruction.strip()}"
+    ).strip()[:3500]
+    return prompt, normalized
+
+
+def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full") -> dict[str, Any]:
     """Natural-language edit of one scene's still via Seedream v4.5 edit.
 
     Uploads the current still as the reference image and applies the user's
     change ("make the lighting darker", "put him in ancient Rome", ...).
+    The scope controls preservation for premium character/background passes.
     """
     import fal_client
     from .canonical_edit import generate_still_edit
@@ -360,9 +452,11 @@ def edit_scene(workspace: Path, index: int, instruction: str) -> dict[str, Any]:
         raise RuntimeError(f"scene {index} has no still to edit")
 
     current_url = fal_client.upload_file(str(still_target))
-    edit_prompt = (
-        f"{sc.get('prompt', '')}\n\nApply this change: {instruction.strip()}"
-    ).strip()[:3500]
+    edit_prompt, normalized_scope = _scoped_edit_prompt(
+        str(sc.get("prompt") or ""),
+        instruction,
+        scope,
+    )
     out_tmp = stills_dir / f"{sc['sid']}_edit.png"
     out_tmp.unlink(missing_ok=True)
     generate_still_edit(edit_prompt, out_tmp, master_url=current_url)
@@ -372,9 +466,17 @@ def edit_scene(workspace: Path, index: int, instruction: str) -> dict[str, Any]:
     (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
     sc["clip_rel"] = None
     sc["status"] = "still_ready"
+    sc["approved_for_video"] = False
+    sc["approved_for_animation"] = False
     sc["last_edit"] = instruction.strip()[:300]
+    sc["last_edit_scope"] = normalized_scope
     save_scenes(workspace, scenes)
-    return {"index": index, "still_rel": sc["still_rel"], "status": "still_ready"}
+    return {
+        "index": index,
+        "still_rel": sc["still_rel"],
+        "status": "still_ready",
+        "last_edit_scope": normalized_scope,
+    }
 
 
 def set_scene_settings(
@@ -404,10 +506,17 @@ def animate_scenes_stage(
     if not scenes:
         raise RuntimeError("no scenes planned")
     if indices is None:
-        targets = [s for s in scenes if s.get("animate")]
+        targets = [s for s in scenes if s.get("animate") and s.get("approved_for_video")]
     else:
         idx_set = set(indices)
-        targets = [s for s in scenes if s.get("index") in idx_set]
+        targets = [
+            s for s in scenes
+            if s.get("index") in idx_set and s.get("approved_for_video")
+        ]
+    if not targets:
+        raise RuntimeError(
+            "no approved scenes to animate. Review the stills first, then approve scenes with set_production_scenes_animate before running i2v."
+        )
     total = max(len(targets), 1)
     for n, sc in enumerate(targets):
         check_cancelled(workspace)
@@ -438,6 +547,9 @@ def animate_scenes_stage(
 def finalize_stage(
     workspace: Path, *, tier: str = "standard", voice_id: str | None = None, el: Any = None,
     reedit_instruction: str | None = None,
+    watermark_text: str = "Studio",
+    captions_enabled: bool = True,
+    caption_mode: str = "word",
 ) -> dict[str, Any]:
     """Ensure every scene has a clip (Ken Burns for non-animated), then VO + compose.
     If reedit_instruction is provided (from Reply & re-edit or re_edit_production tool), we apply
@@ -450,11 +562,40 @@ def finalize_stage(
     scenes = sorted(load_scenes(workspace), key=lambda s: s.get("index", 0))
     if not scenes:
         raise RuntimeError("no scenes to finalize")
+    unapproved = [int(s.get("index", -1)) for s in scenes if not s.get("approved_for_video")]
+    if unapproved:
+        raise RuntimeError(
+            "cannot finalize before still approval. Unapproved scenes: "
+            + ", ".join(str(i + 1) for i in unapproved if i >= 0)
+        )
     script_text = (workspace / "script.txt").read_text(encoding="utf-8").strip()
+
+    def _normalize_tts_text(text: str) -> str:
+        clean = str(text or "")
+        # Common LLM/script artifacts that make TTS pronounce numbers as two
+        # separate ages ("two eight-year-old") instead of a single compound age.
+        clean = re.sub(r"\b2\s+8\s*-\s*year\s*-\s*old\b", "28-year-old", clean, flags=re.I)
+        clean = re.sub(r"\b2\s+8\s+year\s+old\b", "28-year-old", clean, flags=re.I)
+        clean = re.sub(r"\b(\d{2})\s+year\s+old\b", r"\1-year-old", clean, flags=re.I)
+        clean = re.sub(r"\bSarah\s+Chene\b", "Sarah Chen", clean, flags=re.I)
+        return clean
 
     # Apply re-edit instruction effects (surgical, no new generation of stills)
     reedit = (reedit_instruction or "").lower()
     wants_cta = "cta" in reedit or "subscribe" in reedit or "subscribers" in reedit or "packag" in reedit
+    wants_word_captions = any(
+        marker in reedit
+        for marker in (
+            "one word",
+            "single word",
+            "word-by-word",
+            "word by word",
+            "each word",
+            "every single word",
+            "single caption for every",
+            "separate caption",
+        )
+    ) or str(caption_mode or "").lower() in {"word", "single_word", "one_word"}
     if wants_cta and scenes:
         last = scenes[-1]
         narr = last.get("narration", "") or ""
@@ -476,13 +617,17 @@ def finalize_stage(
             _still_to_clip(still, clip, duration_sec=float(sc.get("duration_sec", 5.0)))
             sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
         # Per-scene narration audio for PERFECT sync (visual + 3-word captions timed to voice chunk)
+        sc["narration"] = _normalize_tts_text(sc["narration"])
         na_path = work_dir / f"nar_{sc['sid']}.mp3"
         na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
         na_dur = probe_duration(na) or float(sc.get("duration_sec", 5.0))
         trimmed = trim_with_captions(
             clip, trimmed_dir / f"{sc['sid']}.mp4",
             duration_sec=na_dur, narration_text=sc["narration"],
-            watermark_text="ZeroTier",  # dynamic per channel
+            watermark_text=watermark_text,
+            caption_mode="word" if wants_word_captions else "phrase",
+            captions_enabled=captions_enabled,
+            force=bool(reedit_instruction),
         )
         trimmed_paths.append(trimmed)
         narration_audios.append(na)
@@ -493,14 +638,19 @@ def finalize_stage(
     # Concat per-scene narration audios for the final VO track (ensures exact sync with visuals)
     narration_target = workspace / "narration.mp3"
     if narration_audios:
-        concat_list = work_dir / "nar_concat.txt"
-        with open(concat_list, "w") as f:
-            for na in narration_audios:
-                f.write(f"file '{na.as_posix()}'\n")
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
-            "-c", "copy", str(narration_target)
-        ], check=True, capture_output=True)
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+        for na in narration_audios:
+            cmd.extend(["-i", str(na)])
+        concat_inputs = "".join(f"[{i}:a:0]" for i in range(len(narration_audios)))
+        cmd.extend([
+            "-filter_complex",
+            f"{concat_inputs}concat=n={len(narration_audios)}:v=0:a=1[aout]",
+            "-map", "[aout]",
+            "-c:a", "libmp3lame",
+            "-q:a", "2",
+            str(narration_target),
+        ])
+        subprocess.run(cmd, check=True, capture_output=True)
         narration_audio = narration_target
     else:
         narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
@@ -525,15 +675,66 @@ def finalize_stage(
     }
     _write_result(workspace, result)
 
-    # Auto package.txt for upload (title, tags, desc) — user request for shorts
-    # Includes subscribe CTA
-    pkg = f"""Title: {topic or 'Untitled Short'}
+    # Auto package.txt for upload. Shorts get title/tags/description/timestamps,
+    # but no generated thumbnail by default; YouTube Shorts use the frame/cover flow.
+    topic = str(meta.get("topic") or "Untitled Short").strip()
+    category_key = str(meta.get("category") or "short").strip()
+    render_style = str(meta.get("render_style") or "cinematic").strip()
+    title = topic or "Untitled Short"
+    safe_topic_tag = re.sub(r"[^a-z0-9]+", "", title.lower())[:32] or "shorts"
+    brand_tag = re.sub(r"[^a-z0-9]+", "", str(watermark_text or "").lower())[:32]
+    tags = [
+        safe_topic_tag,
+        category_key,
+        render_style,
+        "shorts",
+        "youtube shorts",
+        "ai video",
+        "nyptid studio",
+    ]
+    if brand_tag:
+        tags.append(brand_tag)
+    if category_key not in tags:
+        tags.append(category_key)
 
-Tags: {category_key}, {render_style}, short, nyptid, zero tier
+    timestamps: list[str] = []
+    cursor = 0.0
+    for sc in scenes:
+        mm = int(cursor // 60)
+        ss = int(cursor % 60)
+        scene_num = int(sc.get("index") or 0) + 1
+        label = str(sc.get("narration") or sc.get("prompt") or f"Scene {scene_num}").strip()
+        label = re.sub(r"\s+", " ", label)[:70].rstrip(" .,")
+        timestamps.append(f"{mm:02d}:{ss:02d} - {label or f'Scene {scene_num}'}")
+        cursor += float(sc.get("duration_sec") or 0) or 0
+
+    brand_hashtag = f" #{brand_tag}" if brand_tag else ""
+    pkg = f"""Title:
+{title}
+
+Alternate Titles:
+1. {title}
+2. {title} | Full Story in 60 Seconds
+3. The Part Everyone Missed About {title[:70]}
 
 Description:
-{topic or 'Watch the full story.'}
+{title}
 
+Watch the full story unfold in a fast, tightly edited short. Subscribe to {watermark_text} for more.
+
+Timestamps:
+{chr(10).join(timestamps) if timestamps else "00:00 - Full short"}
+
+Tags:
+{", ".join(dict.fromkeys(t for t in tags if t))}
+
+Hashtags:
+#shorts #{safe_topic_tag} #nyptidstudio{brand_hashtag}
+
+Thumbnail:
+Not generated for short-form by default. Use the strongest frame/cover from the finished Short unless the user explicitly asks for a custom thumbnail.
+
+CTA:
 Subscribe for more.
 
 """
@@ -557,6 +758,9 @@ def run_styled(
     script_override: str | None = None,
     user_id: str | None = None,
     animate: bool = True,
+    watermark_text: str = "Studio",
+    captions_enabled: bool = True,
+    caption_mode: str = "word",
 ) -> dict:
     """Straight-through render (no review gate) — fallback / auto path."""
     workspace = Path(workspace)
@@ -567,4 +771,12 @@ def run_styled(
     )
     if animate:
         animate_scenes_stage(workspace, indices=None, tier=tier)
-    return finalize_stage(workspace, tier=tier, voice_id=voice_id, el=el)
+    return finalize_stage(
+        workspace,
+        tier=tier,
+        voice_id=voice_id,
+        el=el,
+        watermark_text=watermark_text,
+        captions_enabled=captions_enabled,
+        caption_mode=caption_mode,
+    )

@@ -17,9 +17,12 @@ FastAPI router for NYPTID Studio Agent (OpenRouter + Rookcast skills).
 """
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -29,7 +32,7 @@ from studio_agent.access import account_profile, can_use_studio_agent, is_owner
 from studio_agent.dictation import transcribe_audio_bytes
 
 from studio_agent import openrouter, skills
-from studio_agent import runner, store
+from studio_agent import memory, runner, store
 from studio_agent.queue import (
     StudioAgentQueueFullError,
     StudioAgentQueueTimeoutError,
@@ -62,8 +65,13 @@ class CreateSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] = "both"
     reasoning_depth: Literal["fast", "balanced", "deep"] = "balanced"
     render_style: str | None = "cinematic"
+    channel_id: str | None = ""
+    registry_key: str | None = ""
+    channel_title: str | None = ""
     web_search: bool = True
     animate: bool = True
+    captions_enabled: bool = True
+    caption_mode: Literal["word", "off"] = "word"
 
 
 class PatchSessionRequest(BaseModel):
@@ -72,13 +80,34 @@ class PatchSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] | None = None
     reasoning_depth: Literal["fast", "balanced", "deep"] | None = None
     render_style: str | None = None
+    channel_id: str | None = None
+    registry_key: str | None = None
+    channel_title: str | None = None
     web_search: bool | None = None
     animate: bool | None = None
+    captions_enabled: bool | None = None
+    caption_mode: Literal["word", "off"] | None = None
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=32000)
-    reply_to: dict | None = None  # {job_id, kind} for re-editing specific previous video in same chat
+    reply_to: dict | None = None  # {job_id, kind, scene_index?} for re-editing a previous video/still in same chat
+    attachments: list[dict] = Field(default_factory=list, max_length=4)
+    channel_id: str | None = ""
+    registry_key: str | None = ""
+    channel_title: str | None = ""
+    captions_enabled: bool | None = None
+    caption_mode: Literal["word", "off"] | None = None
+
+
+class RememberRequest(BaseModel):
+    note: str = Field(..., min_length=3, max_length=2000)
+    scope: Literal["global", "channel"] = "channel"
+    channel_id: str = ""
+    registry_key: str = ""
+    channel_title: str = ""
+    kind: str = "preference"
+    importance: int = 4
 
 
 class ApproveRequest(BaseModel):
@@ -88,6 +117,34 @@ class ApproveRequest(BaseModel):
 class RejectRequest(BaseModel):
     action_id: str
     reason: str = ""
+
+
+class SceneApprovalRequest(BaseModel):
+    animate: bool = False
+
+
+def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: ChatRequest) -> dict[str, Any]:
+    has_channel_selection = any(
+        str(value or "").strip()
+        for value in (body.channel_id, body.registry_key, body.channel_title)
+    )
+    updates: dict[str, Any] = {}
+    if has_channel_selection:
+        if body.channel_id is not None and str(body.channel_id or "").strip():
+            updates["channel_id"] = str(body.channel_id or "").strip()
+        if body.registry_key is not None and str(body.registry_key or "").strip():
+            updates["registry_key"] = str(body.registry_key or "").strip()
+        if body.channel_title is not None and str(body.channel_title or "").strip():
+            updates["channel_title"] = str(body.channel_title or "").strip()
+    if body.captions_enabled is not None:
+        updates["captions_enabled"] = bool(body.captions_enabled)
+    if body.caption_mode is not None:
+        updates["caption_mode"] = body.caption_mode
+        if body.caption_mode == "off":
+            updates["captions_enabled"] = False
+    if not updates:
+        return session
+    return store.update_session(session_id, **updates) or session
 
 
 def build_studio_agent_router(
@@ -207,6 +264,23 @@ def build_studio_agent_router(
             headers={"Cache-Control": "private, max-age=300"},
         )
 
+    @router.get("/jobs/{job_id}/package")
+    async def production_job_package(
+        job_id: str,
+        kind: str = Query("longform"),
+        user: dict = Depends(_agent_user),
+    ):
+        _ = user
+        path = agent_jobs.resolve_package_path(job_id, kind)
+        if not path:
+            raise HTTPException(404, "package_not_ready")
+        return FileResponse(
+            path,
+            media_type="text/plain; charset=utf-8",
+            filename=f"{job_id}_upload_package.txt",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
     @router.get("/jobs/{job_id}/still/{scene_idx}")
     async def production_job_still(
         job_id: str,
@@ -224,6 +298,37 @@ def build_studio_agent_router(
             media_type="image/png",
             headers={"Cache-Control": "private, max-age=600"},
         )
+
+    @router.post("/jobs/{job_id}/scene/{scene_idx}/approval")
+    async def production_job_scene_approval(
+        job_id: str,
+        scene_idx: int,
+        body: SceneApprovalRequest,
+        user: dict = Depends(_agent_user),
+    ):
+        _ = user
+        if scene_idx < 0 or scene_idx > 999:
+            raise HTTPException(400, "bad_scene_index")
+        try:
+            from studio_agent import tools as agent_tools
+
+            tool_result = await run_in_threadpool(
+                agent_tools.set_production_scenes_animate,
+                job_id,
+                bool(body.animate),
+                [scene_idx],
+            )
+            snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except Exception as exc:
+            raise HTTPException(400, f"scene_approval_failed: {exc}") from exc
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "scene_index": scene_idx,
+            "animate": bool(body.animate),
+            "tool_result": tool_result,
+            "snapshot": snapshot,
+        }
 
     @router.post("/jobs/{job_id}/finalize")
     async def production_job_finalize(
@@ -311,10 +416,48 @@ def build_studio_agent_router(
             content_format=body.content_format,
             reasoning_depth=body.reasoning_depth,
             render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
+            channel_id=body.channel_id or "",
+            registry_key=body.registry_key or "",
+            channel_title=body.channel_title or "",
             web_search=body.web_search,
             animate=body.animate,
+            captions_enabled=body.captions_enabled,
+            caption_mode=body.caption_mode,
         )
         return {"session": _public_session(session)}
+
+    @router.get("/memory")
+    async def get_memory(
+        channel_id: str = Query(""),
+        registry_key: str = Query(""),
+        user: dict = Depends(_agent_user),
+    ):
+        uid = _user_id(user)
+        return {
+            "ok": True,
+            "summary": memory.summarize_for_prompt(
+                uid,
+                channel_id=channel_id,
+                registry_key=registry_key,
+            ),
+            "profile": memory.public_profile(uid),
+        }
+
+    @router.post("/memory")
+    async def remember_memory(body: RememberRequest, user: dict = Depends(_agent_user)):
+        uid = _user_id(user)
+        item = memory.remember(
+            uid,
+            body.note,
+            scope=body.scope,
+            channel_id=body.channel_id,
+            registry_key=body.registry_key,
+            title=body.channel_title,
+            kind=body.kind,
+            source="api",
+            importance=body.importance,
+        )
+        return {"ok": True, "memory": item, "profile": memory.public_profile(uid)}
 
     @router.get("/render-styles")
     async def list_render_styles():
@@ -326,7 +469,7 @@ def build_studio_agent_router(
         }
 
     @router.get("/style-preview/{key}")
-    async def style_preview(key: str, user: dict = Depends(_agent_user)):
+    async def style_preview(key: str):
         """Serve (generate on-demand if missing) a single cheap hero preview still for the visual style grid.
         Uses Seedream v4.5 / edit so every style has a distinct visual thumbnail (like the reference grids).
         Skeleton uses the glass anatomical look. Extremely cheap (one image per style).
@@ -334,8 +477,36 @@ def build_studio_agent_router(
         from studio_agent.render_styles import get_style_preview_path
         from fastapi.responses import FileResponse
 
-        p = get_style_preview_path(key)
+        timeout_sec = float(os.getenv("STYLE_PREVIEW_STILL_TIMEOUT_SEC", "150") or "150")
+        try:
+            p = await asyncio.wait_for(
+                run_in_threadpool(get_style_preview_path, key),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(504, f"style preview still generation timed out for {key}")
         return FileResponse(str(p), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+    @router.get("/style-preview/{key}/video")
+    async def style_preview_video(key: str):
+        """Serve (generate on-demand if missing) a short i2v motion preview for one visual style.
+
+        This route is public like the still preview because browser media tags do
+        not send bearer headers. It only exposes generated demo assets, not user
+        content.
+        """
+        from studio_agent.render_styles import get_style_preview_video_path
+        from fastapi.responses import FileResponse
+
+        timeout_sec = float(os.getenv("STYLE_PREVIEW_VIDEO_TIMEOUT_SEC", "600") or "600")
+        try:
+            p = await asyncio.wait_for(
+                run_in_threadpool(get_style_preview_video_path, key),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(504, f"style preview video generation timed out for {key}")
+        return FileResponse(str(p), media_type="video/mp4", headers={"Cache-Control": "public, max-age=86400"})
 
     @router.post("/sessions/{session_id}/rollover")
     async def rollover_session(session_id: str, user: dict = Depends(_agent_user)):
@@ -347,12 +518,17 @@ def build_studio_agent_router(
         return {"session": _public_session(session), "rolled_over_from": session_id}
 
     @router.get("/sessions/{session_id}")
-    async def get_session(session_id: str, user: dict = Depends(_agent_user)):
+    async def get_session(
+        session_id: str,
+        sync_pending: bool = Query(True),
+        user: dict = Depends(_agent_user),
+    ):
         session = store.get_session(session_id, user_id=_user_id(user))
         if not session:
             raise HTTPException(404, "session not found")
-        store.sync_pending_from_messages(session_id)
-        session = store.get_session(session_id, user_id=_user_id(user)) or session
+        if sync_pending:
+            store.sync_pending_from_messages(session_id)
+            session = store.get_session(session_id, user_id=_user_id(user)) or session
         return {"session": _public_session(session)}
 
     @router.patch("/sessions/{session_id}")
@@ -375,10 +551,22 @@ def build_studio_agent_router(
             updates["reasoning_depth"] = body.reasoning_depth
         if body.render_style is not None:
             updates["render_style"] = body.render_style
+        if body.channel_id is not None:
+            updates["channel_id"] = body.channel_id.strip()
+        if body.registry_key is not None:
+            updates["registry_key"] = body.registry_key.strip()
+        if body.channel_title is not None:
+            updates["channel_title"] = body.channel_title.strip()
         if body.web_search is not None:
             updates["web_search"] = bool(body.web_search)
         if body.animate is not None:
             updates["animate"] = bool(body.animate)
+        if body.captions_enabled is not None:
+            updates["captions_enabled"] = bool(body.captions_enabled)
+        if body.caption_mode is not None:
+            updates["caption_mode"] = body.caption_mode
+            if body.caption_mode == "off":
+                updates["captions_enabled"] = False
         session = store.update_session(session_id, **updates)
         return {"session": _public_session(session)}
 
@@ -394,6 +582,7 @@ def build_studio_agent_router(
         session = store.get_session(session_id, user_id=_user_id(user))
         if not session:
             raise HTTPException(404, "session not found")
+        session = _apply_chat_turn_options(session_id, session, body)
         plan = _membership_plan_for_user(user)
         profile = _billing_profile(user)
         try:
@@ -403,6 +592,7 @@ def build_studio_agent_router(
                 membership_plan=plan,
                 billing_profile=profile,
                 reply_to=getattr(body, 'reply_to', None),
+                attachments=body.attachments,
             )
         except (StudioAgentQueueFullError, StudioAgentQueueTimeoutError) as exc:
             snap = await queue_snapshot()
@@ -422,20 +612,31 @@ def build_studio_agent_router(
         session = store.get_session(session_id, user_id=_user_id(user))
         if not session:
             raise HTTPException(404, "session not found")
+        session = _apply_chat_turn_options(session_id, session, body)
         plan = _membership_plan_for_user(user)
         profile = _billing_profile(user)
         try:
             openrouter.api_key()
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
+        run = store.create_run(session_id, user_text=body.message.strip())
+        store.append_run_event(
+            session_id,
+            run["run_id"],
+            "status",
+            {"event": "status", "message": "Run accepted.", "run_id": run["run_id"]},
+        )
 
         async def body_iter():
+            yield f"event: status\ndata: {{\"event\":\"status\",\"message\":\"Run accepted.\",\"run_id\":\"{run['run_id']}\"}}\n\n"
             async for chunk in runner.stream_turn(
                 session,
                 body.message.strip(),
                 membership_plan=plan,
                 billing_profile=profile,
                 reply_to=body.reply_to,
+                attachments=body.attachments,
+                run_id=run["run_id"],
             ):
                 yield chunk
 
@@ -448,6 +649,24 @@ def build_studio_agent_router(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @router.get("/sessions/{session_id}/runs")
+    async def list_session_runs(
+        session_id: str,
+        active_only: bool = Query(False),
+        user: dict = Depends(_agent_user),
+    ):
+        session = store.get_session(session_id, user_id=_user_id(user))
+        if not session:
+            raise HTTPException(404, "session not found")
+        return {"runs": store.list_runs(session_id, user_id=_user_id(user), active_only=active_only)}
+
+    @router.get("/sessions/{session_id}/runs/{run_id}")
+    async def get_session_run(session_id: str, run_id: str, user: dict = Depends(_agent_user)):
+        run = store.get_run(session_id, run_id, user_id=_user_id(user))
+        if not run:
+            raise HTTPException(404, "run not found")
+        return {"run": run}
 
     @router.post("/sessions/{session_id}/approve")
     async def approve(session_id: str, body: ApproveRequest, user: dict = Depends(_agent_user)):
@@ -522,10 +741,16 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "content_format": session.get("content_format"),
         "reasoning_depth": session.get("reasoning_depth") or "balanced",
         "render_style": session.get("render_style") or store.DEFAULT_RENDER_STYLE,
+        "channel_id": session.get("channel_id") or "",
+        "registry_key": session.get("registry_key") or "",
+        "channel_title": session.get("channel_title") or "",
         "web_search": bool(session.get("web_search", True)),
         "animate": bool(session.get("animate", True)),
+        "captions_enabled": bool(session.get("captions_enabled", True)),
+        "caption_mode": session.get("caption_mode") or ("off" if session.get("captions_enabled") is False else "word"),
         "message_count": len(session.get("messages") or []),
         "pending_count": len(session.get("pending_actions") or []),
+        "active_runs": store.active_runs(session),
         "created_at": session.get("created_at"),
         "updated_at": session.get("updated_at"),
     }
@@ -537,5 +762,6 @@ def _public_session(session: dict[str, Any]) -> dict[str, Any]:
         "approval_mode": session.get("approval_mode"),
         "pending_actions": session.get("pending_actions") or [],
         "active_jobs": session.get("active_jobs") or [],
+        "active_runs": store.active_runs(session),
         "messages": session.get("messages") or [],
     }

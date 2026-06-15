@@ -3,7 +3,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import type { PageNav } from '../components/NavBar';
 import StudioShell from '../components/layout/StudioShell';
 import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
-import { StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
+import { StudioCampusPreview, StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
 import ChannelHomePanel from '../components/home/ChannelHomePanel';
 import RenderTierPicker from '../components/home/RenderTierPicker';
 import {
@@ -19,6 +19,7 @@ const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const AgentPanel = lazy(() => import('../panels/AgentPanel'));
+const GrowthCampusPanel = lazy(() => import('../panels/GrowthCampusPanel'));
 const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
 const ClipLabPanel = lazy(() => import('../panels/ClipLabPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
@@ -43,22 +44,22 @@ const OWNER_ALL_ACCESS: Record<string, boolean> = {
     catalyst: true,
     refunds: true,
     waitlist: true,
+    campus: true,
 };
 
 function tabFromUrl(): DashboardTab {
-    if (typeof window === 'undefined') return 'agent';
+    if (typeof window === 'undefined') return 'home';
     try {
         const t = new URL(window.location.href).searchParams.get('tab');
         const allowed: DashboardTab[] = [
-            'home', 'create', 'agent', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
+            'home', 'create', 'agent', 'campus', 'network', 'wins', 'leaderboard', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
         ];
+        if (t === 'checklist') return 'campus';
         if (t && allowed.includes(t as DashboardTab)) return t as DashboardTab;
     } catch {
         /* ignore */
     }
-    // For regular users, default straight into Studio Agent chat (the primary experience).
-    // Admins/owners still get the rich home by default if they want the full dashboard.
-    return 'agent';
+    return 'home';
 }
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -88,13 +89,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const canUseAgent = isAdmin || Boolean((laneAccess as Record<string, boolean>).agent);
 
-    // For regular paying users, Studio Agent is the primary experience (first thing they see).
-    // Default tab logic already returns 'agent'; the const below documents intent for future conditionals.
-
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {
             if (nextTab === 'home' || nextTab === 'create') return true;
             if (nextTab === 'longform') return isAdmin;
+            if (nextTab === 'campus') return true;
+            if (nextTab === 'network' || nextTab === 'wins' || nextTab === 'leaderboard') return true;
             if (nextTab === 'agent') return canUseAgent;
             if (nextTab === 'thumbnails') return isAdmin || Boolean((laneAccess as Record<string, boolean>).thumbnails);
             if (nextTab === 'cliplab') return isAdmin || Boolean((laneAccess as Record<string, boolean>).cliplab);
@@ -112,6 +112,20 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     useEffect(() => {
         if (loading) return;
         const urlTab = tabFromUrl();
+        const hasExplicitTab = (() => {
+            if (typeof window === 'undefined') return false;
+            try {
+                return new URL(window.location.href).searchParams.has('tab');
+            } catch {
+                return false;
+            }
+        })();
+        if (!hasExplicitTab) {
+            setTab('campus');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
         if (urlTab === 'agent' && canUseAgent) {
             setTab('agent');
             setCreateOpen(false);
@@ -131,6 +145,18 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         }
         if (urlTab === 'longform' && isAdmin) {
             setTab('longform');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        if (urlTab === 'campus') {
+            setTab('campus');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        if ((urlTab === 'network' || urlTab === 'wins' || urlTab === 'leaderboard')) {
+            setTab(urlTab);
             setCreateOpen(false);
             setSelectedNiche(null);
             return;
@@ -171,7 +197,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const displayName = session.user.email?.split('@')[0] || 'creator';
 
     const openAgent = () => {
-        if (!isAdmin) return;
+        if (!canUseAgent) return;
         selectTab('agent');
     };
 
@@ -184,7 +210,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             } else {
                 u.searchParams.set('tab', id);
             }
-            if (id === 'agent' || id === 'longform') {
+            if (id === 'agent' || id === 'campus' || id === 'longform') {
                 u.searchParams.delete('niche');
             }
             window.history.replaceState({}, '', u.toString());
@@ -192,7 +218,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             /* ignore */
         }
         if (id === 'home') {
-            setTab('home');
+            setTab('campus');
             setCreateOpen(false);
             setSelectedNiche(null);
             return;
@@ -217,6 +243,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             selectTab('longform');
             return;
         }
+        if (action === 'campus' && isAdmin) {
+            selectTab('campus');
+            return;
+        }
         if (action === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
             selectTab('thumbnails');
             return;
@@ -235,6 +265,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const panel = (() => {
         if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
+        if (tab === 'campus') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="hub" />);
+        if (tab === 'network') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="network" />);
+        if (tab === 'wins') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="wins" />);
+        if (tab === 'leaderboard') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="leaderboard" />);
         if (tab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) return lazyPanel(<ThumbnailPanel />);
         if (tab === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
             return lazyPanel(<ClipLabPanel />);
@@ -292,15 +326,16 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const inBuilder = tab === 'create' && createOpen;
     const agentRequested = tab === 'agent';
     const isAgentTab = agentRequested && (loading || canUseAgent);
+    const campusRequested = tab === 'campus' || tab === 'network' || tab === 'wins' || tab === 'leaderboard' || tab === 'home';
     const showHome = tab === 'home' || (tab === 'create' && !createOpen);
 
     return (
         <StudioShell
             onNavigate={onNavigate}
-            fullWidth={inBuilder || isAgentTab}
-            flush={isAgentTab}
+            fullWidth={inBuilder || isAgentTab || campusRequested}
+            flush={isAgentTab || campusRequested}
             sidebar={
-                inBuilder || isAgentTab ? undefined : (
+                inBuilder || isAgentTab || campusRequested ? undefined : (
                     <StudioSidebar
                         active={tab === 'create' && !createOpen ? 'home' : tab}
                         items={sidebarItems}
@@ -311,13 +346,21 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 )
             }
         >
-            {showHome && (
-                <div className="mx-auto max-w-6xl space-y-8">
+            {showHome && tab !== 'home' && (
+                <div className="mx-auto max-w-7xl space-y-8">
                     <StudioHomeHero greeting={greeting} name={displayName} ownerPreview={ownerOverride} />
+                    {isAdmin && <StudioCampusPreview onOpen={() => selectTab('campus')} />}
                     <StudioToolsRow onTool={handleTool} isAdmin={isAdmin} />
-                    <section>
-                        <h2 className="mb-3 text-lg font-bold text-white">Render tier</h2>
-                        <p className="mb-3 text-sm text-gray-500">Draft to iterate. Ship for cinematic export. Documentary for long-form episodes.</p>
+                    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5 shadow-sm shadow-black/30">
+                        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+                            <div>
+                                <h2 className="text-lg font-bold text-white">Render tier</h2>
+                                <p className="mt-1 text-sm text-gray-500">Draft to iterate. Ship for cinematic export. Documentary for long-form episodes.</p>
+                            </div>
+                            <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
+                                Cost-aware
+                            </span>
+                        </div>
                         <RenderTierPicker value={renderTier} onChange={setRenderTier} />
                     </section>
                     <ChannelHomePanel onOpenAgent={openAgent} isAdmin={isAdmin} />
@@ -347,7 +390,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             )}
 
             {agentRequested && (
-                <div className="mx-auto flex h-[calc(100dvh-3.75rem)] max-w-5xl flex-col overflow-hidden px-2 sm:px-4">
+                <div className="flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden">
                     {loading ? (
                         <PanelFallback />
                     ) : canUseAgent ? (
@@ -376,8 +419,16 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             )}
 
-            {tab !== 'create' && tab !== 'home' && !isAgentTab && (
-                <div className="mx-auto max-w-6xl">{panel}</div>
+            {campusRequested && (
+                <div className="h-[calc(100dvh-3.5rem)] overflow-hidden">
+                    {tab === 'home'
+                        ? lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="hub" />)
+                        : panel}
+                </div>
+            )}
+
+            {tab !== 'create' && tab !== 'home' && !isAgentTab && !campusRequested && (
+                <div className="mx-auto max-w-7xl">{panel}</div>
             )}
         </StudioShell>
     );

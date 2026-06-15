@@ -23,7 +23,7 @@ function compact(n: number): string {
 
 function Stat({ icon: Icon, label, value }: { icon: typeof Users; label: string; value: string }) {
     return (
-        <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+        <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2">
             <Icon className="h-4 w-4 shrink-0 text-cyan-300/80" />
             <div className="min-w-0">
                 <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
@@ -55,20 +55,15 @@ export default function ChannelHomePanel({
             setLoading(true);
             setError('');
             try {
-                const res = await fetch(resolveStudioBackendUrl('/api/studio/analytics/channels'), {
+                const res = await fetch(resolveStudioBackendUrl('/api/studio/analytics/channels?sync=true'), {
                     headers: { Authorization: `Bearer ${tok}` },
                 });
                 if (!res.ok) {
                     if (!cancelled) {
                         if (res.status === 403) {
-                            setError(
-                                'Connect YouTube in Settings to see your channel stats here.',
-                            );
+                            setError('Connect YouTube in Settings to see your channel stats here.');
                         } else if (res.status === 429) {
-                            setError(
-                                'Channel analytics is rate-limited on the API bridge — refresh in a minute. '
-                                + 'Studio Agent chat still works on Fly.',
-                            );
+                            setError('Channel analytics is rate-limited on the API bridge. Refresh in a minute; Studio Agent chat still works on Fly.');
                         } else {
                             setError(`Couldn't load channel analytics (${res.status})`);
                         }
@@ -83,19 +78,35 @@ export default function ChannelHomePanel({
                 if (!cancelled) setLoading(false);
             }
         })();
+        const interval = window.setInterval(() => {
+            if (document.visibilityState === 'visible') {
+                void (async () => {
+                    try {
+                        const res = await fetch(resolveStudioBackendUrl('/api/studio/analytics/channels?sync=true'), {
+                            headers: { Authorization: `Bearer ${tok}` },
+                        });
+                        if (!res.ok || cancelled) return;
+                        const data = (await res.json()) as { channels?: ChannelRow[] };
+                        if (!cancelled) setChannels(Array.isArray(data.channels) ? data.channels : []);
+                    } catch {
+                        /* keep last good metrics */
+                    }
+                })();
+            }
+        }, 60_000);
         return () => {
             cancelled = true;
+            window.clearInterval(interval);
         };
     }, [session?.access_token]);
 
     return (
-        <section className="space-y-4">
+        <section className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5 shadow-sm shadow-black/30">
             <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                     <h2 className="text-lg font-bold text-white">Your channel</h2>
                     <p className="mt-1 max-w-2xl text-sm text-gray-500">
-                        The Studio Agent now drives every video — no niche tiles to pick. It analyzes your live
-                        analytics and competitors, then engineers content built to go viral.
+                        Studio Agent reads your live analytics and competitors, then engineers content around real audience behavior.
                     </p>
                 </div>
                 {onOpenAgent && session && (
@@ -111,36 +122,35 @@ export default function ChannelHomePanel({
             </div>
 
             {loading && (
-                <div className="flex h-32 items-center justify-center gap-2 rounded-2xl border border-white/[0.06] bg-white/[0.02] text-sm text-gray-500">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Loading channel analytics…
+                <div className="mt-4 flex h-32 items-center justify-center gap-2 rounded-2xl border border-white/[0.06] bg-black/20 text-sm text-gray-500">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading channel analytics...
                 </div>
             )}
 
             {!loading && error && (
-                <div className="rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200/80">
+                <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200/80">
                     {error}
                 </div>
             )}
 
             {!loading && !error && channels && channels.length === 0 && (
-                <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.02] px-5 py-6">
+                <div className="mt-4 flex flex-col items-start gap-3 rounded-2xl border border-white/[0.08] bg-black/20 px-5 py-6">
                     <div className="flex items-center gap-2 text-white">
                         <Sparkles className="h-5 w-5 text-cyan-300" />
                         <span className="font-semibold">No channel connected yet</span>
                     </div>
                     <p className="max-w-xl text-sm text-gray-500">
-                        Connect a YouTube channel so the Studio Agent can read your real analytics — top videos,
-                        retention, and packaging — and tailor every recommendation to your audience.
+                        Connect YouTube so Studio Agent can read top videos, retention, packaging, and audience patterns.
                     </p>
                 </div>
             )}
 
             {!loading && !error && channels && channels.length > 0 && (
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
                     {channels.map((c) => (
                         <div
                             key={c.channel_id}
-                            className="rounded-2xl border border-white/[0.08] bg-gradient-to-br from-white/[0.03] to-transparent p-5"
+                            className="rounded-2xl border border-white/[0.08] bg-gradient-to-br from-white/[0.045] to-transparent p-5 shadow-sm shadow-black/25"
                         >
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
@@ -148,7 +158,7 @@ export default function ChannelHomePanel({
                                     {c.registry_label && (
                                         <p className="mt-0.5 text-xs text-gray-500">
                                             {c.registry_label}
-                                            {c.registry_format ? ` · ${c.registry_format}` : ''}
+                                            {c.registry_format ? ` / ${c.registry_format}` : ''}
                                         </p>
                                     )}
                                 </div>

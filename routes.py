@@ -527,6 +527,6 @@ async def _get_current_user_from_request_via_dependency(request: Request, requir
     fake = _FakeCred()
     fake.credentials = token
     try:
-        return await require_auth(fake)
+        return await require_auth(request, fake)
     except HTTPException:
         return None

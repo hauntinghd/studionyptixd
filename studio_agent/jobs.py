@@ -22,7 +22,9 @@ JOB_START_TOOLS = frozenset({
     "start_longform_render",
     "start_shortform_generate",
     "analyze_reference_video",
+    "finalize_production",
     "finalize_longform_render",
+    "re_edit_production",
 })
 
 LONGFORM_PHASE_LABELS: dict[str, str] = {
@@ -62,6 +64,9 @@ def extract_jobs_from_tool(tool_name: str, result_text: str) -> list[dict[str, A
     elif tool_name == "finalize_longform_render":
         kind = "longform"
         title = "Long-form finalize"
+    elif tool_name in {"finalize_production", "re_edit_production"}:
+        kind = "shortform"
+        title = "Short-form re-edit" if tool_name == "re_edit_production" else "Short-form finalize"
     else:
         return []
     return [{
@@ -120,6 +125,7 @@ def _longform_status(job_id: str) -> dict[str, Any]:
     if phase == "done" and mp4_path:
         snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=longform"
         snap["download_url"] = snap["mp4_url"]
+        snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=longform"
     thumbs = int(st.get("thumbnails_generated") or 0)
     if thumbs > 0:
         snap["preview_url"] = f"/api/studio-agent/jobs/{job_id}/thumbnail/1"
@@ -142,10 +148,100 @@ def finalize_longform_job(job_id: str) -> dict[str, Any]:
 def resolve_still_path(job_id: str, scene_idx: int) -> Path | None:
     if not job_id.replace("_", "").isalnum() or len(job_id) > 48:
         return None
+    ws = (ROOT / SKELETON_OUTPUT / job_id).resolve()
+    scenes_path = ws / "scenes.json"
+    if scenes_path.is_file():
+        try:
+            scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+            if isinstance(scenes, list):
+                for sc in scenes:
+                    if not isinstance(sc, dict):
+                        continue
+                    if int(sc.get("index") or 0) != int(scene_idx):
+                        continue
+                    rel = str(sc.get("still_rel") or "").strip()
+                    if rel:
+                        path = (ws / rel).resolve()
+                        try:
+                            path.relative_to(ws)
+                        except ValueError:
+                            return None
+                        return path if path.is_file() else None
+        except Exception:
+            pass
+    shortform_fallback = ws / "stills" / f"b{int(scene_idx):02d}.png"
+    if shortform_fallback.is_file():
+        return shortform_fallback
     from long_form import pipeline as lf_pipeline
 
     path = lf_pipeline.job_still_path(job_id, scene_idx)
     return path if path and path.exists() else None
+
+
+def _shortform_scene_count(workspace: Path) -> int:
+    scenes_path = workspace / "scenes.json"
+    if scenes_path.is_file():
+        try:
+            scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+            if isinstance(scenes, list):
+                return len([sc for sc in scenes if isinstance(sc, dict)])
+        except Exception:
+            pass
+    stills_dir = workspace / "stills"
+    if stills_dir.is_dir():
+        return len([p for p in stills_dir.glob("*.png") if p.is_file()])
+    return 0
+
+
+def _shortform_scene_snapshots(job_id: str, workspace: Path) -> list[dict[str, Any]]:
+    scenes_path = workspace / "scenes.json"
+    if not scenes_path.is_file():
+        count = _shortform_scene_count(workspace)
+        return [
+            {
+                "index": i,
+                "duration_sec": 5.0,
+                "approved_for_video": False,
+                "approved_for_animation": False,
+                "animate": False,
+                "still_preview_url": f"/api/studio-agent/jobs/{job_id}/still/{i}",
+            }
+            for i in range(count)
+        ]
+    try:
+        raw = json.loads(scenes_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    scenes: list[dict[str, Any]] = []
+    for fallback_idx, sc in enumerate(raw):
+        if not isinstance(sc, dict):
+            continue
+        try:
+            idx = int(sc.get("index", fallback_idx))
+        except Exception:
+            idx = fallback_idx
+        try:
+            duration = float(sc.get("duration_sec", 5.0) or 5.0)
+        except Exception:
+            duration = 5.0
+        scenes.append({
+            "index": idx,
+            "sid": sc.get("sid"),
+            "narration": sc.get("narration"),
+            "scene_action": sc.get("scene_action") or sc.get("action"),
+            "duration_sec": duration,
+            "status": sc.get("status"),
+            "animate": bool(sc.get("animate", False)),
+            "approved_for_video": bool(sc.get("approved_for_video", False)),
+            "approved_for_animation": bool(sc.get("approved_for_animation", False)),
+            "has_clip": bool(sc.get("clip_rel")),
+            "video_model": sc.get("video_model"),
+            "last_edit": sc.get("last_edit"),
+            "still_preview_url": f"/api/studio-agent/jobs/{job_id}/still/{idx}",
+        })
+    return scenes
 
 
 def _write_shortform_result(workspace: Path, *, status: str, error: str = "", **extra: Any) -> None:
@@ -239,23 +335,57 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "running": False,
         }
     st = str(data.get("status") or "").lower()
+    if st == "cancelled":
+        # If a re-edit/retry reused the workspace, a stale cancelled result can
+        # briefly coexist with a finished MP4. Prefer the actual deliverable.
+        for candidate in ("styled_short.mp4", "final.mp4", "short.mp4"):
+            if (workspace / candidate).is_file() and (workspace / candidate).stat().st_size > 1024:
+                st = "complete"
+                data["status"] = "complete"
+                data.setdefault("video_path", str(workspace / candidate))
+                data.pop("error", None)
+                break
     cancelled = st == "cancelled"
     complete = st == "complete"
+    awaiting_scene_review = st in {"awaiting_scene_review", "awaiting_approval", "stills_done", "review_scenes"}
     terminal_fail = st == "failed" or cancelled
+    scene_snapshots = _shortform_scene_snapshots(job_id, workspace)
+    scene_count = len(scene_snapshots) or _shortform_scene_count(workspace)
     snap: dict[str, Any] = {
         "job_id": job_id,
         "kind": "shortform",
-        "status": "complete" if complete else "failed" if terminal_fail else "running",
-        "progress": 100 if complete else 0 if terminal_fail else 55,
+        "status": "complete" if complete else "failed" if terminal_fail else "awaiting_approval" if awaiting_scene_review else "running",
+        "progress": 100 if complete else 0 if terminal_fail else 80 if awaiting_scene_review else 55,
         "stage": st or "running",
-        "stage_label": "Complete" if complete else ("Cancelled" if cancelled else "Failed") if terminal_fail else "Rendering",
+        "stage_label": "Complete" if complete else ("Cancelled" if cancelled else "Failed") if terminal_fail else "Review stills" if awaiting_scene_review else "Rendering",
+        "stage_detail": (
+            "Review each still. Reply to edit any bad scene, then approve scenes for animation/final export."
+            if awaiting_scene_review else data.get("detail")
+        ),
         "error": ("Cancelled by user" if cancelled else data.get("error")),
-        "running": not complete and not terminal_fail,
+        "running": not complete and not terminal_fail and not awaiting_scene_review,
         "title": str(data.get("topic") or data.get("category") or "Short-form"),
     }
+    if scene_count > 0:
+        snap["current_scene"] = scene_count
+        snap["total_scenes"] = scene_count
+        if scene_snapshots:
+            snap["scenes"] = scene_snapshots
+    if awaiting_scene_review and scene_count > 0:
+        snap["can_finalize"] = False
+        snap["still_count"] = scene_count
+        snap["still_preview_urls"] = [
+            str(scene.get("still_preview_url"))
+            for scene in scene_snapshots[:12]
+            if scene.get("still_preview_url")
+        ] or [
+            f"/api/studio-agent/jobs/{job_id}/still/{i}"
+            for i in range(min(scene_count, 12))
+        ]
     if complete:
         snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=shortform"
         snap["download_url"] = snap["mp4_url"]
+        snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=shortform"
     return snap
 
 
@@ -325,8 +455,49 @@ def get_job_snapshot(job_id: str, kind: str) -> dict[str, Any]:
         snap = _competitor_status(job_id)
     else:
         snap = _longform_status(job_id)
+    if snap.get("status") == "complete" and kind in {"shortform", "longform"}:
+        _attach_render_qa(snap, job_id, kind)
     snap["polled_at"] = time.time()
     return snap
+
+
+def _attach_render_qa(snap: dict[str, Any], job_id: str, kind: str) -> None:
+    """Attach cached deterministic QA without allowing QA failures to break polling."""
+    try:
+        video_path = resolve_media_path(job_id, kind)
+        if not video_path:
+            return
+        package_path = resolve_package_path(job_id, kind)
+        from studio_agent import render_qa
+
+        report = render_qa.analyze_render(
+            job_id=job_id,
+            kind=kind,
+            video_path=video_path,
+            package_path=package_path,
+        )
+        snap["render_qa"] = report
+        snap["ready_to_post"] = report.get("status") == "pass"
+    except Exception as exc:
+        snap["render_qa"] = {
+            "version": 1,
+            "job_id": job_id,
+            "kind": kind,
+            "status": "warn",
+            "score": 0,
+            "summary": "WARN 0/100 - QA could not complete; review manually.",
+            "checks": [
+                {
+                    "id": "qa_exception",
+                    "label": "QA system",
+                    "status": "warn",
+                    "status_label": "WARN",
+                    "detail": str(exc)[:300],
+                }
+            ],
+            "created_at": time.time(),
+        }
+        snap["ready_to_post"] = False
 
 
 def resolve_media_path(job_id: str, kind: str) -> Path | None:
@@ -346,6 +517,157 @@ def resolve_media_path(job_id: str, kind: str) -> Path | None:
 
         path = lf_pipeline.job_mp4_path(job_id)
         return path if path and path.exists() else None
+    return None
+
+
+def _format_ts(seconds: float) -> str:
+    seconds = max(0, float(seconds or 0))
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _build_longform_package(job_id: str) -> Path | None:
+    from long_form import pipeline as lf_pipeline
+
+    state = lf_pipeline.load_state(job_id) or {}
+    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    if not outline:
+        return None
+    job_dir = lf_pipeline.LF_OUTPUT_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    path = job_dir / "package.txt"
+    title = str(outline.get("title") or state.get("title") or "Untitled long-form video").strip()
+    tags = outline.get("tags") if isinstance(outline.get("tags"), list) else []
+    description = str(outline.get("description") or outline.get("hook") or title).strip()
+    chapters = outline.get("chapters") if isinstance(outline.get("chapters"), list) else []
+    timestamps: list[str] = []
+    cursor = 0.0
+    for idx, ch in enumerate(chapters):
+        if not isinstance(ch, dict):
+            continue
+        ch_title = str(ch.get("title") or ch.get("name") or f"Chapter {idx + 1}").strip()
+        timestamps.append(f"{_format_ts(cursor)} - {ch_title}")
+        minutes = float(ch.get("minutes") or 0)
+        duration = float(ch.get("duration_sec") or 0)
+        cursor += duration if duration > 0 else minutes * 60 if minutes > 0 else 60
+    if not timestamps:
+        timestamps = ["00:00 - Opening"]
+    text = f"""Title:
+{title}
+
+Description:
+{description}
+
+Timestamps:
+{chr(10).join(timestamps)}
+
+Tags:
+{", ".join(str(t).strip() for t in tags if str(t).strip())}
+
+Thumbnail:
+Generated for long-form. Use the thumbnail candidates attached to this job and pick the strongest CTR-safe option.
+"""
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _build_shortform_package(job_id: str) -> Path | None:
+    ws = (ROOT / SKELETON_OUTPUT / job_id).resolve()
+    scenes_path = ws / "scenes.json"
+    result_path = ws / "result.json"
+    if not scenes_path.is_file() and not result_path.is_file():
+        return None
+    try:
+        scenes = json.loads(scenes_path.read_text(encoding="utf-8")) if scenes_path.is_file() else []
+        if not isinstance(scenes, list):
+            scenes = []
+    except Exception:
+        scenes = []
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else {}
+        if not isinstance(result, dict):
+            result = {}
+    except Exception:
+        result = {}
+    try:
+        spec_path = ws / "job_spec.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.is_file() else {}
+        if not isinstance(spec, dict):
+            spec = {}
+    except Exception:
+        spec = {}
+    title = str(result.get("topic") or result.get("category") or "Untitled Short").strip()
+    category = str(result.get("category") or "short").strip()
+    render_style = str(result.get("render_style") or "cinematic").strip()
+    safe_topic_tag = "".join(ch for ch in title.lower() if ch.isalnum())[:32] or "shorts"
+    watermark_text = str(spec.get("watermark_text") or result.get("watermark_text") or "").strip()
+    brand_tag = "".join(ch for ch in watermark_text.lower() if ch.isalnum())[:32]
+    tags = [
+        safe_topic_tag,
+        category,
+        render_style,
+        "shorts",
+        "youtube shorts",
+        "ai video",
+        "nyptid studio",
+    ]
+    if brand_tag:
+        tags.append(brand_tag)
+    hashtags = ["#shorts", f"#{safe_topic_tag}", "#nyptidstudio"]
+    if brand_tag:
+        hashtags.append(f"#{brand_tag}")
+    timestamps: list[str] = []
+    cursor = 0.0
+    for idx, sc in enumerate(scenes):
+        if not isinstance(sc, dict):
+            continue
+        label = str(sc.get("narration") or sc.get("prompt") or f"Scene {idx + 1}").strip()
+        timestamps.append(f"{_format_ts(cursor)} - {label[:70].rstrip(' .,') or f'Scene {idx + 1}'}")
+        cursor += float(sc.get("duration_sec") or 0) or 0
+    path = ws / "package.txt"
+    text = f"""Title:
+{title}
+
+Description:
+{title}
+
+Watch the full story unfold in a fast, tightly edited short. Subscribe for more.
+
+Timestamps:
+{chr(10).join(timestamps) if timestamps else "00:00 - Full short"}
+
+Tags:
+{", ".join(dict.fromkeys(t for t in tags if t))}
+
+Hashtags:
+{" ".join(dict.fromkeys(h for h in hashtags if h))}
+
+Thumbnail:
+Not generated for short-form by default. Use the strongest frame/cover from the finished Short unless the user explicitly asks for a custom thumbnail.
+"""
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def resolve_package_path(job_id: str, kind: str) -> Path | None:
+    kind = str(kind or "").strip().lower()
+    if not job_id.replace("_", "").isalnum() or len(job_id) > 48:
+        return None
+    if kind == "shortform":
+        ws = (ROOT / SKELETON_OUTPUT / job_id).resolve()
+        p = (ws / "package.txt").resolve()
+        if p.is_file():
+            return p
+        return _build_shortform_package(job_id)
+    if kind == "longform":
+        from long_form import pipeline as lf_pipeline
+
+        p = (lf_pipeline.LF_OUTPUT_ROOT / job_id / "package.txt").resolve()
+        if p.is_file():
+            return p
+        return _build_longform_package(job_id)
     return None
 
 

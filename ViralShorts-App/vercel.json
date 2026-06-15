@@ -5,11 +5,11 @@
   "rewrites": [
     {
       "source": "/api",
-      "destination": "https://api-studio.nyptidindustries.com/api"
+      "destination": "https://nyptid-studio.fly.dev/api"
     },
     {
       "source": "/api/:path*",
-      "destination": "https://api-studio.nyptidindustries.com/api/:path*"
+      "destination": "https://nyptid-studio.fly.dev/api/:path*"
     },
     {
       "source": "/(.*)",

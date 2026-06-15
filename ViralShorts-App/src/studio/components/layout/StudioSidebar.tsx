@@ -5,6 +5,7 @@ import {
     CalendarClock,
     Clapperboard,
     Film,
+    GraduationCap,
     Image as ImageIcon,
     Home,
     Plus,
@@ -95,13 +96,6 @@ export default function StudioSidebar({
                     );
                 })}
             </nav>
-
-            <div className="mt-4 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-300">Ship tier</p>
-                <p className="mt-1 text-xs leading-relaxed text-gray-400">
-                    Higgsfield cinematic lane unlocks on Pro+. Draft with fal, ship with peak realism.
-                </p>
-            </div>
         </aside>
     );
 }
@@ -115,8 +109,12 @@ export function buildSidebarItems(
         { id: 'home', label: 'Home', icon: Home },
         { id: 'create', label: 'Create', icon: Sparkles },
         { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Beta' },
+        { id: 'campus', label: 'Studio Hub', icon: GraduationCap, badge: 'New' },
+        { id: 'network', label: 'Network', icon: Users },
+        { id: 'wins', label: 'Wins', icon: BarChart3 },
+        { id: 'leaderboard', label: 'Leaderboard', icon: BarChart3 },
         { id: 'thumbnails', label: 'ThumbLab', icon: ImageIcon, hidden: !isAdmin, badge: 'Beta' },
-        { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: !isAdmin, badge: 'Beta' },
+        { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: false, comingSoon: !isAdmin && !laneAccess.cliplab, badge: isAdmin || laneAccess.cliplab ? 'Beta' : 'Soon' },
         { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin, badge: 'Beta' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
         { id: 'analytics', label: 'Analytics', icon: BarChart3, hidden: !isAdmin },

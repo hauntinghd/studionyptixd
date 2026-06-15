@@ -38,7 +38,10 @@ def trim_with_captions(
     width: int = 720,
     height: int = 1280,
     fps: int = 30,
-    watermark_text: str = "ZeroTier",
+    watermark_text: str = "Studio",
+    caption_mode: str = "word",
+    captions_enabled: bool = True,
+    force: bool = False,
 ) -> Path:
     """Trim a scene clip to exact duration and burn captions + watermark.
 
@@ -47,13 +50,15 @@ def trim_with_captions(
     text contains apostrophes, em-dashes, etc.
     """
     out_path = Path(out_path)
-    if out_path.exists() and out_path.stat().st_size > 1024:
+    if not force and out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
 
-    phrases = cap.split_into_phrases(narration_text)
-    timed = cap.time_phrases(phrases, duration_sec)
-
-    drawtexts = [cap.caption_drawtext(p, width=width) for p in timed]
+    caption_mode = "word" if str(caption_mode or "").lower() in {"word", "single_word", "one_word"} else "phrase"
+    drawtexts = []
+    if captions_enabled:
+        phrases = cap.split_into_phrases(narration_text, max_words=1 if caption_mode == "word" else 3)
+        timed = cap.time_phrases(phrases, duration_sec)
+        drawtexts = [cap.caption_drawtext(p, width=width, caption_mode=caption_mode) for p in timed]
     drawtexts.append(cap.watermark_drawtext(watermark_text=watermark_text))
 
     vf = (

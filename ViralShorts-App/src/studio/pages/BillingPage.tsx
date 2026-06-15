@@ -2,7 +2,6 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 import { ArrowLeft, CheckCircle2 } from 'lucide-react';
 import BillingPremiumView from '../components/billing/BillingPremiumView';
 import StudioShell from '../components/layout/StudioShell';
-import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
 import { UNIFIED_PLANS, UNIFIED_TOPUP_PACKS, type UnifiedPlanId } from '../lib/studioProduct';
 import { type PageNav } from '../components/NavBar';
 import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost, resolveStudioBackendUrl } from '../shared';
@@ -22,7 +21,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         verifyPayPalOrder,
         topupPacks,
         creditsTotalRemaining,
-        role,
     } = useContext(AuthContext);
     const [locationState, setLocationState] = useState(() => ({
         search: typeof window === 'undefined' ? '' : window.location.search,
@@ -237,7 +235,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         }
     }, [checkoutTopup, onNavigate, selectedPack, session]);
 
-    const isAdmin = role === 'admin';
     const creditBalance = unifiedBalance ?? Number(creditsTotalRemaining || 0);
 
     const paypalBanner = (
@@ -299,17 +296,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     if (session) {
         return (
-            <StudioShell
-                onNavigate={onNavigate}
-                sidebar={
-                    <StudioSidebar
-                        active="home"
-                        items={buildSidebarItems(isAdmin)}
-                        onCreate={() => onNavigate('dashboard')}
-                        onSelect={() => onNavigate('dashboard')}
-                    />
-                }
-            >
+            <StudioShell onNavigate={onNavigate} fullWidth>
                 {billingBody}
             </StudioShell>
         );

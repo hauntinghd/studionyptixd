@@ -25,7 +25,10 @@ const ASYNC_PATHS = [
 
 /** Fly: agent sessions, YouTube OAuth, studio analytics (avoid RunPod 429 / cold sync). */
 const FLY_DIRECT_PREFIXES = [
+  "/api/health",
+  "/api/oauth/google/youtube/",
   "/api/studio-agent",
+  "/api/studio-hub",
   "/api/youtube/",
   "/api/studio/analytics",
 ];

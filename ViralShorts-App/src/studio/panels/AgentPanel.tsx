@@ -1,17 +1,18 @@
 /**
  * Studio Agent — full-screen chat (OpenRouter + Rookcast skills).
  */
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
-    ArrowLeft, ArrowUp, BookOpen, Brain, Check, History, Loader2, MessageSquarePlus, Mic, MicOff,
-    Palette, Paperclip, Play, RefreshCw, RotateCcw, Shield, ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
+    ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronsLeft, ChevronsRight, History, Loader2,
+    MessageSquarePlus, Mic, MicOff, Palette, Paperclip, Play, RefreshCw, RotateCcw, Shield,
+    ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
 } from 'lucide-react';
-import AgentJobDeliverable from '../components/agent/AgentJobDeliverable';
+import AgentJobDeliverable, { type SceneReplyPreset } from '../components/agent/AgentJobDeliverable';
 import AgentMessageBody from '../components/agent/AgentMessageBody';
 import AgentProductionRail from '../components/agent/AgentProductionRail';
 import AgentProgressBubble from '../components/agent/AgentProgressBubble';
 import AgentRenderDock from '../components/agent/AgentRenderDock';
-import AgentYouTubeConnect from '../components/agent/AgentYouTubeConnect';
+import AgentYouTubeConnect, { type ChannelRow } from '../components/agent/AgentYouTubeConnect';
 import { useAgentProductionJobs } from '../hooks/useAgentProductionJobs';
 import {
     type AgentJobSnapshot,
@@ -24,7 +25,7 @@ import {
     persistJobs,
     rehydrateJobSnapshots,
 } from '../lib/agentProduction';
-import { streamAgentChat, toolLabel, type AgentStreamEvent } from '../lib/streamAgentChat';
+import { streamAgentChat, toolLabel, type AgentChatAttachment, type AgentStreamEvent } from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
@@ -45,10 +46,124 @@ interface ChatMessage {
     productionUpdate?: ProductionProgressUpdate;
 }
 
+interface SessionUiCache {
+    messages: ChatMessage[];
+    pending: PendingAction[];
+    jobTracks: AgentJobTrack[];
+    dockDismissed: boolean;
+}
+
+const SESSION_UI_CACHE_VERSION = 1;
+const MAX_SESSION_UI_CACHE_ENTRIES = 30;
+const MAX_SESSION_UI_CACHE_MESSAGES = 160;
+const MAX_SESSION_UI_CACHE_MESSAGE_CHARS = 24000;
+
+function sessionUiCacheStorageKey(userKey?: string) {
+    return `studio_agent_ui_cache_v${SESSION_UI_CACHE_VERSION}:${userKey || 'anon'}`;
+}
+
+function trimCachedMessage(msg: ChatMessage): ChatMessage {
+    const content = String(msg.content || '');
+    return {
+        ...msg,
+        content: content.length > MAX_SESSION_UI_CACHE_MESSAGE_CHARS
+            ? `${content.slice(0, MAX_SESSION_UI_CACHE_MESSAGE_CHARS)}\n\n[local cache truncated]`
+            : content,
+    };
+}
+
+function sanitizeSessionUiCacheEntry(entry: SessionUiCache): SessionUiCache {
+    return {
+        messages: (entry.messages || []).slice(-MAX_SESSION_UI_CACHE_MESSAGES).map(trimCachedMessage),
+        pending: entry.pending || [],
+        jobTracks: entry.jobTracks || [],
+        dockDismissed: Boolean(entry.dockDismissed),
+    };
+}
+
+function loadStoredSessionUiCache(userKey?: string): Map<string, SessionUiCache> {
+    if (typeof window === 'undefined') return new Map();
+    try {
+        const raw = localStorage.getItem(sessionUiCacheStorageKey(userKey));
+        if (!raw) return new Map();
+        const parsed = JSON.parse(raw) as Record<string, SessionUiCache>;
+        const entries = Object.entries(parsed || {})
+            .filter(([sid, entry]) => sid && entry && Array.isArray(entry.messages))
+            .slice(-MAX_SESSION_UI_CACHE_ENTRIES)
+            .map(([sid, entry]) => [sid, sanitizeSessionUiCacheEntry(entry)] as const);
+        return new Map(entries);
+    } catch {
+        return new Map();
+    }
+}
+
+function persistStoredSessionUiCache(userKey: string | undefined, cache: Map<string, SessionUiCache>) {
+    if (typeof window === 'undefined') return;
+    try {
+        const entries = Array.from(cache.entries()).slice(-MAX_SESSION_UI_CACHE_ENTRIES);
+        const payload = Object.fromEntries(
+            entries.map(([sid, entry]) => [sid, sanitizeSessionUiCacheEntry(entry)]),
+        );
+        localStorage.setItem(sessionUiCacheStorageKey(userKey), JSON.stringify(payload));
+    } catch {
+        /* local cache is best-effort only */
+    }
+}
+
 interface AttachedFile {
     id: string;
     name: string;
     size: number;
+    mimeType: string;
+    kind: 'image' | 'text' | 'binary';
+}
+
+interface AttachmentPayload {
+    name: string;
+    mime_type: string;
+    size: number;
+    kind: 'image' | 'text' | 'binary';
+    text?: string;
+    data_url?: string;
+}
+
+const MAX_AGENT_IMAGE_ATTACHMENTS = 4;
+const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.readAsDataURL(file);
+    });
+}
+
+function normalizeAgentMessage(raw: unknown): ChatMessage | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const row = raw as Record<string, unknown>;
+    const role = row.role === 'user' || row.role === 'assistant' || row.role === 'system' ? row.role : null;
+    if (!role) return null;
+    const content = row.content;
+    if (Array.isArray(content)) {
+        const text = content
+            .map((part) => {
+                if (!part || typeof part !== 'object') return '';
+                const p = part as Record<string, unknown>;
+                return p.type === 'text' ? String(p.text || '') : '';
+            })
+            .filter(Boolean)
+            .join('\n\n');
+        const imageCount = content.filter((part) => (
+            Boolean(part && typeof part === 'object' && (part as Record<string, unknown>).type === 'image_url')
+        )).length;
+        return {
+            ...(row as Partial<ChatMessage>),
+            role,
+            content: `${text}${imageCount ? `\n\n[${imageCount} attached image${imageCount === 1 ? '' : 's'}]` : ''}`.trim(),
+        } as ChatMessage;
+    }
+    return { ...(row as Partial<ChatMessage>), role, content: String(content || '') } as ChatMessage;
 }
 
 const FALLBACK_MODELS: AgentModelOption[] = [
@@ -90,6 +205,7 @@ const FALLBACK_MODELS: AgentModelOption[] = [
 
 type ContentFormat = 'short' | 'long' | 'both';
 type ReasoningDepth = 'fast' | 'balanced' | 'deep';
+type CaptionMode = 'word' | 'off';
 
 const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] = [
     { id: 'fast', label: 'Fast', hint: 'Quick answers, less deliberation' },
@@ -104,6 +220,9 @@ interface RenderStyleOption {
     pipeline?: string;
     description?: string;
     preview_url?: string;
+    preview_video_url?: string;
+    preview_ready?: boolean;
+    preview_video_ready?: boolean;
 }
 
 const FALLBACK_RENDER_STYLES: RenderStyleOption[] = [
@@ -113,6 +232,7 @@ const FALLBACK_RENDER_STYLES: RenderStyleOption[] = [
     { key: 'bw_comic', label: 'B&W comic', group: 'Comic' },
     { key: 'studio_ghibli', label: 'Studio Ghibli', group: 'Animation' },
     { key: 'pixar', label: 'Pixar', group: 'Animation' },
+    { key: 'claymation', label: 'Claymation', group: 'Animation' },
     { key: 'skeleton_host', label: 'Skeleton (NYPTID mascot)', group: 'Niche' },
 ];
 
@@ -136,6 +256,12 @@ interface SessionSummary {
     pending_count?: number;
     content_format?: string;
     reasoning_depth?: string;
+    caption_mode?: CaptionMode;
+    captions_enabled?: boolean;
+    channel_id?: string;
+    registry_key?: string;
+    channel_title?: string;
+    active_runs?: { run_id: string; status: string; last_event?: { data?: { message?: string } } | null }[];
 }
 
 const STARTER_PROMPTS = [
@@ -156,6 +282,54 @@ function formatSessionAge(updatedAt?: number) {
 
 function displayModelName(models: AgentModelOption[], id: string) {
     return models.find((m) => m.id === id)?.name || id.split('/').pop()?.replace(/-/g, ' ') || id;
+}
+
+function activeRunLabel(summary: Pick<SessionSummary, 'active_runs'>): string {
+    const run = summary.active_runs?.find((r) => ['queued', 'running', 'stream_disconnected'].includes(r.status));
+    return String(run?.last_event?.data?.message || (run ? 'Running' : '')).trim();
+}
+
+function channelRegistryKey(channel?: ChannelRow | null): string {
+    const raw = String(channel?.registry_key || channel?.channel_handle || channel?.title || channel?.channel_id || '').trim();
+    return raw
+        .replace(/^@+/, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function normalizeChannelLookup(value?: string | null): string {
+    return String(value || '')
+        .trim()
+        .replace(/^@+/, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function channelLookupKeys(channel?: ChannelRow | null): Set<string> {
+    const keys = [
+        channel?.channel_id,
+        channel?.registry_key,
+        channel?.channel_handle,
+        channel?.title,
+        channelRegistryKey(channel),
+    ]
+        .map(normalizeChannelLookup)
+        .filter(Boolean);
+    return new Set(keys);
+}
+
+function channelMatchesSelection(channel: ChannelRow, selectedId: string, fallback?: ChannelRow | null): boolean {
+    const selectedKeys = new Set([
+        normalizeChannelLookup(selectedId),
+        ...Array.from(channelLookupKeys(fallback)),
+    ].filter(Boolean));
+    if (!selectedKeys.size) return false;
+    for (const key of channelLookupKeys(channel)) {
+        if (selectedKeys.has(key)) return true;
+    }
+    return false;
 }
 
 function pendingActionLabel(tool: string) {
@@ -253,7 +427,7 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
 
 export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const { session, ownerOverride } = useContext(AuthContext);
-    const [accountBadge, setAccountBadge] = useState('');
+    const userCacheKey = String((session as any)?.user?.id || (session as any)?.user?.email || 'anon');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [model, setModel] = useState(FALLBACK_MODELS[0].id);
     const [modelCatalog, setModelCatalog] = useState<AgentModelOption[]>(FALLBACK_MODELS);
@@ -261,10 +435,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('confirm');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [pending, setPending] = useState<PendingAction[]>([]);
-    const [input, setInput] = useState('');
+    const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
     const [attachments, setAttachments] = useState<AttachedFile[]>([]);
-    const [attachmentPayload, setAttachmentPayload] = useState<Record<string, string>>({});
-    const [loading, setLoading] = useState(false);
+    const [attachmentPayload, setAttachmentPayload] = useState<Record<string, AttachmentPayload>>({});
+    const [runningBySession, setRunningBySession] = useState<Record<string, string>>({});
     const [resuming, setResuming] = useState(false);
     const [toolActivity, setToolActivity] = useState('');
     const [booting, setBooting] = useState(true);
@@ -273,11 +447,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
     const [renderStyle, setRenderStyle] = useState('cinematic');
+    const [captionMode, setCaptionMode] = useState<CaptionMode>('word');
     const [, setAnimate] = useState(true); // internal for session compat / patch; UI toggle removed per request
     const [showStyleGrid, setShowStyleGrid] = useState(false);
     const [channelsOpen, setChannelsOpen] = useState(false);
-    const [replyingTo, setReplyingTo] = useState<AgentJobSnapshot | null>(null);
+    const [youtubeChannels, setYoutubeChannels] = useState<ChannelRow[]>([]);
+    const [selectedChannelId, setSelectedChannelId] = useState('');
+    const [sessionChannel, setSessionChannel] = useState<ChannelRow | null>(null);
+    const [replyingTo, setReplyingTo] = useState<(AgentJobSnapshot & { scene_index?: number }) | null>(null);
     const [renderStyleCatalog, setRenderStyleCatalog] = useState<RenderStyleOption[]>(FALLBACK_RENDER_STYLES);
+    const [activeStylePreview, setActiveStylePreview] = useState('');
     const [error, setError] = useState('');
     const [queueHint, setQueueHint] = useState('');
     const [dictationPreview, setDictationPreview] = useState('');
@@ -285,11 +464,79 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const stickToBottomRef = useRef(true);
+    const sessionIdRef = useRef<string | null>(null);
+    const jobSessionRef = useRef<Map<string, string>>(new Map());
+    const queuePollInFlightRef = useRef(false);
+    const sessionLoadSeqRef = useRef(0);
+    const sessionUiCacheRef = useRef<Map<string, SessionUiCache>>(new Map());
     const [jobTracks, setJobTracks] = useState<AgentJobTrack[]>([]);
     const [dockDismissed, setDockDismissed] = useState(false);
     const [pollResetKey, setPollResetKey] = useState(0);
     const [retryingProduction, setRetryingProduction] = useState(false);
     const [cancellingProduction, setCancellingProduction] = useState(false);
+    const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
+    const userCancelledJobsRef = useRef<Set<string>>(new Set());
+    const currentSessionRunning = Boolean(sessionId && runningBySession[sessionId]);
+    const input = sessionId ? draftsBySession[sessionId] || '' : '';
+    const selectedChannel =
+        youtubeChannels.find((ch) => channelMatchesSelection(ch, selectedChannelId, sessionChannel))
+        || sessionChannel;
+    const hasReadableAttachment = attachments.some((f) => {
+        const payload = attachmentPayload[f.id];
+        return Boolean(payload && (payload.data_url || payload.text));
+    });
+
+    const setInput = useCallback((next: string | ((prev: string) => string)) => {
+        const sid = sessionIdRef.current;
+        if (!sid) return;
+        setDraftsBySession((prev) => {
+            const old = prev[sid] || '';
+            const value = typeof next === 'function' ? next(old) : next;
+            return { ...prev, [sid]: value };
+        });
+    }, []);
+
+    const markSessionRunning = useCallback((sid: string, label = 'Thinking...') => {
+        setRunningBySession((prev) => ({ ...prev, [sid]: label }));
+    }, []);
+
+    const clearSessionRunning = useCallback((sid: string) => {
+        setRunningBySession((prev) => {
+            if (!prev[sid]) return prev;
+            const next = { ...prev };
+            delete next[sid];
+            return next;
+        });
+    }, []);
+
+    const isImplicitCancelFailure = useCallback((snap: AgentJobSnapshot) => (
+        snap.status === 'failed'
+        && /cancel+ed by user/i.test(String(snap.error || snap.stage_label || snap.stage || ''))
+        && !userCancelledJobsRef.current.has(snap.job_id)
+    ), []);
+
+    useEffect(() => {
+        sessionIdRef.current = sessionId;
+    }, [sessionId]);
+
+    useEffect(() => {
+        const stored = loadStoredSessionUiCache(userCacheKey);
+        for (const [sid, entry] of sessionUiCacheRef.current.entries()) {
+            stored.set(sid, entry);
+        }
+        sessionUiCacheRef.current = stored;
+    }, [userCacheKey]);
+
+    useEffect(() => {
+        if (!sessionId) return;
+        sessionUiCacheRef.current.set(sessionId, {
+            messages,
+            pending,
+            jobTracks,
+            dockDismissed,
+        });
+        persistStoredSessionUiCache(userCacheKey, sessionUiCacheRef.current);
+    }, [dockDismissed, jobTracks, messages, pending, sessionId, userCacheKey]);
 
     // First-time Studio Agent greeting (only once per user, only for non-owners, and only if no channels connected).
     // This runs on initial mount of the agent experience.
@@ -345,6 +592,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }))
                 .filter((j) => j.job_id);
             if (!normalized.length) return;
+            if (sid) {
+                for (const job of normalized) {
+                    jobSessionRef.current.set(job.job_id, sid);
+                }
+            }
             setJobTracks((prev) => {
                 const merged = mergeJobTracks(prev, normalized);
                 if (sid) persistJobs(sid, merged);
@@ -356,6 +608,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     const appendJobDeliverable = useCallback((snap: AgentJobSnapshot) => {
+        const ownerSession = jobSessionRef.current.get(snap.job_id);
+        if (ownerSession && ownerSession !== sessionIdRef.current) return;
+        if (isImplicitCancelFailure(snap)) return;
         const label =
             snap.kind === 'competitor'
                 ? 'Reference analysis finished — pacing and blueprint signals are in the card below.'
@@ -371,25 +626,32 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                       : 'Your long-form stills are ready. Review the grid, then tap Finalize & export MP4.'
                     : 'Your video is ready.';
         setMessages((m) => {
-            const dup = m.some(
-                (row) =>
-                    row.jobDeliverable?.job_id === snap.job_id
-                    && row.jobDeliverable?.status === snap.status,
-            );
-            if (dup) return m;
-            return [
-                ...m,
-                {
-                    role: 'assistant' as const,
-                    content: label,
-                    jobDeliverable: snap,
-                },
-            ];
+            const nextRow: ChatMessage = {
+                role: 'assistant' as const,
+                content: label,
+                jobDeliverable: snap,
+            };
+            let replaced = false;
+            const withoutProgress = m.filter((row) => row.productionUpdate?.job_id !== snap.job_id);
+            const next = withoutProgress.map((row) => {
+                if (row.jobDeliverable?.job_id !== snap.job_id) return row;
+                replaced = true;
+                return nextRow;
+            });
+            return replaced ? next : [...next, nextRow];
+        });
+        setJobTracks((prev) => {
+            const next = prev.filter((j) => j.job_id !== snap.job_id);
+            const sid = sessionIdRef.current;
+            if (sid) persistJobs(sid, next);
+            return next;
         });
         stickToBottomRef.current = true;
-    }, [approvalMode]);
+    }, [approvalMode, isImplicitCancelFailure]);
 
     const upsertProgressLine = useCallback((update: ProductionProgressUpdate) => {
+        const ownerSession = jobSessionRef.current.get(update.job_id);
+        if (ownerSession && ownerSession !== sessionIdRef.current) return;
         setMessages((m) => {
             const idx = m.findIndex((row) => row.productionUpdate?.job_id === update.job_id);
             const row: ChatMessage = {
@@ -434,11 +696,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     const handleReplyToJob = useCallback(
-        (snapshot: AgentJobSnapshot) => {
-            setReplyingTo(snapshot);
+        (snapshot: AgentJobSnapshot, sceneIndex?: number, preset: SceneReplyPreset = 'edit') => {
+            setReplyingTo(typeof sceneIndex === 'number' ? { ...snapshot, scene_index: sceneIndex } : snapshot);
             const kindLabel = snapshot.kind === 'longform' ? 'long-form' : 'short-form';
-            const suggested =
-                `Please re-edit this ${kindLabel} video and make sure it has proper editing, pacing, storytelling, and packaging + a CTA at the end to get people to subscribe.`;
+            const suggested = typeof sceneIndex === 'number'
+                ? preset === 'regenerate'
+                    ? `Regenerate scene ${sceneIndex + 1} in this ${kindLabel} video from scratch. Keep the same canonical character identity and channel style, but rebuild the still so it has no artifacts and matches what I describe.`
+                    : `Please edit scene ${sceneIndex + 1} in this ${kindLabel} video. Keep the same character identity, then change only what I describe.`
+                : `Please re-edit this ${kindLabel} video and make sure it has proper editing, pacing, storytelling, and packaging + a CTA at the end to get people to subscribe.`;
             setInput(suggested);
             // focus the input so user can edit the instruction or just hit Enter
             setTimeout(() => {
@@ -461,10 +726,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         getToken,
         onProgress: upsertProgressLine,
         onJobComplete: (snap: AgentJobSnapshot) => {
+            const ownerSession = jobSessionRef.current.get(snap.job_id);
+            if (ownerSession && ownerSession !== sessionIdRef.current) return;
             setDockDismissed(false);
             appendJobDeliverable(snap);
         },
         onJobFailed: (snap: AgentJobSnapshot) => {
+            const ownerSession = jobSessionRef.current.get(snap.job_id);
+            if (ownerSession && ownerSession !== sessionIdRef.current) return;
+            if (isImplicitCancelFailure(snap)) {
+                setJobTracks((prev) => {
+                    const next = prev.filter((j) => j.job_id !== snap.job_id);
+                    if (sessionId) persistJobs(sessionId, next);
+                    return next;
+                });
+                setDockDismissed(true);
+                return;
+            }
             setPending([]);
             setDockDismissed(false);
             setError(snap.error || 'Production failed');
@@ -521,6 +799,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         `Studio Agent timed out after ${Math.round(timeoutMs / 1000)}s — retry Resume or open the chat from History.`,
                     );
                 }
+                const message = String((e as Error)?.message || e || '');
+                if (/failed to fetch|networkerror|load failed|fetch resource/i.test(message)) {
+                    throw new Error(
+                        'Studio Agent could not reach the backend from this browser tab. Your chat is preserved; wait a moment and press Resume.',
+                    );
+                }
                 throw e;
             } finally {
                 if (timer) window.clearTimeout(timer);
@@ -535,6 +819,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         el.scrollTo({ top: el.scrollHeight, behavior });
     }, []);
 
+    const styleAssetUrl = useCallback((path?: string) => {
+        if (!path) return '';
+        return path.startsWith('http') ? path : resolveStudioBackendUrl(path.startsWith('/') ? path : `/${path}`);
+    }, []);
+
     const handleScroll = useCallback(() => {
         const el = scrollRef.current;
         if (!el) return;
@@ -546,7 +835,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         if (stickToBottomRef.current) {
             scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth');
         }
-    }, [messages, pending, loading, scrollToBottom]);
+    }, [messages, pending, currentSessionRunning, scrollToBottom]);
 
     useEffect(() => {
         if (pending.length > 0) {
@@ -560,6 +849,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const applySessionPayload = useCallback((raw: Record<string, unknown>) => {
         const sid = String(raw.session_id || '');
         if (sid) {
+            sessionIdRef.current = sid;
             setSessionId(sid);
             try {
                 localStorage.setItem(lastSessionKey, sid);
@@ -567,10 +857,34 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 /* ignore */
             }
         }
-        const msgs = (raw.messages as ChatMessage[]) || [];
-        setMessages(msgs);
+        const rawMessages = raw.messages;
+        const hasServerMessages = Array.isArray(rawMessages);
+        let effectiveMessages: ChatMessage[] | null = null;
+        if (hasServerMessages) {
+            const msgs = rawMessages
+                .map(normalizeAgentMessage)
+                .filter((msg): msg is ChatMessage => Boolean(msg));
+            const cached = sid ? sessionUiCacheRef.current.get(sid) : null;
+            const serverMessageCount = Number(raw.message_count ?? msgs.length);
+            effectiveMessages =
+                msgs.length === 0 && serverMessageCount > 0 && cached?.messages?.length
+                    ? cached.messages
+                    : msgs;
+            setMessages(effectiveMessages);
+        } else if (sid) {
+            const cached = sessionUiCacheRef.current.get(sid);
+            if (cached?.messages?.length) {
+                effectiveMessages = cached.messages;
+                setMessages(cached.messages);
+            }
+        }
         const serverPending = (raw.pending_actions as PendingAction[]) || [];
-        setPending(mergePendingFromTranscript(msgs, serverPending));
+        if (effectiveMessages) {
+            setPending(mergePendingFromTranscript(effectiveMessages, serverPending));
+        } else if (sid) {
+            const cached = sessionUiCacheRef.current.get(sid);
+            if (cached) setPending(cached.pending);
+        }
         if (raw.model) setModel(String(raw.model));
         if (raw.approval_mode === 'auto' || raw.approval_mode === 'confirm') {
             setApprovalMode(raw.approval_mode);
@@ -583,7 +897,29 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const rs = String(raw.render_style || '').trim();
         if (rs) setRenderStyle(rs);
+        const rawCaptionMode = String(raw.caption_mode || '').trim();
+        if (rawCaptionMode === 'word' || rawCaptionMode === 'off') {
+            setCaptionMode(rawCaptionMode);
+        } else if (raw.captions_enabled === false) {
+            setCaptionMode('off');
+        } else if (raw.captions_enabled === true) {
+            setCaptionMode('word');
+        }
         if (typeof raw.animate === 'boolean') setAnimate(raw.animate);
+        const channelId = String(raw.channel_id || '').trim();
+        const channelTitle = String(raw.channel_title || '').trim();
+        const registryKey = String(raw.registry_key || '').trim();
+        setSelectedChannelId(channelId);
+        setSessionChannel(channelId || channelTitle || registryKey ? {
+            channel_id: channelId,
+            title: channelTitle || registryKey || channelId,
+            registry_key: registryKey,
+        } : null);
+        const activeRuns = Array.isArray(raw.active_runs) ? raw.active_runs as SessionSummary['active_runs'] : [];
+        const runLabel = activeRunLabel({ active_runs: activeRuns });
+        if (sid && runLabel) {
+            setRunningBySession((prev) => ({ ...prev, [sid]: runLabel }));
+        }
     }, [lastSessionKey]);
 
     const resumeSession = useCallback(
@@ -593,6 +929,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             if (!sid) return;
             const serverJobs = Array.isArray(raw.active_jobs) ? (raw.active_jobs as AgentJobTrack[]) : [];
             const merged = mergeJobTracks(loadPersistedJobs(sid), serverJobs);
+            for (const job of merged) {
+                if (job.job_id) jobSessionRef.current.set(job.job_id, sid);
+            }
             if (!merged.length) return;
             setJobTracks(merged);
             persistJobs(sid, merged);
@@ -601,7 +940,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             try {
                 const tok = await getToken();
                 const { deliverables } = await rehydrateJobSnapshots(sid, merged, tok);
+                if (sessionIdRef.current !== sid) return;
                 for (const snap of deliverables) appendJobDeliverable(snap);
+                const terminal = new Set(deliverables.map((snap) => snap.job_id));
+                if (terminal.size) {
+                    setJobTracks((prev) => {
+                        const next = prev.filter((job) => !terminal.has(job.job_id));
+                        persistJobs(sid, next);
+                        return next;
+                    });
+                }
             } catch {
                 /* polling optional on resume */
             }
@@ -611,11 +959,40 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
     const refreshHistory = useCallback(async () => {
         const data = await authFetch('/api/studio-agent/sessions?limit=50');
-        setHistory((data?.sessions as SessionSummary[]) || []);
+        const sessions = (data?.sessions as SessionSummary[]) || [];
+        setHistory(sessions);
+        setRunningBySession((prev) => {
+            const next = { ...prev };
+            const seen = new Set(sessions.map((s) => s.session_id));
+            for (const s of sessions) {
+                const label = activeRunLabel(s);
+                if (label) next[s.session_id] = label;
+                else delete next[s.session_id];
+            }
+            for (const sid of Object.keys(next)) {
+                if (!seen.has(sid) && !sessionIdRef.current) {
+                    delete next[sid];
+                }
+            }
+            return next;
+        });
     }, [authFetch]);
 
     const createNewSession = useCallback(
         async (pickModel: string) => {
+            const tempSid = `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+            sessionIdRef.current = tempSid;
+            setSessionId(tempSid);
+            setError('');
+            setQueueHint('');
+            setToolActivity('');
+            setPending([]);
+            setMessages([]);
+            setJobTracks([]);
+            setDockDismissed(true);
+            setReplyingTo(null);
+            setAttachments([]);
+            setAttachmentPayload({});
             const created = await authFetch('/api/studio-agent/sessions', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -624,38 +1001,69 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     content_format: contentFormat,
                     reasoning_depth: reasoningDepth,
                     render_style: renderStyle,
+                    caption_mode: captionMode,
+                    captions_enabled: captionMode !== 'off',
+                    channel_id: selectedChannel?.channel_id || '',
+                    registry_key: channelRegistryKey(selectedChannel),
+                    channel_title: selectedChannel?.title || '',
                 }),
             });
             applySessionPayload((created.session as Record<string, unknown>) || {});
             setJobTracks([]);
+            setPollResetKey((k) => k + 1);
             setDockDismissed(true);
+            const sid = String((created.session as Record<string, unknown>)?.session_id || '');
+            if (sid) sessionIdRef.current = sid;
+            if (sid) persistJobs(sid, []);
+            if (sid) setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
             await refreshHistory();
         },
-        [applySessionPayload, approvalMode, authFetch, contentFormat, reasoningDepth, renderStyle, refreshHistory],
+        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, reasoningDepth, renderStyle, refreshHistory, selectedChannel],
     );
 
     const openSession = useCallback(
         async (id: string) => {
-            if (!id || resuming) return;
+            if (!id) return;
+            const loadSeq = ++sessionLoadSeqRef.current;
+            sessionIdRef.current = id;
+            setSessionId(id);
+            const cached = sessionUiCacheRef.current.get(id);
+            if (cached) {
+                setMessages(cached.messages);
+                setPending(cached.pending);
+                setJobTracks(cached.jobTracks);
+                setDockDismissed(cached.dockDismissed);
+            } else {
+                setDockDismissed(true);
+            }
+            setReplyingTo(null);
+            setToolActivity('');
             setResuming(true);
             setError('');
             try {
-                const data = await authFetch(`/api/studio-agent/sessions/${id}`, {
-                    timeoutMs: 30_000,
+                const data = await authFetch(`/api/studio-agent/sessions/${id}?sync_pending=false`, {
+                    timeoutMs: 60_000,
                 });
-                await resumeSession((data?.session as Record<string, unknown>) || {});
+                if (sessionLoadSeqRef.current !== loadSeq || sessionIdRef.current !== id) return;
+                await resumeSession((data?.session as Record<string, unknown>) || {}, {
+                    rehydrateJobs: false,
+                });
             } catch (e) {
-                setError((e as Error).message);
+                if (sessionLoadSeqRef.current !== loadSeq || sessionIdRef.current !== id) return;
+                const msg = (e as Error).message || '';
+                if (cached && msg.includes('timed out after')) {
+                    return;
+                }
+                setError(msg);
             } finally {
-                setResuming(false);
-                setLoading(false);
+                if (sessionLoadSeqRef.current === loadSeq) setResuming(false);
             }
         },
-        [authFetch, resumeSession, resuming],
+        [authFetch, resumeSession],
     );
 
     const reloadCurrentSession = useCallback(async () => {
-        if (resuming) return;
+        const loadSeq = ++sessionLoadSeqRef.current;
         setResuming(true);
         setError('');
         setQueueHint('');
@@ -677,22 +1085,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 );
                 return;
             }
-            const data = await authFetch(`/api/studio-agent/sessions/${id}`, {
-                timeoutMs: 30_000,
+            const data = await authFetch(`/api/studio-agent/sessions/${id}?sync_pending=true`, {
+                timeoutMs: 45_000,
             });
+            if (sessionLoadSeqRef.current !== loadSeq) return;
             await resumeSession((data?.session as Record<string, unknown>) || {}, {
                 rehydrateJobs: true,
             });
         } catch (e) {
+            if (sessionLoadSeqRef.current !== loadSeq) return;
             setError((e as Error).message);
         } finally {
-            setResuming(false);
-            setLoading(false);
+            if (sessionLoadSeqRef.current === loadSeq) setResuming(false);
         }
-    }, [authFetch, history, lastSessionKey, resumeSession, resuming, sessionId]);
+    }, [authFetch, history, lastSessionKey, resumeSession, sessionId]);
 
     const rolloverSession = useCallback(async () => {
-        if (!sessionId || loading) return;
+        if (!sessionId || currentSessionRunning) return;
         if (
             !window.confirm(
                 'Roll this chat into a new session? Your full transcript, pending approvals, and active renders carry over.',
@@ -700,7 +1109,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         ) {
             return;
         }
-        setLoading(true);
+        markSessionRunning(sessionId, 'Rolling over chat...');
         setError('');
         try {
             const data = await authFetch(`/api/studio-agent/sessions/${sessionId}/rollover`, {
@@ -711,9 +1120,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         } catch (e) {
             setError((e as Error).message);
         } finally {
-            setLoading(false);
+            clearSessionRunning(sessionId);
         }
-    }, [authFetch, loading, refreshHistory, resumeSession, sessionId]);
+    }, [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, refreshHistory, resumeSession, sessionId]);
 
     useEffect(() => {
         if (!sessionId) return;
@@ -728,11 +1137,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         return () => document.removeEventListener('visibilitychange', onVisible);
     }, [sessionId, pending.length, jobTracks.length, messages, reloadCurrentSession]);
 
-    const deleteSession = useCallback(
+    const confirmDeleteSession = useCallback(
         async (id: string) => {
-            if (!id || loading) return;
-            if (!window.confirm('Delete this chat? This cannot be undone.')) return;
-            setLoading(true);
+            if (!id || currentSessionRunning) return;
+            markSessionRunning(id, 'Deleting chat...');
             setError('');
             try {
                 await authFetch(`/api/studio-agent/sessions/${id}`, { method: 'DELETE' });
@@ -754,33 +1162,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             } catch (e) {
                 setError((e as Error).message);
             } finally {
-                setLoading(false);
+                clearSessionRunning(id);
+                setDeleteTarget(null);
             }
         },
-        [authFetch, createNewSession, lastSessionKey, loading, model, openSession, sessionId],
+        [authFetch, clearSessionRunning, createNewSession, currentSessionRunning, lastSessionKey, markSessionRunning, model, openSession, sessionId],
     );
-
-    useEffect(() => {
-        if (ownerOverride) {
-            setAccountBadge('Owner — unmetered');
-            return;
-        }
-        let cancelled = false;
-        (async () => {
-            try {
-                const cred = await authFetch('/api/studio-agent/credits');
-                if (cancelled) return;
-                if (cred?.unlimited || cred?.tier === 'owner') {
-                    setAccountBadge('Owner — unmetered');
-                } else if (cred?.plan_name) {
-                    setAccountBadge(`${cred.plan_name} · ${Number(cred.balance || 0).toLocaleString()} cr`);
-                }
-            } catch {
-                if (!cancelled) setAccountBadge('');
-            }
-        })();
-        return () => { cancelled = true; };
-    }, [authFetch, ownerOverride]);
 
     useEffect(() => {
         let cancelled = false;
@@ -821,7 +1208,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
                 const resume = sessions.find((s) => s.session_id === lastId) || sessions[0];
                 if (!cancelled && resume?.session_id) {
-                    const data = await authFetch(`/api/studio-agent/sessions/${resume.session_id}`);
+                    const data = await authFetch(`/api/studio-agent/sessions/${resume.session_id}?sync_pending=false`, {
+                        timeoutMs: 60_000,
+                    });
                     if (!cancelled) {
                         await resumeSession((data?.session as Record<string, unknown>) || {});
                     }
@@ -857,7 +1246,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             try {
                 const data = await authFetch('/api/studio-agent/render-styles');
                 const styles = (data?.styles as RenderStyleOption[]) || [];
-                if (!cancelled && styles.length) setRenderStyleCatalog(styles);
+                if (!cancelled && styles.length) {
+                    setRenderStyleCatalog(
+                        styles.map((s) => ({
+                            ...s,
+                            preview_url: styleAssetUrl(s.preview_url),
+                            preview_video_url: styleAssetUrl(s.preview_video_url),
+                        })),
+                    );
+                }
             } catch {
                 /* fallback catalog */
             }
@@ -872,6 +1269,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             content_format?: ContentFormat;
             reasoning_depth?: ReasoningDepth;
             render_style?: string;
+            caption_mode?: CaptionMode;
+            captions_enabled?: boolean;
+            channel_id?: string;
+            registry_key?: string;
+            channel_title?: string;
             web_search?: boolean;
             animate?: boolean;
         }) => {
@@ -889,20 +1291,66 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         [authFetch, refreshHistory, sessionId],
     );
 
+    const selectChannelForChat = useCallback(
+        (channel: ChannelRow | null) => {
+            setSelectedChannelId(channel?.channel_id || '');
+            setSessionChannel(channel);
+            const patch = {
+                channel_id: channel?.channel_id || '',
+                registry_key: channelRegistryKey(channel),
+                channel_title: channel?.title || '',
+            };
+            if (sessionId) {
+                void patchSession(patch);
+            }
+        },
+        [patchSession, sessionId],
+    );
+
+    const handleChannelsLoaded = useCallback((channels: ChannelRow[]) => {
+        setYoutubeChannels(channels);
+        const match = channels.find((ch) => channelMatchesSelection(ch, selectedChannelId, sessionChannel));
+        if (match) {
+            setSelectedChannelId(match.channel_id || '');
+            setSessionChannel(match);
+        }
+    }, [selectedChannelId, sessionChannel]);
+
     const buildOutboundMessage = useCallback(
         (text: string) => {
-            const parts = [text.trim()];
+            const hasImages = attachments.some((f) => f.kind === 'image' && attachmentPayload[f.id]?.data_url);
+            const parts = [text.trim() || (hasImages ? 'Please analyze the attached image(s).' : '')];
             for (const f of attachments) {
-                const body = attachmentPayload[f.id];
-                if (!body) continue;
-                parts.push(`\n\n[Attachment: ${f.name}]\n${body.slice(0, 12000)}`);
+                const payload = attachmentPayload[f.id];
+                if (!payload) continue;
+                if (payload.kind === 'text' && payload.text) {
+                    parts.push(`\n\n[Attachment: ${f.name}]\n${payload.text.slice(0, 12000)}`);
+                } else if (payload.kind === 'binary') {
+                    parts.push(`\n\n[Attachment: ${f.name}]\n[Binary file, ${Math.round(f.size / 1024)}KB. Ask the user for a supported image or text file if visual/text access is required.]`);
+                }
             }
             return parts.join('');
         },
         [attachmentPayload, attachments],
     );
 
+    const buildOutboundAttachments = useCallback((): AgentChatAttachment[] => {
+        return attachments
+            .map((f) => attachmentPayload[f.id])
+            .filter((payload): payload is AttachmentPayload & { data_url: string } => (
+                Boolean(payload && payload.kind === 'image' && payload.data_url)
+            ))
+            .map((payload) => ({
+                name: payload.name,
+                mime_type: payload.mime_type,
+                size: payload.size,
+                data_url: payload.data_url,
+            }));
+    }, [attachmentPayload, attachments]);
+
     const pollQueueWhileLoading = useCallback(async () => {
+        if (queuePollInFlightRef.current) return;
+        queuePollInFlightRef.current = true;
         try {
             const snap = (await authFetch('/api/studio-agent/queue')) as {
                 queued?: boolean;
@@ -924,29 +1372,37 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             }
         } catch {
             setQueueHint('');
+        } finally {
+            queuePollInFlightRef.current = false;
         }
     }, [authFetch]);
 
     const sendText = useCallback(
         async (text: string) => {
             const trimmed = buildOutboundMessage(text);
-            if (!trimmed || !sessionId || loading) return;
+            if (!trimmed || !sessionId || runningBySession[sessionId]) return;
+            const activeSessionId = sessionId;
             setInput('');
             setAttachments([]);
             setAttachmentPayload({});
-            setLoading(true);
+            markSessionRunning(activeSessionId, 'Thinking...');
             setError('');
             setQueueHint('');
             setToolActivity('');
             stickToBottomRef.current = true;
-            setMessages((m) => [...m, { role: 'user', content: text.trim() }]);
+            const readableAttachments = buildOutboundAttachments();
+            const visibleUserText = text.trim()
+                || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
+            setMessages((m) => [...m, { role: 'user', content: visibleUserText }]);
             const queuePoll = window.setInterval(() => {
+                if (sessionIdRef.current !== activeSessionId) return;
                 void pollQueueWhileLoading();
             }, 2500);
             void pollQueueWhileLoading();
             try {
                 const tok = await getToken();
                 const onStreamEvent = (ev: AgentStreamEvent) => {
+                    if (sessionIdRef.current !== activeSessionId) return;
                     if (ev.event === 'tool_start' && ev.tool) {
                         setToolActivity(
                             ev.awaiting_approval
@@ -962,7 +1418,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     } else if (ev.event === 'status' && ev.message) {
                         setToolActivity(ev.message);
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
-                        ingestActiveJobs(ev.jobs, sessionId);
+                        ingestActiveJobs(ev.jobs, activeSessionId);
                     } else if (ev.event === 'pending_actions' && Array.isArray(ev.actions)) {
                         setPending(ev.actions as PendingAction[]);
                     }
@@ -970,15 +1426,34 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
                 let data: Record<string, unknown>;
                 try {
-                    data = await streamAgentChat(sessionId, trimmed, tok, { onEvent: onStreamEvent, replyTo: replyingTo ? { job_id: replyingTo.job_id, kind: replyingTo.kind } : undefined });
-                } catch {
-                    data = await authFetch(`/api/studio-agent/sessions/${sessionId}/chat`, {
-                        method: 'POST',
-                        body: JSON.stringify({ 
-                            message: trimmed,
-                            reply_to: replyingTo ? { job_id: replyingTo.job_id, kind: replyingTo.kind } : undefined 
-                        }),
+                    data = await streamAgentChat(sessionId, trimmed, tok, {
+                        onEvent: onStreamEvent,
+                        replyTo: replyingTo ? { job_id: replyingTo.job_id, kind: replyingTo.kind, scene_index: replyingTo.scene_index } : undefined,
+                        attachments: readableAttachments,
+                        captions_enabled: captionMode !== 'off',
+                        caption_mode: captionMode,
+                        channel: selectedChannel ? {
+                            channel_id: selectedChannel.channel_id || '',
+                            registry_key: channelRegistryKey(selectedChannel),
+                            channel_title: selectedChannel.title || '',
+                        } : null,
                     });
+                } catch (streamError) {
+                    try {
+                        const refreshed = await authFetch(`/api/studio-agent/sessions/${activeSessionId}?sync_pending=true`, {
+                            timeoutMs: 120_000,
+                        });
+                        await resumeSession((refreshed?.session as Record<string, unknown>) || {}, {
+                            rehydrateJobs: true,
+                        });
+                    } catch (refreshError) {
+                        throw new Error(
+                            `Studio Agent connection dropped and the recovery refresh could not reach the backend. Your chat is preserved; press Resume in a few seconds. ${String((streamError as Error).message || (refreshError as Error).message || '')}`,
+                        );
+                    }
+                    throw new Error(
+                        `Studio Agent connection dropped, but the backend kept working and I reloaded the saved chat. Press Resume in a few seconds if the answer is still running. ${String((streamError as Error).message || '')}`,
+                    );
                 }
                 setReplyingTo(null); // clear reply after send
                 const q = data?.queue as { waited_sec?: number; queue_position?: number } | undefined;
@@ -989,6 +1464,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     );
                 } else {
                     setQueueHint('');
+                }
+                if (sessionIdRef.current !== activeSessionId) {
+                    await refreshHistory();
+                    return;
                 }
                 const reply = String(data?.assistant_message || '').trim();
                 const nextPending = (data?.pending_actions as PendingAction[]) || [];
@@ -1007,64 +1486,132 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     setError('Agent returned an empty reply. Try again or pick a different model.');
                 }
                 setPending(nextPending);
-                ingestActiveJobs(data?.active_jobs, sessionId);
+                ingestActiveJobs(data?.active_jobs, activeSessionId);
                 await refreshHistory();
             } catch (e) {
+                if (sessionIdRef.current !== activeSessionId) return;
                 setError((e as Error).message);
                 setQueueHint('');
             } finally {
                 window.clearInterval(queuePoll);
-                setLoading(false);
-                setToolActivity('');
+                clearSessionRunning(activeSessionId);
+                if (sessionIdRef.current === activeSessionId) {
+                    setToolActivity('');
+                }
             }
         },
         [
             authFetch,
+            buildOutboundAttachments,
             buildOutboundMessage,
+            captionMode,
+            clearSessionRunning,
             getToken,
             ingestActiveJobs,
-            loading,
+            markSessionRunning,
             pollQueueWhileLoading,
             refreshHistory,
+            resumeSession,
+            runningBySession,
+            selectedChannel,
             sessionId,
         ],
     );
 
     const sendMessage = useCallback(() => sendText(input), [input, sendText]);
 
-    const onPickFiles = useCallback(async (files: FileList | null) => {
+    const onPickFiles = useCallback(async (files: FileList | File[] | null) => {
         if (!files?.length) return;
         const next: AttachedFile[] = [];
-        const payload: Record<string, string> = { ...attachmentPayload };
+        const payload: Record<string, AttachmentPayload> = { ...attachmentPayload };
+        let imageCount = attachments.filter((f) => f.kind === 'image').length;
         for (const file of Array.from(files)) {
             const id = `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            next.push({ id, name: file.name, size: file.size });
+            const isImage = file.type.startsWith('image/');
             const isText = file.type.startsWith('text/')
                 || /\.(md|txt|json|csv|py|ts|tsx|js|jsx|yaml|yml)$/i.test(file.name);
-            if (isText) {
-                payload[id] = await file.text();
+            const kind: AttachedFile['kind'] = isImage ? 'image' : isText ? 'text' : 'binary';
+            const name = file.name || 'pasted-image.png';
+            if (isImage) {
+                if (imageCount >= MAX_AGENT_IMAGE_ATTACHMENTS) {
+                    setError(`Studio Agent can read up to ${MAX_AGENT_IMAGE_ATTACHMENTS} images per message.`);
+                    continue;
+                }
+                if (file.size > MAX_AGENT_IMAGE_BYTES) {
+                    setError(`${name} is too large. Keep image attachments under 8MB.`);
+                    continue;
+                }
+                payload[id] = {
+                    name,
+                    mime_type: file.type || 'image/png',
+                    size: file.size,
+                    kind,
+                    data_url: await readFileAsDataUrl(file),
+                };
+                imageCount += 1;
+            } else if (isText) {
+                payload[id] = {
+                    name,
+                    mime_type: file.type || 'text/plain',
+                    size: file.size,
+                    kind,
+                    text: await file.text(),
+                };
             } else {
-                payload[id] = `[Binary file ${file.name}, ${Math.round(file.size / 1024)}KB — describe how to use it]`;
+                payload[id] = {
+                    name,
+                    mime_type: file.type || 'application/octet-stream',
+                    size: file.size,
+                    kind,
+                };
             }
+            next.push({ id, name, size: file.size, mimeType: file.type, kind });
         }
         setAttachments((a) => [...a, ...next]);
         setAttachmentPayload(payload);
         if (fileInputRef.current) fileInputRef.current.value = '';
-    }, [attachmentPayload]);
+    }, [attachmentPayload, attachments]);
+
+    const onPasteIntoInput = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
+        const clipboard = e.clipboardData;
+        const fromFiles = Array.from(clipboard?.files || []).filter((file) => file.type.startsWith('image/'));
+        const fromItems = Array.from(clipboard?.items || [])
+            .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+            .map((item, idx) => {
+                const file = item.getAsFile();
+                if (!file) return null;
+                const ext = item.type.includes('jpeg') || item.type.includes('jpg') ? 'jpg' : 'png';
+                return new File([file], file.name || `pasted-screenshot-${Date.now()}-${idx}.${ext}`, {
+                    type: file.type || item.type || 'image/png',
+                    lastModified: Date.now(),
+                });
+            })
+            .filter((file): file is File => Boolean(file));
+        const files = [...fromFiles, ...fromItems].filter((file, idx, all) => (
+            idx === all.findIndex((candidate) => (
+                candidate.name === file.name
+                && candidate.size === file.size
+                && candidate.type === file.type
+            ))
+        ));
+        if (!files.length) return;
+        e.preventDefault();
+        void onPickFiles(files);
+    }, [onPickFiles]);
 
     const syncSessionFromServer = useCallback(async () => {
         if (!sessionId) return;
-        const data = await authFetch(`/api/studio-agent/sessions/${sessionId}`, {
-            timeoutMs: 30_000,
+        const data = await authFetch(`/api/studio-agent/sessions/${sessionId}?sync_pending=true`, {
+            timeoutMs: 120_000,
         });
         await resumeSession((data?.session as Record<string, unknown>) || {});
     }, [authFetch, resumeSession, sessionId]);
 
     const approveAction = useCallback(
         async (actionId: string) => {
-            if (!sessionId || loading) return;
+            if (!sessionId || currentSessionRunning) return;
             const approved = pending.find((a) => a.id === actionId);
-            setLoading(true);
+            markSessionRunning(sessionId, 'Approving action...');
             setError('');
             stickToBottomRef.current = true;
             try {
@@ -1109,16 +1656,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setError((e as Error).message);
                 if (approved) setPending((p) => [...p, approved]);
             } finally {
-                setLoading(false);
+                clearSessionRunning(sessionId);
             }
         },
-        [authFetch, ingestActiveJobs, loading, pending, sessionId, syncSessionFromServer],
+        [authFetch, clearSessionRunning, currentSessionRunning, ingestActiveJobs, markSessionRunning, pending, sessionId, syncSessionFromServer],
     );
 
     const rejectAction = useCallback(
         async (actionId: string) => {
-            if (!sessionId || loading) return;
-            setLoading(true);
+            if (!sessionId || currentSessionRunning) return;
+            markSessionRunning(sessionId, 'Rejecting action...');
             try {
                 await authFetch(`/api/studio-agent/sessions/${sessionId}/reject`, {
                     method: 'POST',
@@ -1128,14 +1675,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             } catch (e) {
                 setError((e as Error).message);
             } finally {
-                setLoading(false);
+                clearSessionRunning(sessionId);
             }
         },
-        [authFetch, loading, sessionId],
+        [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, sessionId],
     );
 
     const handleRetryProduction = useCallback(async () => {
-        if (!sessionId || loading || retryingProduction) return;
+        if (!sessionId || currentSessionRunning || retryingProduction) return;
         setRetryingProduction(true);
         setError('');
         setToolActivity('Retrying production…');
@@ -1172,10 +1719,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setRetryingProduction(false);
             setToolActivity('');
         }
-    }, [authFetch, loading, retryingProduction, sessionId]);
+    }, [authFetch, currentSessionRunning, retryingProduction, sessionId]);
 
     const handleCancelProduction = useCallback(async () => {
         if (!dockTrack?.job_id || cancellingProduction) return;
+        userCancelledJobsRef.current.add(dockTrack.job_id);
         setCancellingProduction(true);
         try {
             const tok = await getToken();
@@ -1211,33 +1759,81 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }}
                 onClose={() => setModelPickerOpen(false)}
             />
+            {deleteTarget && (
+                <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 px-4 backdrop-blur-sm">
+                    <button
+                        type="button"
+                        className="absolute inset-0"
+                        aria-label="Close delete confirmation"
+                        onClick={() => setDeleteTarget(null)}
+                    />
+                    <div className="relative w-full max-w-sm rounded-2xl border border-rose-500/25 bg-[#111116] p-5 shadow-2xl shadow-black/60">
+                        <div className="flex items-start gap-3">
+                            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-rose-500/10 text-rose-200">
+                                <Trash2 className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                                <h2 className="text-base font-semibold text-white">Delete chat?</h2>
+                                <p className="mt-1 line-clamp-2 text-sm text-gray-400">
+                                    {deleteTarget.title || 'New chat'} will be removed from Studio Agent history.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={() => setDeleteTarget(null)}
+                                className="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-gray-300 transition hover:bg-white/[0.06] hover:text-white"
+                            >
+                                Keep
+                            </button>
+                            <button
+                                type="button"
+                                disabled={currentSessionRunning}
+                                onClick={() => void confirmDeleteSession(deleteTarget.session_id)}
+                                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
-            <div className="flex min-h-0 flex-1 overflow-hidden">
+            <div className="flex min-h-0 flex-1 overflow-hidden bg-[#050507]">
                 <aside
-                    className={`flex shrink-0 flex-col border-r border-white/[0.06] bg-[#08080a] transition-all ${
-                        historyOpen ? 'w-56' : 'w-0 overflow-hidden border-r-0'
+                    className={`flex shrink-0 flex-col border-r border-white/[0.06] bg-[#050506] transition-all duration-200 ${
+                        historyOpen ? 'w-[258px]' : 'w-[56px]'
                     }`}
                 >
-                    <div className="flex items-center justify-between gap-1 border-b border-white/[0.06] p-2">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                    <div className={`items-center justify-between gap-1 border-b border-white/[0.06] p-2 ${historyOpen ? 'flex' : 'hidden'}`}>
+                        <button
+                            type="button"
+                            onClick={() => setHistoryOpen(false)}
+                            className="grid h-8 w-8 place-items-center rounded-lg bg-white/[0.06] text-gray-300 transition hover:bg-white/[0.1] hover:text-white"
+                            title="Collapse"
+                        >
+                            <ChevronsLeft className="h-4 w-4" />
+                        </button>
+                        <span className="min-w-0 flex-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
                             History
                         </span>
                         <button
                             type="button"
                             title="New chat"
-                            disabled={loading}
                             onClick={() => createNewSession(model)}
-                            className="rounded-lg p-1.5 text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
+                            className="rounded-lg p-1.5 text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200"
                         >
                             <MessageSquarePlus className="h-4 w-4" />
                         </button>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+                    <div className={`min-h-0 flex-1 overflow-y-auto p-1.5 ${historyOpen ? '' : 'hidden'}`}>
                         {history.length === 0 && (
                             <p className="px-2 py-3 text-[10px] text-gray-600">No chats yet — start one.</p>
                         )}
                         {history.map((s) => {
                             const active = s.session_id === sessionId;
+                            const runningLabel = runningBySession[s.session_id];
                             return (
                                 <div
                                     key={s.session_id}
@@ -1247,7 +1843,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 >
                                     <button
                                         type="button"
-                                        disabled={loading}
                                         onClick={() => openSession(s.session_id)}
                                         className={`min-w-0 flex-1 rounded-lg px-2.5 py-2 text-left ${
                                             active ? 'text-white' : 'text-gray-300'
@@ -1257,18 +1852,22 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             {s.title || 'New chat'}
                                         </p>
                                         <p className="mt-0.5 text-[9px] text-gray-500">
-                                            {formatSessionAge(s.updated_at)}
+                                            {runningLabel ? 'Running' : formatSessionAge(s.updated_at)}
                                             {(s.pending_count || 0) > 0
                                                 ? ` · ${s.pending_count} pending`
                                                 : ''}
                                         </p>
+                                        {s.channel_title && (
+                                            <p className="mt-0.5 truncate text-[9px] text-cyan-300/70">
+                                                {s.channel_title}
+                                            </p>
+                                        )}
                                     </button>
                                     <button
                                         type="button"
                                         title="Delete chat"
-                                        disabled={loading}
-                                        onClick={() => deleteSession(s.session_id)}
-                                        className="shrink-0 rounded-lg px-1.5 py-2 text-gray-500 opacity-70 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100 disabled:opacity-40"
+                                        onClick={() => setDeleteTarget(s)}
+                                        className="shrink-0 rounded-lg px-1.5 py-2 text-gray-500 opacity-70 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
                                     >
                                         <Trash2 className="h-3.5 w-3.5" />
                                     </button>
@@ -1276,10 +1875,38 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             );
                         })}
                     </div>
+                    {!historyOpen && (
+                        <div className="flex h-full flex-col items-center gap-2 py-2">
+                            <button
+                                type="button"
+                                onClick={() => setHistoryOpen(true)}
+                                className="grid h-10 w-10 place-items-center rounded-xl bg-white/[0.08] text-gray-200 transition hover:bg-white/[0.12] hover:text-white"
+                                title="Expand"
+                            >
+                                <ChevronsRight className="h-4 w-4" />
+                            </button>
+                            <button
+                                type="button"
+                                title="New chat"
+                                onClick={() => createNewSession(model)}
+                                className="grid h-10 w-10 place-items-center rounded-xl text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200"
+                            >
+                                <MessageSquarePlus className="h-4 w-4" />
+                            </button>
+                            <button
+                                type="button"
+                                title="History"
+                                onClick={() => setHistoryOpen(true)}
+                                className="grid h-10 w-10 place-items-center rounded-xl text-gray-400 transition hover:bg-white/[0.08] hover:text-white"
+                            >
+                                <History className="h-4 w-4" />
+                            </button>
+                        </div>
+                    )}
                 </aside>
 
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                <header className="mb-2 flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] pb-2">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-3 sm:px-5">
+                <header className="mb-2 flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] py-2">
                     {onBack && (
                         <button
                             type="button"
@@ -1301,17 +1928,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     <div className="flex items-center gap-2">
                         {/* Clean branding — no literal robot logo per user request */}
                         <h1 className="text-sm font-semibold text-white">Studio Agent</h1>
-                        {accountBadge && (
-                            <span
-                                className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
-                                    accountBadge.startsWith('Owner')
-                                        ? 'bg-amber-500/15 text-amber-200'
-                                        : 'bg-cyan-500/10 text-cyan-200'
-                                }`}
-                            >
-                                {accountBadge}
-                            </span>
-                        )}
                     </div>
                     <div className="ml-auto flex flex-wrap items-center gap-2">
                         <button
@@ -1327,7 +1943,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         <button
                             type="button"
                             title="Roll transcript into a new session"
-                            disabled={loading || !sessionId}
+                            disabled={currentSessionRunning || !sessionId}
                             onClick={() => void rolloverSession()}
                             className="inline-flex items-center gap-1 rounded-lg border border-white/[0.06] px-2 py-1 text-[9px] font-semibold uppercase text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
                         >
@@ -1360,50 +1976,109 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </button>
                             ))}
                         </div>
-                        {/* Visual Style Grid - now looks like the premium reference galleries (distinct previews per style, cheap Seedream) */}
+                        {/* Visual Style Grid - Seedream stills + on-demand i2v motion previews */}
                         <div className="relative">
                             <button
                                 type="button"
-                                onClick={() => setShowStyleGrid(!showStyleGrid)}
+                                onClick={() => {
+                                    setShowStyleGrid(!showStyleGrid);
+                                    if (showStyleGrid) setActiveStylePreview('');
+                                }}
                                 className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9px] font-semibold uppercase text-violet-200 hover:bg-white/5"
-                                title="Art style (visual gallery - click to pick, uses Seedream v4.5 previews)"
+                                title="Art style previews"
                             >
                                 <Palette className="h-3 w-3 text-violet-300" />
                                 {renderStyleCatalog.find(s => s.key === renderStyle)?.label || renderStyle}
                             </button>
                             {showStyleGrid && (
-                                <div className="absolute right-0 z-[60] mt-1 w-[520px] max-h-[420px] overflow-auto rounded-2xl border border-white/10 bg-[#0b0b11] p-3 shadow-2xl text-xs">
-                                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-violet-400/80">Choose Art Style (visual previews - 1 cheap Seedream per style)</div>
+                                <div className="absolute right-0 z-[60] mt-2 w-[640px] max-h-[560px] overflow-auto rounded-2xl border border-white/10 bg-[#07070a]/95 p-3 text-xs shadow-[0_24px_80px_rgba(0,0,0,0.72)] backdrop-blur-xl">
+                                    <div className="mb-3 flex items-center justify-between gap-3 border-b border-white/[0.06] pb-2">
+                                        <div>
+                                            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-300">Choose art style</div>
+                                            <div className="mt-0.5 text-[10px] text-white/40">Seedream 4.5 stills; hover a card for its separate motion preview.</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowStyleGrid(false);
+                                                setActiveStylePreview('');
+                                            }}
+                                            className="rounded-lg border border-white/10 px-2 py-1 text-[10px] font-semibold text-white/50 transition hover:bg-white/[0.06] hover:text-white"
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
                                     {['Realism', 'Comic', 'Animation', 'Specialty', 'Niche'].map(group => {
                                         const items = renderStyleCatalog.filter(s => s.group === group);
                                         if (!items.length) return null;
                                         return (
-                                            <div key={group} className="mb-3">
-                                                <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-white/50">{group}</div>
-                                                <div className="grid grid-cols-4 gap-2">
-                                                    {items.map(s => (
-                                                        <button
-                                                            key={s.key}
-                                                            onClick={() => {
-                                                                setRenderStyle(s.key);
-                                                                void patchSession({ render_style: s.key });
-                                                                setShowStyleGrid(false);
-                                                            }}
-                                                            className={`group overflow-hidden rounded-xl border text-left transition ${renderStyle === s.key ? 'border-violet-500 ring-1 ring-violet-500/40' : 'border-white/10 hover:border-white/30'}`}
-                                                        >
-                                                            {s.preview_url ? (
-                                                                <img src={s.preview_url} alt={s.label} className="h-14 w-full object-cover bg-black/40" />
-                                                            ) : (
-                                                                <div className="h-14 w-full bg-white/5" />
-                                                            )}
-                                                            <div className="px-1 py-0.5 leading-tight">
-                                                                <div className="text-[9px] text-white/90 group-hover:text-white truncate">{s.label}</div>
-                                                                {s.description ? (
-                                                                    <div className="text-[7px] text-white/50 truncate leading-[9px]">{s.description}</div>
-                                                                ) : null}
-                                                            </div>
-                                                        </button>
-                                                    ))}
+                                            <div key={group} className="mb-4 last:mb-0">
+                                                <div className="mb-2 flex items-center gap-2">
+                                                    <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/45">{group}</div>
+                                                    <div className="h-px flex-1 bg-white/[0.06]" />
+                                                </div>
+                                                <div className="grid grid-cols-4 gap-2.5">
+                                                    {items.map(s => {
+                                                        const isSelected = renderStyle === s.key;
+                                                        const isActive = activeStylePreview === s.key;
+                                                        const showVideo = isActive && Boolean(s.preview_video_url);
+                                                        return (
+                                                            <button
+                                                                key={s.key}
+                                                                type="button"
+                                                                onMouseEnter={() => setActiveStylePreview(s.key)}
+                                                                onFocus={() => setActiveStylePreview(s.key)}
+                                                                onMouseLeave={() => setActiveStylePreview('')}
+                                                                onClick={() => {
+                                                                    setRenderStyle(s.key);
+                                                                    void patchSession({ render_style: s.key });
+                                                                    setShowStyleGrid(false);
+                                                                    setActiveStylePreview('');
+                                                                }}
+                                                                className={`group overflow-hidden rounded-xl border bg-white/[0.025] text-left transition ${
+                                                                    isSelected
+                                                                        ? 'border-violet-400 shadow-[0_0_0_1px_rgba(167,139,250,0.35),0_14px_42px_rgba(109,40,217,0.22)]'
+                                                                        : 'border-white/[0.08] hover:border-white/25 hover:bg-white/[0.045]'
+                                                                }`}
+                                                            >
+                                                                <div className="relative aspect-[9/12] overflow-hidden bg-[#050507]">
+                                                                    {showVideo ? (
+                                                                        <video
+                                                                            key={s.key}
+                                                                            src={s.preview_video_url}
+                                                                            poster={s.preview_url}
+                                                                            className="h-full w-full object-cover"
+                                                                            autoPlay
+                                                                            muted
+                                                                            loop
+                                                                            playsInline
+                                                                            preload="none"
+                                                                        />
+                                                                    ) : s.preview_url ? (
+                                                                        <img
+                                                                            src={s.preview_url}
+                                                                            alt={s.label}
+                                                                            className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.035]"
+                                                                            loading="lazy"
+                                                                        />
+                                                                    ) : (
+                                                                        <div className="h-full w-full bg-white/[0.04]" />
+                                                                    )}
+                                                                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/15 to-transparent px-2 pb-2 pt-8">
+                                                                        <div className="truncate text-[10px] font-semibold text-white">{s.label}</div>
+                                                                    </div>
+                                                                    <div className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/55 px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-wide text-white/70">
+                                                                        {showVideo ? 'Motion' : 'Still'}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="min-h-[44px] px-2 py-1.5 leading-tight">
+                                                                    {s.description ? (
+                                                                        <div className="line-clamp-2 text-[9px] leading-[12px] text-white/45">{s.description}</div>
+                                                                    ) : null}
+                                                                </div>
+                                                            </button>
+                                                        );
+                                                    })}
                                                 </div>
                                             </div>
                                         );
@@ -1411,27 +2086,99 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </div>
                             )}
                         </div>
-                        {/* Channels (kept as requested) */}
                         <button
                             type="button"
-                            onClick={() => setChannelsOpen((o) => !o)}
+                            onClick={() => {
+                                const next: CaptionMode = captionMode === 'off' ? 'word' : 'off';
+                                setCaptionMode(next);
+                                void patchSession({
+                                    caption_mode: next,
+                                    captions_enabled: next !== 'off',
+                                });
+                            }}
                             className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[9px] font-semibold uppercase transition ${
-                                channelsOpen
-                                    ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
-                                    : 'border-white/[0.06] bg-white/[0.02] text-gray-400 hover:bg-white/[0.06] hover:text-white'
+                                captionMode === 'off'
+                                    ? 'border-white/[0.06] bg-white/[0.02] text-gray-400 hover:bg-white/[0.06] hover:text-white'
+                                    : 'border-cyan-500/35 bg-cyan-500/10 text-cyan-100'
                             }`}
-                            title="Connected YouTube channels (click to manage / add)"
+                            title={captionMode === 'off' ? 'Captions are disabled for new renders' : 'One-word captions are enabled for new renders'}
                         >
-                            <Users className="h-3 w-3" />
-                            Channels
+                            CC {captionMode === 'off' ? 'Off' : 'Word'}
                         </button>
+                        <div className="relative">
+                            <button
+                                type="button"
+                                onClick={() => setChannelsOpen((o) => !o)}
+                                className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[9px] font-semibold uppercase transition ${
+                                    channelsOpen
+                                        ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
+                                        : 'border-white/[0.06] bg-white/[0.02] text-gray-400 hover:bg-white/[0.06] hover:text-white'
+                                }`}
+                                title="Connected YouTube channels"
+                            >
+                                <Users className="h-3 w-3" />
+                                {selectedChannel?.title || 'Select channel'}
+                            </button>
+                            {channelsOpen && (
+                                <div className="absolute right-0 top-[calc(100%+8px)] z-50 w-[min(92vw,420px)] rounded-2xl border border-white/10 bg-[#08080b]/95 p-3 shadow-2xl shadow-black/50 backdrop-blur-md">
+                                    <div className="mb-2 flex items-center justify-between">
+                                        <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Chat channel memory</div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setChannelsOpen(false)}
+                                            className="rounded-lg p-1 text-gray-500 hover:bg-white/5 hover:text-white"
+                                            title="Close channels"
+                                        >
+                                            <X className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                    <div className="mb-2 space-y-1">
+                                        <button
+                                            type="button"
+                                            onClick={() => selectChannelForChat(null)}
+                                            className={`flex w-full items-center justify-between rounded-lg border px-2.5 py-2 text-left text-xs transition ${
+                                                !selectedChannelId
+                                                    ? 'border-cyan-400/35 bg-cyan-500/10 text-cyan-100'
+                                                    : 'border-white/[0.06] bg-white/[0.025] text-gray-300 hover:bg-white/[0.05]'
+                                            }`}
+                                        >
+                                            <span>No channel selected</span>
+                                            {!selectedChannelId && <Check className="h-3.5 w-3.5" />}
+                                        </button>
+                                        {youtubeChannels.map((ch) => {
+                                            const active = channelMatchesSelection(ch, selectedChannelId, sessionChannel);
+                                            return (
+                                                <button
+                                                    key={ch.channel_id}
+                                                    type="button"
+                                                    onClick={() => selectChannelForChat(ch)}
+                                                    className={`flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left transition ${
+                                                        active
+                                                            ? 'border-cyan-400/35 bg-cyan-500/10 text-cyan-100'
+                                                            : 'border-white/[0.06] bg-white/[0.025] text-gray-300 hover:bg-white/[0.05]'
+                                                    }`}
+                                                >
+                                                    <span className="min-w-0">
+                                                        <span className="block truncate text-xs font-semibold">{ch.title}</span>
+                                                        <span className="block truncate text-[10px] text-gray-500">
+                                                            {ch.channel_handle || ch.registry_key || ch.channel_id}
+                                                        </span>
+                                                    </span>
+                                                    {active && <Check className="h-3.5 w-3.5 shrink-0" />}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                    <AgentYouTubeConnect onChannelsLoaded={handleChannelsLoaded} />
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </header>
 
                 <AgentProductionRail tracks={jobTracks} snapshots={snapshots} />
 
-                {/* Clean Grok-inspired empty state (no robot, premium feel) */}
-                {messages.length === 0 && !loading && (
+                {false && messages.length === 0 && !currentSessionRunning && (
                     <div className="flex flex-1 items-center justify-center">
                         <div className="text-center">
                             <div className="mx-auto mb-4 h-9 w-9 rounded-full bg-white/90" />
@@ -1442,8 +2189,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </div>
                 )}
 
-                {/* Channel connect as a toggleable "window" (not always visible clutter). Matches the model picker pattern. */}
-                {channelsOpen && (
+                {/* Channel connect now opens as a header popover. */}
+                {false && channelsOpen && (
                     <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-2xl border border-white/10 bg-white/[0.015] p-3">
                         <div className="mb-2 flex items-center justify-between">
                             <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">YouTube Channels</div>
@@ -1495,22 +2242,22 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 >
                     <div className="mx-auto max-w-3xl space-y-3 pb-6 pt-2">
                         {messages.length === 0 && (
-                            <div className="flex flex-col items-center justify-center py-6 text-center sm:py-10">
+                            <div className="flex min-h-full flex-col items-center justify-center py-2 text-center sm:py-3">
                                 {/* Ultra-premium Hero */}
-                                <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-[28px] bg-gradient-to-br from-violet-500/50 via-cyan-400/40 to-violet-500/50 ring-[6px] ring-white/10 shadow-[0_0_80px_rgba(139,92,246,0.25)]">
-                                    <Sparkles className="h-10 w-10 text-white drop-shadow-lg" />
+                                <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/50 via-cyan-400/40 to-violet-500/50 ring-4 ring-white/10 shadow-[0_0_55px_rgba(139,92,246,0.2)]">
+                                    <Sparkles className="h-6 w-6 text-white drop-shadow-lg" />
                                 </div>
-                                <div className="inline-flex items-center gap-2.5 rounded-full border border-white/20 bg-white/5 pl-2.5 pr-4 py-1 text-[10px] font-semibold uppercase tracking-[2.5px] text-white/70 mb-2">
+                                <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 py-1 pl-2 pr-3 text-[9px] font-semibold uppercase tracking-[1.8px] text-white/70">
                                     <div className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-2 py-px text-emerald-400">
                                         <div className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" /> LIVE
                                     </div>
                                     PREMIUM REAL-TIME VIDEO STUDIO
                                 </div>
-                                <h1 className="text-[42px] sm:text-[48px] font-semibold tracking-[-2.2px] text-white leading-none mb-3">What are we shipping today?</h1>
-                                <p className="max-w-[620px] text-[15px] text-gray-400 leading-relaxed mb-1">
+                                <h1 className="mb-2 text-[30px] font-semibold leading-none tracking-tight text-white sm:text-[38px]">What are we shipping today?</h1>
+                                <p className="mb-1 max-w-[620px] text-[12px] leading-relaxed text-gray-400 sm:text-[13px]">
                                     This is the experience your plan unlocks. The agent doesn&apos;t just generate — it <span className="text-white font-medium">builds your video live inside this chat</span>. You watch every decision, every still, every motion clip, every audio layer appear in real time. Full transparency. Full control. Premium quality, delivered visibly.
                                 </p>
-                                <div className="flex items-center gap-3 text-[10px] text-white/50 mt-1 mb-5">
+                                <div className="mb-3 mt-1 flex items-center gap-2 text-[9px] text-white/50 sm:gap-3">
                                     <div>Sub-second updates</div>
                                     <div className="h-px w-3 bg-white/20" />
                                     <div>Per-scene creative control</div>
@@ -1519,7 +2266,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </div>
 
                                 {/* Premium, luxurious starter journeys */}
-                                <div className="w-full max-w-[720px] grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div className="grid w-full max-w-[720px] grid-cols-1 gap-2 sm:grid-cols-2">
                                     {STARTER_PROMPTS.map((p, index) => {
                                         const icons = [Video, BookOpen, Users, Zap];
                                         const labels = ["VIRAL SHORTS", "REFERENCE-LED", "LONG-FORM DOCS", "SIGNATURE STYLE"];
@@ -1536,18 +2283,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                 type="button"
                                                 disabled={!sessionId}
                                                 onClick={() => sendText(p)}
-                                                className="group relative overflow-hidden flex flex-col items-start gap-3 rounded-3xl border border-white/10 bg-[#0a0a0f] p-5 text-left transition-all hover:border-white/25 hover:bg-[#111117] active:scale-[0.985] disabled:opacity-40"
+                                                className="group relative flex min-h-[132px] flex-col items-start gap-2 overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a0f] p-4 text-left transition-all hover:border-white/25 hover:bg-[#111117] active:scale-[0.985] disabled:opacity-40"
                                             >
                                                 <div className="flex w-full items-center justify-between">
-                                                    <div className="rounded-2xl bg-white/5 p-2.5 text-violet-400 group-hover:bg-violet-500/10 transition">
-                                                        <Icon className="h-5 w-5" />
+                                                    <div className="rounded-xl bg-white/5 p-2 text-violet-400 transition group-hover:bg-violet-500/10">
+                                                        <Icon className="h-4 w-4" />
                                                     </div>
                                                     <div className="text-[9px] font-mono uppercase tracking-[2px] text-violet-400/70 group-hover:text-violet-400">
                                                         {labels[index]}
                                                     </div>
                                                 </div>
                                                 <div className="pr-4">
-                                                    <p className="text-[14px] font-semibold text-white leading-tight tracking-[-0.2px]">{p}</p>
+                                                    <p className="text-[13px] font-semibold leading-tight text-white">{p}</p>
                                                     <p className="mt-1.5 text-[11px] text-gray-500 group-hover:text-gray-400">{sub[index]}</p>
                                                 </div>
                                                 <div className="mt-auto pt-3 text-[10px] text-emerald-400/80 flex items-center gap-1.5 group-hover:gap-2 transition-all">
@@ -1559,11 +2306,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     })}
                                 </div>
 
-                                <div className="mt-7 text-[10px] font-medium tracking-[1px] text-white/40 flex items-center gap-3">
-                                    <div className="h-px flex-1 bg-white/10" />
-                                    CREATOR $60 • STUDIO $200 • OWNER UNMETERED
-                                    <div className="h-px flex-1 bg-white/10" />
-                                </div>
                             </div>
                         )}
                         {messages
@@ -1611,6 +2353,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                             handleFinalizeStarted(jid, jobs)
                                                         }
                                                         onReply={handleReplyToJob}
+                                                        onSnapshotUpdate={appendJobDeliverable}
                                                     />
                                                 </div>
                                             )}
@@ -1618,7 +2361,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </div>
                                 );
                             })}
-                        {loading && (
+                        {currentSessionRunning && (
                             <div className="space-y-1 text-xs text-gray-500">
                                 <div className="flex items-center gap-2">
                                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -1668,11 +2411,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     <div className="mt-3 flex flex-wrap gap-2">
                                         <button
                                             type="button"
-                                            disabled={loading}
+                                            disabled={currentSessionRunning}
                                             onClick={() => approveAction(a.id)}
                                             className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/40 transition hover:bg-emerald-500 disabled:opacity-50"
                                         >
-                                            {loading ? (
+                                            {currentSessionRunning ? (
                                                 <Loader2 className="h-4 w-4 animate-spin" />
                                             ) : (
                                                 <Check className="h-4 w-4 stroke-[3]" />
@@ -1681,7 +2424,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                         </button>
                                         <button
                                             type="button"
-                                            disabled={loading}
+                                            disabled={currentSessionRunning}
                                             onClick={() => rejectAction(a.id)}
                                             className="inline-flex min-h-11 items-center justify-center gap-1 rounded-xl border border-white/15 px-4 py-2.5 text-xs font-semibold text-gray-300 hover:bg-white/[0.06]"
                                         >
@@ -1704,8 +2447,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             {attachments.map((f) => (
                                 <span
                                     key={f.id}
-                                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] text-gray-300"
+                                    className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1.5 text-[10px] text-gray-300"
                                 >
+                                    {f.kind === 'image' && attachmentPayload[f.id]?.data_url && (
+                                        <img
+                                            src={attachmentPayload[f.id].data_url}
+                                            alt={f.name}
+                                            className="h-9 w-9 rounded-lg border border-white/10 object-cover"
+                                        />
+                                    )}
+                                    {f.kind === 'image' ? 'Image: ' : f.kind === 'text' ? 'File: ' : 'Unsupported: '}
                                     {f.name}
                                     <button
                                         type="button"
@@ -1732,6 +2483,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             <ArrowLeft className="h-3.5 w-3.5 text-violet-400" />
                             <span className="font-semibold text-violet-300">Replying to:</span>
                             <span className="truncate text-gray-300">{replyingTo.title || replyingTo.kind + ' video'}</span>
+                            {typeof replyingTo.scene_index === 'number' && (
+                                <span className="rounded-full border border-cyan-400/25 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
+                                    Scene {replyingTo.scene_index + 1}
+                                </span>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => setReplyingTo(null)}
@@ -1758,6 +2514,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             value={input}
                             disabled={!sessionId || dictation.transcribing}
                             onChange={(e) => setInput(e.target.value)}
+                            onPaste={onPasteIntoInput}
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter' && !e.shiftKey) {
                                     e.preventDefault();
@@ -1770,6 +2527,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 ref={fileInputRef}
                                 type="file"
                                 multiple
+                                accept="image/*,.txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.yaml,.yml"
                                 className="hidden"
                                 onChange={(e) => onPickFiles(e.target.files)}
                             />
@@ -1783,7 +2541,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             </button>
                             <button
                                 type="button"
-                                disabled={!sessionId || !dictation.supported || dictation.transcribing || loading}
+                                disabled={!sessionId || !dictation.supported || dictation.transcribing || currentSessionRunning}
                                 onClick={() => dictation.toggle()}
                                 className={`rounded-lg p-2 transition ${
                                     dictation.listening
@@ -1842,7 +2600,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             <div className="flex-1" />
                             <button
                                 type="button"
-                                disabled={loading || !input.trim() || !sessionId}
+                                disabled={currentSessionRunning || (!input.trim() && !hasReadableAttachment) || !sessionId}
                                 onClick={sendMessage}
                                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-black transition hover:bg-emerald-500 disabled:opacity-40"
                             >

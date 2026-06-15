@@ -46,10 +46,11 @@ export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi ||
 /** Studio Agent hits Fly directly (persistent sessions); api-studio RunPod can lag behind. */
 export const STUDIO_AGENT_API = isLocalDevHost
     ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || "https://nyptid-studio.fly.dev");
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || PROD_API_BASE_URL);
 
 export const FLY_DIRECT_API_PREFIXES = [
     '/api/studio-agent',
+    '/api/studio-hub',
     '/api/youtube',
     '/api/studio/analytics',
 ];

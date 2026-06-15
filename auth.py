@@ -169,9 +169,12 @@ def build_auth_helpers(
         return await get_current_user(fake)
 
     async def require_auth(
+        request: Request,
         cred: HTTPAuthorizationCredentials = Depends(security),
     ) -> dict:
         user = await get_current_user(cred)
+        if not user:
+            user = await get_current_user_from_request(request)
         if not user:
             raise HTTPException(401, "Authentication required. Please sign in.")
         return user

@@ -54,21 +54,44 @@ def is_key_word(word: str) -> bool:
     return any(p.match(word.strip()) for p in KEY_PATTERNS)
 
 
+def _token_weight(word: str) -> int:
+    """Hyphenated data like 28-year-old should occupy the whole caption beat."""
+    clean = word.strip()
+    if re.search(r"\d+\s*-\s*year\s*-\s*old", clean, re.I):
+        return max_words_for_numeric_phrase()
+    if "-" in clean and any(ch.isdigit() for ch in clean):
+        return 2
+    return 1
+
+
+def max_words_for_numeric_phrase() -> int:
+    return 3
+
+
 def split_into_phrases(text: str, max_words: int = 3) -> list[str]:
     """Break a sentence into phrase chunks of <= max_words for caption display."""
+    max_words = max(1, int(max_words or 3))
     words = text.strip().split()
     out: list[str] = []
     i = 0
     while i < len(words):
         # If the next word is a key word, group it alone or with one connector.
-        if is_key_word(words[i]):
+        if max_words == 1:
+            out.append(words[i].upper())
+            i += 1
+        elif is_key_word(words[i]) or _token_weight(words[i]) >= max_words:
             out.append(words[i].upper())
             i += 1
         else:
             # Group up to max_words consecutive non-key words.
             chunk: list[str] = []
-            while i < len(words) and len(chunk) < max_words and not is_key_word(words[i]):
+            weight = 0
+            while i < len(words) and weight < max_words and not is_key_word(words[i]):
+                w = _token_weight(words[i])
+                if chunk and weight + w > max_words:
+                    break
                 chunk.append(words[i].upper())
+                weight += w
                 i += 1
             if chunk:
                 out.append(" ".join(chunk))
@@ -76,16 +99,31 @@ def split_into_phrases(text: str, max_words: int = 3) -> list[str]:
 
 
 def time_phrases(phrases: list[str], total_duration: float) -> list[CaptionPhrase]:
-    """Distribute phrases evenly across total_duration."""
+    """Distribute caption beats across total_duration.
+
+    Word-by-word captions drift badly if every token receives equal time. TTS
+    naturally lingers on longer words, hyphenated numbers, and sentence-final
+    punctuation, so weight those beats instead of using a flat interval.
+    """
     if not phrases:
         return []
-    per = total_duration / len(phrases)
+    weights: list[float] = []
+    for phrase in phrases:
+        words = phrase.replace("-", " ").split()
+        char_weight = max(1.0, len(re.sub(r"[^A-Z0-9]", "", phrase.upper())) / 5.2)
+        punct_pause = 0.75 if re.search(r"[.!?]$", phrase.strip()) else 0.35 if re.search(r"[,;:]$", phrase.strip()) else 0.0
+        numeric_weight = 0.45 if any(ch.isdigit() for ch in phrase) else 0.0
+        weights.append(max(1.0, len(words) * 0.55 + char_weight + punct_pause + numeric_weight))
+    total_weight = max(1, sum(weights))
+    min_phrase = 0.16 if len(phrases) >= 12 else 0.36
+    variable_total = max(float(total_duration) - (min_phrase * len(phrases)), 0.0)
     out: list[CaptionPhrase] = []
     t = 0.0
-    for p in phrases:
+    for p, weight in zip(phrases, weights):
         is_key = any(is_key_word(w) for w in p.split())
-        out.append(CaptionPhrase(text=p, start_sec=t, duration_sec=per, is_key=is_key))
-        t += per
+        dur = min_phrase + variable_total * (weight / total_weight)
+        out.append(CaptionPhrase(text=p, start_sec=t, duration_sec=dur, is_key=is_key))
+        t += dur
     return out
 
 
@@ -118,11 +156,14 @@ def caption_drawtext(
     *,
     width: int = 720,
     font: str = DEFAULT_FONT,
+    caption_mode: str = "phrase",
 ) -> str:
     """Build an ffmpeg drawtext filter for one CaptionPhrase."""
     fontcolor = "#FF8800" if phrase.is_key else "white"
     n = len(phrase.text)
-    if n <= 12:
+    if caption_mode == "word":
+        size = 82 if n <= 10 else 72
+    elif n <= 12:
         size = 96
     elif n <= 20:
         size = 76

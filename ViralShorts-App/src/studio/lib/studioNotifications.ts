@@ -20,7 +20,7 @@ function load(): StudioNotification[] {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return seedDefaults();
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : seedDefaults();
+        return Array.isArray(parsed) ? mergeDefaults(parsed) : seedDefaults();
     } catch {
         return seedDefaults();
     }
@@ -47,6 +47,24 @@ function seedDefaults(): StudioNotification[] {
             read: false,
         },
         {
+            id: 'studio-campus-live',
+            kind: 'success',
+            title: 'Studio Hub is live',
+            body: 'The first growth OS layer is open: creator growth, business ads, network, ranks, and production engines.',
+            href: '/?page=dashboard&tab=campus',
+            createdAt: now - 30_000,
+            read: false,
+        },
+        {
+            id: 'studio-hub-simplified',
+            kind: 'success',
+            title: 'Studio Hub is cleaner',
+            body: 'Content Studio now opens as a simple room with General Chat, Wins, Leaderboard, direct production launchers, and Network separated.',
+            href: '/?page=dashboard&tab=campus',
+            createdAt: now - 45_000,
+            read: false,
+        },
+        {
             id: 'refund-policy',
             kind: 'billing',
             title: 'Failed renders refund automatically',
@@ -55,6 +73,14 @@ function seedDefaults(): StudioNotification[] {
             read: true,
         },
     ];
+}
+
+function mergeDefaults(items: StudioNotification[]): StudioNotification[] {
+    const existingIds = new Set(items.map((item) => item.id));
+    const missing = seedDefaults().filter((item) => !existingIds.has(item.id));
+    const merged = [...missing, ...items].slice(0, 50);
+    if (missing.length) save(merged);
+    return merged;
 }
 
 export function listNotifications(): StudioNotification[] {
