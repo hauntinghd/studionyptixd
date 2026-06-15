@@ -10,7 +10,14 @@ import httpx
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "anthropic/claude-sonnet-4")
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
-ANTHROPIC_FALLBACK_MODEL = os.getenv("ANTHROPIC_FALLBACK_MODEL", "claude-3-5-haiku-latest")
+_ANTHROPIC_FALLBACK_MODEL_ENV = os.getenv("ANTHROPIC_FALLBACK_MODEL", "").strip()
+_ANTHROPIC_FALLBACK_MODELS_ENV = os.getenv("ANTHROPIC_FALLBACK_MODELS", "").strip()
+ANTHROPIC_FALLBACK_MODELS = [
+    model.strip()
+    for model in (_ANTHROPIC_FALLBACK_MODELS_ENV or _ANTHROPIC_FALLBACK_MODEL_ENV or "claude-haiku-4-5,claude-haiku-4-5-20251001").split(",")
+    if model.strip()
+]
+ANTHROPIC_FALLBACK_MODEL = ANTHROPIC_FALLBACK_MODELS[0] if ANTHROPIC_FALLBACK_MODELS else "claude-haiku-4-5"
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
@@ -440,28 +447,39 @@ async def _anthropic_chat_completion(
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
     system_text, anth_messages = _anthropic_payload_messages(messages)
-    payload: dict[str, Any] = {
-        "model": ANTHROPIC_FALLBACK_MODEL,
+    payload_base: dict[str, Any] = {
         "messages": anth_messages,
         "max_tokens": int(os.getenv("ANTHROPIC_FALLBACK_MAX_TOKENS", "2048")),
         "temperature": temperature,
     }
     if system_text:
-        payload["system"] = system_text
+        payload_base["system"] = system_text
     anth_tools = _anthropic_tools(tools)
     if anth_tools:
-        payload["tools"] = anth_tools
-        payload["tool_choice"] = {"type": "auto"}
+        payload_base["tools"] = anth_tools
+        payload_base["tool_choice"] = {"type": "auto"}
     headers = {
         "x-api-key": key,
         "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
         "content-type": "application/json",
     }
+    last_error = ""
+    selected_model = ANTHROPIC_FALLBACK_MODEL
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
-        if r.status_code >= 400:
-            raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:2000]}")
-        data = r.json()
+        for model in ANTHROPIC_FALLBACK_MODELS:
+            selected_model = model
+            payload = dict(payload_base)
+            payload["model"] = model
+            r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
+            if r.status_code < 400:
+                data = r.json()
+                break
+            last_error = f"Anthropic {r.status_code}: {r.text[:2000]}"
+            if r.status_code != 404:
+                raise RuntimeError(last_error)
+        else:
+            models = ", ".join(ANTHROPIC_FALLBACK_MODELS)
+            raise RuntimeError(f"{last_error}. Tried Anthropic fallback models: {models}")
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for idx, block in enumerate(data.get("content") or []):
@@ -484,7 +502,7 @@ async def _anthropic_chat_completion(
         message["tool_calls"] = tool_calls
     return {
         "id": data.get("id"),
-        "model": data.get("model") or ANTHROPIC_FALLBACK_MODEL,
+        "model": data.get("model") or selected_model,
         "provider": "anthropic_fallback",
         "choices": [{"message": message}],
         "usage": {
