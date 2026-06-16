@@ -1689,7 +1689,11 @@ def set_production_scene_duration(job_id: str, scene_index: int, duration_sec: f
     raise ValueError(f"scene {scene_index} not found")
 
 
-def animate_production_scenes(job_id: str, scene_indices: list[int] | None = None) -> str:
+def animate_production_scenes(
+    job_id: str,
+    scene_indices: list[int] | None = None,
+    max_budget_usd: float | None = None,
+) -> str:
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import animate_scenes_stage, load_scenes, save_scenes
     scenes = load_scenes(ws)
@@ -1722,6 +1726,7 @@ def animate_production_scenes(job_id: str, scene_indices: list[int] | None = Non
         "job_id": job_id,
         "animated": res.get("animated"),
         "failed": failed,
+        "max_budget_usd": max_budget_usd,
         "note": (
             "Animation completed for approved scenes."
             if not failed
@@ -2310,7 +2315,12 @@ def execute_tool(
     if name == "animate_production_scenes":
         raw_idx = args.get("scene_indices")
         indices = [int(x) for x in raw_idx] if isinstance(raw_idx, list) else None
-        return animate_production_scenes(str(args.get("job_id") or ""), indices)
+        raw_budget = args.get("max_budget_usd")
+        try:
+            max_budget_usd = float(raw_budget) if raw_budget is not None else None
+        except (TypeError, ValueError):
+            max_budget_usd = None
+        return animate_production_scenes(str(args.get("job_id") or ""), indices, max_budget_usd)
 
     if name == "finalize_production":
         return finalize_production(str(args.get("job_id") or ""))

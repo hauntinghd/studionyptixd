@@ -12,16 +12,40 @@ DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "anthropic/claude-sonnet-4")
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
 _ANTHROPIC_FALLBACK_MODEL_ENV = os.getenv("ANTHROPIC_FALLBACK_MODEL", "").strip()
 _ANTHROPIC_FALLBACK_MODELS_ENV = os.getenv("ANTHROPIC_FALLBACK_MODELS", "").strip()
-ANTHROPIC_FALLBACK_MODELS = [
-    model.strip()
-    for model in (_ANTHROPIC_FALLBACK_MODELS_ENV or _ANTHROPIC_FALLBACK_MODEL_ENV or "claude-haiku-4-5,claude-haiku-4-5-20251001").split(",")
-    if model.strip()
-]
-ANTHROPIC_FALLBACK_MODEL = ANTHROPIC_FALLBACK_MODELS[0] if ANTHROPIC_FALLBACK_MODELS else "claude-haiku-4-5"
-ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET", "360000"))
-ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES", "28"))
-ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "9000"))
-ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "32000"))
+
+
+def _normalize_anthropic_model(model: str) -> str:
+    """Convert stale/alias model names to stable Anthropic Messages API IDs."""
+    model = model.strip()
+    aliases = {
+        "claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        "claude-4.5-haiku": "claude-haiku-4-5-20251001",
+        "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+        "anthropic/claude-haiku-4.5": "claude-haiku-4-5-20251001",
+    }
+    return aliases.get(model, model)
+
+
+def _anthropic_fallback_model_list() -> list[str]:
+    raw = _ANTHROPIC_FALLBACK_MODELS_ENV or _ANTHROPIC_FALLBACK_MODEL_ENV or "claude-haiku-4-5-20251001"
+    models: list[str] = []
+    for value in raw.split(","):
+        model = _normalize_anthropic_model(value)
+        if model and model not in models:
+            models.append(model)
+    if "claude-haiku-4-5-20251001" not in models:
+        models.append("claude-haiku-4-5-20251001")
+    return models
+
+
+ANTHROPIC_FALLBACK_MODELS = _anthropic_fallback_model_list()
+ANTHROPIC_FALLBACK_MODEL = ANTHROPIC_FALLBACK_MODELS[0] if ANTHROPIC_FALLBACK_MODELS else "claude-haiku-4-5-20251001"
+ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET", "120000"))
+ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES", "14"))
+ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "4000"))
+ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "16000"))
+ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET", "60000"))
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
@@ -357,6 +381,10 @@ def _message_text_size(msg: dict[str, Any]) -> int:
     )
 
 
+def _anthropic_payload_size(system_text: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> int:
+    return len(json.dumps({"system": system_text or "", "messages": messages, "tools": tools or []}, ensure_ascii=False))
+
+
 def _compact_messages_for_anthropic_fallback(messages: list[dict[str, Any]], *, hard: bool = False) -> list[dict[str, Any]]:
     """Build a bounded fallback prompt without deleting persisted chat history.
 
@@ -364,10 +392,10 @@ def _compact_messages_for_anthropic_fallback(messages: list[dict[str, Any]], *, 
     routes. Keep the recent working turn and a compact note about older saved
     state so a long Studio Agent chat does not hard-fail at the model boundary.
     """
-    keep_recent = max(8, ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES // (2 if hard else 1))
-    budget = max(80000, ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET // (2 if hard else 1))
-    max_message_chars = max(2500, ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS // (2 if hard else 1))
-    max_system_chars = max(8000, ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS // (2 if hard else 1))
+    keep_recent = max(4, min(ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES, 8) if hard else ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES)
+    budget = ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET if hard else ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET
+    max_message_chars = max(1200, ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS // (3 if hard else 1))
+    max_system_chars = max(4000, ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS // (3 if hard else 1))
 
     system_parts: list[str] = []
     non_system: list[dict[str, Any]] = []
@@ -412,6 +440,11 @@ def _compact_messages_for_anthropic_fallback(messages: list[dict[str, Any]], *, 
         # the newest user turn are more important than stale chat turns.
         drop_idx = next((idx for idx, msg in enumerate(compacted[:-2]) if msg.get("role") != "system"), 1)
         compacted.pop(drop_idx)
+
+    if hard:
+        for msg in compacted:
+            if msg.get("role") != "system":
+                msg["content"] = _clip_text(_content_to_text(msg.get("content")), max_message_chars)
 
     if not any(m.get("role") != "system" for m in compacted):
         compacted.append({"role": "user", "content": "Continue from the saved Studio Agent state."})
@@ -536,6 +569,14 @@ async def _anthropic_chat_completion(
     if anth_tools:
         payload_base["tools"] = anth_tools
         payload_base["tool_choice"] = {"type": "auto"}
+    if _anthropic_payload_size(system_text, anth_messages, anth_tools) > ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET:
+        compacted_messages = _compact_messages_for_anthropic_fallback(messages, hard=True)
+        system_text, anth_messages = _anthropic_payload_messages(compacted_messages)
+        payload_base["messages"] = anth_messages
+        if system_text:
+            payload_base["system"] = system_text
+        else:
+            payload_base.pop("system", None)
     headers = {
         "x-api-key": key,
         "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
@@ -559,6 +600,9 @@ async def _anthropic_chat_completion(
                     payload["system"] = hard_system_text
                 else:
                     payload.pop("system", None)
+                if _anthropic_payload_size(payload.get("system"), hard_anth_messages, payload.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
+                    payload.pop("tools", None)
+                    payload.pop("tool_choice", None)
                 r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
             if r.status_code < 400:
                 data = r.json()

@@ -519,6 +519,8 @@ def animate_scenes_stage(
             "no approved scenes to animate. Review the stills first, then approve scenes with set_production_scenes_animate before running i2v."
         )
     total = max(len(targets), 1)
+    animated: list[int] = []
+    failed: list[int] = []
     for n, sc in enumerate(targets):
         check_cancelled(workspace)
         _write_progress(workspace, stage="animate", progress=10 + int(n / total * 80),
@@ -535,12 +537,24 @@ def animate_scenes_stage(
             )
             sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
             sc["status"] = "clip_ready"
+            sc.pop("error", None)
+            animated.append(int(sc["index"]))
         except Exception as exc:  # noqa: BLE001 — surface per-scene, keep others
             sc["status"] = "error"
             sc["error"] = str(exc)[:300]
+            failed.append(int(sc["index"]))
+        save_scenes(workspace, scenes)
     save_scenes(workspace, scenes)
+    if failed:
+        _write_progress(
+            workspace,
+            stage="awaiting_scene_review",
+            progress=80,
+            detail=f"Animation needs review: {len(failed)} scene(s) failed",
+        )
+        return {"status": "partial", "animated": animated, "failed": failed}
     _write_progress(workspace, stage="awaiting_scene_review", progress=80, detail="Review animation")
-    return {"status": "animated", "animated": [s["index"] for s in targets]}
+    return {"status": "animated", "animated": animated, "failed": []}
 
 
 # ─── Stage 3: finalize → compose final MP4 ────────────────────────────────────

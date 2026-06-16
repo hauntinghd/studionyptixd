@@ -21,6 +21,9 @@ import httpx
 SEEDREAM_EDIT_ENDPOINT = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_EDIT_URL = f"https://fal.run/{SEEDREAM_EDIT_ENDPOINT}"
 DEFAULT_SEED = int(os.getenv("SKELETON_CANONICAL_SEED", "420042"))
+FAL_EDIT_TIMEOUT_SEC = int(os.getenv("FAL_EDIT_TIMEOUT_SEC", "300"))
+FAL_EDIT_POLL_INTERVAL_SEC = float(os.getenv("FAL_EDIT_POLL_INTERVAL_SEC", "3"))
+FAL_EDIT_POLL_MAX_INTERVAL_SEC = float(os.getenv("FAL_EDIT_POLL_MAX_INTERVAL_SEC", "10"))
 
 IDENTITY_LOCK = (
     "CANONICAL SKELETON EDIT LOCK: preserve the EXACT same character from the "
@@ -66,6 +69,45 @@ def _download(url: str, dest: Path) -> None:
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes(chunk_size=1024 * 256):
                 f.write(chunk)
+
+
+def _queue_result(endpoint: str, args: dict[str, Any], *, timeout_sec: int) -> dict[str, Any]:
+    """Submit a FAL queue job and poll steadily for Seedream edit results."""
+    handle = fal_client.submit(endpoint, arguments=args)
+    request_id = getattr(handle, "request_id", None)
+    if not request_id:
+        raise CanonicalEditError(f"{endpoint} returned no request_id")
+
+    deadline = time.monotonic() + max(30, timeout_sec)
+    interval = max(1.0, FAL_EDIT_POLL_INTERVAL_SEC)
+    max_interval = max(interval, FAL_EDIT_POLL_MAX_INTERVAL_SEC)
+    last_status = None
+
+    while time.monotonic() < deadline:
+        status = fal_client.status(endpoint, request_id, with_logs=False)
+        last_status = status
+        status_name = status.__class__.__name__.lower()
+        if status_name == "completed":
+            response_url = getattr(handle, "response_url", "")
+            if response_url:
+                response = handle.client.get(response_url, timeout=120)
+                response.raise_for_status()
+                payload = response.json()
+            else:
+                payload = fal_client.result(endpoint, request_id)
+            if not isinstance(payload, dict):
+                raise CanonicalEditError(f"{endpoint} returned non-object result: {payload!r}")
+            return payload
+        if status_name in {"failed", "canceled", "cancelled"}:
+            raise CanonicalEditError(f"{endpoint} {status_name} on {request_id}: {status}")
+
+        time.sleep(interval)
+        interval = min(max_interval, interval + 1)
+
+    raise CanonicalEditError(
+        f"{endpoint} timed out after {timeout_sec}s on request {request_id}; "
+        f"last_status={last_status}"
+    )
 
 
 def _reference_url_to_local(reference_url: str) -> Path | None:
@@ -182,9 +224,9 @@ def generate_still_edit(
     _ensure_fal()
     image_urls = resolve_master_reference_urls(master_url=master_url, extra_refs=extra_refs)
     try:
-        result = fal_client.subscribe(
+        result = _queue_result(
             SEEDREAM_EDIT_ENDPOINT,
-            arguments={
+            {
                 "prompt": str(prompt or "")[:3500],
                 "image_urls": image_urls,
                 "negative_prompt": str(negative_prompt or NEG_EDIT)[:1500],
@@ -192,6 +234,7 @@ def generate_still_edit(
                 "num_images": 1,
                 "seed": int(seed),
             },
+            timeout_sec=FAL_EDIT_TIMEOUT_SEC,
         )
     except Exception as exc:
         raise CanonicalEditError(f"seedream edit failed: {exc}") from exc

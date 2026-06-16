@@ -20,10 +20,9 @@ Pipeline:
   Standard tier (5 AC):  Seedance 2.0  → Pixverse V6 (auto-fallback)
   Premium upgrade (7 AC): Kling 2.1 Pro
 
-All via fal_client.subscribe.
+FAL queue polling is throttled for full multi-scene renders.
 """
 from __future__ import annotations
-import concurrent.futures
 import os
 import time
 from pathlib import Path
@@ -32,6 +31,8 @@ import fal_client
 import httpx
 
 FAL_SUBSCRIBE_TIMEOUT_SEC = int(os.getenv("FAL_I2V_SUBSCRIBE_TIMEOUT_SEC", "600"))
+FAL_I2V_POLL_INTERVAL_SEC = float(os.getenv("FAL_I2V_POLL_INTERVAL_SEC", "5"))
+FAL_I2V_POLL_MAX_INTERVAL_SEC = float(os.getenv("FAL_I2V_POLL_MAX_INTERVAL_SEC", "15"))
 
 
 class I2VError(RuntimeError):
@@ -125,6 +126,45 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
     }
 
 
+def _queue_result(endpoint: str, args: dict, *, timeout_sec: int) -> dict:
+    """Submit a FAL queue job and poll slowly enough for multi-scene renders."""
+    handle = fal_client.submit(endpoint, arguments=args)
+    request_id = getattr(handle, "request_id", None)
+    if not request_id:
+        raise I2VError(f"{endpoint} returned no request_id")
+
+    deadline = time.monotonic() + max(30, timeout_sec)
+    interval = max(1.0, FAL_I2V_POLL_INTERVAL_SEC)
+    max_interval = max(interval, FAL_I2V_POLL_MAX_INTERVAL_SEC)
+    last_status = None
+
+    while time.monotonic() < deadline:
+        status = fal_client.status(endpoint, request_id, with_logs=False)
+        last_status = status
+        status_name = status.__class__.__name__.lower()
+        if status_name == "completed":
+            response_url = getattr(handle, "response_url", "")
+            if response_url:
+                response = handle.client.get(response_url, timeout=120)
+                response.raise_for_status()
+                payload = response.json()
+            else:
+                payload = fal_client.result(endpoint, request_id)
+            if not isinstance(payload, dict):
+                raise I2VError(f"{endpoint} returned non-object result: {payload!r}")
+            return payload
+        if status_name in {"failed", "canceled", "cancelled"}:
+            raise I2VError(f"{endpoint} {status_name} on {request_id}: {status}")
+
+        time.sleep(interval)
+        interval = min(max_interval, interval + 2)
+
+    raise I2VError(
+        f"{endpoint} timed out after {timeout_sec}s on request {request_id}; "
+        f"last_status={last_status}"
+    )
+
+
 def list_video_models() -> list[dict[str, object]]:
     """Selectable i2v models for Skeleton AI (image stills are always canonical edit)."""
     return [
@@ -207,15 +247,9 @@ def generate(
     for endpoint in chain:
         args = _build_args(endpoint, motion_prompt, image_url, duration_sec, aspect_ratio)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(fal_client.subscribe, endpoint, arguments=args)
-                result = fut.result(timeout=FAL_SUBSCRIBE_TIMEOUT_SEC)
+            result = _queue_result(endpoint, args, timeout_sec=FAL_SUBSCRIBE_TIMEOUT_SEC)
             used_endpoint = endpoint
             break
-        except concurrent.futures.TimeoutError as e:
-            raise I2VError(
-                f"{endpoint} timed out after {FAL_SUBSCRIBE_TIMEOUT_SEC}s on {still_path.name}"
-            ) from e
         except Exception as e:
             last_exc = e
             if _is_content_policy_error(e) and endpoint != chain[-1]:
