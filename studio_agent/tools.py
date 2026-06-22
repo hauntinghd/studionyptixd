@@ -36,6 +36,16 @@ APPROVAL_REQUIRED = frozenset({
 
 _async_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-agent-async")
 
+_SHORTFORM_CHANNEL_CATEGORY_ALIASES = {
+    # Channel/registry keys are not Skeleton content lanes. MrSkeleWelly is the
+    # psychology/skeleton channel, so route accidental channel-key usage to the
+    # human behavior lane instead of failing the production after approval.
+    "mrskelewelly": "human_limits",
+    "mrskellywelly": "human_limits",
+    "mrskelewellyai": "human_limits",
+    "skeletonai": "human_limits",
+}
+
 
 def _run_async(coro):
     """Run async coroutine from sync execute_tool (may be called inside FastAPI loop)."""
@@ -45,6 +55,21 @@ def _run_async(coro):
         return asyncio.run(coro)
     fut = _async_pool.submit(asyncio.run, coro)
     return fut.result(timeout=120)
+
+
+def _compact_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _normalize_shortform_category_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Keep selected channel keys from being used as Skeleton category lanes."""
+    normalized = dict(args or {})
+    raw_category = str(normalized.get("category_key") or normalized.get("category") or "").strip()
+    mapped = _SHORTFORM_CHANNEL_CATEGORY_ALIASES.get(_compact_key(raw_category))
+    if mapped:
+        normalized.setdefault("_selected_channel_key", raw_category)
+        normalized["category_key"] = mapped
+    return normalized
 
 
 def _compact_video_metric_rows(rows: list[dict[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
@@ -452,6 +477,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "Queue a styled shortform render (9:16, ~12 beats). "
                     "REQUIRED: render_style from list_render_styles or the user's session Art Style picker. "
+                    "category_key is a Skeleton content lane, not the selected YouTube channel key. "
+                    "For MrSkeleWelly psychology shorts, use human_limits. "
                     "Default cinematic/photoreal for documentaries and real people â€” NOT skeleton unless "
                     "render_style=skeleton_host. Comic/history/anime/etc. each have their own T2I look. "
                     "Call list_skeleton_video_models for video_model; list_skeleton_categories for script tone. "
@@ -471,7 +498,10 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                         "category_key": {
                             "type": "string",
-                            "description": "Script tone lane e.g. outcast, people_blogs, custom_my_lane",
+                            "description": (
+                                "Skeleton script/content lane e.g. human_limits, outcast, people_blogs, custom_my_lane. "
+                                "Do not pass a YouTube channel/registry key here."
+                            ),
                         },
                         "topic": {"type": "string"},
                         "script": {"type": "string", "description": "Optional pre-written script"},
@@ -2190,6 +2220,7 @@ def execute_tool(
         from skeleton_ai.i2v_engine import resolve_video_model_chain
         from studio_agent.render_styles import is_skeleton_style, resolve_render_style
 
+        args = _normalize_shortform_category_args(args)
         category_key = str(args.get("category_key") or "people_blogs").strip()
         topic = str(args.get("topic") or "").strip() or None
         script = str(args.get("script") or "").strip() or None
@@ -3146,7 +3177,7 @@ def execute_tool_logged(
         result = execute_tool(
             name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
         )
-        result = production_budget.with_budget_metadata(result, budget_estimate)
+        result = production_budget.with_budget_metadata(result, budget_estimate, arguments)
     except Exception as exc:
         telemetry.record_tool_call(
             user_id, name, arguments, session_id=session_id, result_preview=f"error: {exc}"

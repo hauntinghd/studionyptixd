@@ -6,6 +6,7 @@ sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, guard_text
+from studio_agent.tools import _normalize_shortform_category_args
 
 
 def test_current_text_zerotier_overrides_stale_empire_context():
@@ -18,6 +19,21 @@ def test_current_text_mrskelewelly_can_select_channel():
     session = {"registry_key": ""}
     active = runner._active_registry_key(session, "pull all data from Mr. SkeleWelly")
     assert active == "mrskelewelly"
+
+
+def test_mrskelewelly_channel_key_is_not_used_as_skeleton_category():
+    args = {
+        "category_key": "mrskelewelly",
+        "topic": "The Real Reason You Overthink Everything",
+        "video_model": "seedance",
+        "render_style": "skeleton_host",
+    }
+
+    normalized = _normalize_shortform_category_args(args)
+
+    assert normalized["category_key"] == "human_limits"
+    assert normalized["_selected_channel_key"] == "mrskelewelly"
+    assert args["category_key"] == "mrskelewelly"
 
 
 def test_channel_guard_rewrites_wrong_registry_for_analytics():
@@ -214,4 +230,5 @@ if __name__ == "__main__":
     test_short_plan_uses_actual_live_video_rows_when_returned()
     test_public_search_request_requires_public_search_preflight()
     test_fake_public_search_progress_is_detected()
+    test_mrskelewelly_channel_key_is_not_used_as_skeleton_category()
     print("channel guard tests passed")
