@@ -53,7 +53,8 @@ class AuditReport:
             parts.append(f"- Warning: {item}")
         parts.append(
             "On the next answer, ground claims in user-provided facts, memory, or tool results. "
-            "If the required evidence is missing, call the correct tool first or say what still needs to run."
+            "If the required evidence is missing, do not narrate a future tool call as if it ran. "
+            "Either the backend must execute the tool first, or answer with the exact missing evidence/next step."
         )
         return "\n".join(parts)
 
@@ -104,6 +105,18 @@ _FAKE_LIVE_DATA_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_FAKE_TOOL_PROGRESS_RE = re.compile(
+    r"\b("
+    r"(?:one|two|three|four|five|\d+)\s+data pulls?\s+(?:running|active|started|in progress)|"
+    r"data pulls? running simultaneously|"
+    r"let me read (?:all )?(?:the )?(?:returned )?(?:data|results)|"
+    r"read (?:all )?(?:the )?returned (?:data|results)|"
+    r"results? (?:are|is) still processing|"
+    r"cross-?reference (?:them|the data|the results)|"
+    r"i now have .*?data pulls?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 _CHANNEL_DATA_CLAIM_RE = re.compile(
     r"\b("
@@ -113,6 +126,7 @@ _CHANNEL_DATA_CLAIM_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_TOOL_NARRATION_RE = re.compile(r"(?im)^\s*Tool:\s*([a-zA-Z_][\w.-]*)\b")
 
 _SPECIFIC_RETENTION_CLAIM_RE = re.compile(
     r"\b("
@@ -287,6 +301,10 @@ def _tool_names(tool_fires: Sequence[ToolFire]) -> set[str]:
     return {str(t.name or "") for t in tool_fires if str(t.name or "")}
 
 
+def _textual_tool_names(text: str | None) -> set[str]:
+    return {match.group(1) for match in _TOOL_NARRATION_RE.finditer(text or "")}
+
+
 def _tool_count(tool_fires: Sequence[ToolFire], names: set[str]) -> int:
     return sum(1 for fire in tool_fires if fire.name in names)
 
@@ -392,9 +410,23 @@ def _router_layer(
     tool_fires: Sequence[ToolFire],
 ) -> LayerCheck:
     blockers: list[str] = []
+    textual_tools = _textual_tool_names(assistant_text)
+    if textual_tools:
+        fired_tools = _tool_names(tool_fires)
+        missing = sorted(name for name in textual_tools if name not in fired_tools)
+        if missing:
+            blockers.append(
+                "printed tool-call text without executing matching backend tool(s): "
+                + ", ".join(missing)
+            )
 
     if _FAKE_LIVE_DATA_RE.search(assistant_text) and not _has_any_tool(tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS):
         blockers.append("claimed fresh/live/current data without a search, reference, or channel analytics tool")
+
+    if _FAKE_TOOL_PROGRESS_RE.search(assistant_text) and not _has_any_tool(
+        tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS | _ACTION_TOOLS
+    ):
+        blockers.append("claimed backend tool/search work was running without executed tool evidence")
 
     if _CURRENT_INFO_RE.search(user_text or "") and not _has_any_tool(tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS):
         grounded_refusal = bool(re.search(r"\bneed (?:a |the )?(?:live|search|reference|channel|analytics|data|tool)\b", _lower(assistant_text)))
@@ -552,9 +584,9 @@ def guard_text(assistant_text: str, report: AuditReport) -> str:
     if "channel" in joined or "analytics" in joined:
         if "video-level avd" in joined or "video-level retention" in joined:
             return (
-                "I do not have enough video-level retention evidence to name that specific high-AVD short yet. "
-                "The channel tool returned incomplete/private analytics for per-video AVD. Studio needs a refreshed "
-                "YouTube Analytics OAuth sync or a YouTube Studio screenshot/export before I can identify the exact winner."
+                "I cannot name an exact high-AVD winner from this tool result yet because per-video retention rows "
+                "are unavailable. I should continue from the available selected-channel snapshot/public data, make "
+                "that limitation explicit, and avoid inventing a specific winner."
             )
         return (
             "The required channel analytics tool did not run in this turn, so I cannot make a grounded performance "

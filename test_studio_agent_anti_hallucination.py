@@ -20,6 +20,54 @@ def test_allows_channel_data_claim_with_analytics_tool():
     assert not report.has_blockers
 
 
+def test_blocks_printed_tool_call_without_matching_backend_tool():
+    report = audit_turn(
+        assistant_text=(
+            "Tool: get_public_search_trends\n\n"
+            '{"niche_query":"psychology behavior self improvement YouTube Shorts","platform":"youtube"}\n\n'
+            "Good. I now have four data pulls running simultaneously."
+        ),
+        user_text="Pull live search trend data before recommending a topic.",
+        tool_fires=[],
+    )
+    assert report.has_blockers
+    assert "printed tool-call text" in " ".join(report.blocked_claims)
+
+
+def test_blocks_fake_tool_progress_without_tool_fire():
+    report = audit_turn(
+        assistant_text=(
+            "Good. I now have four data pulls running simultaneously. "
+            "Give me a moment to read the returned data."
+        ),
+        user_text=(
+            "Figure out what people are actually looking for on YouTube Shorts "
+            "before recommending a topic."
+        ),
+        tool_fires=[],
+    )
+    assert report.has_blockers
+    assert "claimed backend tool/search work was running" in " ".join(report.blocked_claims)
+
+
+def test_allows_printed_tool_call_when_matching_backend_tool_exists():
+    report = audit_turn(
+        assistant_text=(
+            "Tool: get_public_search_trends\n\n"
+            '{"niche_query":"psychology behavior self improvement YouTube Shorts","platform":"youtube"}'
+        ),
+        user_text="Pull live search trend data before recommending a topic.",
+        tool_fires=[
+            ToolFire(
+                "get_public_search_trends",
+                {"niche_query": "psychology behavior self improvement YouTube Shorts", "platform": "youtube"},
+                '{"ok":true,"results":[]}',
+            )
+        ],
+    )
+    assert not any("printed tool-call text" in claim for claim in report.blocked_claims)
+
+
 def test_blocks_production_complete_without_completed_result():
     report = audit_turn(
         assistant_text="Re-edit complete. Download the MP4.",

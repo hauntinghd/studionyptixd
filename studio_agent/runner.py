@@ -120,6 +120,15 @@ CHANNEL_ALIASES: dict[str, tuple[str, ...]] = {
         "nyptid recaps",
         "@nyptidrecaps",
     ),
+    "mrskelewelly": (
+        "mrskelewelly",
+        "mr skelewelly",
+        "mr. skelewelly",
+        "mr skellywelly",
+        "mr. skellywelly",
+        "skellywelly",
+        "skelewelly",
+    ),
 }
 
 
@@ -150,6 +159,9 @@ def _needs_channel_data_preflight(user_text: str) -> bool:
     direct_phrases = (
         "channel data",
         "analytics",
+        "pull all data",
+        "pull all of the data",
+        "pull data",
         "pull the data",
         "recommend",
         "why",
@@ -209,6 +221,100 @@ def _needs_channel_data_preflight(user_text: str) -> bool:
         "continue from saved tool",
     )
     return any(phrase in low for phrase in retry_phrases)
+
+
+def _is_channel_data_followup(user_text: str) -> bool:
+    low = str(user_text or "").strip().lower()
+    compact = low.strip(" ?!.")
+    if compact in {
+        "so",
+        "ok",
+        "okay",
+        "yes",
+        "yeah",
+        "yep",
+        "go",
+        "go ahead",
+        "do it",
+        "continue",
+        "try again",
+        "now",
+    }:
+        return True
+    return len(compact) <= 24 and any(
+        phrase in compact
+        for phrase in (
+            "what now",
+            "how about now",
+            "did it work",
+            "any update",
+            "still waiting",
+            "call it",
+        )
+    )
+
+
+def _recent_assistant_promised_channel_data(messages: list[dict[str, Any]], lookback: int = 6) -> bool:
+    checked = 0
+    for msg in reversed(messages or []):
+        if checked >= lookback:
+            break
+        role = str(msg.get("role") or "")
+        if role == "user":
+            continue
+        checked += 1
+        if role != "assistant":
+            continue
+        content = str(msg.get("content") or "").lower()
+        if any(
+            phrase in content
+            for phrase in (
+                "pull the live channel data",
+                "pull live channel data",
+                "pull the channel data",
+                "waiting on the analytics pull",
+                "call that now directly",
+                "call the analytics",
+                "use the studio channel analytics",
+                "before we plan anything",
+                "before making performance claims",
+            )
+        ):
+            return True
+    return False
+
+
+def _assistant_stalled_on_channel_data(assistant_text: str) -> bool:
+    low = str(assistant_text or "").lower()
+    if "get_channel_analytics" in low and ("tool:" in low or "registry_key" in low):
+        return True
+    if any(tool_name in low for tool_name in ("get_public_search_trends", "recommend_video_topics")) and (
+        "tool:" in low or "niche_query" in low or "running simultaneously" in low
+    ):
+        return True
+    stall_phrases = (
+        "let me pull that data right now",
+        "let me pull the live channel data",
+        "let me pull live channel data",
+        "let me pull the channel data",
+        "still waiting on the analytics pull",
+        "let me call that now directly",
+        "let me call it now directly",
+        "i will use the studio channel analytics",
+        "i'll use the studio channel analytics",
+        "i need the connected channel data before",
+        "before we plan anything",
+        "before making performance claims",
+        "four data pulls running",
+        "data pulls running simultaneously",
+        "live search trends",
+        "public demand data",
+        "what i am pulling from public demand data",
+        "people are actively typing",
+        "read the returned data",
+        "cross-reference them",
+    )
+    return any(phrase in low for phrase in stall_phrases)
 
 
 def _is_manual_visual_edit_request(user_text: str, reply_to: dict | None = None) -> bool:
@@ -334,6 +440,72 @@ def _has_channel_analytics_tool(tool_fires: list[ToolFire]) -> bool:
     return any(str(fire.name or "") == "get_channel_analytics" for fire in tool_fires or [])
 
 
+def _wants_short_plan(user_text: str) -> bool:
+    low = str(user_text or "").lower()
+    if "short" not in low and "short-form" not in low and "shortform" not in low:
+        return False
+    plan_terms = (
+        "plan",
+        "new",
+        "next",
+        "make",
+        "create",
+        "doesn't flop",
+        "doesnt flop",
+        "not flop",
+        "flop",
+    )
+    return any(term in low for term in plan_terms)
+
+
+def _needs_public_search_preflight(user_text: str) -> bool:
+    low = str(user_text or "").lower()
+    demand_terms = (
+        "what people are actually looking for",
+        "what people are looking for",
+        "search trend",
+        "search trends",
+        "public demand",
+        "search demand",
+        "youtube shorts",
+        "people are searching",
+        "people are actively typing",
+        "go on youtube",
+        "look up",
+        "live search",
+        "trend data",
+        "topic demand",
+    )
+    action_terms = (
+        "pull",
+        "find",
+        "recommend",
+        "topic",
+        "plan",
+        "new short",
+        "short-form",
+        "short form",
+        "make",
+        "create",
+        "figure out",
+    )
+    return any(term in low for term in demand_terms) and any(term in low for term in action_terms)
+
+
+def _public_search_query_for_channel(active_label: str, user_text: str) -> str:
+    label = str(active_label or "").lower()
+    if "skele" in label:
+        return "psychology hidden behavior self improvement YouTube Shorts"
+    if "empire" in label:
+        return "financial crime documentary business scandal YouTube"
+    if "zerotier" in label or "zero tier" in label:
+        return "comic book mystery shorts YouTube"
+    if "cryptic" in label:
+        return "science mystery deep science YouTube Shorts"
+    cleaned = " ".join(str(user_text or "").split())
+    return cleaned[:180] or "YouTube Shorts topic demand"
+
+
 def _grounded_channel_status_from_tools(
     tool_fires: list[ToolFire],
     *,
@@ -359,9 +531,11 @@ def _grounded_channel_status_from_tools(
         metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
         live = data.get("youtube_analytics_live") if isinstance(data.get("youtube_analytics_live"), dict) else {}
         source = str(quality.get("effective_source") or "unknown").strip()
-        title = str(data.get("channel_title") or active_label or "selected channel").strip()
+        reported_title = str(data.get("channel_title") or "").strip()
+        title = str(active_label or reported_title or "selected channel").strip()
         rows = int(quality.get("video_rows_available") or metrics.get("video_rows_available") or 0)
         retention_rows = int(quality.get("retention_rows_available") or metrics.get("retention_rows_available") or 0)
+        video_row_payloads = _channel_video_rows_from_metrics(metrics)
         oauth_connected = bool(quality.get("oauth_connected"))
         limitation = str(quality.get("limitation") or quality.get("oauth_error") or live.get("error") or "").strip()
         matched_by = ""
@@ -379,16 +553,254 @@ def _grounded_channel_status_from_tools(
         ]
         if matched_by:
             lines.append(f"- Channel match: {matched_by}")
+        if reported_title and reported_title.lower() != title.lower():
+            lines.append(f"- Tool-reported channel title ignored: {reported_title} (selected chat channel is {title})")
         if limitation:
             lines.extend(["", f"Limitation: {limitation}"])
         lines.append("")
-        lines.append(
-            "I should use only this selected-channel result for the next recommendation. "
-            "If retention rows are missing, I can still use the available channel snapshot/public performance, "
-            "but I should not invent a specific high-AVD winner."
-        )
+        if retention_rows > 0 and video_row_payloads:
+            lines.append(
+                "Retention rows with actual video titles/metrics are present for this selected channel. "
+                "I should use only those selected-channel rows for the next recommendation and avoid cross-channel memory contamination."
+            )
+        elif retention_rows > 0:
+            lines.append(
+                "Retention row count was reported, but no actual video-title/metric rows were returned in the payload. "
+                "I should not name a winner from counts alone."
+            )
+        else:
+            lines.append(
+                "I should use only this selected-channel result for the next recommendation. "
+                "If retention rows are missing, I can still use the available channel snapshot/public performance, "
+                "but I should not invent a specific high-AVD winner."
+            )
         return "\n".join(lines)
     return ""
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _channel_video_rows_from_metrics(metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return actual video rows, not just row counts, from the analytics summary."""
+    if not isinstance(metrics, dict):
+        return []
+
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for key in ("top_shorts_by_retention", "top_by_retention", "top_by_views"):
+        bucket = metrics.get(key)
+        if not isinstance(bucket, list):
+            continue
+        for row in bucket:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            video_id = str(row.get("video_id") or "").strip()
+            dedupe_key = video_id or title.lower()
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            rows.append(dict(row))
+            if len(rows) >= 8:
+                return rows
+    return rows
+
+
+def _metric_row_line(row: dict[str, Any]) -> str:
+    title = str(row.get("title") or row.get("video_id") or "Untitled video").strip()
+    stats: list[str] = []
+    views = _safe_int(row.get("views", row.get("view_count", 0)))
+    avp = _safe_float(row.get("average_view_percentage"))
+    avd = _safe_int(row.get("average_view_duration_sec"))
+    ctr = _safe_float(row.get("impression_click_through_rate"))
+    published = str(row.get("published_at") or "").strip()
+    if views:
+        stats.append(f"{views:,} views")
+    if avp:
+        stats.append(f"{avp:.2f}% avg view")
+    if avd:
+        stats.append(f"{avd}s AVD")
+    if ctr:
+        stats.append(f"{ctr:.2f}% CTR")
+    if published:
+        stats.append(f"published {published[:10]}")
+    return f"- {title}" + (f": {'; '.join(stats)}" if stats else "")
+
+
+def _best_retention_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    usable = [
+        row
+        for row in rows
+        if _safe_float(row.get("average_view_percentage")) > 0
+        or _safe_int(row.get("average_view_duration_sec")) > 0
+    ]
+    if not usable:
+        return None
+    return max(
+        usable,
+        key=lambda row: (
+            _safe_float(row.get("average_view_percentage")),
+            _safe_int(row.get("views", row.get("view_count", 0))),
+            _safe_int(row.get("average_view_duration_sec")),
+        ),
+    )
+
+
+def _latest_channel_analytics_evidence(tool_fires: list[ToolFire]) -> dict[str, Any]:
+    for fire in reversed(tool_fires or []):
+        if str(fire.name or "") != "get_channel_analytics":
+            continue
+        try:
+            data = json.loads(fire.result or "{}")
+        except Exception:
+            data = {}
+        if not isinstance(data, dict) or data.get("error"):
+            continue
+        quality = data.get("analytics_data_quality") if isinstance(data.get("analytics_data_quality"), dict) else {}
+        metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
+        video_rows = _channel_video_rows_from_metrics(metrics)
+        return {
+            "video_rows_available": int(quality.get("video_rows_available") or metrics.get("video_rows_available") or 0),
+            "retention_rows_available": int(
+                quality.get("retention_rows_available") or metrics.get("retention_rows_available") or 0
+            ),
+            "source": str(quality.get("effective_source") or "unknown").strip(),
+            "oauth_connected": bool(quality.get("oauth_connected")),
+            "video_rows": video_rows,
+        }
+    return {
+        "video_rows_available": 0,
+        "retention_rows_available": 0,
+        "source": "unknown",
+        "oauth_connected": False,
+        "video_rows": [],
+    }
+
+
+def _grounded_channel_plan_from_tools(
+    tool_fires: list[ToolFire],
+    *,
+    active_label: str,
+    user_text: str = "",
+) -> str:
+    """Plan from available channel evidence without inventing missing retention rows."""
+    status = _grounded_channel_status_from_tools(tool_fires, active_label=active_label)
+    evidence = _latest_channel_analytics_evidence(tool_fires)
+    retention_rows = int(evidence.get("retention_rows_available") or 0)
+    video_rows = evidence.get("video_rows") if isinstance(evidence.get("video_rows"), list) else []
+    best_row = _best_retention_row(video_rows)
+    title = str(active_label or "selected channel").strip() or "selected channel"
+    low_title = title.lower().replace(" ", "")
+    low_user = str(user_text or "").lower()
+    is_skeleton = "skele" in low_title or "skeleton" in low_user or "skelly" in low_user
+
+    if is_skeleton:
+        reference_title = str((best_row or {}).get("title") or "").strip()
+        idea_title = (
+            f"Next {title} short: follow the strongest returned pattern"
+            if reference_title
+            else f"Next {title} short: draft only until actual video rows are returned"
+        )
+        format_line = (
+            "55-60 second psychology skeleton short built from the selected channel's returned video evidence."
+            if reference_title
+            else "55-60 second psychology skeleton short, but treat the topic as a draft until row-level evidence is returned."
+        )
+        hook = (
+            f"Use the structure that worked in {reference_title}: immediate curiosity, one clear psychology promise, and a visual interrupt before the first drop."
+            if reference_title
+            else "Open with one clear psychology promise, but do not claim it is evidence-backed until the analytics payload includes actual titles and retention rows."
+        )
+        beat_lines = [
+            "0-3s: Direct hook, MrSkeleWelly centered, one-word captions if captions are enabled.",
+            "3-10s: Explain the tension: the brain rehearses danger to feel in control.",
+            "10-22s: Visual pattern interrupt: same skeleton identity, new pose/background, no wardrobe drift.",
+            "22-38s: Payoff: overthinking feels useful, but it is usually a fake safety loop.",
+            "38-50s: Practical release: name the next tiny action instead of solving the whole future.",
+            "50-60s: CTA: ask viewers to comment the thing they overthink most.",
+        ]
+        tags = "#psychology #overthinking #shorts #mrskelewelly #mindset"
+    else:
+        idea_title = f"Next {title} short: one clear promise, one visual system, one CTA"
+        format_line = "45-60 second short using the selected channel's available snapshot/public performance data."
+        hook = "Open with the clearest pain point or curiosity gap the channel audience already cares about."
+        beat_lines = [
+            "0-3s: Hook with one dominant promise.",
+            "3-10s: Establish why the viewer should care now.",
+            "10-25s: Deliver the first reveal with a visual change.",
+            "25-42s: Add a second reveal or contradiction.",
+            "42-55s: Resolve the idea and give a clear CTA.",
+        ]
+        tags = "#shorts #content #storytelling"
+
+    evidence_lines: list[str] = []
+    if video_rows:
+        evidence_lines.extend(["Actual selected-channel videos returned:"])
+        evidence_lines.extend(_metric_row_line(row) for row in video_rows[:5])
+        if best_row:
+            best_title = str(best_row.get("title") or "selected video").strip()
+            evidence_lines.append(
+                f"Best returned reference: {best_title} "
+                f"({_safe_float(best_row.get('average_view_percentage')):.2f}% avg view, "
+                f"{_safe_int(best_row.get('views', best_row.get('view_count', 0))):,} views)."
+            )
+    elif retention_rows > 0:
+        evidence_lines.append(
+            "The analytics tool reported retention rows, but the payload did not include actual video titles/metrics. "
+            "I cannot rank a winner until the backend returns top_by_retention or top_shorts_by_retention rows."
+        )
+    else:
+        evidence_lines.append(
+            "No usable row-level retention videos were returned, so this cannot claim a specific high-AVD winner."
+        )
+
+    lines = [
+        status or f"I can use the available selected-channel data for {title}.",
+        "",
+        (
+            "Per-video retention rows with actual video titles are available from the selected-channel analytics result."
+            if video_rows and best_row
+            else "I cannot name an exact high-AVD winner unless the analytics tool returns per-video retention rows. I can still plan the next short from the available channel data without inventing that missing winner."
+        ),
+        "",
+        *evidence_lines,
+        "",
+        f"Next short plan: {idea_title}",
+        f"Format: {format_line}",
+        f"Hook: {hook}",
+        "",
+        "Beat map:",
+    ]
+    lines.extend(f"- {line}" for line in beat_lines)
+    lines.extend(
+        [
+            "",
+            "Production rules:",
+            "- Keep the selected channel locked for this chat.",
+            "- Keep character identity and channel watermark/package locked to this channel.",
+            "- Generate stills first and show them for review before image-to-video.",
+            "- Do not animate until approved scenes are selected.",
+            "- If captions are enabled, use one synced caption per word. If captions are disabled, do not add captions.",
+            "",
+            "Packaging:",
+            f"- Title: {idea_title}",
+            "- Description: A short, direct setup of the promise plus one CTA.",
+            f"- Tags: {tags}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _inject_shortform_render_style(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
@@ -407,12 +819,30 @@ def _inject_shortform_render_style(args: dict[str, Any], session: dict[str, Any]
 def _inject_shortform_caption_options(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     """Ensure shortform jobs inherit session caption preferences when omitted."""
     merged = dict(args or {})
+    explicit_mode = "caption_mode" in merged
+    explicit_enabled = "captions_enabled" in merged
+    session_mode = str(session.get("caption_mode") or "").strip().lower()
+
     if "captions_enabled" not in merged:
-        merged["captions_enabled"] = bool(session.get("captions_enabled", True))
-    if "caption_mode" not in merged:
-        mode = str(session.get("caption_mode") or "").strip().lower()
-        merged["caption_mode"] = "off" if mode == "off" or merged.get("captions_enabled") is False else "word"
-    if str(merged.get("caption_mode") or "").strip().lower() == "off":
+        if "captions_enabled" in session:
+            merged["captions_enabled"] = bool(session.get("captions_enabled"))
+        else:
+            merged["captions_enabled"] = session_mode == "word"
+
+    if not explicit_mode:
+        if session_mode in {"word", "off"}:
+            merged["caption_mode"] = session_mode
+        else:
+            merged["caption_mode"] = "word" if merged.get("captions_enabled") is True else "off"
+
+    if str(merged.get("caption_mode") or "").strip().lower() == "off" or merged.get("captions_enabled") is False:
+        merged["caption_mode"] = "off"
+        merged["captions_enabled"] = False
+    elif explicit_mode or explicit_enabled or session_mode == "word":
+        merged["caption_mode"] = "word"
+        merged["captions_enabled"] = True
+    else:
+        merged["caption_mode"] = "off"
         merged["captions_enabled"] = False
     return merged
 
@@ -697,7 +1127,8 @@ REQUIRED on every short render: `render_style` from list_render_styles OR the us
   ZeroTier branding on skeleton channels, Empire Magnates copy on ZeroTier, or any other cross-channel brand.
 - Captions are optional. If the user asks for no captions, pass captions_enabled=false / caption_mode=off.
   If captions are enabled, default to word-level captions: one spoken word per caption, synced to the narration.
-- For skeleton_host shorts, word captions, selected-channel branding, and the short package are default render outputs.
+- For skeleton_host shorts, selected-channel branding and the short package are default render outputs.
+  Captions follow the selected CC mode; use word captions only when captions are enabled or requested.
   Do not ask the user to re-edit just to get those defaults.
 - Do NOT generate thumbnail candidates for short-form by default. Use the strongest frame/cover from the finished Short
   unless the user explicitly asks for a custom short thumbnail.
@@ -1088,25 +1519,58 @@ async def _run_turn_impl(
         session = compacted
         messages = list(session.get("messages") or messages)
 
+    channel_data_preflight_required = _needs_channel_data_preflight(user_text)
+    if not channel_data_preflight_required and _is_channel_data_followup(user_text):
+        channel_data_preflight_required = _recent_assistant_promised_channel_data(messages)
+    public_search_preflight_required = _needs_public_search_preflight(user_text)
+    if not public_search_preflight_required and _is_channel_data_followup(user_text):
+        public_search_preflight_required = _recent_assistant_promised_channel_data(messages)
+
     preflight_tool_fires: list[ToolFire] = []
-    if (active_registry or active_channel_id) and _needs_channel_data_preflight(user_text):
-        preflight_plan = [
-            ("list_youtube_channels", {}),
-            (
-                "get_channel_analytics",
-                {"registry_key": active_registry, "channel_id": active_channel_id},
-            ),
-            (
-                "recommend_video_topics",
-                {"registry_key": active_registry, "channel_id": active_channel_id, "days": 30},
-            ),
-        ]
+    if (active_registry or active_channel_id) and (channel_data_preflight_required or public_search_preflight_required):
         active_label = (
             str(session.get("channel_title") or "").strip()
             or active_registry.replace("_", " ")
             or "selected"
         )
-        await _fire_event(emit, "status", message=f"Pulling {active_label} channel data...")
+        preflight_plan: list[tuple[str, dict[str, Any]]] = []
+        if channel_data_preflight_required:
+            preflight_plan.extend([
+                ("list_youtube_channels", {}),
+                (
+                    "get_channel_analytics",
+                    {"registry_key": active_registry, "channel_id": active_channel_id},
+                ),
+                (
+                    "recommend_video_topics",
+                    {"registry_key": active_registry, "channel_id": active_channel_id, "days": 30},
+                ),
+            ])
+        if public_search_preflight_required:
+            preflight_plan.append((
+                "get_public_search_trends",
+                {
+                    "registry_key": active_registry,
+                    "query": _public_search_query_for_channel(active_label, user_text),
+                    "days": 30,
+                },
+            ))
+        deduped_plan: list[tuple[str, dict[str, Any]]] = []
+        seen_plan: set[tuple[str, str]] = set()
+        for pf_name, pf_args in preflight_plan:
+            key = (pf_name, json.dumps(pf_args, sort_keys=True))
+            if key in seen_plan:
+                continue
+            seen_plan.add(key)
+            deduped_plan.append((pf_name, pf_args))
+        preflight_plan = deduped_plan
+        if channel_data_preflight_required and public_search_preflight_required:
+            scope = "channel/search data"
+        elif public_search_preflight_required:
+            scope = "public search data"
+        else:
+            scope = "channel data"
+        await _fire_event(emit, "status", message=f"Pulling {active_label} {scope}...")
         for pf_name, pf_args in preflight_plan:
             await _fire_event(emit, "tool_start", tool=pf_name, round=0, awaiting_approval=False)
             try:
@@ -1140,10 +1604,10 @@ async def _run_turn_impl(
             messages.append({
                 "role": "system",
                 "content": (
-                    "[Studio Agent required channel-data preflight is complete for this turn. "
+                    "[Studio Agent required data preflight is complete for this turn. "
                     "Answer from the tool observations already in this context. Do not say you still need to pull "
-                    "channel data or that you will use the analytics tool next; if the tool returned limited data, "
-                    "state the exact limitation from analytics_data_quality/oauth_error and then give the grounded next step.]"
+                    "channel/search data or that you will use the analytics/search tool next; if a tool returned limited data, "
+                    "state the exact limitation from the tool payload and then give the grounded next step.]"
                 ),
             })
             store.update_session(sid, messages=messages)
@@ -1444,6 +1908,27 @@ async def _run_turn_impl(
 
     if assistant_text:
         assistant_text = sanitize_assistant_text(assistant_text)
+        if (
+            (active_registry or active_channel_id)
+            and _has_channel_analytics_tool(tool_fires)
+            and _assistant_stalled_on_channel_data(assistant_text)
+        ):
+            active_label = (
+                str(session.get("channel_title") or "").strip()
+                or str(active_registry or active_channel_id or "").replace("_", " ")
+                or "selected"
+            )
+            if _wants_short_plan(user_text):
+                assistant_text = _grounded_channel_plan_from_tools(
+                    tool_fires,
+                    active_label=active_label,
+                    user_text=user_text,
+                )
+            else:
+                assistant_text = _grounded_channel_status_from_tools(
+                    tool_fires,
+                    active_label=active_label,
+                )
         audit = audit_turn(
             assistant_text=assistant_text,
             user_text=user_text,
@@ -1545,11 +2030,21 @@ async def _run_turn_impl(
                     "channel analytics tool did not run" in guarded.lower()
                     or "verify the missing evidence" in guarded.lower()
                     or "cannot make a grounded performance claim" in guarded.lower()
+                    or "cannot name an exact high-avd winner" in guarded.lower()
+                    or "video-level retention" in guarded.lower()
+                    or "per-video retention" in guarded.lower()
                 ):
-                    grounded_status = _grounded_channel_status_from_tools(
-                        tool_fires,
-                        active_label=active_label,
-                    )
+                    if _wants_short_plan(user_text):
+                        grounded_status = _grounded_channel_plan_from_tools(
+                            tool_fires,
+                            active_label=active_label,
+                            user_text=user_text,
+                        )
+                    else:
+                        grounded_status = _grounded_channel_status_from_tools(
+                            tool_fires,
+                            active_label=active_label,
+                        )
             assistant_text = sanitize_assistant_text(grounded_status or guard_text(assistant_text, audit))
         messages.append({"role": "assistant", "content": assistant_text})
 
