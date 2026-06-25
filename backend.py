@@ -704,6 +704,24 @@ _frontend_asset_cache = {"ts": 0.0, "js": "", "css": ""}
 _frontend_cache_buster = str(int(time.time()))
 
 
+@app.on_event("startup")
+async def _start_persistent_background_maintenance() -> None:
+    import catalyst_backfill
+    import youtube as youtube_module
+
+    catalyst_backfill.start_auto_loop()
+    youtube_module.start_youtube_token_maintenance()
+
+
+@app.on_event("shutdown")
+async def _stop_persistent_background_maintenance() -> None:
+    import catalyst_backfill
+    import youtube as youtube_module
+
+    catalyst_backfill.stop_auto_loop()
+    youtube_module.stop_youtube_token_maintenance()
+
+
 def _resolve_latest_frontend_assets() -> tuple[str, str]:
     now = time.time()
     if now - float(_frontend_asset_cache.get("ts", 0.0)) < 10.0:

@@ -7,6 +7,7 @@ import html as html_lib
 import hmac
 import json
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -49,7 +50,14 @@ from backend_settings import (
 )
 
 YOUTUBE_OAUTH_STATE_TTL_SEC = 20 * 60
-YOUTUBE_TOKEN_REFRESH_MARGIN_SEC = 120
+YOUTUBE_TOKEN_REFRESH_MARGIN_SEC = max(
+    120,
+    int(os.getenv("YOUTUBE_TOKEN_REFRESH_MARGIN_SEC", "1800")),
+)
+YOUTUBE_TOKEN_MAINTENANCE_INTERVAL_SEC = max(
+    300,
+    int(os.getenv("YOUTUBE_TOKEN_MAINTENANCE_INTERVAL_SEC", "900")),
+)
 YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
@@ -90,6 +98,7 @@ def _youtube_cache_set(key: str, data):
 
 _youtube_connections: dict[str, dict] = {}
 _youtube_connections_lock = asyncio.Lock()
+_youtube_token_maintenance_task: asyncio.Task | None = None
 _youtube_oauth_states: dict[str, dict] = {}
 _youtube_oauth_states_lock = asyncio.Lock()
 _youtube_historical_compare_public_view = lambda payload: dict(payload or {})
@@ -2168,6 +2177,87 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
     updated["oauth_mode"] = oauth_mode
     updated["last_synced_at"] = now
     return str(updated.get("access_token", "") or "").strip(), updated
+
+
+async def _youtube_refresh_saved_tokens_once() -> dict:
+    """Proactively refresh every saved channel before its access token expires."""
+    async with _youtube_connections_lock:
+        _load_youtube_connections()
+        candidates = [
+            (str(user_id), str(channel_id), dict(record or {}))
+            for user_id, bucket in (_youtube_connections or {}).items()
+            if isinstance(bucket, dict)
+            for channel_id, record in (bucket.get("channels") or {}).items()
+            if isinstance(record, dict) and str(record.get("refresh_token", "") or "").strip()
+        ]
+
+    refreshed_count = 0
+    failed_count = 0
+    changed: list[tuple[str, str, dict]] = []
+    now = time.time()
+    for user_id, channel_id, record in candidates:
+        expires_at = float(record.get("token_expires_at", 0.0) or 0.0)
+        has_error = bool(str(record.get("last_sync_error", "") or "").strip())
+        if expires_at > now + YOUTUBE_TOKEN_REFRESH_MARGIN_SEC and not has_error:
+            continue
+        try:
+            _, updated = await _youtube_ensure_access_token(record)
+            updated["last_sync_error"] = ""
+            changed.append((user_id, channel_id, updated))
+            refreshed_count += 1
+        except Exception as exc:
+            record["last_sync_error"] = _clip_text(str(exc), 320)
+            changed.append((user_id, channel_id, record))
+            failed_count += 1
+
+    if changed:
+        async with _youtube_connections_lock:
+            _load_youtube_connections()
+            for user_id, channel_id, record in changed:
+                bucket = _youtube_bucket_for_user(user_id)
+                bucket.setdefault("channels", {})[channel_id] = record
+            _save_youtube_connections()
+    return {
+        "checked": len(candidates),
+        "refreshed": refreshed_count,
+        "failed": failed_count,
+    }
+
+
+async def _youtube_token_maintenance_runner() -> None:
+    try:
+        await asyncio.sleep(20)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            summary = await _youtube_refresh_saved_tokens_once()
+            log.info(
+                "YouTube token maintenance: checked=%d refreshed=%d failed=%d",
+                summary["checked"],
+                summary["refreshed"],
+                summary["failed"],
+            )
+        except Exception as exc:
+            log.warning("YouTube token maintenance failed: %s", str(exc)[:300])
+        try:
+            await asyncio.sleep(YOUTUBE_TOKEN_MAINTENANCE_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            return
+
+
+def start_youtube_token_maintenance() -> None:
+    global _youtube_token_maintenance_task
+    if _youtube_token_maintenance_task is not None and not _youtube_token_maintenance_task.done():
+        return
+    _youtube_token_maintenance_task = asyncio.create_task(_youtube_token_maintenance_runner())
+
+
+def stop_youtube_token_maintenance() -> None:
+    global _youtube_token_maintenance_task
+    if _youtube_token_maintenance_task is not None and not _youtube_token_maintenance_task.done():
+        _youtube_token_maintenance_task.cancel()
+    _youtube_token_maintenance_task = None
 
 
 async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -> dict:
