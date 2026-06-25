@@ -1,13 +1,10 @@
 import type { ComponentType } from 'react';
 import {
-    BarChart3,
     BrainCircuit,
     CalendarClock,
     Clapperboard,
     Film,
-    GraduationCap,
     Image as ImageIcon,
-    Home,
     Plus,
     Receipt,
     Sparkles,
@@ -106,18 +103,13 @@ export function buildSidebarItems(
 ): SidebarItem[] {
     const canAgent = isAdmin || Boolean(laneAccess.agent);
     return ([
-        { id: 'home', label: 'Home', icon: Home },
         { id: 'create', label: 'Create', icon: Sparkles },
         { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Beta' },
-        { id: 'campus', label: 'Studio Hub', icon: GraduationCap, badge: 'New' },
-        { id: 'network', label: 'Network', icon: Users },
-        { id: 'wins', label: 'Wins', icon: BarChart3 },
-        { id: 'leaderboard', label: 'Leaderboard', icon: BarChart3 },
         { id: 'thumbnails', label: 'ThumbLab', icon: ImageIcon, hidden: !isAdmin, badge: 'Beta' },
         { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: false, comingSoon: !isAdmin && !laneAccess.cliplab, badge: isAdmin || laneAccess.cliplab ? 'Beta' : 'Soon' },
         { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin, badge: 'Beta' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
-        { id: 'analytics', label: 'Analytics', icon: BarChart3, hidden: !isAdmin },
+        { id: 'analytics', label: 'Analytics', icon: BrainCircuit, hidden: !isAdmin },
         { id: 'catalyst', label: 'Catalyst', icon: BrainCircuit, hidden: !isAdmin },
         { id: 'refunds', label: 'Refunds', icon: Receipt, hidden: !isAdmin },
         { id: 'waitlist', label: 'Waitlist', icon: Users, hidden: !isAdmin },

@@ -1028,7 +1028,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const sb = supabase || await ensureSupabaseClient();
         if (!sb) return "Auth is still connecting. Try again in a second.";
         pendingAuthIntentRef.current = 'google';
-        const redirectTo = isLocalDevHost ? `${window.location.origin}?page=dashboard` : `${STUDIO_SITE_URL}?page=dashboard`;
+        const redirectTo = isLocalDevHost
+            ? `${window.location.origin}?page=dashboard&tab=agent`
+            : `${STUDIO_SITE_URL}?page=dashboard&tab=agent`;
         const { error } = await sb.auth.signInWithOAuth({
             provider: 'google',
             options: {

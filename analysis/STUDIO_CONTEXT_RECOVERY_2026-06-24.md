@@ -23,7 +23,8 @@ Catalyst learning, channel memory, analytics, and background intelligence remain
 - Thread ID: `019e9f40-9535-76a2-aefe-4abade5809e2`
 - Raw session:
   `C:\Users\casey\.codex\sessions\2026\06\06\rollout-2026-06-06T19-24-35-019e9f40-9535-76a2-aefe-4abade5809e2.jsonl`
-- Size at recovery: about 150 MB, 21,450 JSONL records, 201 user messages.
+- The currently readable compressed JSONL was about 150 MB with 21,450 records and 201 user messages.
+- The original accumulated context footprint was over 15 GB before compression, per the user. Do not describe 150 MB as the total historical context size.
 - The Codex app reports the thread as `systemError`, but the raw session is intact.
 
 The final usable state from that thread was:

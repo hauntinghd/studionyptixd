@@ -179,13 +179,6 @@ export const STUDIO_TOOLS: StudioTool[] = [
         action: 'agent',
     },
     {
-        id: 'campus',
-        title: 'Studio Hub',
-        desc: 'Creator growth, business ads, network, ranks',
-        badge: 'New',
-        action: 'campus',
-    },
-    {
         id: 'thumbnails',
         title: 'ThumbLab',
         desc: 'Upload your video, study creator thumbs, generate packaging',

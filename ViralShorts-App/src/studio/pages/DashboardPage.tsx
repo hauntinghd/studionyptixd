@@ -3,7 +3,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import type { PageNav } from '../components/NavBar';
 import StudioShell from '../components/layout/StudioShell';
 import StudioSidebar, { buildSidebarItems } from '../components/layout/StudioSidebar';
-import { StudioCampusPreview, StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
+import { StudioHomeHero, StudioToolsRow } from '../components/home/NicheGalleryV2';
 import ChannelHomePanel from '../components/home/ChannelHomePanel';
 import RenderTierPicker from '../components/home/RenderTierPicker';
 import {
@@ -19,7 +19,6 @@ const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const AgentPanel = lazy(() => import('../panels/AgentPanel'));
-const GrowthCampusPanel = lazy(() => import('../panels/GrowthCampusPanel'));
 const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
 const ClipLabPanel = lazy(() => import('../panels/ClipLabPanel'));
 const RefundsPanel = lazy(() => import('../panels/RefundsPanel'));
@@ -48,18 +47,20 @@ const OWNER_ALL_ACCESS: Record<string, boolean> = {
 };
 
 function tabFromUrl(): DashboardTab {
-    if (typeof window === 'undefined') return 'home';
+    if (typeof window === 'undefined') return 'agent';
     try {
         const t = new URL(window.location.href).searchParams.get('tab');
+        if (!t || t === 'home' || t === 'campus' || t === 'network' || t === 'wins' || t === 'leaderboard' || t === 'checklist') {
+            return 'agent';
+        }
         const allowed: DashboardTab[] = [
-            'home', 'create', 'agent', 'campus', 'network', 'wins', 'leaderboard', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
+            'create', 'agent', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
         ];
-        if (t === 'checklist') return 'campus';
         if (t && allowed.includes(t as DashboardTab)) return t as DashboardTab;
     } catch {
         /* ignore */
     }
-    return 'home';
+    return 'agent';
 }
 
 export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
@@ -93,8 +94,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         (nextTab: DashboardTab) => {
             if (nextTab === 'home' || nextTab === 'create') return true;
             if (nextTab === 'longform') return isAdmin;
-            if (nextTab === 'campus') return true;
-            if (nextTab === 'network' || nextTab === 'wins' || nextTab === 'leaderboard') return true;
+            if (nextTab === 'campus' || nextTab === 'network' || nextTab === 'wins' || nextTab === 'leaderboard') return canUseAgent;
             if (nextTab === 'agent') return canUseAgent;
             if (nextTab === 'thumbnails') return isAdmin || Boolean((laneAccess as Record<string, boolean>).thumbnails);
             if (nextTab === 'cliplab') return isAdmin || Boolean((laneAccess as Record<string, boolean>).cliplab);
@@ -121,7 +121,14 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             }
         })();
         if (!hasExplicitTab) {
-            setTab(canUseAgent ? 'agent' : 'campus');
+            setTab('agent');
+            try {
+                const u = new URL(window.location.href);
+                u.searchParams.set('tab', 'agent');
+                window.history.replaceState({}, '', u.toString());
+            } catch {
+                /* ignore */
+            }
             setCreateOpen(false);
             setSelectedNiche(null);
             return;
@@ -133,30 +140,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             return;
         }
         if (urlTab === 'agent' && !canUseAgent) {
-            setTab('home');
-            try {
-                const u = new URL(window.location.href);
-                u.searchParams.delete('tab');
-                window.history.replaceState({}, '', u.toString());
-            } catch {
-                /* ignore */
-            }
+            setTab('agent');
+            setCreateOpen(false);
+            setSelectedNiche(null);
             return;
         }
         if (urlTab === 'longform' && isAdmin) {
             setTab('longform');
-            setCreateOpen(false);
-            setSelectedNiche(null);
-            return;
-        }
-        if (urlTab === 'campus') {
-            setTab('campus');
-            setCreateOpen(false);
-            setSelectedNiche(null);
-            return;
-        }
-        if ((urlTab === 'network' || urlTab === 'wins' || urlTab === 'leaderboard')) {
-            setTab(urlTab);
             setCreateOpen(false);
             setSelectedNiche(null);
             return;
@@ -202,34 +192,27 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     };
 
     const selectTab = (id: DashboardTab) => {
-        if (!isTabUnlocked(id)) return;
+        const normalizedId: DashboardTab = (
+            id === 'home' || id === 'campus' || id === 'network' || id === 'wins' || id === 'leaderboard'
+        ) ? 'agent' : id;
+        if (!isTabUnlocked(normalizedId)) return;
         try {
             const u = new URL(window.location.href);
-            if (id === 'home') {
-                u.searchParams.delete('tab');
-            } else {
-                u.searchParams.set('tab', id);
-            }
-            if (id === 'agent' || id === 'campus' || id === 'longform') {
+            u.searchParams.set('tab', normalizedId);
+            if (normalizedId === 'agent' || normalizedId === 'longform') {
                 u.searchParams.delete('niche');
             }
             window.history.replaceState({}, '', u.toString());
         } catch {
             /* ignore */
         }
-        if (id === 'home') {
-            setTab('campus');
-            setCreateOpen(false);
-            setSelectedNiche(null);
-            return;
-        }
-        if (id === 'create') {
+        if (normalizedId === 'create') {
             setTab('create');
             setCreateOpen(true);
             setSelectedNiche(null);
             return;
         }
-        setTab(id);
+        setTab(normalizedId);
         setCreateOpen(false);
         setSelectedNiche(null);
     };
@@ -243,10 +226,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             selectTab('longform');
             return;
         }
-        if (action === 'campus' && isAdmin) {
-            selectTab('campus');
-            return;
-        }
+        if (action === 'campus') return openAgent();
         if (action === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
             selectTab('thumbnails');
             return;
@@ -265,16 +245,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const panel = (() => {
         if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
-        if (tab === 'campus') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="hub" />);
-        if (tab === 'network') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="network" />);
-        if (tab === 'wins') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="wins" />);
-        if (tab === 'leaderboard') return lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="leaderboard" />);
         if (tab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) return lazyPanel(<ThumbnailPanel />);
         if (tab === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
             return lazyPanel(<ClipLabPanel />);
         }
         if (tab === 'agent' && canUseAgent) {
-            return lazyPanel(<AgentPanel onBack={() => selectTab('home')} />);
+            return lazyPanel(<AgentPanel />);
         }
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
@@ -326,16 +302,15 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const inBuilder = tab === 'create' && createOpen;
     const agentRequested = tab === 'agent';
     const isAgentTab = agentRequested && (loading || canUseAgent);
-    const campusRequested = tab === 'campus' || tab === 'network' || tab === 'wins' || tab === 'leaderboard' || tab === 'home';
-    const showHome = tab === 'home' || (tab === 'create' && !createOpen);
+    const showHome = tab === 'create' && !createOpen;
 
     return (
         <StudioShell
             onNavigate={onNavigate}
-            fullWidth={inBuilder || isAgentTab || campusRequested}
-            flush={isAgentTab || campusRequested}
+            fullWidth={inBuilder || isAgentTab}
+            flush={isAgentTab}
             sidebar={
-                inBuilder || isAgentTab || campusRequested ? undefined : (
+                inBuilder || isAgentTab ? undefined : (
                     <StudioSidebar
                         active={tab === 'create' && !createOpen ? 'home' : tab}
                         items={sidebarItems}
@@ -346,10 +321,9 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 )
             }
         >
-            {showHome && tab !== 'home' && (
+            {showHome && (
                 <div className="mx-auto max-w-7xl space-y-8">
                     <StudioHomeHero greeting={greeting} name={displayName} ownerPreview={ownerOverride} />
-                    {isAdmin && <StudioCampusPreview onOpen={() => selectTab('campus')} />}
                     <StudioToolsRow onTool={handleTool} isAdmin={isAdmin} />
                     <section className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5 shadow-sm shadow-black/30">
                         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -419,15 +393,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                 </div>
             )}
 
-            {campusRequested && (
-                <div className="h-[calc(100dvh-3.5rem)] overflow-hidden">
-                    {tab === 'home'
-                        ? lazyPanel(<GrowthCampusPanel onNavigate={onNavigate} onSelectStudioTab={selectTab} section="hub" />)
-                        : panel}
-                </div>
-            )}
-
-            {tab !== 'create' && tab !== 'home' && !isAgentTab && !campusRequested && (
+            {tab !== 'create' && tab !== 'home' && !isAgentTab && (
                 <div className="mx-auto max-w-7xl">{panel}</div>
             )}
         </StudioShell>

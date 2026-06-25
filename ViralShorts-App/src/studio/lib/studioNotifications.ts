@@ -13,6 +13,7 @@ export interface StudioNotification {
 }
 
 const STORAGE_KEY = 'nyptid_studio_notifications_v1';
+const RETIRED_IDS = new Set(['studio-campus-live', 'studio-hub-simplified']);
 
 function load(): StudioNotification[] {
     if (typeof window === 'undefined') return [];
@@ -20,7 +21,9 @@ function load(): StudioNotification[] {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return seedDefaults();
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? mergeDefaults(parsed) : seedDefaults();
+        return Array.isArray(parsed)
+            ? mergeDefaults(parsed.filter((item) => !RETIRED_IDS.has(String(item?.id || ''))))
+            : seedDefaults();
     } catch {
         return seedDefaults();
     }
@@ -44,24 +47,6 @@ function seedDefaults(): StudioNotification[] {
             title: 'Studio v2 is live',
             body: 'Pick a niche, choose Draft or Ship tier, connect YouTube in Settings for outcome insights.',
             createdAt: now,
-            read: false,
-        },
-        {
-            id: 'studio-campus-live',
-            kind: 'success',
-            title: 'Studio Hub is live',
-            body: 'The first growth OS layer is open: creator growth, business ads, network, ranks, and production engines.',
-            href: '/?page=dashboard&tab=campus',
-            createdAt: now - 30_000,
-            read: false,
-        },
-        {
-            id: 'studio-hub-simplified',
-            kind: 'success',
-            title: 'Studio Hub is cleaner',
-            body: 'Content Studio now opens as a simple room with General Chat, Wins, Leaderboard, direct production launchers, and Network separated.',
-            href: '/?page=dashboard&tab=campus',
-            createdAt: now - 45_000,
             read: false,
         },
         {

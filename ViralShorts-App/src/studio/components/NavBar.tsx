@@ -2,13 +2,9 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Bell,
     ChevronDown,
-    Gift,
-    Layers,
     LogOut,
-    Megaphone,
     MessageSquarePlus,
     Settings,
-    Share2,
     ShieldCheck,
     User,
     UserCircle,
@@ -66,9 +62,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
     })();
     const topupHref = buildPageHref('billing', { section: 'topups' }, 'topup-packs');
     const subscriptionHref = buildPageHref('subscription');
-    const dashboardHref = buildPageHref('dashboard');
-    const campusHref = buildPageHref('dashboard', { tab: 'campus' });
-    const whatsNewHref = buildPageHref('dashboard', { tab: 'campus' }, 'whats-new');
+    const dashboardHref = buildPageHref('dashboard', { tab: 'agent' });
     const accountHref = buildPageHref('account');
     const settingsHref = buildPageHref('settings');
     const billingPageHref = buildPageHref('billing');
@@ -307,22 +301,6 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                                     <a href={billingPageHref} onClick={handleBillingMenuClick} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
                                         <WalletCards className="w-4 h-4 text-cyan-300" />
                                         Billing
-                                    </a>
-                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
-                                        <Share2 className="w-4 h-4 text-emerald-300" />
-                                        Affiliate Dashboard
-                                    </a>
-                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
-                                        <Gift className="w-4 h-4 text-rose-300" />
-                                        Refer a Friend
-                                    </a>
-                                    <a href={campusHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(campusHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
-                                        <Megaphone className="w-4 h-4 text-violet-300" />
-                                        Provide Feedback
-                                    </a>
-                                    <a href={whatsNewHref} onClick={(e) => { setMenuOpen(false); if (isPlainLeftClick(e)) { e.preventDefault(); navigateToUrl(whatsNewHref); } }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-gray-200 transition hover:bg-white/[0.05]">
-                                        <Layers className="w-4 h-4 text-cyan-300" />
-                                        What's New
                                     </a>
                                     <div className="my-2 border-t border-white/[0.06]" />
                                     <button type="button" onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-red-300 transition hover:bg-red-500/10">
