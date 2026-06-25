@@ -216,7 +216,20 @@ def build_scene_edit_prompt(
     topic = str(topic or "").strip()
     visual = str(visual_description or "").strip()
     outfit = sanitize_skeleton_outfit(outfit)
-    parts = [IDENTITY_LOCK, ARTIFACT_GUARD]
+    # Seedream truncates long prompts. Put the scene delta before verbose
+    # wardrobe/artifact guards so the requested location and pose always arrive.
+    parts = [IDENTITY_LOCK]
+    if visual:
+        parts.append(
+            f"PRIMARY SCENE INSTRUCTION — CHANGE ONLY environment, camera, props, and pose: {visual}. "
+            "This location, action, and composition are mandatory; do not replace them with unrelated props or settings. "
+            "Keep the canonical skeleton character identical to the reference."
+        )
+    else:
+        parts.append("PRIMARY SCENE INSTRUCTION — change only the background environment.")
+    if topic:
+        parts.append(f"TOPIC CONTEXT: {topic}.")
+    parts.append(ARTIFACT_GUARD)
     if outfit:
         parts.append(
             f"WARDROBE / BODY EDIT ONLY on the SAME canonical skeleton: {outfit}. "
@@ -227,15 +240,6 @@ def build_scene_edit_prompt(
             "If clothing is requested, render real finished garments: complete shirt/jacket, complete pants, "
             "matching shoes when visible, clean edges, believable fabric folds, no partial transparent fabric errors."
         )
-    if topic:
-        parts.append(f"TOPIC CONTEXT: {topic}.")
-    if visual:
-        parts.append(
-            f"CHANGE ONLY the environment, camera, props, and pose as needed: {visual}. "
-            "Keep the canonical skeleton character identical to the reference."
-        )
-    else:
-        parts.append("Change only the background environment; keep the skeleton identical.")
     parts.append("Vertical 9:16 cinematic framing, premium commercial lighting, sharp focus.")
     prompt = " ".join(parts)
     prompt = prompt.replace(

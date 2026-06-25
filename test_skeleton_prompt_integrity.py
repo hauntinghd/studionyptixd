@@ -28,6 +28,7 @@ def test_scene_prompt_forbids_human_tissue_at_clothing_edges():
     assert "bare feet" not in prompt
     assert "glass-and-bone skeletal feet" in prompt
     assert "muscle definition" not in prompt
+    assert prompt.index("primary scene instruction") < prompt.index("wardrobe must")
 
 
 def test_negative_prompt_blocks_hybrid_human_anatomy():
