@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from studio_agent import telemetry
+from studio_agent import production_budget, telemetry
 
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
@@ -122,10 +122,33 @@ def _longform_status(job_id: str) -> dict[str, Any]:
             f"/api/studio-agent/jobs/{job_id}/still/{i}"
             for i in range(min(scenes_gen, 12))
         ]
+        _attach_production_control(
+            snap,
+            "start_longform_render",
+            job_id=job_id,
+            awaiting_user_approval=True,
+            next_action=(
+                "Review chapter stills, edit or regenerate weak frames, then approve "
+                "the long-form render for final composition."
+            ),
+        )
+    elif running:
+        _attach_production_control(
+            snap,
+            "start_longform_render",
+            job_id=job_id,
+            next_action="Wait for the long-form production stage to update or complete.",
+        )
     if phase == "done" and mp4_path:
         snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=longform"
         snap["download_url"] = snap["mp4_url"]
         snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=longform"
+        _attach_production_control(
+            snap,
+            "finalize_longform_render",
+            job_id=job_id,
+            next_action="Download, package, or start a controlled revision pass.",
+        )
     thumbs = int(st.get("thumbnails_generated") or 0)
     if thumbs > 0:
         snap["preview_url"] = f"/api/studio-agent/jobs/{job_id}/thumbnail/1"
@@ -265,6 +288,27 @@ def _shortform_failed_snap(job_id: str, error: str, *, progress: int = 0) -> dic
     }
 
 
+def _attach_production_control(
+    snap: dict[str, Any],
+    tool_name: str,
+    *,
+    job_id: str,
+    awaiting_user_approval: bool = False,
+    next_action: str | None = None,
+) -> dict[str, Any]:
+    """Expose durable render/approval metadata for UI polling without changing execution."""
+    control = production_budget.production_control_metadata(tool_name, {"job_id": job_id})
+    control["awaiting_user_approval"] = bool(awaiting_user_approval)
+    if next_action:
+        control["next_action"] = next_action
+    snap["production_control"] = control
+    snap["queue_lane"] = control.get("lane")
+    snap["queue_priority"] = control.get("queue_priority")
+    snap["stage_gates"] = control.get("stage_gates") or []
+    snap["awaiting_user_approval"] = bool(awaiting_user_approval)
+    return snap
+
+
 def _shortform_status(job_id: str) -> dict[str, Any]:
     workspace = (ROOT / SKELETON_OUTPUT / job_id).resolve()
     result_path = workspace / "result.json"
@@ -310,7 +354,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                     stage_detail = str(prog.get("detail") or stage_detail)
             except Exception:
                 pass
-        return {
+        snap = {
             "job_id": job_id,
             "kind": "shortform",
             "status": "running",
@@ -321,6 +365,12 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "running": True,
             "title": "Short-form video",
         }
+        return _attach_production_control(
+            snap,
+            "start_shortform_generate",
+            job_id=job_id,
+            next_action="Wait for the running production stage to update or complete.",
+        )
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -382,10 +432,33 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             f"/api/studio-agent/jobs/{job_id}/still/{i}"
             for i in range(min(scene_count, 12))
         ]
+        _attach_production_control(
+            snap,
+            "start_shortform_generate",
+            job_id=job_id,
+            awaiting_user_approval=True,
+            next_action=(
+                "Review stills, edit or regenerate bad scenes, then approve scenes "
+                "before animation or final export."
+            ),
+        )
+    elif not complete and not terminal_fail:
+        _attach_production_control(
+            snap,
+            "finalize_production",
+            job_id=job_id,
+            next_action="Track the server-side render until a terminal result is available.",
+        )
     if complete:
         snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=shortform"
         snap["download_url"] = snap["mp4_url"]
         snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=shortform"
+        _attach_production_control(
+            snap,
+            "finalize_production",
+            job_id=job_id,
+            next_action="Download, upload package, or start a reply-and-edit pass.",
+        )
     return snap
 
 

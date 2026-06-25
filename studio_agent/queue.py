@@ -18,6 +18,7 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -42,24 +43,48 @@ _log = logging.getLogger("nyptid-studio.studio-agent-queue")
 
 _ACTIVE_KEY = f"{REDIS_QUEUE_PREFIX}:studio_agent:active"
 _WAITING_KEY = f"{REDIS_QUEUE_PREFIX}:studio_agent:waiting"
+_LEASES_KEY = f"{REDIS_QUEUE_PREFIX}:studio_agent:leases"
+_LEASE_SEC = max(int(STUDIO_AGENT_QUEUE_MAX_WAIT_SEC) * 4, 7200)
 
 _TRY_ACQUIRE_LUA = """
 local active = tonumber(redis.call('GET', KEYS[1]) or '0')
+local reclaimed = tonumber(redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[2]) or '0')
+if reclaimed > 0 then
+  active = math.max(active - reclaimed, 0)
+  redis.call('SET', KEYS[1], active)
+end
 local maxc = tonumber(ARGV[1])
 if active < maxc then
   redis.call('INCR', KEYS[1])
-  return {1, active + 1}
+  redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
+  redis.call('EXPIRE', KEYS[2], ARGV[5])
+  return {1, active + 1, reclaimed}
 end
-return {0, active}
+return {0, active, reclaimed}
 """
 
 _RELEASE_LUA = """
 local active = tonumber(redis.call('GET', KEYS[1]) or '0')
-if active > 0 then
+local lease_id = ARGV[1] or ''
+local removed = 0
+if lease_id ~= '' then
+  removed = tonumber(redis.call('ZREM', KEYS[2], lease_id) or '0')
+end
+if active > 0 and removed > 0 then
   redis.call('DECR', KEYS[1])
   return active - 1
 end
 return 0
+"""
+
+_CLEANUP_LEASES_LUA = """
+local active = tonumber(redis.call('GET', KEYS[1]) or '0')
+local reclaimed = tonumber(redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[1]) or '0')
+if reclaimed > 0 then
+  active = math.max(active - reclaimed, 0)
+  redis.call('SET', KEYS[1], active)
+end
+return {active, reclaimed}
 """
 
 _redis_client: Redis | None = None
@@ -95,6 +120,8 @@ class QueueAdmission:
     queue_position: int
     active_sessions: int
     mode: str
+    lease_id: str = ""
+    reclaimed_stale: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +129,7 @@ class QueueAdmission:
             "queue_position": int(self.queue_position),
             "active_sessions": int(self.active_sessions),
             "mode": self.mode,
+            "reclaimed_stale": int(self.reclaimed_stale),
         }
 
 
@@ -139,7 +167,46 @@ def queue_config() -> dict[str, Any]:
         "max_queue_depth": int(STUDIO_AGENT_MAX_QUEUE_DEPTH),
         "max_wait_sec": int(STUDIO_AGENT_QUEUE_MAX_WAIT_SEC),
         "redis_backed": bool(_redis_enabled()),
+        "lease_sec": int(_LEASE_SEC),
     }
+
+
+async def _redis_cleanup_stale_leases() -> int:
+    redis = await _get_redis()
+    if redis is None:
+        return 0
+    try:
+        raw = await redis.eval(
+            _CLEANUP_LEASES_LUA,
+            2,
+            _ACTIVE_KEY,
+            _LEASES_KEY,
+            str(time.time()),
+        )
+        return int(raw[1])
+    except Exception as exc:
+        _log.warning("studio agent redis stale lease cleanup failed: %s", exc)
+        return 0
+
+
+async def _redis_lease_diagnostics() -> dict[str, Any]:
+    redis = await _get_redis()
+    if redis is None:
+        return {"lease_count": 0, "oldest_lease_expires_in_sec": None}
+    try:
+        count = int(await redis.zcard(_LEASES_KEY) or 0)
+        oldest = await redis.zrange(_LEASES_KEY, 0, 0, withscores=True)
+        expires_in: float | None = None
+        if oldest:
+            expires_at = float(oldest[0][1])
+            expires_in = round(max(expires_at - time.time(), 0.0), 1)
+        return {
+            "lease_count": count,
+            "oldest_lease_expires_in_sec": expires_in,
+        }
+    except Exception as exc:
+        _log.warning("studio agent redis lease diagnostics failed: %s", exc)
+        return {"lease_count": 0, "oldest_lease_expires_in_sec": None}
 
 
 async def queue_snapshot() -> dict[str, Any]:
@@ -147,15 +214,28 @@ async def queue_snapshot() -> dict[str, Any]:
     active = 0
     waiting = 0
     mode = "disabled"
+    reclaimed_stale = 0
+    redis_available = False
+    lease_diag: dict[str, Any] = {"lease_count": 0, "oldest_lease_expires_in_sec": None}
     if not STUDIO_AGENT_QUEUE_ENABLED:
-        return {**cfg, "active_sessions": 0, "waiting": 0, "mode": mode}
+        return {
+            **cfg,
+            "active_sessions": 0,
+            "waiting": 0,
+            "mode": mode,
+            "redis_available": False,
+            **lease_diag,
+        }
 
     if await _redis_ping():
+        redis_available = True
         redis = await _get_redis()
         if redis is not None:
             try:
+                reclaimed_stale = await _redis_cleanup_stale_leases()
                 active = int(await redis.get(_ACTIVE_KEY) or 0)
                 waiting = int(await redis.get(_WAITING_KEY) or 0)
+                lease_diag = await _redis_lease_diagnostics()
                 mode = "redis"
             except Exception as exc:
                 _log.warning("studio agent queue snapshot redis failed: %s", exc)
@@ -174,32 +254,41 @@ async def queue_snapshot() -> dict[str, Any]:
         "mode": mode,
         "utilization_pct": utilization,
         "queued": active >= cfg["max_concurrent"] or waiting > 0,
+        "redis_available": redis_available,
+        "reclaimed_stale": reclaimed_stale,
+        **lease_diag,
     }
 
 
-async def _redis_try_acquire() -> tuple[bool, int]:
+async def _redis_try_acquire(lease_id: str) -> tuple[bool, int, int]:
     redis = await _get_redis()
     if redis is None:
-        return False, 0
+        return False, 0, 0
     try:
+        now = time.time()
         raw = await redis.eval(
             _TRY_ACQUIRE_LUA,
-            1,
+            2,
             _ACTIVE_KEY,
+            _LEASES_KEY,
             str(STUDIO_AGENT_MAX_CONCURRENT),
+            str(now),
+            str(now + _LEASE_SEC),
+            lease_id,
+            str(_LEASE_SEC + 60),
         )
-        return bool(int(raw[0])), int(raw[1])
+        return bool(int(raw[0])), int(raw[1]), int(raw[2])
     except Exception as exc:
         _log.warning("studio agent redis try_acquire failed: %s", exc)
-        return False, 0
+        return False, 0, 0
 
 
-async def _redis_release() -> None:
+async def _redis_release(lease_id: str = "") -> None:
     redis = await _get_redis()
     if redis is None:
         return
     try:
-        await redis.eval(_RELEASE_LUA, 1, _ACTIVE_KEY)
+        await redis.eval(_RELEASE_LUA, 2, _ACTIVE_KEY, _LEASES_KEY, lease_id or "")
     except Exception as exc:
         _log.warning("studio agent redis release failed: %s", exc)
 
@@ -275,6 +364,7 @@ async def reset_queue_counters() -> dict[str, Any]:
                 cleared["redis_waiting"] = int(await redis.get(_WAITING_KEY) or 0)
                 await redis.set(_ACTIVE_KEY, 0)
                 await redis.set(_WAITING_KEY, 0)
+                await redis.delete(_LEASES_KEY)
             except Exception as exc:
                 _log.warning("studio agent queue reset redis failed: %s", exc)
     return cleared
@@ -296,13 +386,16 @@ async def acquire_slot(
     deadline = start + STUDIO_AGENT_QUEUE_MAX_WAIT_SEC
     use_redis = await _redis_ping()
     mode = "redis" if use_redis else "local"
+    lease_id = uuid.uuid4().hex if use_redis else ""
     registered_wait = False
     queue_position = 0
+    reclaimed_stale = 0
 
     try:
         while time.time() < deadline:
             if use_redis:
-                ok, active = await _redis_try_acquire()
+                ok, active, reclaimed = await _redis_try_acquire(lease_id)
+                reclaimed_stale += reclaimed
             else:
                 ok, active = await _local_try_acquire()
 
@@ -310,7 +403,7 @@ async def acquire_slot(
                 if registered_wait:
                     await _decr_waiting()
                 waited = time.time() - start
-                return QueueAdmission(waited, queue_position, active, mode)
+                return QueueAdmission(waited, queue_position, active, mode, lease_id, reclaimed_stale)
 
             if not registered_wait:
                 queue_position = await _incr_waiting()
@@ -337,9 +430,15 @@ async def acquire_slot(
 async def release_slot(admission: QueueAdmission | None = None) -> None:
     if not STUDIO_AGENT_QUEUE_ENABLED:
         return
+    if admission is None:
+        if await _redis_ping():
+            _log.warning("studio agent queue release skipped: missing admission lease")
+            return
+        await _local_release()
+        return
     mode = admission.mode if admission else "local"
     if mode == "redis" or await _redis_ping():
-        await _redis_release()
+        await _redis_release(admission.lease_id)
     else:
         await _local_release()
 

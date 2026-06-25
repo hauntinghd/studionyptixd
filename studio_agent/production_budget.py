@@ -40,6 +40,7 @@ EXPENSIVE_TOOLS = frozenset({
     "finalize_longform_render",
     "generate_longform_thumbnails",
     "edit_production_scene_still",
+    "edit_production_scenes_still",
     "regenerate_production_scene_still",
     "animate_production_scenes",
     "finalize_production",
@@ -54,11 +55,61 @@ DEFAULT_CAPS_USD = {
     "finalize_longform_render": 85.0,
     "generate_longform_thumbnails": 1.0,
     "edit_production_scene_still": 0.25,
+    "edit_production_scenes_still": 1.0,
     "regenerate_production_scene_still": 0.25,
     "animate_production_scenes": 3.0,
     "finalize_production": 1.0,
     "re_edit_production": 1.5,
     "regenerate_longform_still": 0.25,
+}
+
+
+APPROVAL_REQUIRED_TOOLS = frozenset({
+    "start_shortform_generate",
+    "start_longform_render",
+    "set_production_scenes_animate",
+    "animate_production_scenes",
+    "finalize_production",
+    "finalize_longform_render",
+})
+
+
+TOOL_LANES = {
+    "start_shortform_generate": "render",
+    "start_longform_render": "render",
+    "finalize_longform_render": "render",
+    "generate_longform_thumbnails": "render",
+    "edit_production_scene_still": "render",
+    "edit_production_scenes_still": "render",
+    "regenerate_production_scene_still": "render",
+    "regenerate_longform_still": "render",
+    "animate_production_scenes": "render",
+    "finalize_production": "render",
+    "re_edit_production": "render",
+    "analyze_reference_video": "analysis",
+    "analyze_competitor_video": "analysis",
+    "build_scene_blueprint_from_reference": "analysis",
+    "get_channel_analytics": "analysis",
+}
+
+
+STAGE_GATES = {
+    "start_shortform_generate": ["cost_preflight", "create_stills", "await_scene_review"],
+    "edit_production_scene_still": ["cost_preflight", "edit_still", "await_scene_review"],
+    "edit_production_scenes_still": ["cost_preflight", "batch_edit_stills", "await_scene_review"],
+    "regenerate_production_scene_still": ["cost_preflight", "regenerate_still", "await_scene_review"],
+    "animate_production_scenes": ["scene_approval_required", "image_to_video", "await_animation_result"],
+    "finalize_production": ["compose", "package", "publish_ready_artifact"],
+    "start_longform_render": ["cost_preflight", "outline", "create_stills", "await_chapter_review"],
+    "finalize_longform_render": ["chapter_approval_required", "compose", "package"],
+    "generate_longform_thumbnails": ["cost_preflight", "thumbnail_variants", "await_packaging_review"],
+}
+
+
+QUEUE_PRIORITIES = {
+    "chat": 100,
+    "analysis": 70,
+    "render": 40,
 }
 
 
@@ -105,6 +156,15 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         count = max(1, min(3, int(args.get("count") or 3)))
         est = count * _fallback("seedream_v45_per_image")
         breakdown = {"thumbnails": count, "seedream_v45_per_image": _fallback("seedream_v45_per_image")}
+    elif name == "edit_production_scenes_still":
+        raw_indices = args.get("scene_indices") or []
+        try:
+            count = len(raw_indices) if isinstance(raw_indices, list) and raw_indices else int(args.get("scene_count") or 12)
+        except Exception:
+            count = 12
+        count = max(1, min(60, count))
+        est = count * _fallback("seedream_v45_per_image")
+        breakdown = {"seedream_v45_edit_images": count, "scope": str(args.get("scope") or "character")}
     elif name in {"edit_production_scene_still", "regenerate_production_scene_still", "regenerate_longform_still"}:
         est = _fallback("seedream_v45_per_image")
         breakdown = {"seedream_v45_edit_images": 1}
@@ -122,7 +182,7 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
     return BudgetEstimate(name, round(max(0.0, est), 4), max_budget, mode, breakdown)
 
 
-def with_budget_metadata(result: str, estimate: BudgetEstimate | None) -> str:
+def with_budget_metadata(result: str, estimate: BudgetEstimate | None, args: dict[str, Any] | None = None) -> str:
     if not estimate:
         return result
     try:
@@ -132,12 +192,58 @@ def with_budget_metadata(result: str, estimate: BudgetEstimate | None) -> str:
     if not isinstance(data, dict):
         return result
     data["budget"] = estimate.as_dict()
+    data["production_control"] = production_control_metadata(estimate.tool, args, estimate)
     return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def production_control_metadata(
+    tool_name: str,
+    args: dict[str, Any] | None = None,
+    estimate: BudgetEstimate | None = None,
+) -> dict[str, Any]:
+    args = dict(args or {})
+    name = str(tool_name or "")
+    lane = tool_lane(name)
+    return {
+        "tool": name,
+        "lane": lane,
+        "queue_priority": QUEUE_PRIORITIES.get(lane, 50),
+        "requires_approval": name in APPROVAL_REQUIRED_TOOLS,
+        "stage_gates": list(STAGE_GATES.get(name, ())),
+        "durable_state": durable_state_contract(name, args),
+        "resume_safe": name in EXPENSIVE_TOOLS,
+        "budget_mode": estimate.mode if estimate else "none",
+    }
+
+
+def tool_lane(tool_name: str) -> str:
+    return TOOL_LANES.get(str(tool_name or ""), "chat")
+
+
+def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    args = dict(args or {})
+    name = str(tool_name or "")
+    job_id = str(args.get("job_id") or "").strip()
+    if name.startswith("start_shortform"):
+        return {"kind": "shortform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
+    if name in {
+        "edit_production_scene_still",
+        "edit_production_scenes_still",
+        "regenerate_production_scene_still",
+        "animate_production_scenes",
+        "finalize_production",
+        "re_edit_production",
+    }:
+        return {"kind": "shortform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
+    if "longform" in name:
+        return {"kind": "longform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
+    return {"kind": "generic", "must_persist": False}
 
 
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     scenes = max(1, int(args.get("scene_count") or 12))
-    animate = bool(args.get("animate", True))
+    full_auto = bool(args.get("_full_auto") or args.get("full_auto"))
+    animate = bool(args.get("animate", False)) and full_auto
     stills = scenes * _fallback("seedream_v45_per_image")
     seconds = scenes * 5.0 if animate else 0.0
     video_model = str(args.get("video_model") or "seedance").strip()
@@ -152,6 +258,8 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
     total = (stills + video + tts) * 1.15
     return total, {
         "scene_count": scenes,
+        "review_gate": not full_auto,
+        "i2v_deferred_until_scene_approval": not full_auto,
         "stills_usd": round(stills, 4),
         "video_seconds": seconds,
         "video_model": video_model,

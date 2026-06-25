@@ -13,6 +13,7 @@ FastAPI router for NYPTID Studio Agent (OpenRouter + Rookcast skills).
   GET    /api/studio-agent/models
   GET    /api/studio-agent/skills
   GET    /api/studio-agent/queue
+  GET    /api/studio-agent/production-control
   POST   /api/studio-agent/dictation
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ from studio_agent.access import account_profile, can_use_studio_agent, is_owner
 from studio_agent.dictation import transcribe_audio_bytes
 
 from studio_agent import openrouter, skills
-from studio_agent import memory, runner, store
+from studio_agent import memory, production_budget, runner, store
 from studio_agent.queue import (
     StudioAgentQueueFullError,
     StudioAgentQueueTimeoutError,
@@ -200,6 +201,19 @@ def build_studio_agent_router(
     async def agent_queue_status(user: dict = Depends(_agent_user)):
         """Live OpenRouter/fal concurrency — for UI wait indicators."""
         return await queue_snapshot()
+
+    @router.get("/production-control")
+    async def agent_production_control_status(user: dict = Depends(_agent_user)):
+        """Read-only contract for queue lanes, approval gates, and budget caps."""
+        return {
+            "queue": await queue_snapshot(),
+            "lanes": production_budget.QUEUE_PRIORITIES,
+            "tool_lanes": production_budget.TOOL_LANES,
+            "approval_required_tools": sorted(production_budget.APPROVAL_REQUIRED_TOOLS),
+            "stage_gates": production_budget.STAGE_GATES,
+            "expensive_tools": sorted(production_budget.EXPENSIVE_TOOLS),
+            "default_caps_usd": production_budget.DEFAULT_CAPS_USD,
+        }
 
     @router.post("/queue/reset")
     async def agent_queue_reset(user: dict = Depends(_agent_user)):
