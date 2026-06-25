@@ -24,11 +24,12 @@ def test_scene_prompt_forbids_human_tissue_at_clothing_edges():
         outfit="hoodie, jeans, bare feet",
     ).lower()
     assert "zero human skin" in prompt
-    assert "every exposed limb segment" in prompt
+    assert "every exposed body part" in prompt
     assert "bare feet" not in prompt
     assert "glass-and-bone skeletal feet" in prompt
     assert "muscle definition" not in prompt
-    assert prompt.index("primary scene instruction") < prompt.index("wardrobe must")
+    assert prompt.startswith("primary edit")
+    assert len(prompt) < 1800
 
 
 def test_negative_prompt_blocks_hybrid_human_anatomy():

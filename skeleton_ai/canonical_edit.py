@@ -206,7 +206,7 @@ def resolve_master_reference_urls(
     return urls[:3]
 
 
-def build_scene_edit_prompt(
+def _build_scene_edit_prompt_legacy(
     *,
     topic: str = "",
     visual_description: str = "",
@@ -247,6 +247,59 @@ def build_scene_edit_prompt(
         "Clothes, armor, or props",
     )
     return prompt[:3500]
+
+
+def build_scene_edit_prompt(
+    *,
+    topic: str = "",
+    visual_description: str = "",
+    outfit: str = "",
+) -> str:
+    """Build a compact scene-first edit prompt; identity comes from the reference."""
+    topic = str(topic or "").strip()
+    visual = str(visual_description or "").strip()
+    outfit = sanitize_skeleton_outfit(outfit)
+
+    parts: list[str] = []
+    if visual:
+        parts.append(
+            f"PRIMARY EDIT: {visual}. "
+            "The named location, action, and composition are mandatory. "
+            "Do not substitute a studio backdrop or unrelated props."
+        )
+    else:
+        parts.append(
+            "PRIMARY EDIT: Change only the background environment while preserving "
+            "the canonical character."
+        )
+
+    parts.append(
+        "Use the exact canonical character from the reference image: identical ivory "
+        "skeleton, transparent glass shell, skull, eyes, proportions, hands, and feet. "
+        "Every exposed body part remains ivory bone inside clear glass; zero human skin "
+        "or flesh."
+    )
+    if topic:
+        parts.append(f"TOPIC CONTEXT: {topic}.")
+
+    no_clothing = bool(re.search(r"\bno clothing\b", outfit, re.IGNORECASE))
+    if outfit and not no_clothing:
+        parts.append(
+            f"WARDROBE: {outfit}. Render complete physically coherent garments over "
+            "the glass shell. At cuffs and hems, exposed limbs remain glass-and-bone "
+            "skeleton anatomy."
+        )
+    else:
+        parts.append(
+            "No clothing. Preserve the complete transparent glass shell and visible "
+            "ivory skeleton."
+        )
+
+    parts.append(
+        "Exactly one skeleton host. Vertical 9:16 cinematic composition, environment "
+        "clearly visible, sharp focus."
+    )
+    return " ".join(parts)[:1800]
 
 
 def generate_still_edit(
