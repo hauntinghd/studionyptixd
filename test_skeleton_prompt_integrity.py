@@ -4,6 +4,7 @@ from skeleton_ai.canonical_edit import (
     sanitize_skeleton_outfit,
 )
 from skeleton_ai.pipeline import (
+    _expand_locked_scene_direction,
     _visual_brief_beat_direction,
     _visual_brief_requests_wardrobe,
 )
@@ -68,10 +69,23 @@ def test_numbered_beat_direction_is_extracted_exactly():
     )
 
 
+def test_sparse_locked_scene_gets_visible_environment_and_wide_framing():
+    direction = _expand_locked_scene_direction(
+        "skeleton in dark room, hand reaching toward chest"
+    ).lower()
+    assert direction.startswith("skeleton in dark room")
+    assert "replace the entire reference background" in direction
+    assert "medium-wide vertical shot" in direction
+    assert "head to knees" in direction
+    assert "no isolated close-up" in direction
+    assert "never use a black void" in direction
+
+
 if __name__ == "__main__":
     test_bare_feet_are_rewritten_as_skeletal_glass_feet()
     test_scene_prompt_forbids_human_tissue_at_clothing_edges()
     test_negative_prompt_blocks_hybrid_human_anatomy()
     test_scene_only_visual_brief_does_not_request_wardrobe()
     test_numbered_beat_direction_is_extracted_exactly()
+    test_sparse_locked_scene_gets_visible_environment_and_wide_framing()
     print("skeleton prompt integrity tests passed")

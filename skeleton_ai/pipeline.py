@@ -162,6 +162,38 @@ def _visual_brief_beat_direction(
     return re.sub(r"\s+", " ", match.group(1)).strip(" .;") if match else ""
 
 
+def _expand_locked_scene_direction(direction: str) -> str:
+    """Keep the user's beat literal while making the environment visible."""
+    scene = re.sub(r"\s+", " ", str(direction or "")).strip(" .;")
+    if not scene:
+        return ""
+    low = scene.lower()
+    explicit_closeup = any(
+        term in low
+        for term in (
+            "close-up",
+            "closeup",
+            "extreme close",
+            "macro shot",
+            "headshot",
+        )
+    )
+    composition = (
+        "Use the explicitly requested close framing while retaining recognizable "
+        "environment details in the background."
+        if explicit_closeup
+        else (
+            "Use a medium-wide vertical shot showing the skeleton from at least head "
+            "to knees plus substantial surrounding environment; no isolated close-up."
+        )
+    )
+    return (
+        f"{scene}. Replace the entire reference background with the named location. "
+        f"{composition} The location must contain recognizable physical details and "
+        "fill the frame; never use a black void, plain studio backdrop, or unrelated prop."
+    )
+
+
 def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = "",
                    topic: str | None = None, visual_brief: str | None = None) -> dict:
     """
@@ -226,7 +258,9 @@ def derive_beat_visuals(
     setting = plan.get("topic_setting", "")
     fallback = plan.get("fallback_outfit", "")
     vbl = (visual_brief or plan.get("visual_brief_lock") or "").strip()
-    locked_scene = _visual_brief_beat_direction(vbl, beat_index)
+    locked_scene = _expand_locked_scene_direction(
+        _visual_brief_beat_direction(vbl, beat_index)
+    )
 
     sys = (
         "You compose ONE per-scene visual prompt for a NYPTID Skeleton AI short.\n\n"
@@ -277,11 +311,7 @@ def derive_beat_visuals(
         "scene_action",
         "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
     )
-    action = (
-        f"Canonical skeleton host; {locked_scene}. Do not add unrelated props or change this location."
-        if locked_scene
-        else generated_action
-    )
+    action = locked_scene if locked_scene else generated_action
     return (
         outfit,
         action,

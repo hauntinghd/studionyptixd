@@ -263,7 +263,7 @@ def build_scene_edit_prompt(
     parts: list[str] = []
     if visual:
         parts.append(
-            f"PRIMARY EDIT: {visual}. "
+            f"PRIMARY EDIT: REPLACE THE ENTIRE BACKGROUND AND RECOMPOSE THE SHOT. {visual}. "
             "The named location, action, and composition are mandatory. "
             "Do not substitute a studio backdrop or unrelated props."
         )
