@@ -911,6 +911,7 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
                     "linked_at": float(previous.get("linked_at", now) or now),
                     "last_synced_at": float(previous.get("last_synced_at", 0.0) or 0.0),
                     "last_sync_error": "",
+                    "token_refresh_retry_at": 0.0,
                 }
             bucket["channels"] = existing_channels
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
@@ -2176,6 +2177,7 @@ async def _youtube_ensure_access_token(record: dict) -> tuple[str, dict]:
     updated["token_scope"] = str(refreshed.get("scope", updated.get("token_scope", "")) or "").strip()
     updated["oauth_mode"] = oauth_mode
     updated["last_synced_at"] = now
+    updated["token_refresh_retry_at"] = 0.0
     return str(updated.get("access_token", "") or "").strip(), updated
 
 
@@ -2197,7 +2199,10 @@ async def _youtube_refresh_saved_tokens_once() -> dict:
     now = time.time()
     for user_id, channel_id, record in candidates:
         expires_at = float(record.get("token_expires_at", 0.0) or 0.0)
+        retry_at = float(record.get("token_refresh_retry_at", 0.0) or 0.0)
         has_error = bool(str(record.get("last_sync_error", "") or "").strip())
+        if retry_at > now:
+            continue
         if expires_at > now + YOUTUBE_TOKEN_REFRESH_MARGIN_SEC and not has_error:
             continue
         try:
@@ -2217,10 +2222,12 @@ async def _youtube_refresh_saved_tokens_once() -> dict:
                     repaired = {}
                 if repaired:
                     repaired["last_sync_error"] = ""
+                    repaired["token_refresh_retry_at"] = 0.0
                     changed.append((user_id, channel_id, repaired))
                     refreshed_count += 1
                     continue
             record["last_sync_error"] = _clip_text(str(exc), 320)
+            record["token_refresh_retry_at"] = now + (6 * 3600)
             changed.append((user_id, channel_id, record))
             failed_count += 1
 
