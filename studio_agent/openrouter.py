@@ -9,6 +9,7 @@ import httpx
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "anthropic/claude-sonnet-4")
+PRIMARY_PROVIDER = os.getenv("STUDIO_AGENT_PRIMARY_PROVIDER", os.getenv("STUDIO_AGENT_LLM_PROVIDER", "anthropic")).strip().lower()
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
 _ANTHROPIC_FALLBACK_MODEL_ENV = os.getenv("ANTHROPIC_FALLBACK_MODEL", "").strip()
 _ANTHROPIC_FALLBACK_MODELS_ENV = os.getenv("ANTHROPIC_FALLBACK_MODELS", "").strip()
@@ -18,11 +19,25 @@ def _normalize_anthropic_model(model: str) -> str:
     """Convert stale/alias model names to stable Anthropic Messages API IDs."""
     model = model.strip()
     aliases = {
+        "anthropic/claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
         "claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
+        "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+        "anthropic/claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+        "anthropic/claude-haiku-4-5": "claude-haiku-4-5-20251001",
         "claude-haiku-4-5": "claude-haiku-4-5-20251001",
         "claude-4.5-haiku": "claude-haiku-4-5-20251001",
         "claude-haiku-4.5": "claude-haiku-4-5-20251001",
         "anthropic/claude-haiku-4.5": "claude-haiku-4-5-20251001",
+        "anthropic/claude-opus-4-8": "claude-opus-4-8",
+        "opus": "claude-opus-4-8",
+        "claude-opus-4.8": "claude-opus-4-8",
+        "anthropic/claude-sonnet-4": "claude-sonnet-4-6",
+        "claude-sonnet-4": "claude-sonnet-4-6",
+        "anthropic/claude-4-sonnet": "claude-sonnet-4-6",
+        "claude-4-sonnet": "claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
+        "claude-sonnet-4.6": "claude-sonnet-4-6",
+        "sonnet": "claude-sonnet-4-6",
     }
     return aliases.get(model, model)
 
@@ -41,11 +56,12 @@ def _anthropic_fallback_model_list() -> list[str]:
 
 ANTHROPIC_FALLBACK_MODELS = _anthropic_fallback_model_list()
 ANTHROPIC_FALLBACK_MODEL = ANTHROPIC_FALLBACK_MODELS[0] if ANTHROPIC_FALLBACK_MODELS else "claude-haiku-4-5-20251001"
-ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET", "120000"))
-ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES", "14"))
-ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "4000"))
-ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "16000"))
-ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET", "60000"))
+ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET", "70000"))
+ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES", "10"))
+ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "2500"))
+ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "10000"))
+ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET", "36000"))
+ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET", "12000"))
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
@@ -298,11 +314,15 @@ def _mark_dynamic_recommendations(extras: list[dict[str, Any]], *, existing: lis
             row["recommended"] = True
 
 
-def api_key() -> str:
-    key = (
+def _openrouter_api_key_optional() -> str:
+    return (
         os.getenv("OPENROUTER_API_KEY", "").strip()
         or os.getenv("OPEN_ROUTER_API_KEY", "").strip()
     )
+
+
+def api_key() -> str:
+    key = _openrouter_api_key_optional()
     if not key:
         raise RuntimeError(
             "OPENROUTER_API_KEY is not set. Add it to .env (never commit the key)."
@@ -311,7 +331,19 @@ def api_key() -> str:
 
 
 def anthropic_api_key() -> str:
-    return os.getenv("ANTHROPIC_API_KEY", "").strip()
+    key = (
+        os.getenv("ANTHROPIC_API_KEY", "").strip()
+        or os.getenv("CLAUDE_API_KEY", "").strip()
+    )
+    return key
+
+
+def _use_anthropic_primary() -> bool:
+    if PRIMARY_PROVIDER in {"anthropic", "claude", "anthropic_direct", "direct_anthropic"}:
+        return bool(anthropic_api_key())
+    if PRIMARY_PROVIDER in {"auto", ""}:
+        return bool(anthropic_api_key()) and not bool(_openrouter_api_key_optional())
+    return False
 
 
 def _headers() -> dict[str, str]:
@@ -485,6 +517,17 @@ def _anthropic_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]
     return out
 
 
+def _strip_anthropic_tools(payload: dict[str, Any]) -> None:
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+
+
+def _anthropic_tool_size(tools: list[dict[str, Any]] | None) -> int:
+    if not tools:
+        return 0
+    return len(json.dumps(tools, ensure_ascii=False))
+
+
 def _anthropic_payload_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
@@ -552,6 +595,8 @@ async def _anthropic_chat_completion(
     tools: list[dict[str, Any]] | None = None,
     temperature: float,
     timeout: float,
+    provider_label: str = "anthropic_fallback",
+    model_override: str | None = None,
 ) -> dict[str, Any]:
     key = anthropic_api_key()
     if not key:
@@ -566,10 +611,13 @@ async def _anthropic_chat_completion(
     if system_text:
         payload_base["system"] = system_text
     anth_tools = _anthropic_tools(tools)
-    if anth_tools:
+    include_tools = bool(anth_tools)
+    if _anthropic_tool_size(anth_tools) > ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET:
+        include_tools = False
+    if anth_tools and include_tools:
         payload_base["tools"] = anth_tools
         payload_base["tool_choice"] = {"type": "auto"}
-    if _anthropic_payload_size(system_text, anth_messages, anth_tools) > ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET:
+    if _anthropic_payload_size(system_text, anth_messages, payload_base.get("tools")) > ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET:
         compacted_messages = _compact_messages_for_anthropic_fallback(messages, hard=True)
         system_text, anth_messages = _anthropic_payload_messages(compacted_messages)
         payload_base["messages"] = anth_messages
@@ -577,15 +625,25 @@ async def _anthropic_chat_completion(
             payload_base["system"] = system_text
         else:
             payload_base.pop("system", None)
+        if _anthropic_payload_size(system_text, anth_messages, payload_base.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
+            _strip_anthropic_tools(payload_base)
+            anth_tools = []
+    if _anthropic_payload_size(payload_base.get("system"), payload_base["messages"], payload_base.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
+        _strip_anthropic_tools(payload_base)
     headers = {
         "x-api-key": key,
         "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
         "content-type": "application/json",
     }
+    model_candidates = list(ANTHROPIC_FALLBACK_MODELS)
+    if model_override:
+        override = _normalize_anthropic_model(model_override)
+        if override and ("/" not in override or override.startswith("claude-")):
+            model_candidates = [override] + [m for m in model_candidates if m != override]
     last_error = ""
-    selected_model = ANTHROPIC_FALLBACK_MODEL
+    selected_model = model_candidates[0] if model_candidates else ANTHROPIC_FALLBACK_MODEL
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for model in ANTHROPIC_FALLBACK_MODELS:
+        for model in model_candidates:
             selected_model = model
             payload = dict(payload_base)
             payload["model"] = model
@@ -601,8 +659,7 @@ async def _anthropic_chat_completion(
                 else:
                     payload.pop("system", None)
                 if _anthropic_payload_size(payload.get("system"), hard_anth_messages, payload.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
-                    payload.pop("tools", None)
-                    payload.pop("tool_choice", None)
+                    _strip_anthropic_tools(payload)
                 r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
             if r.status_code < 400:
                 data = r.json()
@@ -611,7 +668,7 @@ async def _anthropic_chat_completion(
             if r.status_code != 404:
                 raise RuntimeError(last_error)
         else:
-            models = ", ".join(ANTHROPIC_FALLBACK_MODELS)
+            models = ", ".join(model_candidates)
             raise RuntimeError(f"{last_error}. Tried Anthropic fallback models: {models}")
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -636,7 +693,7 @@ async def _anthropic_chat_completion(
     return {
         "id": data.get("id"),
         "model": data.get("model") or selected_model,
-        "provider": "anthropic_fallback",
+        "provider": provider_label,
         "choices": [{"message": message}],
         "usage": {
             "prompt_tokens": usage.get("input_tokens", 0),
@@ -756,11 +813,36 @@ async def chat_completion(
     reasoning_depth: str = "balanced",
     web_search: bool = False,
 ) -> dict[str, Any]:
-    temp, reasoning = reasoning_params(reasoning_depth, model=model or DEFAULT_MODEL)
+    selected_model = model or DEFAULT_MODEL
+    temp, reasoning = reasoning_params(reasoning_depth, model=selected_model)
     if temperature is not None:
         temp = float(temperature)
+    timeout = 180.0 if reasoning_depth == "deep" else 120.0
+    if _use_anthropic_primary():
+        direct_messages = messages
+        if web_search:
+            direct_messages = [
+                *messages,
+                {
+                    "role": "system",
+                    "content": (
+                        "Direct Anthropic mode does not provide OpenRouter web search. "
+                        "Use only Studio tool results already present in this turn. "
+                        "Do not claim live web, YouTube, or private analytics access "
+                        "unless a tool result is present."
+                    ),
+                },
+            ]
+        return await _anthropic_chat_completion(
+            messages=direct_messages,
+            tools=tools,
+            temperature=temp,
+            timeout=timeout,
+            provider_label="anthropic_direct",
+            model_override=selected_model,
+        )
     payload: dict[str, Any] = {
-        "model": model or DEFAULT_MODEL,
+        "model": selected_model,
         "messages": messages,
         "temperature": temp,
         "max_tokens": _completion_token_cap(reasoning_depth, has_tools=bool(tools)),
@@ -779,7 +861,6 @@ async def chat_completion(
             max_results = 5
         payload["plugins"] = [{"id": "web", "max_results": max(1, min(max_results, 10))}]
 
-    timeout = 180.0 if reasoning_depth == "deep" else 120.0
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OPENROUTER_BASE}/chat/completions", headers=_headers(), json=payload)
         if _is_openrouter_credit_limit(r.status_code, r.text):
@@ -812,6 +893,8 @@ async def chat_completion(
                     tools=tools,
                     temperature=temp,
                     timeout=timeout,
+                    provider_label="anthropic_fallback",
+                    model_override=selected_model,
                 )
             suffix = ""
             if _should_try_anthropic(r.status_code, detail) and not anthropic_api_key():

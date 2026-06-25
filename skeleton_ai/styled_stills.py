@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from .fal_auth import require_fal_key
+
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 
 
@@ -15,10 +17,10 @@ class StyledStillError(RuntimeError):
 
 
 def _ensure_fal() -> None:
-    key = os.getenv("FAL_AI_KEY", "").strip()
-    if not key:
-        raise StyledStillError("FAL_AI_KEY not set")
-    os.environ["FAL_KEY"] = key
+    try:
+        require_fal_key("styled still generation")
+    except RuntimeError as exc:
+        raise StyledStillError(str(exc)) from exc
 
 
 def _download(url: str, dest: Path) -> None:

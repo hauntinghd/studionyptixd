@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import fal_client
+
+from .fal_auth import require_fal_key
 import httpx
 
 
@@ -53,10 +55,10 @@ def list_models() -> list[dict[str, Any]]:
 
 
 def _ensure_fal() -> None:
-    key = os.getenv("FAL_AI_KEY", "").strip()
-    if not key:
-        raise StillsError("FAL_AI_KEY not set in env")
-    os.environ["FAL_KEY"] = key  # fal_client reads this
+    try:
+        require_fal_key("still generation")
+    except RuntimeError as exc:
+        raise StillsError(str(exc)) from exc
 
 
 def _build_args(model_key: str, prompt: str, negative_prompt: str,

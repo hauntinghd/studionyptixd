@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 import fal_client
 import httpx
 
+from .fal_auth import require_fal_key
+
 SEEDREAM_EDIT_ENDPOINT = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_EDIT_URL = f"https://fal.run/{SEEDREAM_EDIT_ENDPOINT}"
 DEFAULT_SEED = int(os.getenv("SKELETON_CANONICAL_SEED", "420042"))
@@ -39,7 +41,10 @@ ARTIFACT_GUARD = (
     "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render. "
     "Wardrobe must be physically coherent and complete: shirts cover the torso as a real shirt, "
     "pants cover both legs as real pants, shoes fit both feet, sleeves and hems are clean, "
-    "fabric never melts into bones or glass, no half-clothes, no floating straps, no torn accidental seams."
+    "fabric never melts into bones or glass, no half-clothes, no floating straps, no torn accidental seams. "
+    "If a white T-shirt or undershirt is requested, it must be opaque and continuous under any open coat "
+    "or jacket in every frame: no bare sternum, no exposed ribcage through the shirt, no transparent shirt, "
+    "and no shirt disappearing under the lapels."
 )
 
 NEG_EDIT = (
@@ -47,6 +52,7 @@ NEG_EDIT = (
     "cartoon eyes, glowing eyes, missing bones, exposed ribcage outside shell, "
     "opaque skin replacing glass, duplicate skeleton, twin bodies, "
     "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
+    "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt, "
     "extra fingers, broken hands, low quality, blurry, watermark, text overlay"
 )
 
@@ -56,10 +62,10 @@ class CanonicalEditError(RuntimeError):
 
 
 def _ensure_fal() -> None:
-    key = os.getenv("FAL_AI_KEY", "").strip()
-    if not key:
-        raise CanonicalEditError("FAL_AI_KEY not set")
-    os.environ["FAL_KEY"] = key
+    try:
+        require_fal_key("Seedream canonical edit")
+    except RuntimeError as exc:
+        raise CanonicalEditError(str(exc)) from exc
 
 
 def _download(url: str, dest: Path) -> None:

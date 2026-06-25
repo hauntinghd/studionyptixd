@@ -101,6 +101,26 @@ _PLAN_SYSTEM_PROMPT = (
 )
 
 
+WARDROBE_MOTION_LOCK = (
+    "Wardrobe continuity lock: keep every garment solid and unchanged for the entire clip; "
+    "white T-shirt or undershirt stays opaque under any open coat or jacket; "
+    "black pants and shoes stay complete; no shirtless frames, bare chest, exposed sternum, "
+    "exposed ribcage, transparent fabric, disappearing clothing, wardrobe popping, or outfit morphing."
+)
+
+
+def apply_wardrobe_motion_lock(motion: str, outfit: str | None = None) -> str:
+    """Append a hard continuity guard to image-to-video prompts."""
+    motion_text = str(motion or "").strip() or "Subtle idle motion, soft ambient movement"
+    outfit_text = str(outfit or "").strip()
+    if "wardrobe continuity lock" in motion_text.lower():
+        return motion_text[:900]
+    lock = WARDROBE_MOTION_LOCK
+    if outfit_text:
+        lock = f"{lock} Locked outfit remains unchanged: {outfit_text[:240]}."
+    return f"{motion_text}. {lock}"[:900]
+
+
 def _merge_visual_brief(outfit: str, visual_brief: str | None) -> str:
     vb = (visual_brief or "").strip()
     if not vb:
@@ -219,7 +239,10 @@ def derive_beat_visuals(
             "scene_action",
             "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
         ),
-        data.get("motion_prompt", "Subtle idle motion, soft ambient movement"),
+        apply_wardrobe_motion_lock(
+            data.get("motion_prompt", "Subtle idle motion, soft ambient movement"),
+            outfit,
+        ),
     )
 
 

@@ -15,6 +15,8 @@ import time
 import httpx
 from pathlib import Path
 
+from .fal_auth import require_fal_key
+
 SEEDREAM_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 
 
@@ -23,10 +25,10 @@ class SeedreamError(RuntimeError):
 
 
 def _load_key() -> str:
-    key = os.getenv("FAL_AI_KEY", "").strip()
-    if not key:
-        raise SeedreamError("FAL_AI_KEY not set in env")
-    return key
+    try:
+        return require_fal_key("Seedream text-to-image")
+    except RuntimeError as exc:
+        raise SeedreamError(str(exc)) from exc
 
 
 def generate(

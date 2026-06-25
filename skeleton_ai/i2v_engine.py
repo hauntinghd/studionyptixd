@@ -30,6 +30,8 @@ from pathlib import Path
 import fal_client
 import httpx
 
+from .fal_auth import require_fal_key
+
 FAL_SUBSCRIBE_TIMEOUT_SEC = int(os.getenv("FAL_I2V_SUBSCRIBE_TIMEOUT_SEC", "600"))
 FAL_I2V_POLL_INTERVAL_SEC = float(os.getenv("FAL_I2V_POLL_INTERVAL_SEC", "5"))
 FAL_I2V_POLL_MAX_INTERVAL_SEC = float(os.getenv("FAL_I2V_POLL_MAX_INTERVAL_SEC", "15"))
@@ -72,11 +74,10 @@ VIDEO_MODELS: dict[str, dict[str, object]] = {
 
 
 def _ensure_fal():
-    key = os.getenv("FAL_AI_KEY", "").strip()
-    if not key:
-        raise I2VError("FAL_AI_KEY not set in env")
-    os.environ["FAL_KEY"] = key  # fal_client reads this
-    return key
+    try:
+        return require_fal_key("image-to-video")
+    except RuntimeError as exc:
+        raise I2VError(str(exc)) from exc
 
 
 def _is_content_policy_error(exc: Exception) -> bool:

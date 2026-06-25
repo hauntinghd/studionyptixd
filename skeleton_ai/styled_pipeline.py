@@ -16,7 +16,7 @@ from studio_agent.render_styles import RenderStyle, get_render_style
 
 from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
 from .i2v_engine import ac_cost_for_video_model, generate as gen_clip, resolve_video_model_chain
-from .pipeline import Beat, _write_progress, check_cancelled, split_script_into_beats
+from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
 from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
 from .styled_stills import build_styled_scene_prompt, generate_still_t2i
@@ -330,7 +330,8 @@ def plan_scenes(
                 generate_still_t2i(prompt, still_target, negative_prompt=style.negative_prompt, seed=420042 + i)
         scenes.append({
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
-            "outfit": outfit, "scene_action": action, "motion_prompt": motion,
+            "outfit": outfit, "scene_action": action,
+            "motion_prompt": apply_wardrobe_motion_lock(motion, outfit) if is_skeleton else motion,
             "still_rel": f"stills/{sid}.png", "clip_rel": None,
             "animate": bool(prev.get("animate", default_animate)),
             "approved_for_video": bool(prev.get("approved_for_video", False)),
@@ -530,8 +531,15 @@ def animate_scenes_stage(
         clip = clips_dir / f"{sc['sid']}.mp4"
         clip.unlink(missing_ok=True)  # re-animate fresh
         try:
+            motion_prompt = sc.get("motion_prompt") or sc["narration"]
+            skeleton_scene_text = " ".join(
+                str(sc.get(key) or "") for key in ("render_style", "outfit", "prompt", "scene_action")
+            ).lower()
+            if "skeleton_host" in skeleton_scene_text or "skeleton" in skeleton_scene_text:
+                motion_prompt = apply_wardrobe_motion_lock(motion_prompt, sc.get("outfit"))
+                sc["motion_prompt"] = motion_prompt
             gen_clip(
-                still, sc.get("motion_prompt") or sc["narration"], clip,
+                still, motion_prompt, clip,
                 tier=tier, video_model=sc.get("video_model"),
                 duration_sec=int(sc.get("duration_sec", 5)),
             )
