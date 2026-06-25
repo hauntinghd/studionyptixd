@@ -305,6 +305,7 @@ def plan_scenes(
                     cat["label"],
                     plan=plan,
                     visual_brief=visual_brief,
+                    beat_index=i,
                 )
                 prompt = build_scene_edit_prompt(
                     topic=topic or cat["label"],

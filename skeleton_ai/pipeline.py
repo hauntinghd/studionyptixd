@@ -143,6 +143,25 @@ def _visual_brief_requests_wardrobe(visual_brief: str | None) -> bool:
     return any(term in low for term in wardrobe_terms)
 
 
+def _visual_brief_beat_direction(
+    visual_brief: str | None,
+    beat_index: int | None,
+) -> str:
+    """Extract a numbered Beat N directive from a user-authored visual brief."""
+    if beat_index is None:
+        return ""
+    text = str(visual_brief or "").strip()
+    if not text:
+        return ""
+    number = int(beat_index) + 1
+    match = re.search(
+        rf"\bBeat\s*{number}\s*:\s*(.+?)(?=\s+\bBeat\s*\d+\s*:|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return re.sub(r"\s+", " ", match.group(1)).strip(" .;") if match else ""
+
+
 def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = "",
                    topic: str | None = None, visual_brief: str | None = None) -> dict:
     """
@@ -199,6 +218,7 @@ def derive_beat_visuals(
     *,
     plan: dict | None = None,
     visual_brief: str | None = None,
+    beat_index: int | None = None,
 ) -> tuple[str, str, str]:
     """Per-beat visuals for canonical skeleton Seedream edit (background/outfit/props only)."""
     plan = plan or {"characters": {}, "fallback_outfit": "charcoal hoodie and dark joggers"}
@@ -206,6 +226,7 @@ def derive_beat_visuals(
     setting = plan.get("topic_setting", "")
     fallback = plan.get("fallback_outfit", "")
     vbl = (visual_brief or plan.get("visual_brief_lock") or "").strip()
+    locked_scene = _visual_brief_beat_direction(vbl, beat_index)
 
     sys = (
         "You compose ONE per-scene visual prompt for a NYPTID Skeleton AI short.\n\n"
@@ -226,6 +247,7 @@ def derive_beat_visuals(
     )
     user_lines = [
                   f"Mandatory visual direction: {vbl}" if vbl else "",
+                  f"MANDATORY EXACT SCENE FOR THIS BEAT: {locked_scene}" if locked_scene else "",
                   f"Topic setting: {setting}" if setting else "",
                   f"Character sheet (JSON): {chars_json}",
                   f"Fallback outfit: {fallback}",
@@ -251,12 +273,18 @@ def derive_beat_visuals(
     )
     if bool(data.get("bare_torso", False)):
         outfit = f"[BARE_TORSO] {outfit}"
+    generated_action = data.get(
+        "scene_action",
+        "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
+    )
+    action = (
+        f"Canonical skeleton host; {locked_scene}. Do not add unrelated props or change this location."
+        if locked_scene
+        else generated_action
+    )
     return (
         outfit,
-        data.get(
-            "scene_action",
-            "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
-        ),
+        action,
         apply_wardrobe_motion_lock(
             data.get("motion_prompt", "Subtle idle motion, soft ambient movement"),
             outfit,
@@ -355,6 +383,7 @@ def run(
             cat["label"],
             plan=plan,
             visual_brief=visual_brief,
+            beat_index=i,
         )
         beats.append(Beat(
             index=i,

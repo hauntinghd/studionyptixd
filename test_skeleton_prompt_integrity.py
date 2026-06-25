@@ -3,7 +3,10 @@ from skeleton_ai.canonical_edit import (
     build_scene_edit_prompt,
     sanitize_skeleton_outfit,
 )
-from skeleton_ai.pipeline import _visual_brief_requests_wardrobe
+from skeleton_ai.pipeline import (
+    _visual_brief_beat_direction,
+    _visual_brief_requests_wardrobe,
+)
 
 
 def test_bare_feet_are_rewritten_as_skeletal_glass_feet():
@@ -49,9 +52,24 @@ def test_scene_only_visual_brief_does_not_request_wardrobe():
     )
 
 
+def test_numbered_beat_direction_is_extracted_exactly():
+    brief = (
+        "Beat 1: skeleton in dark bedroom, hand reaching toward chest. "
+        "Beat 2: brain highlighted with cyan neural pathways. "
+        "Beat 3: childhood memory space."
+    )
+    assert _visual_brief_beat_direction(brief, 0) == (
+        "skeleton in dark bedroom, hand reaching toward chest"
+    )
+    assert _visual_brief_beat_direction(brief, 1) == (
+        "brain highlighted with cyan neural pathways"
+    )
+
+
 if __name__ == "__main__":
     test_bare_feet_are_rewritten_as_skeletal_glass_feet()
     test_scene_prompt_forbids_human_tissue_at_clothing_edges()
     test_negative_prompt_blocks_hybrid_human_anatomy()
     test_scene_only_visual_brief_does_not_request_wardrobe()
+    test_numbered_beat_direction_is_extracted_exactly()
     print("skeleton prompt integrity tests passed")
