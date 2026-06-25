@@ -59,7 +59,11 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
     const currentPlanLabel = ownerOverride
         ? 'Owner override'
         : billingActive
-            ? capitalize(normalizedPlan || 'starter')
+            ? normalizedPlan === 'creator'
+                ? 'Studio'
+                : normalizedPlan === 'studio'
+                    ? 'Studio Pro'
+                    : capitalize(normalizedPlan || 'starter')
             : 'Free';
     const totalCredits = Number(creditsTotalRemaining || 0);
 
@@ -212,8 +216,8 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         </div>
                         <div className="mt-6 rounded-xl border border-white/[0.06] bg-black/20 p-4 text-sm text-gray-400">
                             <p className="font-semibold text-white">Billing behavior</p>
-                            <p className="mt-2">Included monthly credits burn first when membership is active.</p>
-                            <p className="mt-1">Wallet credits persist if membership expires.</p>
+                            <p className="mt-2">Expiring rollover credits burn first, then the current monthly grant.</p>
+                            <p className="mt-1">Purchased reload credits persist if membership expires.</p>
                         </div>
                         <button
                             onClick={signOut}

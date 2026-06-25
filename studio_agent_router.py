@@ -171,7 +171,7 @@ def build_studio_agent_router(
         ):
             raise HTTPException(
                 403,
-                "Studio Agent requires an active Creator ($60/mo) or Studio ($200/mo) plan.",
+                "Studio Agent requires an active Studio ($60/mo) or Studio Pro ($200/mo) plan.",
             )
         return user
 

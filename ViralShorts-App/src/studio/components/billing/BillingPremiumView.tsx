@@ -72,12 +72,25 @@ export default function BillingPremiumView({
                         </div>
                         <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">One wallet. Every model.</h1>
                         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-gray-400">
-                            Credits cover Studio Agent, OpenRouter, fal image/video, and ElevenLabs. You pay for real production usage.
+                            One credit wallet covers Studio Agent, image and video generation, voice, sound, and model usage.
                         </p>
                     </div>
                     <div className="grid min-w-[320px] grid-cols-2 gap-3">
                         <HeroStat icon={Gauge} label="Balance" value={creditBalance >= 999999 ? 'Unlimited' : creditBalance.toLocaleString()} sub="unified credits" />
-                        <HeroStat icon={CreditCard} label="Model" value={billingActive ? normalizedCurrentPlan || 'Active' : 'No plan'} sub="membership" />
+                        <HeroStat
+                            icon={CreditCard}
+                            label="Plan"
+                            value={
+                                billingActive
+                                    ? normalizedCurrentPlan === 'creator'
+                                        ? 'Studio'
+                                        : normalizedCurrentPlan === 'studio'
+                                            ? 'Studio Pro'
+                                            : 'Active'
+                                    : 'No plan'
+                            }
+                            sub="membership"
+                        />
                     </div>
                 </div>
             </section>
@@ -86,7 +99,7 @@ export default function BillingPremiumView({
                 <div className="flex flex-wrap items-end justify-between gap-4">
                     <div>
                         <h2 className="text-lg font-bold text-white">Plans</h2>
-                        <p className="mt-1 text-sm text-gray-500">Monthly credits refresh each billing cycle. Top-ups stack on top.</p>
+                        <p className="mt-1 text-sm text-gray-500">Monthly credits roll over once. Purchased reloads remain available until used.</p>
                     </div>
                     <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
                         Usage-priced
@@ -144,7 +157,7 @@ export default function BillingPremiumView({
                     <Zap className="h-5 w-5 text-cyan-400" />
                     <h2 className="text-lg font-bold text-white">Top up</h2>
                 </div>
-                <p className="mt-1 text-sm text-gray-500">Pay-as-you-go credits used after your monthly grant runs out.</p>
+                <p className="mt-1 text-sm text-gray-500">Add 1,000 credits for $25 whenever a larger production needs more capacity.</p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     {sortedPacks.map((pack) => {
                         const active = selectedPack?.price_id === pack.price_id;
@@ -186,6 +199,7 @@ export default function BillingPremiumView({
                         <p><strong className="text-gray-200">Studio Agent</strong> - OpenRouter models debited per token at live rates.</p>
                         <p><strong className="text-gray-200">fal</strong> - image, video, SFX, and motion graphics charged per render.</p>
                         <p><strong className="text-gray-200">ElevenLabs</strong> - TTS and voice cloning charged per character.</p>
+                        <p><strong className="text-gray-200">Protection</strong> - paid jobs reserve credits before starting; failed starts are refunded automatically.</p>
                     </div>
                 </div>
             </section>

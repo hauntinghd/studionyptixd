@@ -253,29 +253,31 @@ export interface UnifiedPlan {
 export const UNIFIED_PLANS: UnifiedPlan[] = [
     {
         id: 'creator',
-        title: 'Creator',
+        title: 'Studio',
         priceUsd: 60,
-        monthlyCredits: 5000,
+        monthlyCredits: 2000,
         description: 'Everything you need to ship consistently — Studio Agent, OpenRouter, fal renders, and ElevenLabs in one wallet.',
         features: [
-            '5,000 credits / month',
+            '2,000 credits / month',
+            'Unused monthly credits roll over for one month',
             'Studio Agent + full OpenRouter catalog',
-            'Usage-based debits (OpenRouter, fal, ElevenLabs)',
-            'Competitor analysis + Catalyst recommendations',
+            'Efficient and Premium production modes',
+            'Hard cost approval before paid generation',
         ],
     },
     {
         id: 'studio',
-        title: 'Studio',
+        title: 'Studio Pro',
         priceUsd: 200,
-        monthlyCredits: 20000,
+        monthlyCredits: 8000,
         bestValue: true,
         description: 'Best value per credit for daily operators and teams running multiple channels.',
         features: [
-            '20,000 credits / month',
-            '100 credits per dollar (vs ~83 on Creator)',
+            '8,000 credits / month',
+            'Unused monthly credits roll over for one month',
             'Priority render queue',
-            'Everything in Creator',
+            'Higher concurrency and larger productions',
+            'Everything in Studio',
         ],
     },
 ];
@@ -288,10 +290,7 @@ export interface UnifiedTopupPack {
 }
 
 export const UNIFIED_TOPUP_PACKS: UnifiedTopupPack[] = [
-    { price_id: 'uc_boost', pack: 'boost', credits: 500, price_usd: 30 },
-    { price_id: 'uc_growth', pack: 'growth', credits: 2000, price_usd: 100 },
-    { price_id: 'uc_scale', pack: 'scale', credits: 5000, price_usd: 200 },
-    { price_id: 'uc_max', pack: 'max', credits: 10000, price_usd: 350 },
+    { price_id: 'uc_reload', pack: 'reload', credits: 1000, price_usd: 25 },
 ];
 
 export function visibleNiches(isOwner: boolean): StudioNiche[] {

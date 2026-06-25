@@ -51,6 +51,13 @@ def account_profile(
         except Exception:
             pass
     if owner:
+        if uid:
+            try:
+                import unified_credits as uc
+
+                uc.set_unlimited(uid, True, reason="studio_owner_profile")
+            except Exception:
+                pass
         return {
             "tier": "owner",
             "label": "Owner account",

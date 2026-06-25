@@ -2235,7 +2235,6 @@ def execute_tool(
         if args.get("hero_motion_ratio") is not None:
             outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
         job_id = lf_pipeline.start_render(channel, outline)
-        billing = _debit_fal_for_outline(user_id, outline, job_id=job_id, kind="longform")
         return json.dumps({
             "status": "awaiting_scene_review",
             "job_id": job_id,
@@ -2249,7 +2248,6 @@ def execute_tool(
             "chapters": len(outline.get("chapters") or []),
             "motion_policy": outline.get("motion_policy"),
             "hero_motion_ratio": lf_pipeline.resolve_motion_ratio(outline)[1],
-            "billing": billing,
         }, indent=2)
 
     if name == "list_skeleton_video_models":
@@ -3344,15 +3342,66 @@ def execute_tool_logged(
     content_format: str,
     session_id: str | None = None,
 ) -> str:
-    """Wrapper that records telemetry then runs the tool."""
+    """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
     budget_estimate = None
+    credit_reservation: dict[str, Any] | None = None
     try:
         budget_estimate = production_budget.enforce_budget(name, arguments)
+        if budget_estimate is not None and str(user_id or "").strip():
+            import unified_credits as uc
+
+            credit_reservation = uc.reserve_usd(
+                user_id,
+                budget_estimate.estimated_usd,
+                reason=f"studio_tool:{name}",
+                metadata={
+                    "tool": name,
+                    "session_id": session_id,
+                    "budget": budget_estimate.as_dict(),
+                },
+                repair_reserve_pct=0.25,
+            )
         result = execute_tool(
             name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
         )
         result = production_budget.with_budget_metadata(result, budget_estimate, arguments)
+        if credit_reservation and not credit_reservation.get("unlimited"):
+            import unified_credits as uc
+
+            base_credits = uc.usd_to_credits(budget_estimate.estimated_usd if budget_estimate else 0.0)
+            state = uc.commit_reservation(
+                user_id,
+                str(credit_reservation.get("reservation_id") or ""),
+                actual_credits=base_credits,
+                reason=f"studio_tool_started:{name}",
+                metadata={"tool": name, "session_id": session_id},
+            )
+            try:
+                payload = json.loads(result or "{}")
+                if isinstance(payload, dict):
+                    payload["credits"] = {
+                        "charged": base_credits,
+                        "repair_reserve_refunded": max(
+                            0,
+                            int(credit_reservation.get("credits", 0) or 0) - base_credits,
+                        ),
+                        "balance_after": int(state.get("balance", 0) or 0),
+                    }
+                    result = json.dumps(payload, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
     except Exception as exc:
+        if credit_reservation and not credit_reservation.get("unlimited"):
+            try:
+                import unified_credits as uc
+
+                uc.release_reservation(
+                    user_id,
+                    str(credit_reservation.get("reservation_id") or ""),
+                    reason=f"studio_tool_failed:{name}",
+                )
+            except Exception:
+                pass
         telemetry.record_tool_call(
             user_id, name, arguments, session_id=session_id, result_preview=f"error: {exc}"
         )

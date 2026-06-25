@@ -195,12 +195,12 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             setCheckoutError('');
             setPlanLoadingId(planId);
             try {
+                if (billingActive && usesStripeMembership) {
+                    const err = await manageBilling();
+                    if (err) setCheckoutError(err);
+                    return;
+                }
                 if (billingActive && normalizedCurrentPlan === planId) {
-                    if (usesStripeMembership) {
-                        const err = await manageBilling();
-                        if (err) setCheckoutError(err);
-                        return;
-                    }
                     if (usesManualPayPalMembership) {
                         const err = await checkout(planId);
                         if (err) setCheckoutError(err);

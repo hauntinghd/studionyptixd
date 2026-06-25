@@ -372,7 +372,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
                     ) : (
                         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
                             <p className="max-w-md text-sm text-gray-400">
-                                Studio Agent requires a Creator or Studio plan. Upgrade in Billing to unlock the agent.
+                                Studio Agent requires Studio or Studio Pro. Upgrade in Billing to unlock the agent.
                             </p>
                             <button
                                 type="button"

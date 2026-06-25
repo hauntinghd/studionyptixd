@@ -430,6 +430,7 @@ MAINTENANCE_BANNER_MESSAGE = os.getenv(
 ).strip()
 
 stripe_lib.api_key = STRIPE_SECRET_KEY
+stripe_lib.api_version = "2026-02-25.clover"
 
 ELITE_PRICE_ID = os.getenv("PLAN_PRICE_ID_ELITE", "price_1T9uMwBL8lRmwao2Lk89pxiz").strip()
 
@@ -457,22 +458,22 @@ PLAN_PRICE_USD = {
 # Credits are debited per operation from actual provider USD cost; see
 # CREDIT_USD_VALUE for the conversion rate.
 #
-# $200 tier is intentionally the better value: more credits per dollar than the
-# $60 tier (100 cr/$ vs ~83 cr/$) so upgrading is always the smarter buy.
+# One credit represents $0.01 of metered provider spend. Subscription margin is
+# created by the amount of credits granted, not by a hidden debit multiplier.
 # ---------------------------------------------------------------------------
 UNIFIED_PLANS = {
     "creator": {
         "id": "creator",
-        "name": "Creator",
+        "name": "Studio",
         "price_usd": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", "60")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_CREATOR_CREDITS", "5000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_CREATOR_CREDITS", "2000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_CREATOR_PRICE_ID", "").strip(),
     },
     "studio": {
         "id": "studio",
-        "name": "Studio",
+        "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_CREDITS", "20000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_CREDITS", "8000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRICE_ID", "").strip(),
         "best_value": True,
     },
@@ -483,12 +484,11 @@ for _plan_id, _plan_spec in UNIFIED_PLANS.items():
         STRIPE_PRICE_TO_PLAN[_stripe_price] = _plan_id
 
 # USD value of one credit when debiting against real provider spend.
-# credits_charged = ceil(provider_usd * (1 + CREDIT_MARGIN) / CREDIT_USD_VALUE)
-# At $60 -> 5,000 credits, 1 credit ~= $0.012 of plan price; the margin lets the
-# same credit cover ~$0.01 of raw provider cost (OpenRouter tokens, fal seconds,
-# ElevenLabs characters) while keeping a platform margin.
+# credits_charged = ceil(provider_usd * (1 + CREDIT_MARGIN) / CREDIT_USD_VALUE).
+# The default is exact pass-through metering: 100 credits equals $1 of provider
+# spend. The subscription grant and reload price create the product margin.
 CREDIT_USD_VALUE = float(os.getenv("CREDIT_USD_VALUE", "0.01"))
-CREDIT_MARGIN = float(os.getenv("CREDIT_MARGIN", "0.20"))
+CREDIT_MARGIN = float(os.getenv("CREDIT_MARGIN", "0.0"))
 
 # Animation usage pricing baseline:
 # Kling 2.1 Standard I2V observed market API cost (5s) ~= $0.28.
@@ -502,10 +502,7 @@ ANIMATION_CREDIT_UNIT_USD = round(
 
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 TOPUP_PACK_SPECS = [
-    {"id": "uc_boost", "pack": "boost", "credits": 500, "price_usd": 30.00},
-    {"id": "uc_growth", "pack": "growth", "credits": 2000, "price_usd": 100.00},
-    {"id": "uc_scale", "pack": "scale", "credits": 5000, "price_usd": 200.00},
-    {"id": "uc_max", "pack": "max", "credits": 10000, "price_usd": 350.00},
+    {"id": "uc_reload", "pack": "reload", "credits": 1000, "price_usd": 25.00},
 ]
 TOPUP_PACKS = {
     str(spec["id"]): {

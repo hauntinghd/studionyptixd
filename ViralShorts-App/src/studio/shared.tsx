@@ -524,8 +524,8 @@ export type LaneAccessMap = Record<string, boolean>;
 // Billing/Dashboard render correct prices/limits even while /api/config is loading or
 // temporarily unreachable (e.g. serverless cold-start on RunPod).
 export const PUBLIC_PLAN_LIMITS_FALLBACK: PlanLimitMap = {
-    creator: { monthly_credits: 5000, price_usd: 60 },
-    studio: { monthly_credits: 20000, price_usd: 200 },
+    creator: { monthly_credits: 2000, price_usd: 60 },
+    studio: { monthly_credits: 8000, price_usd: 200 },
 };
 export const PUBLIC_PLAN_PRICES_FALLBACK: PlanPriceMap = {
     creator: 60,
@@ -536,10 +536,7 @@ export const PUBLIC_PLAN_FEATURES_FALLBACK: PlanFeatureMap = {
     studio: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
 };
 export const PUBLIC_TOPUP_PACKS_FALLBACK: TopupPack[] = [
-    { price_id: 'uc_boost', pack: 'boost', credits: 500, price_usd: 30 },
-    { price_id: 'uc_growth', pack: 'growth', credits: 2000, price_usd: 100 },
-    { price_id: 'uc_scale', pack: 'scale', credits: 5000, price_usd: 200 },
-    { price_id: 'uc_max', pack: 'max', credits: 10000, price_usd: 350 },
+    { price_id: 'uc_reload', pack: 'reload', credits: 1000, price_usd: 25 },
 ];
 
 export interface AuthContextType {

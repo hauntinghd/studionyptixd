@@ -386,7 +386,7 @@ function transcriptMentionsPendingAction(messages: ChatMessage[]): boolean {
 function friendlyApiError(status: number, data: Record<string, unknown>, fallback: string) {
     const detail = String(data?.detail || data?.error || fallback);
     if (status === 401 || status === 403) {
-        return detail || 'Sign in required. Studio Agent needs Creator or Studio plan (owners have full access).';
+        return detail || 'Sign in required. Studio Agent needs Studio or Studio Pro (owners have unlimited access).';
     }
     if (status === 404) {
         if (detail && !detail.startsWith('Not Found')) {

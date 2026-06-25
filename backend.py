@@ -19083,7 +19083,7 @@ async def _public_config_payload():
             "animated_credit_label": "Credits",
             "non_animated_credit_label": "Credits",
             "overage_label": "credit top-ups",
-            "hard_stop_on_animated_exhaustion": False,
+            "hard_stop_on_animated_exhaustion": True,
             "waitlist_only_mode": bool(WAITLIST_ONLY_MODE),
             "waitlist_requires_stripe_payment": bool(WAITLIST_REQUIRE_STRIPE_PAYMENT),
             "kling21_standard_i2v_5s_usd": KLING21_STANDARD_I2V_5S_USD,
@@ -20979,12 +20979,14 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
         latest = dict(_paypal_orders.get(order_id, {}) or {})
         if latest.get("credited"):
             return latest
-        await _credit_topup_wallet(
-            user_id=str(latest.get("user_id", "") or ""),
-            credits=int(latest.get("credits", 0) or 0),
-            source=str(latest.get("pack", "paypal") or "paypal"),
-            stripe_session_id=order_id,
-        )
+        is_unified_pack = str(latest.get("price_id", "") or "").startswith("uc_")
+        if not is_unified_pack:
+            await _credit_topup_wallet(
+                user_id=str(latest.get("user_id", "") or ""),
+                credits=int(latest.get("credits", 0) or 0),
+                source=str(latest.get("pack", "paypal") or "paypal"),
+                stripe_session_id=order_id,
+            )
         try:
             import unified_credits as uc
             uc.add_credits(
@@ -20992,6 +20994,7 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
                 int(latest.get("credits", 0) or 0),
                 reason="paypal_topup",
                 metadata={"order_id": order_id, "pack": str(latest.get("pack", "") or "")},
+                idempotency_key=f"paypal_order:{order_id}",
             )
         except Exception as uc_err:
             log.warning(f"Unified wallet top-up mirror failed for {order_id}: {uc_err}")
@@ -21918,12 +21921,14 @@ async def _stripe_webhook(request: Request):
                 return {"status": "ok"}
             topup_credits = int(str(metadata.get("topup_credits", "0") or "0"))
             if user_id and topup_credits > 0:
-                await _credit_topup_wallet(
-                    user_id=user_id,
-                    credits=topup_credits,
-                    source=str(metadata.get("topup_pack", "topup") or "topup"),
-                    stripe_session_id=str(session_data.get("id", "") or ""),
-                )
+                is_unified_pack = str(metadata.get("topup_price_id", "") or "").startswith("uc_")
+                if not is_unified_pack:
+                    await _credit_topup_wallet(
+                        user_id=user_id,
+                        credits=topup_credits,
+                        source=str(metadata.get("topup_pack", "topup") or "topup"),
+                        stripe_session_id=str(session_data.get("id", "") or ""),
+                    )
                 try:
                     import unified_credits as uc
                     uc.add_credits(
@@ -21934,6 +21939,7 @@ async def _stripe_webhook(request: Request):
                             "session_id": str(session_data.get("id", "") or ""),
                             "pack": str(metadata.get("topup_pack", "") or ""),
                         },
+                        idempotency_key=f"stripe_checkout:{str(session_data.get('id', '') or '')}",
                     )
                 except Exception as uc_err:
                     log.warning(f"Unified wallet top-up mirror failed for {user_id[:12]}: {uc_err}")
