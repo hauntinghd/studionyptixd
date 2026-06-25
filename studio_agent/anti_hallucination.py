@@ -149,25 +149,25 @@ _PRODUCTION_COMPLETE_RE = re.compile(
 
 _ACTION_LANGUAGE_RE = re.compile(
     r"\b("
-    r"i'?m (?:applying|fixing|building|starting|running|deploying|rendering|editing|re-editing|resubmitting|checking|pulling)|"
+    r"i'?m (?:applying|fixing|building|starting|running|deploying|rendering|editing|re-editing|submitting|resubmitting|checking|pulling)|"
     r"i (?:applied|fixed|built|started|ran|deployed|rendered|edited|re-edited|checked|pulled)|"
-    r"starting now|running now|rendering now|resubmitting now|checking completion|checking the status"
+    r"starting now|running now|rendering now|submitting now|resubmitting now|checking completion|checking the status"
     r")\b",
     re.IGNORECASE,
 )
 
 _COMMITMENT_RE = re.compile(
     r"\b("
-    r"i(?:'ll| will)\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
-    r"let\s+me\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify|try)|"
-    r"i'?m\s+going\s+to\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
+    r"i(?:'ll| will)\s+(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
+    r"let\s+me\s+(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify|try)|"
+    r"i'?m\s+going\s+to\s+(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
     r"still\s+working\s+on\s+(?:the|that|this|it|a)\s+(?:fix|rewrite|retry|build|deploy|install|patch|update|search|lookup|test|render|edit)"
     r")\b",
     re.IGNORECASE,
 )
 
 _ACTION_COMMITMENT_RE = re.compile(
-    r"\b(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|write|edit|update|patch|deploy|install|test)\b",
+    r"\b(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|write|edit|update|patch|deploy|install|test)\b",
     re.IGNORECASE,
 )
 

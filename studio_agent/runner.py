@@ -1513,6 +1513,171 @@ async def _run_turn_impl(
     except Exception:
         pass
 
+    # Explicit production starts are deterministic. If the model previously
+    # prepared a start action but narrated instead of firing it, recover the
+    # exact stored arguments and surface/execute them before another LLM call.
+    if not reply_to and _wants_production_execution(user_text):
+        existing_pending = list(session.get("pending_actions") or [])
+        if existing_pending:
+            assistant_text = "The production is already prepared and waiting for your approval."
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(sid, messages=messages, pending_actions=existing_pending)
+            await _fire_event(emit, "pending_actions", actions=existing_pending)
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": existing_pending,
+                "active_jobs": list(session.get("active_jobs") or []),
+                "approval_mode": approval_mode,
+                "reasoning_depth": reasoning_depth,
+                "usage": {},
+                "billing": {
+                    "credits_charged": 0,
+                    "provider_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                },
+            }
+        recovered = _recover_requested_production(session, user_text)
+        if recovered:
+            name, args = recovered
+            if name == "start_shortform_generate":
+                args = _inject_shortform_render_style(args, session)
+                args = _inject_shortform_caption_options(args, session)
+                args = _normalize_shortform_category_args(args)
+            args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
+            budget_payload = None
+            try:
+                estimate = production_budget.enforce_budget(name, args)
+                if estimate is not None:
+                    budget_payload = estimate.as_dict()
+            except production_budget.BudgetExceededError as exc:
+                assistant_text = f"Studio could not prepare the production: {exc}"
+                messages.append({"role": "assistant", "content": assistant_text})
+                store.update_session(sid, messages=messages)
+                await _fire_event(emit, "tool_end", tool=name, status="error", error="budget_exceeded")
+                return {
+                    "session_id": sid,
+                    "assistant_message": assistant_text,
+                    "pending_actions": [],
+                    "active_jobs": list(session.get("active_jobs") or []),
+                    "approval_mode": approval_mode,
+                    "reasoning_depth": reasoning_depth,
+                    "usage": {},
+                    "billing": {
+                        "credits_charged": 0,
+                        "provider_usd": 0.0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                    },
+                }
+            await _fire_event(
+                emit,
+                "tool_start",
+                tool=name,
+                round=0,
+                awaiting_approval=approval_mode == "confirm" and requires_approval(name),
+                deterministic_start=True,
+            )
+            if approval_mode == "confirm" and requires_approval(name):
+                action_id = f"act_{uuid.uuid4().hex[:12]}"
+                action = {
+                    "id": action_id,
+                    "tool": name,
+                    "arguments": args,
+                    "summary": f"{name}({json.dumps(args)[:200]})",
+                    "budget": budget_payload,
+                }
+                assistant_text = "The production is prepared correctly and waiting for your approval."
+                messages.append({"role": "assistant", "content": assistant_text})
+                store.update_session(
+                    sid,
+                    messages=messages,
+                    pending_actions=[action],
+                    last_production={
+                        "tool": name,
+                        "arguments": args,
+                        "updated_at": time.time(),
+                    },
+                )
+                await _fire_event(emit, "pending_actions", actions=[action])
+                await _fire_event(emit, "tool_end", tool=name, status="awaiting_approval")
+                return {
+                    "session_id": sid,
+                    "assistant_message": assistant_text,
+                    "pending_actions": [action],
+                    "active_jobs": list(session.get("active_jobs") or []),
+                    "approval_mode": approval_mode,
+                    "reasoning_depth": reasoning_depth,
+                    "usage": {},
+                    "billing": {
+                        "credits_charged": 0,
+                        "provider_usd": 0.0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                    },
+                }
+            try:
+                result = execute_tool_logged(
+                    name,
+                    args,
+                    user_id=user_id,
+                    content_format=content_format,
+                    session_id=sid,
+                )
+            except Exception as exc:
+                result = json.dumps({"error": str(exc)})
+            parsed_result: dict[str, Any] = {}
+            try:
+                loaded = json.loads(result or "{}")
+                if isinstance(loaded, dict):
+                    parsed_result = loaded
+            except Exception:
+                pass
+            error = str(parsed_result.get("error") or "").strip()
+            if error:
+                assistant_text = f"Studio tried to start the production, but the backend returned: {error}"
+                active_jobs = list(session.get("active_jobs") or [])
+                await _fire_event(emit, "tool_end", tool=name, status="error", error=error[:160])
+            else:
+                started = extract_jobs_from_tool(name, result)
+                active_jobs = merge_active_jobs(list(session.get("active_jobs") or []), started)
+                status = str(parsed_result.get("status") or "started").replace("_", " ")
+                job_id = str(parsed_result.get("job_id") or "").strip()
+                assistant_text = (
+                    f"Production started successfully{f' as {job_id}' if job_id else ''}. "
+                    f"Current status: {status}."
+                )
+                await _fire_event(emit, "active_jobs", jobs=active_jobs)
+                await _fire_event(emit, "tool_end", tool=name, status="ok")
+            messages.append(_tool_observation_message(name, result))
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(
+                sid,
+                messages=messages,
+                active_jobs=active_jobs,
+                last_production={
+                    "tool": name,
+                    "arguments": args,
+                    "updated_at": time.time(),
+                },
+            )
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": [],
+                "active_jobs": active_jobs,
+                "approval_mode": approval_mode,
+                "reasoning_depth": reasoning_depth,
+                "usage": {},
+                "billing": {
+                    "credits_charged": 0,
+                    "provider_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                },
+            }
+
     if reply_to and not _is_manual_visual_edit_request(user_text, reply_to):
         job_id = str(reply_to.get("job_id") or "")
         kind = str(reply_to.get("kind") or "shortform")

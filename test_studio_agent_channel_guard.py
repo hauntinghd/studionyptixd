@@ -56,6 +56,20 @@ def test_failed_render_cannot_be_described_as_resubmitting_now():
     assert any("promised execution" in claim for claim in report.blocked_claims)
 
 
+def test_call_and_submitting_now_without_tool_are_blocked():
+    report = audit_turn(
+        assistant_text=(
+            "Let me call the render tool directly now with the correct category. "
+            "Here is exactly what I am submitting. Submitting now."
+        ),
+        user_text="Let's get it started.",
+        tool_fires=[],
+    )
+
+    assert report.has_blockers
+    assert any("promised execution" in claim for claim in report.blocked_claims)
+
+
 def test_successful_render_can_be_reported_without_future_promise_block():
     started = ToolFire(
         "start_shortform_generate",
@@ -303,6 +317,7 @@ if __name__ == "__main__":
     test_current_text_zerotier_overrides_stale_empire_context()
     test_current_text_mrskelewelly_can_select_channel()
     test_failed_render_cannot_be_described_as_resubmitting_now()
+    test_call_and_submitting_now_without_tool_are_blocked()
     test_successful_render_can_be_reported_without_future_promise_block()
     test_explicit_start_language_recovers_last_production()
     test_non_action_chat_does_not_recover_or_repeat_production()
