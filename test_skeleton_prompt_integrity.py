@@ -102,6 +102,7 @@ def test_character_scoped_repair_preserves_background():
     )
     low = prompt.lower()
     assert scope == "character"
+    assert low.startswith("requested change")
     assert "preserve the current background" in low
     assert "repair skeleton anatomy" in low
 

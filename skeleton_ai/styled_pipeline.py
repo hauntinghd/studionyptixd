@@ -424,11 +424,12 @@ def _scoped_edit_prompt(scene_prompt: str, instruction: str, scope: str) -> tupl
             "identity, camera framing, and visual style as possible."
         ),
     }[normalized]
+    compact_scene = " ".join(str(scene_prompt or "").split())[:1600]
     prompt = (
-        f"Original scene intent:\n{scene_prompt.strip()}\n\n"
+        f"REQUESTED CHANGE — EXECUTE THIS FIRST:\n{instruction.strip()}\n\n"
         f"Edit scope: {normalized}.\n"
         f"Continuity rules: {guardrails}\n\n"
-        f"Requested change:\n{instruction.strip()}"
+        f"Original scene intent for context only:\n{compact_scene}"
     ).strip()[:3500]
     return prompt, normalized
 
