@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .scripting_grok import GrokClient, build_script_prompt
-from .canonical_edit import build_scene_edit_prompt, generate_still_edit
+from .canonical_edit import build_scene_edit_prompt, generate_still_edit, sanitize_skeleton_outfit
 from .i2v_engine import (
     ac_cost_for_video_model,
     generate as gen_clip,
@@ -84,8 +84,9 @@ def split_script_into_beats(script_text: str, target_count: int = 12) -> list[st
 _PLAN_SYSTEM_PROMPT = (
     "You are the visual planner for NYPTID Studio Skeleton AI shorts.\n\n"
     "THE HOST IS LOCKED — one canonical 3D skeleton from the master reference: "
-    "ivory-white anatomical bones, translucent glass body shell, realistic human "
-    "eyes in the sockets. Identity never changes. Scene-to-scene you may only "
+    "ivory-white anatomical bones and translucent glass body shell. The eyes already "
+    "present in the reference remain unchanged. No skin, flesh, human limbs, or muscle tissue. "
+    "Identity never changes. Scene-to-scene you may only "
     "change OUTFIT (worn over the shell), BACKGROUND, PROPS, and POSE.\n\n"
     "Given a full narration script and optional topic hint, list recurring "
     "comparison subjects or roles and lock ONE outfit description per named "
@@ -195,9 +196,10 @@ def derive_beat_visuals(
     sys = (
         "You compose ONE per-scene visual prompt for a NYPTID Skeleton AI short.\n\n"
         "THE HOST IS LOCKED — the same canonical ivory skeleton with glass shell and "
-        "realistic eyes from the master reference. Do NOT describe a different character, "
+        "the unchanged eyes from the master reference. Do NOT describe a different character, "
         "porcelain mannequin, or human actor. Only wardrobe, environment, props, and pose "
-        "may change.\n\n"
+        "may change. Every exposed body part must remain ivory bone inside clear glass. "
+        "Never output skin, flesh, muscles, human hands, human feet, or the phrase 'bare feet'.\n\n"
         "Output strict JSON:\n"
         "  outfit — clothing, armor, or visible muscle definition worn ON the same skeleton "
         "(from character sheet when named). Example: 'lean athletic muscle overlay on glass shell' — "
@@ -230,7 +232,9 @@ def derive_beat_visuals(
             "Canonical skeleton host in a cinematic photoreal environment matching the narration, sharp commercial lighting, vertical 9:16",
             "Subtle weight shift and ambient light flicker over five seconds",
         )
-    outfit = data.get("outfit", fallback) or fallback or "charcoal hoodie and dark joggers"
+    outfit = sanitize_skeleton_outfit(
+        data.get("outfit", fallback) or fallback or "charcoal hoodie and dark joggers"
+    )
     if bool(data.get("bare_torso", False)):
         outfit = f"[BARE_TORSO] {outfit}"
     return (

@@ -10,6 +10,7 @@ Pattern mirrors long_form/pb_lies_cast_kit.py (master + roster + scene edits).
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -30,15 +31,20 @@ FAL_EDIT_POLL_MAX_INTERVAL_SEC = float(os.getenv("FAL_EDIT_POLL_MAX_INTERVAL_SEC
 IDENTITY_LOCK = (
     "CANONICAL SKELETON EDIT LOCK: preserve the EXACT same character from the "
     "reference image — same ivory-white anatomical skeleton, same translucent "
-    "glass body shell hugging the bones, same skull proportions, same realistic "
-    "human eyes in the sockets, same limb lengths and pose mass. "
-    "Do NOT redesign the character. Do NOT change bone color, eye style, or shell shape."
+    "glass body shell hugging the bones, same skull proportions, and the same eyes "
+    "already present in the reference. Every visible body part remains skeletal: "
+    "ivory bone geometry inside transparent glass. There is ZERO human skin, flesh, "
+    "muscle, hair, fingernails, toenails, or human limb tissue anywhere. "
+    "Do NOT redesign the character. Do NOT change bone color, eye style, shell shape, "
+    "or replace any arm, hand, leg, or foot with human anatomy."
 )
 
 ARTIFACT_GUARD = (
     "Exactly ONE canonical skeleton host in frame unless the scene explicitly "
     "requires background people. Anatomically correct hands, no extra limbs, "
     "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render. "
+    "Both arms, both hands, all fingers, both legs, both feet, and all toes must visibly "
+    "match the reference skeleton: ivory bones enclosed by clear glass, never skin. "
     "Wardrobe must be physically coherent and complete: shirts cover the torso as a real shirt, "
     "pants cover both legs as real pants, shoes fit both feet, sleeves and hems are clean, "
     "fabric never melts into bones or glass, no half-clothes, no floating straps, no torn accidental seams. "
@@ -50,11 +56,30 @@ ARTIFACT_GUARD = (
 NEG_EDIT = (
     "different character, redesigned skeleton, alternate mascot, chibi, anime, "
     "cartoon eyes, glowing eyes, missing bones, exposed ribcage outside shell, "
-    "opaque skin replacing glass, duplicate skeleton, twin bodies, "
+    "human skin, flesh, human body, human actor, human arm, human hand, human fingers, "
+    "human leg, human foot, human toes, fingernails, toenails, muscles, hybrid human skeleton, "
+    "half human, asymmetrical anatomy, opaque skin replacing glass, duplicate skeleton, twin bodies, "
     "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
     "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt, "
     "extra fingers, broken hands, low quality, blurry, watermark, text overlay"
 )
+
+
+def sanitize_skeleton_outfit(outfit: str) -> str:
+    """Remove wardrobe language that makes edit models reconstruct human tissue."""
+    text = str(outfit or "").strip()
+    replacements = (
+        (r"\bbare[\s-]*feet\b", "uncovered canonical glass-and-bone skeletal feet"),
+        (r"\bbare[\s-]*foot\b", "uncovered canonical glass-and-bone skeletal foot"),
+        (r"\bbare[\s-]*hands?\b", "uncovered canonical glass-and-bone skeletal hands"),
+        (r"\bvisible muscle definition\b", "subtle contour in the existing glass shell"),
+        (r"\bmuscle definition\b", "glass-shell anatomical contour"),
+        (r"\bmuscular\b", "athletic skeletal proportions"),
+        (r"\bskin(?:tone| tone)?\b", "glass-shell tint"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
 
 
 class CanonicalEditError(RuntimeError):
@@ -190,13 +215,15 @@ def build_scene_edit_prompt(
     """Prompt for background/prop/wardrobe delta only — identity comes from refs."""
     topic = str(topic or "").strip()
     visual = str(visual_description or "").strip()
-    outfit = str(outfit or "").strip()
+    outfit = sanitize_skeleton_outfit(outfit)
     parts = [IDENTITY_LOCK, ARTIFACT_GUARD]
     if outfit:
         parts.append(
             f"WARDROBE / BODY EDIT ONLY on the SAME canonical skeleton: {outfit}. "
             "Clothes, muscle definition, armor, or props are layered ON the existing glass shell and bones — "
             "never replace the skeleton, never swap to a human or new character, never remove the glass shell. "
+            "Garments may occlude limbs, but every exposed limb segment must remain transparent glass with "
+            "ivory bones inside; never infer skin at cuffs, sleeves, waistbands, or pant hems. "
             "If clothing is requested, render real finished garments: complete shirt/jacket, complete pants, "
             "matching shoes when visible, clean edges, believable fabric folds, no partial transparent fabric errors."
         )
@@ -210,7 +237,12 @@ def build_scene_edit_prompt(
     else:
         parts.append("Change only the background environment; keep the skeleton identical.")
     parts.append("Vertical 9:16 cinematic framing, premium commercial lighting, sharp focus.")
-    return " ".join(parts)[:3500]
+    prompt = " ".join(parts)
+    prompt = prompt.replace(
+        "Clothes, muscle definition, armor, or props",
+        "Clothes, armor, or props",
+    )
+    return prompt[:3500]
 
 
 def generate_still_edit(
