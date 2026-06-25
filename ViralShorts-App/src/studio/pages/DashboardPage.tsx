@@ -121,7 +121,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             }
         })();
         if (!hasExplicitTab) {
-            setTab('campus');
+            setTab(canUseAgent ? 'agent' : 'campus');
             setCreateOpen(false);
             setSelectedNiche(null);
             return;

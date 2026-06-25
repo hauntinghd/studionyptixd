@@ -40,7 +40,7 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
 
     return (
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-white/[0.06] bg-[#09090b]/95 px-4 backdrop-blur-md sm:px-6">
-            <a href={`${STUDIO_SITE_URL}?page=dashboard`} className="flex items-center gap-2 shrink-0">
+            <a href={`${STUDIO_SITE_URL}?page=dashboard&tab=agent`} className="flex items-center gap-2 shrink-0">
                 <Logo size={28} />
             </a>
 
