@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -462,6 +463,76 @@ def _wants_short_plan(user_text: str) -> bool:
         "flop",
     )
     return any(term in low for term in plan_terms)
+
+
+def _wants_production_execution(user_text: str) -> bool:
+    """Detect an explicit request to begin or resume a production."""
+    return bool(
+        re.search(
+            r"\b("
+            r"start(?: it| this| the (?:video|render|production))?|"
+            r"get (?:it|this) started|"
+            r"let'?s (?:do|start|make|render|generate) (?:it|this|the video)|"
+            r"go ahead|do it|"
+            r"render (?:it|this|the video)|"
+            r"generate (?:it|this|the video)|"
+            r"make (?:it|this|the video)|"
+            r"begin (?:the )?(?:render|production)"
+            r")\b",
+            str(user_text or ""),
+            re.IGNORECASE,
+        )
+    )
+
+
+def _promised_execution_blocked(audit: Any) -> bool:
+    return any(
+        "promised execution without firing a matching tool" in str(claim).lower()
+        for claim in (getattr(audit, "blocked_claims", None) or [])
+    )
+
+
+def _recover_requested_production(
+    session: dict[str, Any],
+    user_text: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Recover the exact last production when the model narrated instead of acting."""
+    if not _wants_production_execution(user_text):
+        return None
+    fresh = store.get_session(str(session.get("session_id") or "")) or session
+    production_tools = {"start_shortform_generate", "start_longform_render"}
+
+    def find_production(value: Any) -> tuple[str, dict[str, Any]] | None:
+        if isinstance(value, dict):
+            direct_name = str(value.get("tool") or "").strip()
+            direct_args = value.get("arguments")
+            if direct_name in production_tools and isinstance(direct_args, dict) and direct_args:
+                return direct_name, dict(direct_args)
+            fn = value.get("function")
+            fn_name = str(fn.get("name") or "").strip() if isinstance(fn, dict) else ""
+            if isinstance(fn, dict) and fn_name in production_tools:
+                raw_args = fn.get("arguments")
+                if isinstance(raw_args, dict) and raw_args:
+                    return fn_name, dict(raw_args)
+                if isinstance(raw_args, str):
+                    try:
+                        parsed = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        parsed = {}
+                    if isinstance(parsed, dict) and parsed:
+                        return fn_name, parsed
+            for child in reversed(list(value.values())):
+                found = find_production(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in reversed(value):
+                found = find_production(child)
+                if found:
+                    return found
+        return None
+
+    return find_production(fresh)
 
 
 def _needs_public_search_preflight(user_text: str) -> bool:
@@ -1941,6 +2012,117 @@ async def _run_turn_impl(
             user_text=user_text,
             tool_fires=tool_fires,
         )
+        if audit.has_issues and _promised_execution_blocked(audit):
+            recovered = _recover_requested_production(session, user_text)
+            if recovered:
+                name, args = recovered
+                if name == "start_shortform_generate":
+                    args = _inject_shortform_render_style(args, session)
+                    args = _inject_shortform_caption_options(args, session)
+                    args = _normalize_shortform_category_args(args)
+                args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
+                await _fire_event(
+                    emit,
+                    "tool_start",
+                    tool=name,
+                    round=0,
+                    awaiting_approval=approval_mode == "confirm" and requires_approval(name),
+                    recovered_from_audit=True,
+                )
+                if approval_mode == "confirm" and requires_approval(name):
+                    action_id = f"act_{uuid.uuid4().hex[:12]}"
+                    budget_payload = None
+                    budget_summary = ""
+                    try:
+                        estimate = production_budget.enforce_budget(name, args)
+                        if estimate is not None:
+                            budget_payload = estimate.as_dict()
+                            budget_summary = (
+                                f" | est ${budget_payload['estimated_usd']:.2f} "
+                                f"<= cap ${budget_payload['max_budget_usd']:.2f}"
+                            )
+                    except production_budget.BudgetExceededError as exc:
+                        assistant_text = f"Studio could not prepare the production: {exc}"
+                        await _fire_event(
+                            emit,
+                            "tool_end",
+                            tool=name,
+                            status="error",
+                            error="budget_exceeded",
+                        )
+                    else:
+                        pending.append({
+                            "id": action_id,
+                            "tool": name,
+                            "arguments": args,
+                            "summary": f"{name}({json.dumps(args)[:200]}){budget_summary}",
+                            "budget": budget_payload,
+                        })
+                        assistant_text = "The production request is prepared correctly and waiting for your approval."
+                        store.update_session(
+                            sid,
+                            pending_actions=pending,
+                            last_production={
+                                "tool": name,
+                                "arguments": args,
+                                "updated_at": time.time(),
+                            },
+                        )
+                        await _fire_event(emit, "pending_actions", actions=pending)
+                        await _fire_event(emit, "tool_end", tool=name, status="awaiting_approval")
+                else:
+                    try:
+                        result = execute_tool_logged(
+                            name,
+                            args,
+                            user_id=user_id,
+                            content_format=content_format,
+                            session_id=sid,
+                        )
+                    except Exception as exc:
+                        result = json.dumps({"error": str(exc)})
+                    tool_fires.append(ToolFire(name, dict(args), result))
+                    messages.append(_tool_observation_message(name, result))
+                    try:
+                        memory.observe_tool_result(str(user_id), name, args, result)
+                    except Exception:
+                        pass
+                    parsed_result: dict[str, Any] = {}
+                    try:
+                        loaded = json.loads(result or "{}")
+                        if isinstance(loaded, dict):
+                            parsed_result = loaded
+                    except Exception:
+                        pass
+                    error = str(parsed_result.get("error") or "").strip()
+                    if error:
+                        assistant_text = f"Studio tried to start the production, but the backend returned: {error}"
+                        await _fire_event(emit, "tool_end", tool=name, status="error", error=error[:160])
+                    else:
+                        started = extract_jobs_from_tool(name, result)
+                        active_jobs = merge_active_jobs(active_jobs, started)
+                        status = str(parsed_result.get("status") or "started").replace("_", " ")
+                        job_id = str(parsed_result.get("job_id") or "").strip()
+                        assistant_text = (
+                            f"Production started successfully{f' as {job_id}' if job_id else ''}. "
+                            f"Current status: {status}."
+                        )
+                        store.update_session(
+                            sid,
+                            active_jobs=active_jobs,
+                            last_production={
+                                "tool": name,
+                                "arguments": args,
+                                "updated_at": time.time(),
+                            },
+                        )
+                        await _fire_event(emit, "active_jobs", jobs=active_jobs)
+                        await _fire_event(emit, "tool_end", tool=name, status="ok")
+                audit = audit_turn(
+                    assistant_text=assistant_text,
+                    user_text=user_text,
+                    tool_fires=tool_fires,
+                )
         if (
             audit.has_issues
             and _missing_channel_tool_blocked(audit)

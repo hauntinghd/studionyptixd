@@ -72,6 +72,54 @@ def test_successful_render_can_be_reported_without_future_promise_block():
     assert not report.has_blockers
 
 
+def test_explicit_start_language_recovers_last_production():
+    session = {
+        "session_id": "sa_test_recovery",
+        "last_production": {
+            "tool": "analyze_reference_video",
+            "arguments": {"url": "https://youtube.com/shorts/reference"},
+        },
+        "runs": [{
+            "events": [{
+                "event": "pending_actions",
+                "data": {
+                    "actions": [{
+                        "tool": "start_shortform_generate",
+                        "arguments": {
+                            "category_key": "mrskelewelly",
+                            "topic": "The real reason men build emotional walls",
+                            "video_model": "seedance",
+                            "render_style": "comic_book",
+                        },
+                    }],
+                },
+            }],
+        }],
+    }
+
+    recovered = runner._recover_requested_production(
+        session,
+        "Let's get it started in here. Let's do it.",
+    )
+
+    assert recovered is not None
+    name, args = recovered
+    assert name == "start_shortform_generate"
+    assert args["category_key"] == "mrskelewelly"
+
+
+def test_non_action_chat_does_not_recover_or_repeat_production():
+    session = {
+        "session_id": "sa_test_no_recovery",
+        "last_production": {
+            "tool": "start_shortform_generate",
+            "arguments": {"category_key": "human_limits", "topic": "Existing job"},
+        },
+    }
+
+    assert runner._recover_requested_production(session, "What title did we choose?") is None
+
+
 def test_channel_guard_rewrites_wrong_registry_for_analytics():
     args = runner._channel_guard_tool_args(
         "get_channel_analytics",
@@ -256,6 +304,8 @@ if __name__ == "__main__":
     test_current_text_mrskelewelly_can_select_channel()
     test_failed_render_cannot_be_described_as_resubmitting_now()
     test_successful_render_can_be_reported_without_future_promise_block()
+    test_explicit_start_language_recovers_last_production()
+    test_non_action_chat_does_not_recover_or_repeat_production()
     test_channel_guard_rewrites_wrong_registry_for_analytics()
     test_channel_guard_does_not_touch_unscoped_tools()
     test_short_followup_after_analytics_promise_requires_preflight()
