@@ -2211,21 +2211,6 @@ async def _youtube_refresh_saved_tokens_once() -> dict:
             changed.append((user_id, channel_id, updated))
             refreshed_count += 1
         except Exception as exc:
-            if _google_oauth_error_suggests_reconnect_required(str(exc)):
-                try:
-                    repaired = await _youtube_repair_channel_record_from_sibling(
-                        user_id,
-                        channel_id,
-                        record,
-                    )
-                except Exception:
-                    repaired = {}
-                if repaired:
-                    repaired["last_sync_error"] = ""
-                    repaired["token_refresh_retry_at"] = 0.0
-                    changed.append((user_id, channel_id, repaired))
-                    refreshed_count += 1
-                    continue
             record["last_sync_error"] = _clip_text(str(exc), 320)
             record["token_refresh_retry_at"] = now + (6 * 3600)
             changed.append((user_id, channel_id, record))
