@@ -942,8 +942,14 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
         )
 
     from long_form.prompts.channels import get_channel
-    channel = get_channel(state["channel_key"])
+    channel = dict(get_channel(state["channel_key"]))
     outline = state.get("outline") or {}
+    style_lock = str(outline.get("render_style_lock") or "").strip()
+    if style_lock:
+        channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
+        channel["thumbnail_style_prompt"] = (
+            f"{style_lock} {channel.get('thumbnail_style_prompt') or ''}"
+        ).strip()
     job_dir = _ensure_job_dir(job_id)
     visual_style = channel.get("visual_style") or ""
     fps = int(channel.get("fps") or 24)

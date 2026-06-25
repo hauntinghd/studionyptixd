@@ -312,19 +312,36 @@ def _format_polled_job_status(result: str) -> str:
     except Exception:
         data = {}
     if not isinstance(data, dict):
-        return f"Studio polled the job. Result: {str(result)[:800]}"
+        return "I couldn’t read the production status cleanly. Try Resume once, and I’ll reconnect to the render."
     if data.get("error"):
-        return f"Studio polled the job, but the backend returned: {data['error']}"
+        return f"I couldn’t check the production yet: {data['error']}"
     status = str(data.get("status") or data.get("phase") or data.get("stage") or "running")
     job_id = str(data.get("job_id") or "").strip()
     if status in {"awaiting_scene_review", "awaiting_approval"}:
-        return (
-            f"Job {job_id} is at {status.replace('_', ' ')}. "
-            "The generated scenes are ready for review; no animation or finalization should run until you approve them."
-        )
+        approved = int(data.get("approved_scene_count") or 0)
+        total = int(data.get("total_scenes") or data.get("scene_count") or 0)
+        if total and approved >= total:
+            pending = int(data.get("animation_pending_count") or 0)
+            return (
+                f"All {total} scenes are approved. "
+                + (
+                    f"{pending} animation clip{'s' if pending != 1 else ''} still need to render."
+                    if pending
+                    else "The animation is ready to review before final export."
+                )
+            )
+        count = f" {total} scenes" if total else " the scenes"
+        return f"I finished generating{count}. Review them below and tell me what to change, approve, or animate."
     percent = data.get("percent", data.get("progress"))
     suffix = f" ({percent}%)" if percent is not None else ""
-    return f"Job {job_id} status: {status.replace('_', ' ')}{suffix}."
+    friendly = {
+        "complete": "The production is complete and ready to download.",
+        "failed": "The production stopped with an error.",
+        "animate": "I’m animating the approved scenes now.",
+        "scenes_approved": "The scenes are approved and ready for animation.",
+        "running": "The production is still running.",
+    }.get(status, f"The production is {status.replace('_', ' ')}.")
+    return f"{friendly}{suffix}"
 
 
 def _recent_assistant_promised_channel_data(messages: list[dict[str, Any]], lookback: int = 6) -> bool:
@@ -2753,17 +2770,14 @@ async def _approve_action_impl(
             parsed = {}
             preview = result[:400]
         is_complete = _production_result_complete(parsed)
-        assistant_note = (
-            (
-                f"Approved {name} — production is complete. "
-                f"{preview or 'The finished MP4 is available in the render dock.'}"
-            )
-            if is_complete
-            else (
-                f"Approved {name} — production is running. "
-                f"{preview or 'Track progress in the render dock.'}"
-            )
-        )
+        if is_complete:
+            assistant_note = "Your video is complete. You can review or download it from the production card."
+        elif name == "start_longform_render":
+            assistant_note = "I started the long-form production. I’ll show the chapter scenes here as they become ready for review."
+        elif name == "start_shortform_generate":
+            assistant_note = "I started building the video. I’ll bring the scenes into this chat for review before animation."
+        else:
+            assistant_note = "The production is running. I’ll keep the progress visible here."
         messages.append({"role": "assistant", "content": assistant_note})
         store.update_session(
             sid,

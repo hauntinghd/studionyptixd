@@ -1187,8 +1187,14 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
 
     # Re-hydrate channel from registry by key.
     from long_form.prompts.channels import get_channel
-    channel = get_channel(state["channel_key"])
+    channel = dict(get_channel(state["channel_key"]))
     outline = state.get("outline") or {}
+    style_lock = str(outline.get("render_style_lock") or "").strip()
+    if style_lock:
+        channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
+        channel["thumbnail_style_prompt"] = (
+            f"{style_lock} {channel.get('thumbnail_style_prompt') or ''}"
+        ).strip()
 
     job_dir = _ensure_job_dir(job_id)
     chapters_path = _chapters_path(job_id)

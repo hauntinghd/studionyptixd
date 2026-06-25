@@ -248,6 +248,7 @@ def rollover_session(session_id: str, *, user_id: str) -> dict[str, Any] | None:
         channel_id=str(old.get("channel_id") or ""),
         registry_key=str(old.get("registry_key") or ""),
         channel_title=str(old.get("channel_title") or ""),
+        product_website=str(old.get("product_website") or ""),
     )
     prior = list(old.get("messages") or [])
     prior.append({
@@ -281,6 +282,7 @@ def create_session(
     channel_id: str = "",
     registry_key: str = "",
     channel_title: str = "",
+    product_website: str = "",
 ) -> dict[str, Any]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     sid = f"sa_{uuid.uuid4().hex[:16]}"
@@ -295,6 +297,7 @@ def create_session(
         "channel_id": str(channel_id or "").strip(),
         "registry_key": str(registry_key or "").strip(),
         "channel_title": str(channel_title or "").strip(),
+        "product_website": str(product_website or "").strip(),
         "web_search": bool(web_search),
         "animate": bool(animate),
         "captions_enabled": bool(captions_enabled),

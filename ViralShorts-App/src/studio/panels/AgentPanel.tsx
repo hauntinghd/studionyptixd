@@ -4,7 +4,7 @@
 import { useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
     ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronsLeft, ChevronsRight, History, Loader2,
-    MessageSquarePlus, Mic, MicOff, Palette, Paperclip, Play, RefreshCw, RotateCcw, Shield,
+    MessageSquarePlus, Mic, MicOff, Palette, Paperclip, Play, RefreshCw, RotateCcw, Search, Shield,
     ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
 } from 'lucide-react';
 import AgentJobDeliverable, { type SceneReplyPreset } from '../components/agent/AgentJobDeliverable';
@@ -28,6 +28,7 @@ import {
 import { streamAgentChat, toolLabel, type AgentChatAttachment, type AgentStreamEvent } from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
+import { loadStudioHubState } from '../lib/studioHubState';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
@@ -436,7 +437,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [toolActivity, setToolActivity] = useState('');
     const [booting, setBooting] = useState(true);
     const [history, setHistory] = useState<SessionSummary[]>([]);
+    const [historyQuery, setHistoryQuery] = useState('');
     const [historyOpen, setHistoryOpen] = useState(true);
+    const [productWebsite, setProductWebsite] = useState('');
     const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
     const [renderStyle, setRenderStyle] = useState('cinematic');
@@ -474,6 +477,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const selectedChannel =
         youtubeChannels.find((ch) => channelMatchesSelection(ch, selectedChannelId, sessionChannel))
         || sessionChannel;
+    const filteredHistory = history.filter((item) => (
+        !historyQuery.trim()
+        || String(item.title || '').toLowerCase().includes(historyQuery.trim().toLowerCase())
+        || String(item.channel_title || '').toLowerCase().includes(historyQuery.trim().toLowerCase())
+    ));
     const hasReadableAttachment = attachments.some((f) => {
         const payload = attachmentPayload[f.id];
         return Boolean(payload && (payload.data_url || payload.text));
@@ -511,6 +519,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     useEffect(() => {
         sessionIdRef.current = sessionId;
     }, [sessionId]);
+
+    useEffect(() => {
+        const token = session?.access_token;
+        if (!token) return;
+        let cancelled = false;
+        loadStudioHubState(token)
+            .then((state) => {
+                if (!cancelled) setProductWebsite(String(state.profile?.website || '').trim());
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+        };
+    }, [session?.access_token]);
 
     useEffect(() => {
         const stored = loadStoredSessionUiCache(userCacheKey);
@@ -999,6 +1021,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     channel_id: selectedChannel?.channel_id || '',
                     registry_key: channelRegistryKey(selectedChannel),
                     channel_title: selectedChannel?.title || '',
+                    product_website: productWebsite,
                 }),
             });
             applySessionPayload((created.session as Record<string, unknown>) || {});
@@ -1011,7 +1034,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             if (sid) setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
             await refreshHistory();
         },
-        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, reasoningDepth, renderStyle, refreshHistory, selectedChannel],
+        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel],
     );
 
     const openSession = useCallback(
@@ -1269,6 +1292,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             channel_title?: string;
             web_search?: boolean;
             animate?: boolean;
+            product_website?: string;
         }) => {
             if (!sessionId) return;
             try {
@@ -1283,6 +1307,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         },
         [authFetch, refreshHistory, sessionId],
     );
+
+    useEffect(() => {
+        if (!sessionId || !productWebsite) return;
+        void patchSession({ product_website: productWebsite });
+    }, [patchSession, productWebsite, sessionId]);
 
     const selectChannelForChat = useCallback(
         (channel: ChannelRow | null) => {
@@ -1793,45 +1822,54 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 </div>
             )}
 
-            <div className="flex min-h-0 flex-1 overflow-hidden bg-[#050507]">
+            <div className="flex min-h-0 flex-1 overflow-hidden bg-black">
                 <aside
-                    className={`flex shrink-0 flex-col border-r border-white/[0.06] bg-[#050506] transition-all duration-200 ${
-                        historyOpen ? 'w-[258px]' : 'w-[56px]'
+                    className={`flex shrink-0 flex-col border-r border-white/[0.07] bg-[#050505] transition-all duration-200 ${
+                        historyOpen ? 'w-[244px]' : 'w-[56px]'
                     }`}
                 >
-                    <div className={`items-center justify-between gap-1 border-b border-white/[0.06] p-2 ${historyOpen ? 'flex' : 'hidden'}`}>
+                    <div className={`border-b border-white/[0.06] p-2.5 ${historyOpen ? 'block' : 'hidden'}`}>
+                        <div className="mb-2 flex items-center justify-between px-1">
+                            <span className="text-sm font-semibold text-white">Studio</span>
+                            <button
+                                type="button"
+                                onClick={() => setHistoryOpen(false)}
+                                className="grid h-8 w-8 place-items-center rounded-lg text-gray-500 transition hover:bg-white/[0.07] hover:text-white"
+                                title="Collapse sidebar"
+                            >
+                                <ChevronsLeft className="h-4 w-4" />
+                            </button>
+                        </div>
                         <button
                             type="button"
-                            onClick={() => setHistoryOpen(false)}
-                            className="grid h-8 w-8 place-items-center rounded-lg bg-white/[0.06] text-gray-300 transition hover:bg-white/[0.1] hover:text-white"
-                            title="Collapse"
-                        >
-                            <ChevronsLeft className="h-4 w-4" />
-                        </button>
-                        <span className="min-w-0 flex-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-                            History
-                        </span>
-                        <button
-                            type="button"
-                            title="New chat"
                             onClick={() => createNewSession(model)}
-                            className="rounded-lg p-1.5 text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200"
+                            className="mb-2 flex h-10 w-full items-center gap-2 rounded-xl bg-white/[0.08] px-3 text-sm font-semibold text-white transition hover:bg-white/[0.12]"
                         >
                             <MessageSquarePlus className="h-4 w-4" />
+                            New chat
                         </button>
+                        <label className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.06] bg-black/30 px-3 text-gray-500 focus-within:border-white/15 focus-within:text-gray-300">
+                            <Search className="h-3.5 w-3.5" />
+                            <input
+                                value={historyQuery}
+                                onChange={(event) => setHistoryQuery(event.target.value)}
+                                placeholder="Search chats"
+                                className="min-w-0 flex-1 bg-transparent text-xs text-white outline-none placeholder:text-gray-600"
+                            />
+                        </label>
                     </div>
                     <div className={`min-h-0 flex-1 overflow-y-auto p-1.5 ${historyOpen ? '' : 'hidden'}`}>
                         {history.length === 0 && (
                             <p className="px-2 py-3 text-[10px] text-gray-600">No chats yet — start one.</p>
                         )}
-                        {history.map((s) => {
+                        {filteredHistory.map((s) => {
                             const active = s.session_id === sessionId;
                             const runningLabel = runningBySession[s.session_id];
                             return (
                                 <div
                                     key={s.session_id}
-                                    className={`group mb-1 flex items-stretch gap-0.5 rounded-lg transition ${
-                                        active ? 'bg-violet-500/20' : 'hover:bg-white/[0.05]'
+                                    className={`group mb-1 flex items-stretch gap-0.5 rounded-xl transition ${
+                                        active ? 'bg-white/[0.09]' : 'hover:bg-white/[0.05]'
                                     }`}
                                 >
                                     <button
@@ -1898,8 +1936,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     )}
                 </aside>
 
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-3 sm:px-5">
-                <header className="mb-2 flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] py-2">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.07] px-3 py-2 sm:px-5">
                     {onBack && (
                         <button
                             type="button"
@@ -1921,6 +1959,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     <div className="flex items-center gap-2">
                         {/* Clean branding — no literal robot logo per user request */}
                         <h1 className="text-sm font-semibold text-white">Studio Agent</h1>
+                        <span className="hidden text-xs text-gray-600 sm:inline">Create, edit, and ship from one conversation</span>
                     </div>
                     <div className="ml-auto flex flex-wrap items-center gap-2">
                         <button
@@ -2233,12 +2272,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     onScroll={handleScroll}
                     className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 sm:px-3"
                 >
-                    <div className="mx-auto max-w-3xl space-y-3 pb-6 pt-2">
+                    <div className="mx-auto max-w-4xl space-y-4 pb-8 pt-4">
                         {messages.length === 0 && (
-                            <div className="flex min-h-full flex-col items-center justify-center py-2 text-center sm:py-3">
+                            <div className="flex min-h-[56vh] flex-col items-center justify-center px-4 text-center">
                                 {/* Ultra-premium Hero */}
-                                <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/50 via-cyan-400/40 to-violet-500/50 ring-4 ring-white/10 shadow-[0_0_55px_rgba(139,92,246,0.2)]">
-                                    <Sparkles className="h-6 w-6 text-white drop-shadow-lg" />
+                                <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06]">
+                                    <Sparkles className="h-7 w-7 text-white" />
                                 </div>
                                 <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 py-1 pl-2 pr-3 text-[9px] font-semibold uppercase tracking-[1.8px] text-white/70">
                                     <div className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-2 py-px text-emerald-400">
@@ -2246,7 +2285,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </div>
                                     PREMIUM REAL-TIME VIDEO STUDIO
                                 </div>
-                                <h1 className="mb-2 text-[30px] font-semibold leading-none tracking-tight text-white sm:text-[38px]">What are we shipping today?</h1>
+                                <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">What do you want to create?</h1>
                                 <p className="mb-1 max-w-[620px] text-[12px] leading-relaxed text-gray-400 sm:text-[13px]">
                                     This is the experience your plan unlocks. The agent doesn&apos;t just generate — it <span className="text-white font-medium">builds your video live inside this chat</span>. You watch every decision, every still, every motion clip, every audio layer appear in real time. Full transparency. Full control. Premium quality, delivered visibly.
                                 </p>
@@ -2323,10 +2362,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                         className={`flex ${isUser ? 'justify-end' : 'justify-start'} group`}
                                     >
                                         <div
-                                            className={`max-w-[88%] rounded-3xl px-4 py-2.5 text-[13.5px] leading-relaxed shadow-sm transition-all duration-200 sm:max-w-[78%] ${
+                                            className={`max-w-[92%] rounded-3xl px-4 py-3 text-[14px] leading-relaxed transition-all duration-200 sm:max-w-[82%] ${
                                                 isUser
-                                                    ? 'bg-gradient-to-br from-violet-600 to-violet-500 text-white rounded-br-lg'
-                                                    : 'bg-white/[0.035] text-gray-100 border border-white/[0.06] rounded-bl-lg'
+                                                    ? 'bg-white text-black rounded-br-lg'
+                                                    : 'bg-white/[0.035] text-gray-100 border border-white/[0.07] rounded-bl-lg'
                                             }`}
                                         >
                                             {text.trim() ? (
@@ -2434,7 +2473,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </div>
                 )}
 
-                <div className="mx-auto w-full max-w-3xl shrink-0 pb-1 pt-2">
+                <div className="mx-auto w-full max-w-3xl shrink-0 px-3 pb-3 pt-2">
                     {attachments.length > 0 && (
                         <div className="mb-2 flex flex-wrap gap-2">
                             {attachments.map((f) => (
@@ -2492,7 +2531,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         </div>
                     )}
 
-                    <div className="rounded-2xl border border-white/[0.1] bg-[#0c0c0e] shadow-lg shadow-black/40">
+                    <div className="rounded-[26px] border border-white/[0.12] bg-[#111113] shadow-2xl shadow-black/50">
                         <textarea
                             ref={inputRef}
                             className="max-h-36 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 text-sm text-white placeholder:text-gray-600 focus:outline-none"

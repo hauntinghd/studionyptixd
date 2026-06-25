@@ -73,6 +73,7 @@ class CreateSessionRequest(BaseModel):
     animate: bool = True
     captions_enabled: bool = True
     caption_mode: Literal["word", "off"] = "word"
+    product_website: str = ""
 
 
 class PatchSessionRequest(BaseModel):
@@ -88,6 +89,7 @@ class PatchSessionRequest(BaseModel):
     animate: bool | None = None
     captions_enabled: bool | None = None
     caption_mode: Literal["word", "off"] | None = None
+    product_website: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -473,6 +475,7 @@ def build_studio_agent_router(
             animate=body.animate,
             captions_enabled=body.captions_enabled,
             caption_mode=body.caption_mode,
+            product_website=body.product_website,
         )
         return {"session": _public_session(session)}
 
@@ -617,6 +620,8 @@ def build_studio_agent_router(
             updates["caption_mode"] = body.caption_mode
             if body.caption_mode == "off":
                 updates["captions_enabled"] = False
+        if body.product_website is not None:
+            updates["product_website"] = body.product_website.strip()[:2000]
         session = store.update_session(session_id, **updates)
         return {"session": _public_session(session)}
 
@@ -798,6 +803,7 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "animate": bool(session.get("animate", True)),
         "captions_enabled": bool(session.get("captions_enabled", True)),
         "caption_mode": session.get("caption_mode") or ("off" if session.get("captions_enabled") is False else "word"),
+        "product_website": session.get("product_website") or "",
         "message_count": len(session.get("messages") or []),
         "pending_count": len(session.get("pending_actions") or []),
         "active_runs": store.active_runs(session),

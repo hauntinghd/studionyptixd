@@ -14,12 +14,7 @@ export type StudioHubWin = {
 
 export type StudioHubState = {
     profile: {
-        display_name?: string;
-        bio?: string;
-        timezone?: string;
-        company?: string;
         website?: string;
-        avatar_url?: string;
         [key: string]: string | undefined;
     };
     channels: string[];
@@ -31,7 +26,7 @@ export type StudioHubState = {
 };
 
 export const defaultStudioHubState: StudioHubState = {
-    profile: { display_name: '', bio: '', timezone: 'America/New_York' },
+    profile: { website: '' },
     channels: ['Empire Magnates', 'ZeroTier', 'NYPTID Clips'],
     power_signals: [
         { name: 'Post wins', detail: 'Share proof with a screenshot and result context.', xp: 125 },

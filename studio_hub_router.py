@@ -17,12 +17,7 @@ log = logging.getLogger("studio.hub")
 
 DEFAULT_HUB_STATE: dict[str, Any] = {
     "profile": {
-        "display_name": "",
-        "bio": "",
-        "timezone": "America/New_York",
-        "company": "",
         "website": "",
-        "avatar_url": "",
     },
     "channels": ["Empire Magnates", "ZeroTier", "NYPTID Clips"],
     "roles": [
@@ -78,9 +73,6 @@ def _now_iso() -> str:
 
 def _deep_default_state(user: dict | None = None) -> dict[str, Any]:
     state = json.loads(json.dumps(DEFAULT_HUB_STATE))
-    email = str((user or {}).get("email", "") or "").strip()
-    if email and not state["profile"].get("display_name"):
-        state["profile"]["display_name"] = email.split("@", 1)[0]
     return state
 
 

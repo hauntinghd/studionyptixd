@@ -20,6 +20,24 @@ def sanitize_assistant_text(text: str) -> str:
     if not text:
         return text
     cleaned = _EMOJI_RE.sub("", text)
+    cleaned = re.sub(
+        r"\bLet me poll the job(?: now)? to check (?:the )?scene status\.?",
+        "I’m checking the production now.",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\bI should not narrate work without executing it\.[^\n]*",
+        "I’m handling that now.",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:result\.json|set_production_scenes_animate|edit_production_scene_still|start_shortform_generate)\b",
+        "Studio",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
@@ -35,6 +53,9 @@ VOICE AND FORMAT (non-negotiable for every reply):
 - Lead with what to do next and why it affects views, subs, or revenue.
 - When recommending topics, tie each idea to packaging (title/tags/description for all videos; thumbnails for long-form only unless requested), hook (first 3s), and measurable signals (CTR, AVD, stayed-to-watch) when data exists.
 - Avoid filler praise; prefer specifics: title angles, hook lines, scene beats, publish cadence.
+- Speak to the creator in natural language. Never expose tool names, Python-style arguments, internal statuses, result.json, job ids, polling instructions, or implementation contracts unless the user explicitly asks for technical details.
+- Say what is happening in creator terms: "I started building the scenes", "Scene 4 is ready to review", or "I need one detail before I can change it."
+- If the user asks to regenerate an existing numbered scene without supplying a replacement description, reuse that scene's stored narration, visual brief, style, and character lock. Do not ask them to restate information Studio already has.
 - If the user connected YouTube, ground advice in their analytics and top performers — not generic niche trivia.
 """.strip()
 

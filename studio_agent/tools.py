@@ -385,6 +385,13 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "number",
                             "description": "Optional exact 0-1 fraction of scenes that receive paid i2v.",
                         },
+                        "render_style": {
+                            "type": "string",
+                            "description": (
+                                "Studio art-style key. This becomes a strict production-wide lock across every chapter, "
+                                "scene, still, animation prompt, and thumbnail."
+                            ),
+                        },
                         "max_budget_usd": {
                             "type": "number",
                             "description": "Hard preflight budget cap. Studio refuses to start if estimated provider spend is higher.",
@@ -489,7 +496,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "Create a durable product-reference manifest for a software or physical-product advertisement. "
                     "Uses images attached in the current chat and/or safely crawls a public product website for "
-                    "dedicated product images. Call before start_shortform_generate for product ads."
+                    "dedicated product images. If website_url is omitted, use the product website saved on the user's "
+                    "Studio profile. Call before start_shortform_generate for product ads."
                 ),
                 "parameters": {
                     "type": "object",
@@ -2204,10 +2212,25 @@ def execute_tool(
     if name == "start_longform_render":
         from long_form.prompts.channels import get_channel
         from long_form import pipeline as lf_pipeline
+        from studio_agent.render_styles import resolve_render_style
 
         channel_key = str(args.get("channel_key") or "").strip()
-        channel = get_channel(channel_key)
+        channel = dict(get_channel(channel_key))
         outline = _build_outline_from_args(args)
+        style = resolve_render_style(
+            str(args.get("render_style") or "").strip() or None,
+            session_style=_session_render_style(session_id),
+        )
+        style_lock = (
+            f"STRICT PRODUCTION-WIDE ART STYLE LOCK: {style.label}. "
+            f"{style.prompt_prefix} Every chapter, scene, character, object, transition frame, "
+            "animation prompt, and thumbnail must remain visibly in this exact art style. "
+            "Never switch to photorealism, another animation medium, or the channel default."
+        )
+        channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
+        outline["render_style"] = style.key
+        outline["render_style_label"] = style.label
+        outline["render_style_lock"] = style_lock
         outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
         if args.get("hero_motion_ratio") is not None:
             outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
@@ -2218,6 +2241,8 @@ def execute_tool(
             "job_id": job_id,
             "channel_key": channel_key,
             "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
+            "render_style": style.key,
+            "render_style_label": style.label,
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
             "finalize_url": f"/api/long-form/jobs/{job_id}/finalize",
             "outline_title": outline.get("title"),
@@ -2306,7 +2331,10 @@ def execute_tool(
         manifest = product_reference.ingest(
             session_id=str(session_id or ""),
             user_id=str(user_id or ""),
-            website_url=str(args.get("website_url") or "").strip(),
+            website_url=(
+                str(args.get("website_url") or "").strip()
+                or str(session.get("product_website") or "").strip()
+            ),
             attached_paths=[str(path) for path in attached_paths],
             product_name=str(args.get("product_name") or ""),
             product_description=str(args.get("product_description") or ""),
