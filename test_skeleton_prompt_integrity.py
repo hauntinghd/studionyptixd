@@ -9,6 +9,7 @@ from skeleton_ai.pipeline import (
     _visual_brief_beat_direction,
     _visual_brief_requests_wardrobe,
 )
+from skeleton_ai.styled_pipeline import _scoped_edit_prompt
 
 
 def test_bare_feet_are_rewritten_as_skeletal_glass_feet():
@@ -93,6 +94,18 @@ def test_locked_scene_keeps_planner_environment_as_subordinate_detail():
     assert "must not change the mandatory location" in merged
 
 
+def test_character_scoped_repair_preserves_background():
+    prompt, scope = _scoped_edit_prompt(
+        "Skeleton standing in a flawless dark bedroom.",
+        "Repair skeleton anatomy and glass-shell artifacts.",
+        "character",
+    )
+    low = prompt.lower()
+    assert scope == "character"
+    assert "preserve the current background" in low
+    assert "repair skeleton anatomy" in low
+
+
 if __name__ == "__main__":
     test_bare_feet_are_rewritten_as_skeletal_glass_feet()
     test_scene_prompt_forbids_human_tissue_at_clothing_edges()
@@ -101,4 +114,5 @@ if __name__ == "__main__":
     test_numbered_beat_direction_is_extracted_exactly()
     test_sparse_locked_scene_gets_visible_environment_and_wide_framing()
     test_locked_scene_keeps_planner_environment_as_subordinate_detail()
+    test_character_scoped_repair_preserves_background()
     print("skeleton prompt integrity tests passed")

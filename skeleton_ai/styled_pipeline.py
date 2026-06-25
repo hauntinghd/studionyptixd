@@ -462,7 +462,28 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     )
     out_tmp = stills_dir / f"{sc['sid']}_edit.png"
     out_tmp.unlink(missing_ok=True)
-    generate_still_edit(edit_prompt, out_tmp, master_url=current_url)
+    extra_refs: list[str] | None = None
+    if _style_for(workspace).pipeline == "skeleton_host":
+        public_dir = Path(__file__).resolve().parents[1] / "ViralShorts-App" / "public"
+        canonical = next(
+            (
+                path
+                for path in (
+                    public_dir / "canonical-skeleton-master-hires.png",
+                    public_dir / "canonical-skeleton-master.png",
+                )
+                if path.is_file()
+            ),
+            None,
+        )
+        if canonical is not None:
+            extra_refs = [str(canonical)]
+    generate_still_edit(
+        edit_prompt,
+        out_tmp,
+        master_url=current_url,
+        extra_refs=extra_refs,
+    )
     # Promote the edit to the canonical still; drop stale animation.
     still_target.unlink(missing_ok=True)
     out_tmp.rename(still_target)
