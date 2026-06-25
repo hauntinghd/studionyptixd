@@ -235,6 +235,7 @@ def plan_scenes(
     script_override: str | None = None,
     user_id: str | None = None,
     default_animate: bool = True,
+    reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
     """Write the script, plan beats, render one Seedream still per scene, then
     stop at the awaiting_scene_review gate so the user can edit/animate per scene."""
@@ -328,7 +329,23 @@ def plan_scenes(
 
                 generate_still_edit(prompt, still_target, seed=420042 + i)
             else:
-                generate_still_t2i(prompt, still_target, negative_prompt=style.negative_prompt, seed=420042 + i)
+                if reference_images:
+                    from .styled_stills import generate_still_reference_edit
+
+                    generate_still_reference_edit(
+                        prompt,
+                        still_target,
+                        reference_paths=reference_images,
+                        negative_prompt=style.negative_prompt,
+                        seed=420042 + i,
+                    )
+                else:
+                    generate_still_t2i(
+                        prompt,
+                        still_target,
+                        negative_prompt=style.negative_prompt,
+                        seed=420042 + i,
+                    )
         scenes.append({
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
             "outfit": outfit, "scene_action": action,
@@ -349,6 +366,7 @@ def plan_scenes(
         "stills_model": "seedream_v45_edit_canonical" if is_skeleton else f"seedream_v45_t2i_{style.key}",
         "category": category_key, "topic": topic, "tier": tier,
         "scene_count": len(scenes),
+        "product_reference_count": len(reference_images or []),
     })
     return {"status": "awaiting_scene_review", "scene_count": len(scenes), "job_id": workspace.name}
 

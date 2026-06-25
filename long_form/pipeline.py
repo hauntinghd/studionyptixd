@@ -122,6 +122,21 @@ FAL_PRICING_USD.update({
 MMAUDIO_DEFAULT_SEC = float(os.environ.get("LF_MMAUDIO_SEC", "8"))
 
 
+def resolve_motion_ratio(outline: dict | None) -> tuple[str, float]:
+    """Resolve the durable long-form motion policy used by cost and render."""
+    data = outline or {}
+    policy = str(data.get("motion_policy") or "balanced").strip().lower()
+    defaults = {"full": 1.0, "balanced": 0.35, "economy": 0.15, "stills": 0.0}
+    if policy not in defaults:
+        policy = "balanced"
+    raw_ratio = data.get("hero_motion_ratio")
+    try:
+        ratio = float(raw_ratio) if raw_ratio is not None else defaults[policy]
+    except (TypeError, ValueError):
+        ratio = defaults[policy]
+    return policy, max(0.0, min(1.0, ratio))
+
+
 def compute_render_cost(
     channel: dict,
     outline: dict | None = None,
@@ -167,6 +182,8 @@ def compute_render_cost(
     if pipeline_kind == "v5_episode":
         scenes_per_chapter = scenes_per_chapter_override or 12
         n_scenes = n_chapters * scenes_per_chapter
+        motion_policy, motion_ratio = resolve_motion_ratio(outline)
+        animated_scenes = min(n_scenes, max(0, round(n_scenes * motion_ratio)))
         total_vo_chars = n_scenes * 200
         vo_k = total_vo_chars / 1000.0
 
@@ -208,7 +225,7 @@ def compute_render_cost(
         breakdown = {
             "stills_seedream": round(n_scenes * still_per, 2),
             "thumbnails_seedream": round(thumb_count * still_per, 2),
-            "ltx_i2v_clips": round(n_scenes * per_clip, 2),
+            "ltx_i2v_clips": round(animated_scenes * per_clip, 2),
             "mmaudio_sfx_per_scene": round(n_scenes * sfx_per, 2),
             "fal_minimax_vo": round(fal_vo, 2),
         }
@@ -229,6 +246,10 @@ def compute_render_cost(
             "breakdown": breakdown,
             "non_fal_breakdown": non_fal,
             "n_scenes": n_scenes,
+            "animated_scenes": animated_scenes,
+            "still_motion_scenes": n_scenes - animated_scenes,
+            "motion_policy": motion_policy,
+            "hero_motion_ratio": motion_ratio,
             "n_chapters": n_chapters,
             "pipeline_kind": pipeline_kind,
             "i2v_model_billed": i2v_model,

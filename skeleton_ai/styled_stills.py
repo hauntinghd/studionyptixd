@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import fal_client
 
 from .fal_auth import require_fal_key
+from .canonical_edit import _queue_result
 
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 
@@ -102,6 +104,58 @@ def generate_still_t2i(
         "local_path": str(out_path),
         "cdn_url": url,
         "provider": "seedream_v45_t2i",
+        "seed": seed,
+        "bytes": out_path.stat().st_size,
+    }
+
+
+def generate_still_reference_edit(
+    prompt: str,
+    out_path: Path,
+    *,
+    reference_paths: list[str],
+    negative_prompt: str,
+    seed: int = 420042,
+) -> dict[str, Any]:
+    """Create an ad still while locking product identity to supplied images."""
+    out_path = Path(out_path)
+    if out_path.exists() and out_path.stat().st_size > 1024:
+        return {"local_path": str(out_path), "provider": "seedream_v45_product_edit", "cached": True}
+    _ensure_fal()
+    urls: list[str] = []
+    for raw in list(reference_paths or [])[:3]:
+        path = Path(str(raw or ""))
+        if path.is_file() and path.stat().st_size > 1024:
+            urls.append(fal_client.upload_file(str(path)))
+        elif str(raw).startswith(("http://", "https://")):
+            urls.append(str(raw))
+    if not urls:
+        raise StyledStillError("product reference edit requires at least one usable product image")
+    result = _queue_result(
+        "fal-ai/bytedance/seedream/v4.5/edit",
+        {
+            "prompt": (
+                "PRODUCT IDENTITY LOCK: preserve the exact product design, logo placement, colors, "
+                "materials, proportions, screen UI, and packaging visible in the reference images. "
+                "Do not invent a replacement product. " + str(prompt or "")
+            )[:3500],
+            "image_urls": urls,
+            "negative_prompt": str(negative_prompt or "")[:1500],
+            "image_size": "auto_2K",
+            "num_images": 1,
+            "seed": int(seed),
+        },
+        timeout_sec=300,
+    )
+    images = list((result or {}).get("images") or [])
+    url = str((images[0] or {}).get("url") or "").strip() if images else ""
+    if not url:
+        raise StyledStillError(f"product reference edit returned no image: {result!r}")
+    _download(url, out_path)
+    return {
+        "local_path": str(out_path),
+        "cdn_url": url,
+        "provider": "seedream_v45_product_edit",
         "seed": seed,
         "bytes": out_path.stat().st_size,
     }

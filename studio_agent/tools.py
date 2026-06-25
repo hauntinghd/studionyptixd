@@ -373,6 +373,18 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": "JSON string: {title, chapters:[{title, beats}]}",
                         },
+                        "motion_policy": {
+                            "type": "string",
+                            "enum": ["full", "balanced", "economy", "stills"],
+                            "description": (
+                                "Long-form motion budget. balanced animates about 35% hero scenes; economy about 15%; "
+                                "stills uses local cinematic motion; full runs i2v on every scene."
+                            ),
+                        },
+                        "hero_motion_ratio": {
+                            "type": "number",
+                            "description": "Optional exact 0-1 fraction of scenes that receive paid i2v.",
+                        },
                         "max_budget_usd": {
                             "type": "number",
                             "description": "Hard preflight budget cap. Studio refuses to start if estimated provider spend is higher.",
@@ -473,6 +485,27 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "ingest_product_reference",
+                "description": (
+                    "Create a durable product-reference manifest for a software or physical-product advertisement. "
+                    "Uses images attached in the current chat and/or safely crawls a public product website for "
+                    "dedicated product images. Call before start_shortform_generate for product ads."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "website_url": {"type": "string", "description": "Official product or landing-page URL."},
+                        "use_attached_images": {"type": "boolean", "description": "Use product images attached in this chat."},
+                        "product_name": {"type": "string"},
+                        "product_description": {"type": "string"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "start_shortform_generate",
                 "description": (
                     "Queue a styled shortform render (9:16, ~12 beats). "
@@ -515,6 +548,13 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "description": (
                                 "Scene-level creative lock: characters, era, wardrobe, palette, "
                                 "composition notes â€” applied every beat."
+                            ),
+                        },
+                        "product_reference_id": {
+                            "type": "string",
+                            "description": (
+                                "Reference id returned by ingest_product_reference. Studio then uses reference editing "
+                                "so the real product remains visually locked in every advertisement scene."
                             ),
                         },
                         "animate": {
@@ -1406,6 +1446,8 @@ def _spawn_shortform_job(
     captions_enabled: bool = True,
     caption_mode: str = "word",
     resume_job_id: str | None = None,
+    reference_images: list[str] | None = None,
+    product_reference: dict[str, Any] | None = None,
 ) -> str:
     # Resume: reuse the prior job's workspace so finished stills/clips/VO are
     # not re-rendered (and not re-billed). Falls back to a fresh job otherwise.
@@ -1447,6 +1489,8 @@ def _spawn_shortform_job(
         "captions_enabled": captions_enabled,
         "caption_mode": caption_mode,
         "user_id": user_id,
+        "reference_images": list(reference_images or []),
+        "product_reference": product_reference or None,
         "started_at": time.time(),
     }
     (workspace / "job_spec.json").write_text(
@@ -1498,6 +1542,7 @@ def _spawn_shortform_job(
                 script_override=script,
                 user_id=user_id,
                 default_animate=False,
+                reference_images=list(reference_images or []),
             )
         except Exception as exc:
             from skeleton_ai.pipeline import RenderCancelled
@@ -2163,6 +2208,9 @@ def execute_tool(
         channel_key = str(args.get("channel_key") or "").strip()
         channel = get_channel(channel_key)
         outline = _build_outline_from_args(args)
+        outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
+        if args.get("hero_motion_ratio") is not None:
+            outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
         job_id = lf_pipeline.start_render(channel, outline)
         billing = _debit_fal_for_outline(user_id, outline, job_id=job_id, kind="longform")
         return json.dumps({
@@ -2174,6 +2222,8 @@ def execute_tool(
             "finalize_url": f"/api/long-form/jobs/{job_id}/finalize",
             "outline_title": outline.get("title"),
             "chapters": len(outline.get("chapters") or []),
+            "motion_policy": outline.get("motion_policy"),
+            "hero_motion_ratio": lf_pipeline.resolve_motion_ratio(outline)[1],
             "billing": billing,
         }, indent=2)
 
@@ -2243,6 +2293,43 @@ def execute_tool(
             ensure_ascii=False,
         )
 
+    if name == "ingest_product_reference":
+        from studio_agent import product_reference
+        from studio_agent import store
+
+        session = store.get_session(str(session_id or ""), user_id=str(user_id or "")) or {}
+        attached_paths = (
+            list(session.get("latest_attachment_paths") or [])
+            if bool(args.get("use_attached_images", True))
+            else []
+        )
+        manifest = product_reference.ingest(
+            session_id=str(session_id or ""),
+            user_id=str(user_id or ""),
+            website_url=str(args.get("website_url") or "").strip(),
+            attached_paths=[str(path) for path in attached_paths],
+            product_name=str(args.get("product_name") or ""),
+            product_description=str(args.get("product_description") or ""),
+        )
+        return json.dumps({
+            "ok": True,
+            "reference_id": manifest["reference_id"],
+            "product_name": manifest["product_name"],
+            "website": manifest.get("website"),
+            "image_count": len(manifest.get("images") or []),
+            "images": [
+                {
+                    "source": image.get("source"),
+                    "source_url": image.get("source_url"),
+                    "bytes": image.get("bytes"),
+                }
+                for image in manifest.get("images") or []
+            ],
+            "next_action": (
+                "Call start_shortform_generate with this product_reference_id and an advertisement visual_brief."
+            ),
+        }, indent=2)
+
     if name == "generate_longform_thumbnails":
         return generate_longform_thumbnails(
             str(args.get("job_id") or ""),
@@ -2260,6 +2347,7 @@ def execute_tool(
         topic = str(args.get("topic") or "").strip() or None
         script = str(args.get("script") or "").strip() or None
         visual_brief = str(args.get("visual_brief") or "").strip() or None
+        product_reference_id = str(args.get("product_reference_id") or "").strip()
         video_model = str(args.get("video_model") or "seedance").strip()
         tier = str(args.get("tier") or "standard").strip()
         if video_model == "kling_pro":
@@ -2287,6 +2375,23 @@ def execute_tool(
             caption_mode = "word"
         watermark_text = _session_channel_brand(session_id)
         resume_job_id = str(args.get("_resume_job_id") or "").strip() or None
+        product_manifest: dict[str, Any] | None = None
+        reference_images: list[str] = []
+        if product_reference_id:
+            from studio_agent import product_reference
+
+            product_manifest = product_reference.load(product_reference_id, user_id=str(user_id or ""))
+            reference_images = [
+                str(image.get("path") or "")
+                for image in product_manifest.get("images") or []
+                if str(image.get("path") or "").strip()
+            ][:3]
+            product_lock = (
+                f"PRODUCT ADVERTISEMENT FOR {product_manifest.get('product_name')}. "
+                "Preserve the exact supplied product identity in every product shot. "
+                f"Product facts: {product_manifest.get('product_description') or 'Use only visible or supplied facts.'}"
+            )
+            visual_brief = f"{product_lock} {visual_brief or ''}".strip()
         job_id = _spawn_shortform_job(
             category_key=category_key,
             topic=topic,
@@ -2301,10 +2406,14 @@ def execute_tool(
             captions_enabled=captions_enabled,
             caption_mode=caption_mode,
             resume_job_id=resume_job_id,
+            reference_images=reference_images,
+            product_reference=product_manifest,
         )
         stills_model = (
             "seedream_v45_edit_canonical"
             if is_skeleton_style(style)
+            else "seedream_v45_edit_product_reference"
+            if reference_images
             else f"seedream_v45_t2i_{style.key}"
         )
         if is_skeleton_style(style):
@@ -2314,7 +2423,7 @@ def execute_tool(
             )
         else:
             pipeline_note = (
-                f"{style.label} - Seedream stills only. "
+                f"{style.label} - {'product-locked Seedream reference edits' if reference_images else 'Seedream stills'} only. "
                 f"No image-to-video runs until scenes are approved. Later video model: {resolved_vm}."
             )
         return json.dumps({
@@ -2327,6 +2436,8 @@ def execute_tool(
             "render_style_label": style.label,
             "video_model": resolved_vm,
             "stills_model": stills_model,
+            "product_reference_id": product_reference_id or None,
+            "product_reference_count": len(reference_images),
             "watermark_text": watermark_text,
             "captions_enabled": captions_enabled,
             "caption_mode": "word" if captions_enabled else "off",

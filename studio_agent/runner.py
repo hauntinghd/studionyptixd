@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -1035,6 +1037,36 @@ def _valid_image_attachments(attachments: list[dict[str, Any]] | None) -> list[d
     return valid
 
 
+def _persist_image_attachments(
+    session_id: str,
+    attachments: list[dict[str, Any]] | None,
+) -> list[str]:
+    images = _valid_image_attachments(attachments)
+    if not images:
+        return []
+    from studio_agent.tools import SKELETON_OUTPUT
+
+    safe_session = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:80]
+    target = SKELETON_OUTPUT / "_session_inputs" / safe_session
+    target.mkdir(parents=True, exist_ok=True)
+    paths: list[str] = []
+    for image in images:
+        _header, encoded = image["data_url"].split(",", 1)
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            continue
+        if not payload or len(payload) > 8 * 1024 * 1024:
+            continue
+        mime = image["mime_type"]
+        suffix = ".png" if mime == "image/png" else ".webp" if mime == "image/webp" else ".jpg"
+        path = target / f"{hashlib.sha256(payload).hexdigest()[:20]}{suffix}"
+        if not path.exists():
+            path.write_bytes(payload)
+        paths.append(str(path.resolve()))
+    return paths
+
+
 def _build_user_content(user_text: str, attachments: list[dict[str, Any]] | None = None) -> str | list[dict[str, Any]]:
     images = _valid_image_attachments(attachments)
     if not images:
@@ -1568,6 +1600,18 @@ async def _run_turn_impl(
     active_channel_id = str(session.get("channel_id") or "").strip()
     if active_registry and active_registry != str(session.get("registry_key") or "").strip():
         session = store.update_session(sid, registry_key=active_registry) or session
+    persisted_attachment_paths = _persist_image_attachments(sid, attachments)
+    if persisted_attachment_paths:
+        session = store.update_session(
+            sid,
+            latest_attachment_paths=persisted_attachment_paths,
+            latest_attachment_at=time.time(),
+        ) or session
+        user_text = (
+            f"{user_text}\n\n[Studio system: {len(persisted_attachment_paths)} image attachment(s) "
+            "were persisted for production. For a product advertisement, call "
+            "ingest_product_reference with use_attached_images=true.]"
+        )
 
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
     messages.append({"role": "user", "content": _build_user_content(user_text, attachments)})

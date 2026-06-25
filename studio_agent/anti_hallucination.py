@@ -258,6 +258,7 @@ _CHANNEL_DATA_TOOLS = {
 }
 
 _ACTION_TOOLS = {
+    "ingest_product_reference",
     "start_shortform_generate",
     "start_longform_render",
     "re_edit_production",

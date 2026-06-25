@@ -66,6 +66,7 @@ from long_form.pipeline import (
     _slugify,
     _two_pass_loudnorm,
     load_state,
+    resolve_motion_ratio,
     save_state,
     update_status,
 )
@@ -607,6 +608,7 @@ def _process_scene(
     voice_id: str,
     fps: int,
     job_dir: Path,
+    paid_motion: bool = True,
 ) -> Path:
     """End-to-end per-scene render. Returns the path to the assembled
     scene MP4 ready for final concat.
@@ -650,9 +652,28 @@ def _process_scene(
         vo_dur = 2.0
 
     # 3. LTX clip — generate at EM_LTX_CLIP_SEC (12s+), trim/slow to VO below
-    clip = clips / f"clip_{sid}.mp4"
-    motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
-    _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
+    clip = clips / f"clip_{sid}_{'i2v' if paid_motion else 'still'}.mp4"
+    if paid_motion:
+        motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
+        _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
+    elif not clip.exists() or clip.stat().st_size < 1024:
+        frames = max(1, int((vo_dur + 0.5) * fps))
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+            "-loop", "1", "-i", str(still),
+            "-vf",
+            (
+                "scale=2048:1152:force_original_aspect_ratio=increase,"
+                "crop=1920:1080,"
+                f"zoompan=z='min(zoom+0.00035,1.08)':d={frames}:s=1920x1080:fps={fps}"
+            ),
+            "-t", f"{vo_dur + 0.5:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-an", str(clip),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise LFRenderError(f"local still motion failed: {result.stderr[-400:]}")
 
     # 4. Per-scene SFX
     sfx_path = sfx / f"sfx_{sid}.mp3"
@@ -938,6 +959,24 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
         for r in scene_brief_records
     ]
     total = len(scene_briefs)
+    motion_policy, motion_ratio = resolve_motion_ratio(state.get("outline") or {})
+    paid_motion_count = min(total, max(0, round(total * motion_ratio)))
+    ordered_indices = [gi for _, _, gi, _ in scene_briefs]
+    if paid_motion_count >= total:
+        paid_motion_indices = set(ordered_indices)
+    elif paid_motion_count <= 0:
+        paid_motion_indices: set[int] = set()
+    else:
+        paid_motion_indices = {
+            ordered_indices[round(position * (total - 1) / max(1, paid_motion_count - 1))]
+            for position in range(paid_motion_count)
+        }
+    state["motion_policy"] = motion_policy
+    state["hero_motion_ratio"] = motion_ratio
+    state["paid_motion_scene_indices"] = sorted(paid_motion_indices)
+    state["paid_motion_scene_count"] = len(paid_motion_indices)
+    state["local_motion_scene_count"] = total - len(paid_motion_indices)
+    save_state(job_id, state)
 
     loop = asyncio.get_running_loop()
 
@@ -956,6 +995,7 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
             scene_brief=sb, visual_style=visual_style,
             motion_prompt_hint=motion_hint, voice_id=voice_id, fps=fps,
             job_dir=job_dir,
+            paid_motion=global_idx in paid_motion_indices,
         )
 
     # Same SCENE_CONCURRENCY as the original full-pipeline run (each scene

@@ -277,6 +277,9 @@ def _estimate_longform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any
 
         channel = get_channel(str(args.get("channel_key") or "").strip())
         outline = _build_outline_from_args(args)
+        outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
+        if args.get("hero_motion_ratio") is not None:
+            outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
         cost = compute_render_cost(channel, outline)
         est = float(cost.get("stage_1_usd") or cost.get("total_usd") or 0.0)
         return est, {"stage": "start/stills", **cost}
