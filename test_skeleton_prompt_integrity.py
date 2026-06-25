@@ -5,6 +5,7 @@ from skeleton_ai.canonical_edit import (
 )
 from skeleton_ai.pipeline import (
     _expand_locked_scene_direction,
+    _merge_locked_scene_with_generated,
     _visual_brief_beat_direction,
     _visual_brief_requests_wardrobe,
 )
@@ -81,6 +82,17 @@ def test_sparse_locked_scene_gets_visible_environment_and_wide_framing():
     assert "never use a black void" in direction
 
 
+def test_locked_scene_keeps_planner_environment_as_subordinate_detail():
+    merged = _merge_locked_scene_with_generated(
+        "skeleton in dark room, hand reaching toward chest",
+        "Dim bedroom with an unmade bed, sheer curtains, and blue moonlight",
+    ).lower()
+    assert merged.startswith("skeleton in dark room")
+    assert "dim bedroom with an unmade bed" in merged
+    assert "supporting environment detail" in merged
+    assert "must not change the mandatory location" in merged
+
+
 if __name__ == "__main__":
     test_bare_feet_are_rewritten_as_skeletal_glass_feet()
     test_scene_prompt_forbids_human_tissue_at_clothing_edges()
@@ -88,4 +100,5 @@ if __name__ == "__main__":
     test_scene_only_visual_brief_does_not_request_wardrobe()
     test_numbered_beat_direction_is_extracted_exactly()
     test_sparse_locked_scene_gets_visible_environment_and_wide_framing()
+    test_locked_scene_keeps_planner_environment_as_subordinate_detail()
     print("skeleton prompt integrity tests passed")

@@ -194,6 +194,24 @@ def _expand_locked_scene_direction(direction: str) -> str:
     )
 
 
+def _merge_locked_scene_with_generated(
+    locked_scene: str,
+    generated_action: str,
+) -> str:
+    """Enrich a mandatory beat without allowing the planner to replace it."""
+    locked = str(locked_scene or "").strip()
+    generated = re.sub(r"\s+", " ", str(generated_action or "")).strip(" .;")
+    if not locked:
+        return generated
+    if not generated:
+        return locked
+    return (
+        f"{locked} Supporting environment detail from the scene planner: {generated}. "
+        "Use those details only as set dressing, camera, and lighting; they must not "
+        "change the mandatory location, action, subject, or composition above."
+    )
+
+
 def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = "",
                    topic: str | None = None, visual_brief: str | None = None) -> dict:
     """
@@ -311,7 +329,7 @@ def derive_beat_visuals(
         "scene_action",
         "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
     )
-    action = locked_scene if locked_scene else generated_action
+    action = _merge_locked_scene_with_generated(locked_scene, generated_action)
     return (
         outfit,
         action,
