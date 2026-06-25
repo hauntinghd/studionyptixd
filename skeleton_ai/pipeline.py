@@ -132,6 +132,17 @@ def _merge_visual_brief(outfit: str, visual_brief: str | None) -> str:
     return vb or base
 
 
+def _visual_brief_requests_wardrobe(visual_brief: str | None) -> bool:
+    low = str(visual_brief or "").lower()
+    wardrobe_terms = (
+        "wearing", "wears", "wardrobe", "outfit", "clothing", "clothes",
+        "shirt", "hoodie", "jacket", "coat", "pants", "jeans", "shorts",
+        "dress", "suit", "uniform", "armor", "cape", "hat", "helmet",
+        "shoes", "sneakers", "boots",
+    )
+    return any(term in low for term in wardrobe_terms)
+
+
 def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = "",
                    topic: str | None = None, visual_brief: str | None = None) -> dict:
     """
@@ -148,7 +159,7 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
         user_lines.append(f"Topic hint: {topic}")
     if visual_brief:
         user_lines.append(
-            f"USER WARDROBE LOCK (same canonical skeleton every beat): {visual_brief}"
+            f"USER VISUAL DIRECTION (environment, pose, props, overlays, and wardrobe only if explicitly named): {visual_brief}"
         )
     user_lines.append("Script:")
     user_lines.append(script_text.strip())
@@ -172,9 +183,12 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
     plan.setdefault("topic_setting", "")
     if visual_brief:
         plan["visual_brief_lock"] = visual_brief.strip()
-        fb = str(plan.get("fallback_outfit") or "").strip()
-        if visual_brief.strip().lower() not in fb.lower():
-            plan["fallback_outfit"] = f"{visual_brief.strip()}; {fb}".strip("; ")
+    if not _visual_brief_requests_wardrobe(visual_brief):
+        plan["fallback_outfit"] = (
+            "no clothing; preserve the complete canonical transparent glass shell "
+            "and ivory bone anatomy from the master reference"
+        )
+        plan["characters"]["skeleton_host"] = plan["fallback_outfit"]
     return plan
 
 
@@ -211,7 +225,7 @@ def derive_beat_visuals(
         "No markdown."
     )
     user_lines = [
-                  f"Mandatory wardrobe lock: {vbl}" if vbl else "",
+                  f"Mandatory visual direction: {vbl}" if vbl else "",
                   f"Topic setting: {setting}" if setting else "",
                   f"Character sheet (JSON): {chars_json}",
                   f"Fallback outfit: {fallback}",

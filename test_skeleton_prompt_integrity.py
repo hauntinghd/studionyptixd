@@ -3,6 +3,7 @@ from skeleton_ai.canonical_edit import (
     build_scene_edit_prompt,
     sanitize_skeleton_outfit,
 )
+from skeleton_ai.pipeline import _visual_brief_requests_wardrobe
 
 
 def test_bare_feet_are_rewritten_as_skeletal_glass_feet():
@@ -39,8 +40,18 @@ def test_negative_prompt_blocks_hybrid_human_anatomy():
         assert phrase in low
 
 
+def test_scene_only_visual_brief_does_not_request_wardrobe():
+    assert not _visual_brief_requests_wardrobe(
+        "Skeleton in a dark bedroom, hand toward chest, cyan nervous system overlay"
+    )
+    assert _visual_brief_requests_wardrobe(
+        "Skeleton wearing a charcoal hoodie and black jeans"
+    )
+
+
 if __name__ == "__main__":
     test_bare_feet_are_rewritten_as_skeletal_glass_feet()
     test_scene_prompt_forbids_human_tissue_at_clothing_edges()
     test_negative_prompt_blocks_hybrid_human_anatomy()
+    test_scene_only_visual_brief_does_not_request_wardrobe()
     print("skeleton prompt integrity tests passed")
