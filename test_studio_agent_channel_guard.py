@@ -5,7 +5,7 @@ import json
 sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import runner
-from studio_agent.anti_hallucination import AuditReport, ToolFire, guard_text
+from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text
 from studio_agent.tools import _normalize_shortform_category_args
 
 
@@ -34,6 +34,42 @@ def test_mrskelewelly_channel_key_is_not_used_as_skeleton_category():
     assert normalized["category_key"] == "human_limits"
     assert normalized["_selected_channel_key"] == "mrskelewelly"
     assert args["category_key"] == "mrskelewelly"
+
+
+def test_failed_render_cannot_be_described_as_resubmitting_now():
+    failed = ToolFire(
+        "start_shortform_generate",
+        {"category_key": "mrskelewelly"},
+        json.dumps({"error": '"mrskelewelly" is not a valid lane key'}),
+    )
+
+    report = audit_turn(
+        assistant_text=(
+            "I will resubmit now with education as the category. "
+            "Resubmitting now — one moment."
+        ),
+        user_text="Let's get it started.",
+        tool_fires=[failed],
+    )
+
+    assert report.has_blockers
+    assert any("promised execution" in claim for claim in report.blocked_claims)
+
+
+def test_successful_render_can_be_reported_without_future_promise_block():
+    started = ToolFire(
+        "start_shortform_generate",
+        {"category_key": "human_limits"},
+        json.dumps({"status": "awaiting_scene_review", "job_id": "short_123"}),
+    )
+
+    report = audit_turn(
+        assistant_text="I started the production and it is awaiting scene review.",
+        user_text="Let's get it started.",
+        tool_fires=[started],
+    )
+
+    assert not report.has_blockers
 
 
 def test_channel_guard_rewrites_wrong_registry_for_analytics():
@@ -218,6 +254,8 @@ def test_fake_public_search_progress_is_detected():
 if __name__ == "__main__":
     test_current_text_zerotier_overrides_stale_empire_context()
     test_current_text_mrskelewelly_can_select_channel()
+    test_failed_render_cannot_be_described_as_resubmitting_now()
+    test_successful_render_can_be_reported_without_future_promise_block()
     test_channel_guard_rewrites_wrong_registry_for_analytics()
     test_channel_guard_does_not_touch_unscoped_tools()
     test_short_followup_after_analytics_promise_requires_preflight()

@@ -20,7 +20,13 @@ from studio_agent.tone import (
     PROFESSIONAL_VOICE_BLOCK,
     sanitize_assistant_text,
 )
-from studio_agent.tools import execute_tool_logged, re_edit_production, requires_approval, tool_schemas
+from studio_agent.tools import (
+    _normalize_shortform_category_args,
+    execute_tool_logged,
+    re_edit_production,
+    requires_approval,
+    tool_schemas,
+)
 from studio_agent.queue import (
     StudioAgentQueueFullError,
     StudioAgentQueueTimeoutError,
@@ -1753,6 +1759,7 @@ async def _run_turn_impl(
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
                     args = _inject_shortform_caption_options(args, session)
+                    args = _normalize_shortform_category_args(args)
                 args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
 
                 # HARD GUARD for reply-to re-edit: never allow a full new production start when the user
@@ -2176,6 +2183,7 @@ async def _approve_action_impl(
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, session)
         args = _inject_shortform_caption_options(args, session)
+        args = _normalize_shortform_category_args(args)
 
     # Defense for re-edit threads: if this pending action is a start tool but the conversation
     # has an active reply-to re-edit context in recent messages, redirect to surgical re-edit
@@ -2314,6 +2322,7 @@ async def retry_last_production(
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, fresh)
         args = _inject_shortform_caption_options(args, fresh)
+        args = _normalize_shortform_category_args(args)
         # Resume the last shortform job's workspace so finished stills/clips/VO
         # are reused instead of re-rendered (and re-billed) from scratch.
         prev = [

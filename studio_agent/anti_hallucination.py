@@ -149,20 +149,25 @@ _PRODUCTION_COMPLETE_RE = re.compile(
 
 _ACTION_LANGUAGE_RE = re.compile(
     r"\b("
-    r"i'?m (?:applying|fixing|building|starting|running|deploying|rendering|editing|re-editing|checking|pulling)|"
+    r"i'?m (?:applying|fixing|building|starting|running|deploying|rendering|editing|re-editing|resubmitting|checking|pulling)|"
     r"i (?:applied|fixed|built|started|ran|deployed|rendered|edited|re-edited|checked|pulled)|"
-    r"starting now|running now|rendering now|checking completion|checking the status"
+    r"starting now|running now|rendering now|resubmitting now|checking completion|checking the status"
     r")\b",
     re.IGNORECASE,
 )
 
 _COMMITMENT_RE = re.compile(
     r"\b("
-    r"i'?ll\s+(?:fix|rewrite|retry|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
-    r"let\s+me\s+(?:fix|rewrite|retry|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify|try)|"
-    r"i'?m\s+going\s+to\s+(?:fix|rewrite|retry|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
+    r"i(?:'ll| will)\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
+    r"let\s+me\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify|try)|"
+    r"i'?m\s+going\s+to\s+(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|pull|fetch|search|look|check|write|edit|update|patch|deploy|install|test|verify)|"
     r"still\s+working\s+on\s+(?:the|that|this|it|a)\s+(?:fix|rewrite|retry|build|deploy|install|patch|update|search|lookup|test|render|edit)"
     r")\b",
+    re.IGNORECASE,
+)
+
+_ACTION_COMMITMENT_RE = re.compile(
+    r"\b(?:fix|rewrite|retry|resubmit|run|launch|start|build|generate|create|write|edit|update|patch|deploy|install|test)\b",
     re.IGNORECASE,
 )
 
@@ -313,6 +318,29 @@ def _has_any_tool(tool_fires: Sequence[ToolFire], names: set[str]) -> bool:
     return _tool_count(tool_fires, names) > 0
 
 
+def _tool_fire_succeeded(fire: ToolFire) -> bool:
+    raw = str(fire.result or "").strip()
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return not bool(re.match(r"^(?:error|failed|failure)\b", raw, re.IGNORECASE))
+    if not isinstance(data, dict):
+        return True
+    if data.get("error"):
+        return False
+    status = str(data.get("status") or "").strip().lower()
+    return status not in {"error", "failed", "failure", "rejected"}
+
+
+def _latest_tool_succeeded(tool_fires: Sequence[ToolFire], names: set[str]) -> bool:
+    for fire in reversed(tool_fires):
+        if fire.name in names:
+            return _tool_fire_succeeded(fire)
+    return False
+
+
 def _analytics_retention_unavailable(tool_fires: Sequence[ToolFire]) -> bool:
     saw_analytics = False
     for fire in tool_fires:
@@ -393,14 +421,18 @@ def _scrub_phrases(text: str) -> tuple[list[str], list[str]]:
 
 
 def _commitment_without_execution(text: str, tool_fires: Sequence[ToolFire]) -> str | None:
-    if _has_any_tool(tool_fires, _ACTION_TOOLS | _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS):
-        return None
     if _ALLOWED_COMMITMENT_RE.search(text):
         masked = _ALLOWED_COMMITMENT_RE.sub("", text)
         match = _COMMITMENT_RE.search(masked)
-        return match.group(0).strip() if match else None
-    match = _COMMITMENT_RE.search(text)
-    return match.group(0).strip() if match else None
+    else:
+        match = _COMMITMENT_RE.search(text)
+    if not match:
+        return None
+    commitment = match.group(0).strip()
+    if _ACTION_COMMITMENT_RE.search(commitment):
+        return None if _latest_tool_succeeded(tool_fires, _ACTION_TOOLS) else commitment
+    evidence_tools = _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS
+    return None if _latest_tool_succeeded(tool_fires, evidence_tools) else commitment
 
 
 def _router_layer(
@@ -453,8 +485,8 @@ def _engineer_layer(
     if _PRODUCTION_COMPLETE_RE.search(assistant_text) and not _production_completed_this_turn(tool_fires):
         blockers.append("claimed production/re-edit completion without a completed production tool result")
 
-    if _ACTION_LANGUAGE_RE.search(assistant_text) and not _has_any_tool(tool_fires, _ACTION_TOOLS):
-        warnings.append("used action language without any action-taking Studio tool in the turn")
+    if _ACTION_LANGUAGE_RE.search(assistant_text) and not _latest_tool_succeeded(tool_fires, _ACTION_TOOLS):
+        warnings.append("used action language without a successful action-taking Studio tool in the turn")
 
     commitment = _commitment_without_execution(assistant_text, tool_fires)
     if commitment:
