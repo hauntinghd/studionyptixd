@@ -2394,10 +2394,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 );
                             })}
                         {currentSessionRunning && (
-                            <div className="space-y-1 text-xs text-gray-500">
-                                <div className="flex items-center gap-2">
-                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                    {queueHint || toolActivity || 'Thinking…'}
+                            <div className="max-w-[92%] space-y-2 rounded-3xl rounded-bl-lg border border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-3 text-sm text-gray-200 sm:max-w-[82%]">
+                                <div className="flex items-center gap-2.5">
+                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
+                                    <span className="font-medium">
+                                        {queueHint || toolActivity || 'Thinking through your request...'}
+                                    </span>
+                                    <span className="flex gap-1" aria-hidden="true">
+                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" />
+                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:150ms]" />
+                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:300ms]" />
+                                    </span>
                                 </div>
                                 {dockSnap && dockSnap.running !== false && !dockDismissed ? (
                                     <p className="text-cyan-300/90">

@@ -26,12 +26,9 @@ def sanitize_assistant_text(text: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
-    cleaned = re.sub(
-        r"\bI should not narrate work without executing it\.[^\n]*",
-        "I’m handling that now.",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    # Do not rewrite an anti-hallucination correction into another unsupported
+    # progress claim. The runner must execute, request approval, or report the
+    # concrete blocker.
     cleaned = re.sub(
         r"\b(?:result\.json|set_production_scenes_animate|edit_production_scene_still|start_shortform_generate)\b",
         "Studio",

@@ -697,6 +697,7 @@ async def _anthropic_chat_completion(
     timeout: float,
     provider_label: str = "anthropic_fallback",
     model_override: str | None = None,
+    force_tool_call: bool = False,
 ) -> dict[str, Any]:
     key = anthropic_api_key()
     if not key:
@@ -714,7 +715,7 @@ async def _anthropic_chat_completion(
     include_tools = bool(anth_tools)
     if anth_tools and include_tools:
         payload_base["tools"] = anth_tools
-        payload_base["tool_choice"] = {"type": "auto"}
+        payload_base["tool_choice"] = {"type": "any" if force_tool_call else "auto"}
     if _anthropic_payload_size(system_text, anth_messages, payload_base.get("tools")) > ANTHROPIC_FALLBACK_PROMPT_CHAR_BUDGET:
         compacted_messages = _compact_messages_for_anthropic_fallback(messages, hard=True)
         system_text, anth_messages = _anthropic_payload_messages(compacted_messages)
@@ -941,6 +942,7 @@ async def chat_completion(
     temperature: float | None = None,
     reasoning_depth: str = "balanced",
     web_search: bool = False,
+    force_tool_call: bool = False,
 ) -> dict[str, Any]:
     selected_model = model or DEFAULT_MODEL
     temp, reasoning = reasoning_params(reasoning_depth, model=selected_model)
@@ -969,6 +971,7 @@ async def chat_completion(
             timeout=timeout,
             provider_label="anthropic_direct",
             model_override=selected_model,
+            force_tool_call=force_tool_call,
         )
     payload: dict[str, Any] = {
         "model": selected_model,
@@ -980,7 +983,7 @@ async def chat_completion(
         payload["reasoning"] = reasoning
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = "required" if force_tool_call else "auto"
     if web_search:
         # OpenRouter's built-in web plugin: runs a live web search (Exa) and
         # injects results before the model answers — works with any model slug.
@@ -1024,6 +1027,7 @@ async def chat_completion(
                     timeout=timeout,
                     provider_label="anthropic_fallback",
                     model_override=selected_model,
+                    force_tool_call=force_tool_call,
                 )
             suffix = ""
             if _should_try_anthropic(r.status_code, detail) and not anthropic_api_key():

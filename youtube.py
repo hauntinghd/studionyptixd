@@ -1331,7 +1331,6 @@ async def _youtube_fetch_video_analytics_bulk(
         if chunk_start_date > end_date:
             chunk_start_date = end_date - timedelta(days=365)
         for metrics in (
-            "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
             "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
         ):
             try:
@@ -2314,7 +2313,6 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     top_rows: list = []
     top_header_names: list[str] = []
     for metrics in (
-        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
         "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
     ):
         try:
@@ -2348,7 +2346,6 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
     retention_header_names: list[str] = []
     retention_start_date = date(2005, 1, 1)
     for metrics in (
-        "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate",
         "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage",
     ):
         try:
@@ -2361,8 +2358,8 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
                     "startDate": retention_start_date.isoformat(),
                     "endDate": end_date.isoformat(),
                     "dimensions": "video",
-                    "sort": "-averageViewPercentage,-views",
-                    "maxResults": 50,
+                    "sort": "-views",
+                    "maxResults": 200,
                     "metrics": metrics,
                 },
             )

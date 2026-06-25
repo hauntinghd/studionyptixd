@@ -200,17 +200,21 @@ def _resolve_user_channel_connection(
     requested = str(requested_channel_id or "").strip()
     reg_key = str(registry_key or "").strip()
     fallback_id = requested
+    registry_channel_id = ""
     try:
         from long_form.catalyst_bridge import CHANNEL_KEY_TO_ID
 
-        if not fallback_id and reg_key:
-            fallback_id = str(CHANNEL_KEY_TO_ID.get(reg_key, "") or "").strip()
+        if reg_key:
+            registry_channel_id = str(CHANNEL_KEY_TO_ID.get(reg_key, "") or "").strip()
+        if registry_channel_id:
+            fallback_id = registry_channel_id
     except Exception:
         pass
 
     out = {
         "requested_channel_id": requested,
         "requested_registry_key": reg_key,
+        "registry_channel_id": registry_channel_id,
         "lookup_channel_id": fallback_id,
         "analytics_channel_id": fallback_id,
         "snapshot_channel_id": fallback_id,
@@ -245,7 +249,10 @@ def _resolve_user_channel_connection(
             "snapshot_channel_id": lookup_id,
             "matched": True,
             "matched_by": matched_by,
-            "corrected": bool(fallback_id and lookup_id and lookup_id != fallback_id),
+            "corrected": bool(
+                (requested and fallback_id and requested != fallback_id)
+                or (fallback_id and lookup_id and lookup_id != fallback_id)
+            ),
             "record": rec,
         }
 

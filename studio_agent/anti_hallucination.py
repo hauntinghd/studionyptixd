@@ -167,7 +167,7 @@ _COMMITMENT_RE = re.compile(
 )
 
 _ACTION_COMMITMENT_RE = re.compile(
-    r"\b(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|write|edit|update|patch|deploy|install|test)\b",
+    r"\b(?:call|fix|rewrite|retry|submit|resubmit|run|launch|start|build|generate|create|write|edit|update|patch|deploy|install|test|check|verify)\b",
     re.IGNORECASE,
 )
 

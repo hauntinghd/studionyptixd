@@ -568,6 +568,30 @@ def _wants_production_execution(user_text: str) -> bool:
     )
 
 
+def _requires_tool_execution(user_text: str) -> bool:
+    """Return true when a user is asking Studio to do work, not discuss it."""
+    low = str(user_text or "").strip().lower()
+    if not low:
+        return False
+    action = re.search(
+        r"\b("
+        r"regenerate|edit|change|fix|replace|remove|add|create|make|render|generate|"
+        r"animate|approve|finalize|publish|upload|pull|fetch|refresh|check|inspect|"
+        r"list|show|analy[sz]e|crawl|resume|continue|do it|go ahead"
+        r")\b",
+        low,
+    )
+    target = re.search(
+        r"\b("
+        r"scene|still|image|video|short|long[- ]?form|render|production|job|"
+        r"channel|youtube|data|analytics|retention|trend|website|product|"
+        r"reference|thumbnail|script|caption|subtitle|file|project"
+        r")s?\b",
+        low,
+    )
+    return bool(action and target)
+
+
 def _promised_execution_blocked(audit: Any) -> bool:
     return any(
         "promised execution without firing a matching tool" in str(claim).lower()
@@ -1991,6 +2015,10 @@ async def _run_turn_impl(
             except Exception as exc:
                 pf_result = json.dumps({"error": str(exc)}, indent=2)
             preflight_tool_fires.append(ToolFire(pf_name, dict(pf_args), pf_result))
+            try:
+                memory.observe_tool_result(str(user_id), pf_name, pf_args, pf_result)
+            except Exception:
+                pass
             messages.append(_tool_observation_message(pf_name, pf_result))
             store.update_session(sid, messages=messages)
             err_preview = ""
@@ -2130,6 +2158,11 @@ async def _run_turn_impl(
             model=model,
             reasoning_depth=reasoning_depth,
             web_search=web_search,
+            force_tool_call=(
+                round_idx == 0
+                and not preflight_tool_fires
+                and _requires_tool_execution(user_text)
+            ),
         )
         msg = openrouter.message_from_response(resp)
         usage = openrouter.usage_from_response(resp)
@@ -2488,6 +2521,10 @@ async def _run_turn_impl(
                 except Exception as exc:
                     pf_result = json.dumps({"error": str(exc)}, indent=2)
                 tool_fires.append(ToolFire(pf_name, dict(pf_args), pf_result))
+                try:
+                    memory.observe_tool_result(str(user_id), pf_name, pf_args, pf_result)
+                except Exception:
+                    pass
                 messages.append(_tool_observation_message(pf_name, pf_result))
                 store.update_session(sid, messages=messages)
                 err_preview = ""

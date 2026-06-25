@@ -6,7 +6,8 @@ sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text
-from studio_agent.tools import _normalize_shortform_category_args
+from studio_agent.tone import sanitize_assistant_text
+from studio_agent.tools import _normalize_shortform_category_args, _resolve_user_channel_connection
 
 
 def test_current_text_zerotier_overrides_stale_empire_context():
@@ -34,6 +35,32 @@ def test_mrskelewelly_channel_key_is_not_used_as_skeleton_category():
     assert normalized["category_key"] == "human_limits"
     assert normalized["_selected_channel_key"] == "mrskelewelly"
     assert args["category_key"] == "mrskelewelly"
+
+
+def test_registry_channel_id_overrides_stale_session_channel_id():
+    resolved = _resolve_user_channel_connection(
+        "",
+        "UCu_2fPA-ZmRZsfSeb5VIpPA",
+        "zerotier",
+    )
+    assert resolved["lookup_channel_id"] == "UC9Gth_4MVet6rdPH7MHJf-g"
+    assert resolved["registry_channel_id"] == "UC9Gth_4MVet6rdPH7MHJf-g"
+
+
+def test_action_request_requires_real_tool_selection():
+    assert runner._requires_tool_execution("Regenerate scene 3 and show me the new still.")
+    assert runner._requires_tool_execution("Pull the ZeroTier channel analytics.")
+    assert not runner._requires_tool_execution("What model are you using?")
+
+
+def test_anti_hallucination_correction_is_not_rewritten_as_fake_progress():
+    text = (
+        "I should not narrate work without executing it. "
+        "I need to run the matching Studio tool now or name the exact blocker."
+    )
+    cleaned = sanitize_assistant_text(text)
+    assert "handling that now" not in cleaned.lower()
+    assert "should not narrate work" in cleaned.lower()
 
 
 def test_failed_render_cannot_be_described_as_resubmitting_now():
