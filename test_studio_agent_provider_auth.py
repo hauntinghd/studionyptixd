@@ -29,6 +29,39 @@ class StudioAgentProviderAuthTests(unittest.IsolatedAsyncioTestCase):
             "claude-sonnet-4-6",
         )
 
+    def test_oversized_anthropic_tool_set_keeps_relevant_callable_tools(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": f"tool_{index}",
+                    "description": "x" * 500,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for index in range(30)
+        ]
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "poll_render_job",
+                "description": "Poll a production job.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string"}, "kind": {"type": "string"}},
+                    "required": ["job_id", "kind"],
+                },
+            },
+        })
+        selected = openrouter._select_anthropic_tools(
+            tools,
+            [{"role": "user", "content": "continue and poll the job status"}],
+            budget=2500,
+        )
+        names = {row["name"] for row in selected}
+        self.assertIn("poll_render_job", names)
+        self.assertLessEqual(openrouter._anthropic_tool_size(selected), 2500)
+
     async def test_direct_anthropic_primary_bypasses_openrouter(self):
         response = {
             "provider": "anthropic_direct",

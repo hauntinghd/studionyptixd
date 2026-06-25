@@ -261,6 +261,70 @@ def _is_channel_data_followup(user_text: str) -> bool:
     )
 
 
+def _is_job_status_followup(user_text: str) -> bool:
+    compact = str(user_text or "").strip().lower().strip(" ?!.")
+    return compact in {
+        "continue",
+        "resume",
+        "status",
+        "check status",
+        "poll",
+        "poll it",
+        "check it",
+        "any update",
+        "what happened",
+        "is it done",
+    }
+
+
+def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
+    """Find the most recent durable production job even if active_jobs was cleared."""
+    fresh = store.get_session(str(session.get("session_id") or "")) or session
+    jobs = list(fresh.get("active_jobs") or [])
+    for job in reversed(jobs):
+        job_id = str(job.get("job_id") or "").strip()
+        if job_id:
+            return job_id, str(job.get("kind") or "shortform").strip() or "shortform"
+
+    messages = list(fresh.get("messages") or [])
+    for msg in reversed(messages):
+        text = str(msg.get("content") or "")
+        if "job_id" not in text:
+            continue
+        match = re.search(r'"job_id"\s*:\s*"([^"]+)"', text)
+        if not match:
+            match = re.search(r"\bjob[_ -]?id\s*[=:]\s*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
+        if match:
+            kind = "shortform"
+            if re.search(r'"kind"\s*:\s*"longform"', text, re.IGNORECASE):
+                kind = "longform"
+            elif re.search(r'"kind"\s*:\s*"competitor"', text, re.IGNORECASE):
+                kind = "competitor"
+            return match.group(1), kind
+    return None
+
+
+def _format_polled_job_status(result: str) -> str:
+    try:
+        data = json.loads(result or "{}")
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return f"Studio polled the job. Result: {str(result)[:800]}"
+    if data.get("error"):
+        return f"Studio polled the job, but the backend returned: {data['error']}"
+    status = str(data.get("status") or data.get("phase") or data.get("stage") or "running")
+    job_id = str(data.get("job_id") or "").strip()
+    if status in {"awaiting_scene_review", "awaiting_approval"}:
+        return (
+            f"Job {job_id} is at {status.replace('_', ' ')}. "
+            "The generated scenes are ready for review; no animation or finalization should run until you approve them."
+        )
+    percent = data.get("percent", data.get("progress"))
+    suffix = f" ({percent}%)" if percent is not None else ""
+    return f"Job {job_id} status: {status.replace('_', ' ')}{suffix}."
+
+
 def _recent_assistant_promised_channel_data(messages: list[dict[str, Any]], lookback: int = 6) -> bool:
     checked = 0
     for msg in reversed(messages or []):
@@ -1512,6 +1576,46 @@ async def _run_turn_impl(
         memory.observe_user_message(str(user_id), user_text, session=session)
     except Exception:
         pass
+
+    if not reply_to and _is_job_status_followup(user_text):
+        poll_target = _recover_poll_target(session)
+        if poll_target:
+            job_id, kind = poll_target
+            await _fire_event(emit, "tool_start", tool="poll_render_job", round=0, awaiting_approval=False)
+            try:
+                result = execute_tool_logged(
+                    "poll_render_job",
+                    {"job_id": job_id, "kind": kind},
+                    user_id=user_id,
+                    content_format=content_format,
+                    session_id=sid,
+                )
+            except Exception as exc:
+                result = json.dumps({"job_id": job_id, "kind": kind, "error": str(exc)})
+            assistant_text = _format_polled_job_status(result)
+            messages.append(_tool_observation_message("poll_render_job", result))
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(
+                sid,
+                messages=messages,
+                active_jobs=[{"job_id": job_id, "kind": kind, "started_at": time.time()}],
+            )
+            await _fire_event(emit, "tool_end", tool="poll_render_job", status="ok")
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": list(session.get("pending_actions") or []),
+                "active_jobs": [{"job_id": job_id, "kind": kind, "started_at": time.time()}],
+                "approval_mode": approval_mode,
+                "reasoning_depth": reasoning_depth,
+                "usage": {},
+                "billing": {
+                    "credits_charged": 0,
+                    "provider_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                },
+            }
 
     # Explicit production starts are deterministic. If the model previously
     # prepared a start action but narrated instead of firing it, recover the

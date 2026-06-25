@@ -111,7 +111,7 @@ export default function AgentModelPicker({
                         </p>
                         <p className="mt-2 flex items-center gap-1.5 text-[10px] text-emerald-400/90">
                             <Sparkles className="h-3 w-3" />
-                            {cleanModels.length} models via OpenRouter — live pricing when available
+                            {cleanModels.length} Claude models available through your Anthropic API
                         </p>
                     </div>
                     <button
@@ -129,7 +129,7 @@ export default function AgentModelPicker({
                         <input
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
-                            placeholder="Search providers, models, capabilities…"
+                            placeholder="Search Claude models and capabilities…"
                             className="w-full rounded-xl border border-teal-500/25 bg-black/40 py-2 pl-10 pr-3 text-sm text-white placeholder:text-gray-600 focus:border-teal-400/60 focus:outline-none"
                         />
                     </div>

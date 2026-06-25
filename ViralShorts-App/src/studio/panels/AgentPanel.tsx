@@ -1,5 +1,5 @@
 /**
- * Studio Agent — full-screen chat (OpenRouter + Rookcast skills).
+ * Studio Agent — full-screen chat (Anthropic Claude + Rookcast skills).
  */
 import { useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
@@ -168,38 +168,31 @@ function normalizeAgentMessage(raw: unknown): ChatMessage | null {
 
 const FALLBACK_MODELS: AgentModelOption[] = [
     {
-        id: 'anthropic/claude-sonnet-4',
-        name: 'Claude Sonnet 4',
+        id: 'claude-sonnet-4-6',
+        name: 'Claude Sonnet 4.6',
         provider: 'Anthropic',
         recommended: true,
         intelligence: 5,
         speed: 4,
-        description: 'Strong tool use and production planning.',
+        description: 'Default Studio runner for tool use and production planning.',
     },
     {
-        id: 'google/gemini-2.0-flash-001',
-        name: 'Gemini 2.0 Flash',
-        provider: 'Google',
-        recommended: true,
-        intelligence: 4,
-        speed: 5,
-        description: 'Fast, cheap runner for high-volume iteration.',
-    },
-    {
-        id: 'openai/gpt-4o',
-        name: 'GPT-4o',
-        provider: 'OpenAI',
+        id: 'claude-opus-4-8',
+        name: 'Claude Opus 4.8',
+        provider: 'Anthropic',
         recommended: true,
         intelligence: 5,
-        speed: 4,
+        speed: 2,
+        description: 'Highest-depth Claude runner for complex production sessions.',
     },
     {
-        id: 'deepseek/deepseek-chat',
-        name: 'DeepSeek Chat',
-        provider: 'DeepSeek',
+        id: 'claude-haiku-4-5-20251001',
+        name: 'Claude Haiku 4.5',
+        provider: 'Anthropic',
         recommended: true,
         intelligence: 4,
         speed: 5,
+        description: 'Fast, lower-cost Claude runner for status checks and lightweight tool loops.',
     },
 ];
 
@@ -411,7 +404,7 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
                 + 'if this persists, Roll over or start a new chat.'
             );
         }
-        return detail || 'Studio is at capacity (OpenRouter + fal). Your request is queued — try again shortly.';
+        return detail || 'Studio is at capacity (Claude + fal). Your request is queued — try again shortly.';
     }
     if (status === 429) {
         if (/queue/i.test(detail)) {
@@ -1189,7 +1182,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             rec.map((id) => FALLBACK_MODELS.find((m) => m.id === id) || {
                                 id,
                                 name: displayModelName(FALLBACK_MODELS, id),
-                                provider: id.split('/')[0] || 'OpenRouter',
+                                provider: 'Anthropic',
                             }),
                         );
                         pickModel = rec[0];
@@ -1364,7 +1357,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 const max = Number(snap.max_concurrent || 250);
                 setQueueHint(
                     wait > 0
-                        ? `High load — ~${wait} ahead of you (${active}/${max} active). OpenRouter + fal are queued…`
+                        ? `High load — ~${wait} ahead of you (${active}/${max} active). Claude + fal are queued…`
                         : `High load — ${active}/${max} concurrent sessions. Waiting for a slot…`,
                 );
             } else {
@@ -1953,7 +1946,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         {/* Decluttered: removed Short/Long/Auto tabs (user request). Agent now infers from chat text ("make a 45s short about X" or "12-min documentary"). This makes the header much cleaner. */}
                         <div
                             className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5"
-                            title="How deeply the model reasons (OpenRouter)"
+                            title="How deeply Claude reasons"
                         >
                             {REASONING_OPTIONS.map((opt) => (
                                 <button

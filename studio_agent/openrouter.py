@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "anthropic/claude-sonnet-4")
+DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "claude-sonnet-4-6")
 PRIMARY_PROVIDER = os.getenv("STUDIO_AGENT_PRIMARY_PROVIDER", os.getenv("STUDIO_AGENT_LLM_PROVIDER", "anthropic")).strip().lower()
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
 _ANTHROPIC_FALLBACK_MODEL_ENV = os.getenv("ANTHROPIC_FALLBACK_MODEL", "").strip()
@@ -31,6 +31,8 @@ def _normalize_anthropic_model(model: str) -> str:
         "anthropic/claude-opus-4-8": "claude-opus-4-8",
         "opus": "claude-opus-4-8",
         "claude-opus-4.8": "claude-opus-4-8",
+        "anthropic/claude-fable-5": "claude-fable-5",
+        "claude-fable-5": "claude-fable-5",
         "anthropic/claude-sonnet-4": "claude-sonnet-4-6",
         "claude-sonnet-4": "claude-sonnet-4-6",
         "anthropic/claude-4-sonnet": "claude-sonnet-4-6",
@@ -65,19 +67,46 @@ ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_TOOL_CHA
 
 # Curated models with tool-use support; full list via GET /models.
 RECOMMENDED_MODELS = [
-    "anthropic/claude-sonnet-4",
-    "openai/gpt-4o",
-    "google/gemini-2.5-pro-preview",
-    "google/gemini-2.0-flash-001",
-    "x-ai/grok-4",
-    "deepseek/deepseek-chat",
-    "moonshotai/kimi-k2",
-    "meta-llama/llama-3.3-70b-instruct",
-    "qwen/qwen-2.5-72b-instruct",
+    "claude-sonnet-4-6",
+    "claude-opus-4-8",
+    "claude-haiku-4-5-20251001",
+    "claude-fable-5",
 ]
 
 # Display metadata for Studio Agent model picker (merged with live OpenRouter pricing).
 CURATED_META: dict[str, dict[str, Any]] = {
+    "claude-sonnet-4-6": {
+        "name": "Claude Sonnet 4.6",
+        "provider": "Anthropic",
+        "description": "Default Studio runner: strong tool use, planning, and production orchestration.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+    },
+    "claude-opus-4-8": {
+        "name": "Claude Opus 4.8",
+        "provider": "Anthropic",
+        "description": "Highest-depth Claude runner for complex planning and long production sessions.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 2,
+    },
+    "claude-haiku-4-5-20251001": {
+        "name": "Claude Haiku 4.5",
+        "provider": "Anthropic",
+        "description": "Fast, lower-cost Claude runner for status checks and lightweight tool loops.",
+        "recommended": True,
+        "intelligence": 4,
+        "speed": 5,
+    },
+    "claude-fable-5": {
+        "name": "Claude Fable 5",
+        "provider": "Anthropic",
+        "description": "Anthropic creative model when enabled for this API account.",
+        "recommended": False,
+        "intelligence": 5,
+        "speed": 3,
+    },
     "anthropic/claude-sonnet-4": {
         "name": "Claude Sonnet 4",
         "provider": "Anthropic",
@@ -231,7 +260,7 @@ def _catalog_row(mid: str, live_row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": mid,
         "name": meta.get("name") or live_row.get("name") or mid.split("/")[-1],
-        "provider": meta.get("provider") or _provider_from_id(mid),
+        "provider": meta.get("provider") or live_row.get("provider") or _provider_from_id(mid),
         "description": meta.get("description") or live_row.get("description") or "",
         "context_length": live_row.get("context_length"),
         "prompt_price_per_m": prompt_ppm,
@@ -528,6 +557,73 @@ def _anthropic_tool_size(tools: list[dict[str, Any]] | None) -> int:
     return len(json.dumps(tools, ensure_ascii=False))
 
 
+_ANTHROPIC_CORE_TOOL_PRIORITY = (
+    "poll_render_job",
+    "list_production_scenes",
+    "edit_production_scene_still",
+    "edit_production_scenes_still",
+    "regenerate_production_scene_still",
+    "set_production_scenes_animate",
+    "set_production_scene_duration",
+    "animate_production_scenes",
+    "finalize_production",
+    "start_shortform_generate",
+    "start_longform_render",
+    "get_studio_credits",
+    "get_channel_analytics",
+    "recommend_video_topics",
+    "search_youtube_public",
+    "analyze_reference_video",
+)
+
+
+def _select_anthropic_tools(
+    tools: list[dict[str, Any]] | None,
+    messages: list[dict[str, Any]],
+    *,
+    budget: int = ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET,
+) -> list[dict[str, Any]]:
+    """Keep relevant tools callable instead of dropping the complete tool set."""
+    converted = _anthropic_tools(tools)
+    if _anthropic_tool_size(converted) <= budget:
+        return converted
+
+    recent_text = " ".join(
+        _content_to_text(msg.get("content"))
+        for msg in (messages or [])[-8:]
+        if str(msg.get("role") or "") in {"user", "assistant", "system"}
+    ).lower()
+    priority = list(_ANTHROPIC_CORE_TOOL_PRIORITY)
+    keyword_tools = {
+        "poll": ("poll_render_job", "list_production_scenes"),
+        "continue": ("poll_render_job", "list_production_scenes"),
+        "status": ("poll_render_job", "list_production_scenes"),
+        "scene": ("list_production_scenes", "edit_production_scene_still", "set_production_scenes_animate"),
+        "edit": ("edit_production_scene_still", "edit_production_scenes_still", "re_edit_production"),
+        "render": ("start_shortform_generate", "start_longform_render", "poll_render_job"),
+        "animate": ("set_production_scenes_animate", "animate_production_scenes"),
+        "final": ("finalize_production", "finalize_longform_render"),
+        "channel": ("get_channel_analytics", "recommend_video_topics"),
+        "youtube": ("search_youtube_public", "analyze_reference_video"),
+    }
+    for keyword, names in keyword_tools.items():
+        if keyword in recent_text:
+            priority = [*names, *priority]
+
+    by_name = {str(row.get("name") or ""): row for row in converted}
+    ordered_names = list(dict.fromkeys([*priority, *by_name.keys()]))
+    selected: list[dict[str, Any]] = []
+    for name in ordered_names:
+        row = by_name.get(name)
+        if not row:
+            continue
+        candidate = [*selected, row]
+        if _anthropic_tool_size(candidate) > budget:
+            continue
+        selected.append(row)
+    return selected
+
+
 def _anthropic_payload_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
@@ -610,10 +706,8 @@ async def _anthropic_chat_completion(
     }
     if system_text:
         payload_base["system"] = system_text
-    anth_tools = _anthropic_tools(tools)
+    anth_tools = _select_anthropic_tools(tools, messages)
     include_tools = bool(anth_tools)
-    if _anthropic_tool_size(anth_tools) > ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET:
-        include_tools = False
     if anth_tools and include_tools:
         payload_base["tools"] = anth_tools
         payload_base["tool_choice"] = {"type": "auto"}
@@ -704,6 +798,37 @@ async def _anthropic_chat_completion(
 
 
 async def list_models() -> list[dict[str, Any]]:
+    if _use_anthropic_primary():
+        headers = {
+            "x-api-key": anthropic_api_key(),
+            "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(f"{ANTHROPIC_BASE}/models", headers=headers)
+            r.raise_for_status()
+            data = r.json()
+        items = data.get("data") if isinstance(data, dict) else data
+        available = {
+            str(item.get("id") or ""): item
+            for item in (items or [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        rows: list[dict[str, Any]] = []
+        for model_id in RECOMMENDED_MODELS:
+            item = available.get(model_id)
+            if not item:
+                continue
+            rows.append({
+                "id": model_id,
+                "name": CURATED_META.get(model_id, {}).get("name") or item.get("display_name") or model_id,
+                "description": CURATED_META.get(model_id, {}).get("description") or "",
+                "provider": "Anthropic",
+                "context_length": item.get("context_window"),
+            })
+        return rows or [
+            {"id": model_id, "name": CURATED_META[model_id]["name"], "provider": "Anthropic"}
+            for model_id in RECOMMENDED_MODELS[:3]
+        ]
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(f"{OPENROUTER_BASE}/models", headers=_headers())
         r.raise_for_status()
