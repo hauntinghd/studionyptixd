@@ -1697,13 +1697,48 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
             sc["approved_for_animation"] = bool(animate)
             changed.append(sc.get("index"))
     save_scenes(ws, scenes)
+    approved_count = sum(1 for sc in scenes if sc.get("approved_for_video"))
+    all_approved = bool(scenes) and approved_count == len(scenes)
+    if all_approved:
+        result_path = ws / "result.json"
+        result: dict[str, Any] = {}
+        try:
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                result = loaded
+        except Exception:
+            pass
+        result.update({
+            "status": "scenes_approved",
+            "job_id": job_id,
+            "scene_count": len(scenes),
+            "approved_scene_count": approved_count,
+            "animation_pending_count": sum(
+                1 for sc in scenes
+                if sc.get("approved_for_animation") and not sc.get("clip_rel")
+            ),
+        })
+        result.pop("error", None)
+        result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        (ws / "progress.json").write_text(json.dumps({
+            "stage": "scenes_approved",
+            "progress": 85,
+            "detail": "All scenes approved; ready to animate",
+        }, indent=2), encoding="utf-8")
     return json.dumps({
         "ok": True,
         "job_id": job_id,
         "affected": changed,
         "animate": animate,
         "approved_for_video": changed,
-        "note": "Selected scenes are now approved for video. animate=true scenes can use i2v; animate=false scenes will use the still/Ken Burns path at finalize.",
+        "approved_count": approved_count,
+        "scene_count": len(scenes),
+        "all_approved": all_approved,
+        "note": (
+            "All scenes are approved and ready for animation/final export."
+            if all_approved
+            else "Selected scenes are approved. animate=true scenes are queued for i2v selection; animate=false scenes use the still/Ken Burns path."
+        ),
     }, indent=2)
 
 

@@ -124,6 +124,11 @@ class SceneApprovalRequest(BaseModel):
     animate: bool = False
 
 
+class SceneBulkApprovalRequest(BaseModel):
+    animate: bool = False
+    scene_indices: list[int] | None = None
+
+
 def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: ChatRequest) -> dict[str, Any]:
     has_channel_selection = any(
         str(value or "").strip()
@@ -339,6 +344,37 @@ def build_studio_agent_router(
             "ok": True,
             "job_id": job_id,
             "scene_index": scene_idx,
+            "animate": bool(body.animate),
+            "tool_result": tool_result,
+            "snapshot": snapshot,
+        }
+
+    @router.post("/jobs/{job_id}/scenes/approval")
+    async def production_job_scenes_approval(
+        job_id: str,
+        body: SceneBulkApprovalRequest,
+        user: dict = Depends(_agent_user),
+    ):
+        _ = user
+        indices = body.scene_indices
+        if indices is not None and any(idx < 0 or idx > 999 for idx in indices):
+            raise HTTPException(400, "bad_scene_index")
+        try:
+            from studio_agent import tools as agent_tools
+
+            tool_result = await run_in_threadpool(
+                agent_tools.set_production_scenes_animate,
+                job_id,
+                bool(body.animate),
+                indices,
+            )
+            snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except Exception as exc:
+            raise HTTPException(400, f"scene_bulk_approval_failed: {exc}") from exc
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "scene_indices": indices,
             "animate": bool(body.animate),
             "tool_result": tool_result,
             "snapshot": snapshot,

@@ -397,19 +397,57 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                 break
     cancelled = st == "cancelled"
     complete = st == "complete"
-    awaiting_scene_review = st in {"awaiting_scene_review", "awaiting_approval", "stills_done", "review_scenes"}
+    awaiting_scene_review = st in {
+        "awaiting_scene_review",
+        "awaiting_approval",
+        "stills_done",
+        "review_scenes",
+        "scenes_approved",
+        "awaiting_animation_review",
+    }
     terminal_fail = st == "failed" or cancelled
     scene_snapshots = _shortform_scene_snapshots(job_id, workspace)
     scene_count = len(scene_snapshots) or _shortform_scene_count(workspace)
+    approved_scene_count = sum(
+        1 for scene in scene_snapshots
+        if scene.get("approved_for_video") or scene.get("approved_for_animation")
+    )
+    all_scenes_approved = scene_count > 0 and approved_scene_count == scene_count
+    animation_pending_count = sum(
+        1 for scene in scene_snapshots
+        if scene.get("approved_for_animation") and not scene.get("has_clip")
+    )
+    animation_complete_count = sum(
+        1 for scene in scene_snapshots
+        if scene.get("approved_for_animation") and scene.get("has_clip")
+    )
+    review_stage_label = (
+        "Ready to animate"
+        if all_scenes_approved and animation_pending_count
+        else "Animation ready for review"
+        if all_scenes_approved and animation_complete_count
+        else "Scenes approved"
+        if all_scenes_approved
+        else "Review stills"
+    )
+    review_stage_detail = (
+        f"All {scene_count} scenes are approved. {animation_pending_count} approved animation clip(s) still need rendering."
+        if all_scenes_approved and animation_pending_count
+        else f"All {scene_count} scenes are approved. Review the rendered animation, then finalize."
+        if all_scenes_approved and animation_complete_count
+        else f"All {scene_count} scenes are approved and ready for final export."
+        if all_scenes_approved
+        else "Review each still. Reply to edit any bad scene, then approve scenes for animation/final export."
+    )
     snap: dict[str, Any] = {
         "job_id": job_id,
         "kind": "shortform",
         "status": "complete" if complete else "failed" if terminal_fail else "awaiting_approval" if awaiting_scene_review else "running",
-        "progress": 100 if complete else 0 if terminal_fail else 80 if awaiting_scene_review else 55,
+        "progress": 100 if complete else 0 if terminal_fail else 85 if all_scenes_approved else 80 if awaiting_scene_review else 55,
         "stage": st or "running",
-        "stage_label": "Complete" if complete else ("Cancelled" if cancelled else "Failed") if terminal_fail else "Review stills" if awaiting_scene_review else "Rendering",
+        "stage_label": "Complete" if complete else ("Cancelled" if cancelled else "Failed") if terminal_fail else review_stage_label if awaiting_scene_review else "Rendering",
         "stage_detail": (
-            "Review each still. Reply to edit any bad scene, then approve scenes for animation/final export."
+            review_stage_detail
             if awaiting_scene_review else data.get("detail")
         ),
         "error": ("Cancelled by user" if cancelled else data.get("error")),
@@ -419,10 +457,14 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     if scene_count > 0:
         snap["current_scene"] = scene_count
         snap["total_scenes"] = scene_count
+        snap["approved_scene_count"] = approved_scene_count
+        snap["all_scenes_approved"] = all_scenes_approved
+        snap["animation_pending_count"] = animation_pending_count
+        snap["animation_complete_count"] = animation_complete_count
         if scene_snapshots:
             snap["scenes"] = scene_snapshots
     if awaiting_scene_review and scene_count > 0:
-        snap["can_finalize"] = False
+        snap["can_finalize"] = all_scenes_approved and animation_pending_count == 0
         snap["still_count"] = scene_count
         snap["still_preview_urls"] = [
             str(scene.get("still_preview_url"))
@@ -436,10 +478,15 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             snap,
             "start_shortform_generate",
             job_id=job_id,
-            awaiting_user_approval=True,
+            awaiting_user_approval=not all_scenes_approved,
             next_action=(
-                "Review stills, edit or regenerate bad scenes, then approve scenes "
-                "before animation or final export."
+                "Animate the approved scenes, then review and finalize."
+                if all_scenes_approved and animation_pending_count
+                else "Review the rendered animation, then finalize."
+                if all_scenes_approved and animation_complete_count
+                else "Finalize the approved production."
+                if all_scenes_approved
+                else "Review stills, edit or regenerate bad scenes, then approve scenes before animation or final export."
             ),
         )
     elif not complete and not terminal_fail:

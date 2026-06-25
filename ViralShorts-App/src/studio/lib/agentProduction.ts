@@ -54,6 +54,10 @@ export type AgentJobSnapshot = {
     still_count?: number;
     still_preview_urls?: string[];
     scenes?: AgentSceneSnapshot[];
+    approved_scene_count?: number;
+    all_scenes_approved?: boolean;
+    animation_pending_count?: number;
+    animation_complete_count?: number;
     pacing?: {
         avg_shot_sec?: number | null;
         cut_count?: number;
@@ -79,6 +83,10 @@ export function agentJobStillUrl(jobId: string, sceneIdx: number) {
 
 export function agentJobSceneApprovalUrl(jobId: string, sceneIdx: number) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/approval`);
+}
+
+export function agentJobScenesApprovalUrl(jobId: string) {
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scenes/approval`);
 }
 
 export function agentJobFinalizeUrl(jobId: string) {

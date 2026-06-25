@@ -7,6 +7,7 @@ import {
     agentJobMediaUrl,
     agentJobPackageUrl,
     agentJobSceneApprovalUrl,
+    agentJobScenesApprovalUrl,
     agentJobStillUrl,
     mediaUrl,
 } from '../../lib/agentProduction';
@@ -321,6 +322,10 @@ export default function AgentJobDeliverable({
             still_preview_url: stills[idx],
         }));
     }, [snapshot.scenes, snapshot.total_scenes, stills]);
+    const approvedSceneCount = sceneCards.filter(
+        (scene) => scene.approved_for_video || scene.approved_for_animation,
+    ).length;
+    const allScenesApproved = sceneCards.length > 0 && approvedSceneCount === sceneCards.length;
     const modelUrls = useMemo(() => {
         const raw = [
             snapshot.model_url,
@@ -407,6 +412,31 @@ export default function AgentJobDeliverable({
         }
     };
 
+    const approveAllScenes = async (animate: boolean) => {
+        const tok = session?.access_token;
+        if (!tok || !snapshot.job_id) return;
+        setSceneActionBusy(`all:${animate ? 'animate' : 'still'}`);
+        setSceneActionError('');
+        try {
+            const res = await fetch(agentJobScenesApprovalUrl(snapshot.job_id), {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${tok}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ animate }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((data as { detail?: string }).detail || res.statusText));
+            const next = (data as { snapshot?: AgentJobSnapshot }).snapshot;
+            if (next) onSnapshotUpdate?.(next);
+        } catch (e) {
+            setSceneActionError((e as Error).message);
+        } finally {
+            setSceneActionBusy('');
+        }
+    };
+
     // Failed state
     if (failed) {
         return (
@@ -452,7 +482,11 @@ export default function AgentJobDeliverable({
                     )}
                     {awaiting && (
                         <div className="rounded-full bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-medium text-amber-300">
-                            Awaiting your review
+                            {allScenesApproved
+                                ? snapshot.animation_pending_count
+                                    ? 'Approved — ready to animate'
+                                    : 'Approved'
+                                : 'Awaiting your review'}
                         </div>
                     )}
                     {complete && (
@@ -488,13 +522,33 @@ export default function AgentJobDeliverable({
             <div className="p-3">
                 {awaiting && isShortform && sceneCards.length > 0 && (
                     <div className="mb-3">
-                        <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                             <div>
                                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">Scene review</p>
-                                <p className="text-[11px] text-gray-500">Approve stills one by one. Animate only scenes you explicitly approve.</p>
+                                <p className="text-[11px] text-gray-500">Approve individual scenes or apply one decision to the full batch.</p>
                             </div>
-                            <div className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] font-semibold text-cyan-100">
-                                {sceneCards.filter((scene) => scene.approved_for_video || scene.approved_for_animation).length}/{sceneCards.length} approved
+                            <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                <button
+                                    type="button"
+                                    disabled={Boolean(sceneActionBusy)}
+                                    onClick={() => void approveAllScenes(false)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15 disabled:opacity-50"
+                                >
+                                    {sceneActionBusy === 'all:still' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                                    Approve all as stills
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={Boolean(sceneActionBusy)}
+                                    onClick={() => void approveAllScenes(true)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/20 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold text-violet-100 hover:bg-violet-500/15 disabled:opacity-50"
+                                >
+                                    {sceneActionBusy === 'all:animate' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                                    Approve all for animation
+                                </button>
+                                <div className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] font-semibold text-cyan-100">
+                                    {approvedSceneCount}/{sceneCards.length} approved
+                                </div>
                             </div>
                         </div>
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -589,7 +643,7 @@ export default function AgentJobDeliverable({
                                                     className="col-span-2 inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-400/20 bg-violet-500/10 px-2 py-1.5 text-[10px] font-semibold text-violet-100 hover:bg-violet-500/15 disabled:opacity-50"
                                                 >
                                                     {busyAnimate ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-                                                    Approve + animate this scene
+                                                    Approve for animation
                                                 </button>
                                             </div>
                                         </div>
@@ -701,9 +755,15 @@ export default function AgentJobDeliverable({
                 {/* Awaiting approval actions (beautiful finalize gate) */}
                 {awaiting && isShortform && (
                     <div className="mt-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3 text-xs text-cyan-100/90">
-                        <p className="font-semibold text-cyan-100">Scene review required</p>
+                        <p className="font-semibold text-cyan-100">
+                            {allScenesApproved ? 'Scene approval complete' : 'Scene review required'}
+                        </p>
                         <p className="mt-1 text-cyan-100/70">
-                            No image-to-video should run until these stills are approved. Reply with the scene number and edit request, or tell Studio Agent which scenes to approve for animation.
+                            {allScenesApproved
+                                ? snapshot.animation_pending_count
+                                    ? `${snapshot.animation_pending_count} approved scene(s) are ready for image-to-video. Tell Studio Agent to animate the approved scenes.`
+                                    : 'All scenes are approved. Review any completed animation, then finalize the production.'
+                                : 'No image-to-video should run until these stills are approved. Reply with the scene number and edit request, or approve scenes for animation.'}
                         </p>
                     </div>
                 )}
