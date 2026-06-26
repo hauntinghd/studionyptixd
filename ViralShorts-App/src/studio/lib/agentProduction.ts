@@ -11,6 +11,12 @@ export type AgentJobTrack = {
     started_at?: number;
 };
 
+export function normalizeAgentJobKind(jobId: string, kind?: string): AgentJobKind {
+    if (kind === 'longform' || kind === 'shortform' || kind === 'competitor') return kind;
+    if (/^[0-9a-f]{12}$/i.test(String(jobId || '').trim())) return 'competitor';
+    return 'shortform';
+}
+
 export type AgentSceneSnapshot = {
     index: number;
     sid?: string | null;
@@ -153,11 +159,12 @@ export function isTerminalJob(snap: AgentJobSnapshot) {
 export function mergeJobTracks(existing: AgentJobTrack[], incoming: AgentJobTrack[]) {
     const map = new Map<string, AgentJobTrack>();
     for (const j of existing) {
-        if (j.job_id) map.set(j.job_id, j);
+        if (j.job_id) map.set(j.job_id, { ...j, kind: normalizeAgentJobKind(j.job_id, j.kind) });
     }
     for (const j of incoming) {
         if (!j.job_id) continue;
-        map.set(j.job_id, { ...map.get(j.job_id), ...j });
+        const merged = { ...map.get(j.job_id), ...j };
+        map.set(j.job_id, { ...merged, kind: normalizeAgentJobKind(j.job_id, merged.kind) });
     }
     return [...map.values()];
 }
@@ -169,7 +176,11 @@ export function loadPersistedJobs(sessionId: string): AgentJobTrack[] {
         const raw = localStorage.getItem(`${JOBS_STORAGE_KEY}_${sessionId}`);
         if (!raw) return [];
         const parsed = JSON.parse(raw) as AgentJobTrack[];
-        return Array.isArray(parsed) ? parsed : [];
+        return Array.isArray(parsed)
+            ? parsed
+                .filter((job) => job?.job_id)
+                .map((job) => ({ ...job, kind: normalizeAgentJobKind(job.job_id, job.kind) }))
+            : [];
     } catch {
         return [];
     }
