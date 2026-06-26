@@ -298,12 +298,29 @@ def _is_job_status_followup(user_text: str) -> bool:
 
 def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
     """Find the most recent durable production job even if active_jobs was cleared."""
+    def _infer_kind(job_id: str, candidate: str = "") -> str:
+        kind = str(candidate or "").strip().lower()
+        if kind in {"shortform", "longform", "competitor"}:
+            return kind
+        try:
+            from studio_agent import competitor
+
+            if (competitor.WORK_ROOT / job_id / "status.json").is_file():
+                return "competitor"
+        except Exception:
+            pass
+        if re.fullmatch(r"[0-9a-f]{12}", job_id or "", re.IGNORECASE):
+            # Reference-analysis jobs are short UUID hex ids. Shortform jobs in Studio
+            # are usually timestamp/underscore ids with a skeleton workspace.
+            return "competitor"
+        return "shortform"
+
     fresh = store.get_session(str(session.get("session_id") or "")) or session
     jobs = list(fresh.get("active_jobs") or [])
     for job in reversed(jobs):
         job_id = str(job.get("job_id") or "").strip()
         if job_id:
-            return job_id, str(job.get("kind") or "shortform").strip() or "shortform"
+            return job_id, _infer_kind(job_id, str(job.get("kind") or ""))
 
     messages = list(fresh.get("messages") or [])
     for msg in reversed(messages):
@@ -314,12 +331,13 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
         if not match:
             match = re.search(r"\bjob[_ -]?id\s*[=:]\s*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
         if match:
-            kind = "shortform"
+            kind = ""
             if re.search(r'"kind"\s*:\s*"longform"', text, re.IGNORECASE):
                 kind = "longform"
             elif re.search(r'"kind"\s*:\s*"competitor"', text, re.IGNORECASE):
                 kind = "competitor"
-            return match.group(1), kind
+            job_id = match.group(1)
+            return job_id, _infer_kind(job_id, kind)
     return None
 
 
@@ -330,11 +348,19 @@ def _format_polled_job_status(result: str) -> str:
         data = {}
     if not isinstance(data, dict):
         return "I couldn’t read the production status cleanly. Try Resume once, and I’ll reconnect to the render."
-    if data.get("error"):
         return f"I couldn’t check the production yet: {data['error']}"
     status = str(data.get("status") or data.get("phase") or data.get("stage") or "running")
     kind = str(data.get("kind") or "").strip().lower()
+    if not kind and (
+        isinstance(data.get("analysis_profile"), dict)
+        or isinstance(data.get("pacing"), dict)
+        or "style_reference_note" in data
+        or "reference" in str(data.get("note") or "").lower()
+    ):
+        kind = "competitor"
     job_id = str(data.get("job_id") or "").strip()
+    if data.get("error") and kind != "competitor":
+        return f"I couldnâ€™t check the production yet: {data['error']}"
     if kind == "competitor":
         stage = str(data.get("stage") or status or "running").replace("_", " ")
         percent = data.get("percent", data.get("progress"))
@@ -1755,17 +1781,27 @@ async def _run_turn_impl(
             assistant_text = _format_polled_job_status(result)
             messages.append(_tool_observation_message("poll_render_job", result))
             messages.append({"role": "assistant", "content": assistant_text})
+            try:
+                polled = json.loads(result or "{}")
+            except Exception:
+                polled = {}
+            polled_status = str(polled.get("status") or polled.get("phase") or polled.get("stage") or "running").lower() if isinstance(polled, dict) else "running"
+            still_active = polled_status not in {"complete", "failed", "error", "cancelled", "awaiting_scene_review", "awaiting_approval"}
+            active_jobs = [{"job_id": job_id, "kind": kind, "started_at": time.time()}] if still_active else [
+                j for j in list(session.get("active_jobs") or [])
+                if str(j.get("job_id") or "") != job_id
+            ]
             store.update_session(
                 sid,
                 messages=messages,
-                active_jobs=[{"job_id": job_id, "kind": kind, "started_at": time.time()}],
+                active_jobs=active_jobs,
             )
             await _fire_event(emit, "tool_end", tool="poll_render_job", status="ok")
             return {
                 "session_id": sid,
                 "assistant_message": assistant_text,
                 "pending_actions": list(session.get("pending_actions") or []),
-                "active_jobs": [{"job_id": job_id, "kind": kind, "started_at": time.time()}],
+                "active_jobs": active_jobs,
                 "approval_mode": approval_mode,
                 "reasoning_depth": reasoning_depth,
                 "usage": {},

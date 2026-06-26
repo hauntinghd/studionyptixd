@@ -25,6 +25,7 @@ export default function AgentRenderDock({
     const failed = snapshot.status === 'failed';
     const complete = snapshot.status === 'complete';
     const running = !failed && !complete && snapshot.status !== 'awaiting_approval';
+    const isAnalysis = track.kind === 'competitor' || snapshot.kind === 'competitor';
 
     if (!running && !failed && !complete) return null;
 
@@ -92,20 +93,20 @@ export default function AgentRenderDock({
                                 failed ? 'text-red-300/90' : complete ? 'text-emerald-300/90' : 'text-cyan-300/90'
                             }`}
                         >
-                            {failed ? 'Failed' : complete ? 'Complete' : 'Production'}
+                            {failed ? 'Failed' : complete ? 'Complete' : isAnalysis ? 'Analysis' : 'Production'}
                         </p>
                         <p className="truncate text-sm font-semibold text-white">
                             {failed
-                                ? 'Production failed'
+                                ? isAnalysis ? 'Reference analysis failed' : 'Production failed'
                                 : complete
-                                  ? track.title || 'Video ready'
+                                  ? track.title || (isAnalysis ? 'Analysis ready' : 'Video ready')
                                   : snapshot.stage_label || track.title || 'Rendering'}
                         </p>
                         <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-400">
                             {failed
-                                ? snapshot.error || 'Tap Retry to run the same brief again.'
+                                ? snapshot.error || (isAnalysis ? 'Ask Studio Agent to re-run the reference analysis.' : 'Tap Retry to run the same brief again.')
                                 : complete
-                                  ? 'Download your MP4 or keep chatting.'
+                                  ? isAnalysis ? 'The pacing and blueprint signals are ready in chat.' : 'Download your MP4 or keep chatting.'
                                   : snapshot.stage_detail
                                     || (snapshot.total_scenes
                                         ? `Scene ${snapshot.current_scene || 0}/${snapshot.total_scenes}`

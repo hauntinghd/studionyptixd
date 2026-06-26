@@ -630,7 +630,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             snap.kind === 'competitor'
                 ? snap.status === 'complete'
                     ? 'Reference analysis finished — format-specific pacing and blueprint signals are in the card below.'
-                    : 'Reference analysis is still running.'
+                    : snap.status === 'failed'
+                      ? `Reference analysis failed: ${snap.error || 'the analysis workspace could not be read.'}`
+                      : 'Reference analysis is still running.'
                 : snap.status === 'failed'
                   ? snap.error
                       ? `Production failed: ${snap.error}`

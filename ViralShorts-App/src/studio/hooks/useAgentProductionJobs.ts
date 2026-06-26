@@ -162,7 +162,7 @@ export function useAgentProductionJobs({
               status: 'running',
               progress: 8,
               stage: 'starting',
-              stage_label: 'Starting production',
+              stage_label: primary.kind === 'competitor' ? 'Starting analysis' : 'Starting production',
               stage_detail: 'Spawning render on the server…',
               running: true,
               title: primary.title,

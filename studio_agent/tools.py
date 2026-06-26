@@ -3332,7 +3332,12 @@ def execute_tool(
         if kind == "competitor":
             from studio_agent import competitor
 
-            return json.dumps(competitor.read_status(job_id), indent=2, ensure_ascii=True)
+            data = competitor.read_status(job_id)
+            if isinstance(data, dict):
+                data = {"job_id": job_id, "kind": "competitor", **data}
+            else:
+                data = {"job_id": job_id, "kind": "competitor", "status": "failed", "error": "invalid analysis status"}
+            return json.dumps(data, indent=2, ensure_ascii=True)
         if kind == "shortform":
             result_path = (ROOT / SKELETON_OUTPUT / job_id / "result.json").resolve()
             if not result_path.is_file():

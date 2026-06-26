@@ -67,6 +67,32 @@ class ReferenceOrchestrationTests(unittest.TestCase):
         self.assertEqual(data["stage"], "complete")
         self.assertEqual(data["note"], "Reference analysis complete.")
 
+    def test_polled_reference_status_infers_competitor_without_kind(self):
+        text = runner._format_polled_job_status(json.dumps({
+            "job_id": "abcdef123456",
+            "status": "running",
+            "stage": "extracting_audio",
+            "percent": 90,
+            "analysis_profile": competitor.analysis_profile("short"),
+        }))
+        self.assertIn("reference analysis", text.lower())
+        self.assertIn("extracting audio", text.lower())
+        self.assertNotIn("production", text.lower())
+
+    def test_recover_poll_target_infers_12_hex_job_as_competitor(self):
+        session = {
+            "session_id": "s1",
+            "active_jobs": [],
+            "messages": [
+                {
+                    "role": "tool",
+                    "content": json.dumps({"job_id": "abcdef123456", "status": "running"}),
+                }
+            ],
+        }
+        with patch.object(runner.store, "get_session", return_value=session):
+            self.assertEqual(runner._recover_poll_target(session), ("abcdef123456", "competitor"))
+
 
 if __name__ == "__main__":
     unittest.main()
