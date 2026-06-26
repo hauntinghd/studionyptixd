@@ -206,6 +206,12 @@ def test_current_posted_video_requires_latest_upload_channel_preflight():
     assert runner._needs_latest_upload_focus(text)
 
 
+def test_current_public_demand_requires_fresh_public_search():
+    text = "figure out what people are currently searching on actual YouTube right now for the next short"
+    assert runner._needs_public_search_preflight(text)
+    assert runner._needs_fresh_public_search(text)
+
+
 def test_fake_channel_analytics_tool_text_is_detected():
     text = 'Let me pull that data right now.\n\nTool: get_channel_analytics\n\n{"registry_key": "mrskelewelly"}'
     assert runner._assistant_stalled_on_channel_data(text)

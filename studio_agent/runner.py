@@ -259,6 +259,31 @@ def _needs_latest_upload_focus(user_text: str) -> bool:
     )
 
 
+def _needs_fresh_public_search(user_text: str) -> bool:
+    low = str(user_text or "").lower()
+    return any(
+        phrase in low
+        for phrase in (
+            "current",
+            "latest",
+            "newest",
+            "right now",
+            "today",
+            "live",
+            "fresh",
+            "most updated",
+            "up to date",
+            "up-to-date",
+            "actual youtube",
+            "public search",
+            "what people are searching",
+            "what people are actually looking for",
+            "currently trending",
+            "trending now",
+        )
+    )
+
+
 def _is_channel_data_followup(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     compact = low.strip(" ?!.")
@@ -751,7 +776,10 @@ def _needs_public_search_preflight(user_text: str) -> bool:
         "search demand",
         "youtube shorts",
         "people are searching",
+        "people are currently searching",
         "people are actively typing",
+        "currently searching",
+        "actual youtube",
         "go on youtube",
         "look up",
         "live search",
@@ -2096,6 +2124,7 @@ async def _run_turn_impl(
     if not channel_data_preflight_required and _is_channel_data_followup(user_text):
         channel_data_preflight_required = _recent_assistant_promised_channel_data(messages)
     public_search_preflight_required = _needs_public_search_preflight(user_text)
+    fresh_public_search_required = _needs_fresh_public_search(user_text)
     if not public_search_preflight_required and _is_channel_data_followup(user_text):
         public_search_preflight_required = _recent_assistant_promised_channel_data(messages)
 
@@ -2129,6 +2158,7 @@ async def _run_turn_impl(
                     "registry_key": active_registry,
                     "query": _public_search_query_for_channel(active_label, user_text),
                     "days": 30,
+                    "fresh": fresh_public_search_required,
                 },
             ))
         deduped_plan: list[tuple[str, dict[str, Any]]] = []

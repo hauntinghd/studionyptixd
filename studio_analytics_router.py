@@ -32,6 +32,7 @@ async def _fetch_public_search_videos(
     days: int = 30,
     max_results: int = 15,
     order: str = "viewCount",
+    fresh: bool = False,
 ) -> list[dict[str, Any]]:
     """Recent public YouTube search results (Data API key, no OAuth)."""
     from youtube import _youtube_public_api_get
@@ -55,6 +56,7 @@ async def _fetch_public_search_videos(
             timeout_sec=25,
             quota_kind="user",
             quota_note=f"studio_analytics_search:{q[:48]}",
+            cache_bypass=bool(fresh),
         )
     except Exception as exc:
         return [{"error": str(exc)[:200]}]

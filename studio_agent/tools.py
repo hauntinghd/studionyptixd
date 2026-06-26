@@ -1002,6 +1002,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "enum": ["relevance", "date", "viewCount"],
                             "default": "relevance",
                         },
+                        "fresh": {
+                            "type": "boolean",
+                            "description": "Bypass public-search cache for current/latest/live requests; costs fresh YouTube quota.",
+                            "default": False,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -1021,6 +1026,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "query": {"type": "string"},
                         "registry_key": {"type": "string"},
                         "days": {"type": "integer", "default": 30},
+                        "fresh": {
+                            "type": "boolean",
+                            "description": "Bypass public-search cache for current/latest/live trend requests; costs fresh YouTube quota.",
+                            "default": False,
+                        },
                     },
                     "required": [],
                 },
@@ -2946,6 +2956,7 @@ def execute_tool(
             reg_key = str(args.get("registry_key") or "").strip()
             query = str(args.get("query") or "").strip()
             days = int(args.get("days") or 30)
+            fresh = bool(args.get("fresh"))
             queries = [query] if query else (_default_queries_for_registry(reg_key) if reg_key else ["YouTube viral"])
             channel_titles: list[str] = []
             niche_keywords: list[str] = []
@@ -2964,7 +2975,7 @@ def execute_tool(
             all_titles: list[str] = []
             rows: list[dict[str, Any]] = []
             for q in queries[:2]:
-                batch = await _fetch_public_search_videos(q, days=days, max_results=10, order="viewCount")
+                batch = await _fetch_public_search_videos(q, days=days, max_results=10, order="viewCount", fresh=fresh)
                 rows.extend(batch)
                 all_titles.extend([str(r.get("title") or "") for r in batch if r.get("title")])
             predictions = _predict_topics(
@@ -2972,7 +2983,20 @@ def execute_tool(
                 channel_titles=channel_titles,
                 niche_keywords=niche_keywords or queries,
             )
-            return {"window_days": days, "queries": queries, "videos": rows[:20], "predicted_topics": predictions}
+            return {
+                "source": "youtube_data_api_public_search",
+                "fresh": fresh,
+                "private_analytics": False,
+                "window_days": days,
+                "queries": queries,
+                "videos": rows[:20],
+                "predicted_topics": predictions,
+                "note": (
+                    "Fresh=true bypassed the public search cache for this request."
+                    if fresh
+                    else "Public search may use a short-lived cache to conserve YouTube quota."
+                ),
+            }
 
         return json.dumps(_run_async(_fetch()), indent=2)
 
@@ -2985,6 +3009,7 @@ def execute_tool(
                 raise ValueError("query required")
             max_results = max(1, min(int(args.get("max_results") or 8), 15))
             order = str(args.get("order") or "relevance").strip() or "relevance"
+            fresh = bool(args.get("fresh"))
             if order not in {"relevance", "date", "viewCount"}:
                 order = "relevance"
             payload, active_key = await _youtube_public_api_get(
@@ -3001,6 +3026,7 @@ def execute_tool(
                 timeout_sec=25,
                 quota_kind="interactive",
                 quota_note=f"studio_agent_public_youtube_search:{query[:48]}",
+                cache_bypass=fresh,
             )
             video_ids: list[str] = []
             search_items: dict[str, dict[str, Any]] = {}
@@ -3043,8 +3069,12 @@ def execute_tool(
                 "source": "youtube_data_api_public_search",
                 "query": query,
                 "order": order,
+                "fresh": fresh,
                 "private_analytics": False,
                 "active_key": "(cache)" if active_key == "(cache)" else "configured",
+                "cache_status": (
+                    "fresh" if active_key not in {"(cache)", "(stale-cache)"} else str(active_key).strip("()")
+                ),
                 "videos": videos,
                 "note": (
                     "Use these public results to choose a reference URL. Do not claim private AVD, CTR, "
@@ -3193,6 +3223,7 @@ def execute_tool(
             selected_channel_id = str(args.get("channel_id") or "").strip()
             niche = str(args.get("niche_query") or "").strip()
             days = int(args.get("days") or 30)
+            fresh = bool(args.get("fresh"))
 
             channel_block: dict[str, Any] = {}
             ch_id = selected_channel_id or (CHANNEL_KEY_TO_ID.get(reg_key, "") if reg_key else "")
@@ -3213,7 +3244,7 @@ def execute_tool(
             videos: list[dict[str, Any]] = []
             titles: list[str] = []
             for q in queries[:2]:
-                batch = await _fetch_public_search_videos(q, days=days, max_results=12, order="viewCount")
+                batch = await _fetch_public_search_videos(q, days=days, max_results=12, order="viewCount", fresh=fresh)
                 videos.extend(batch)
                 titles.extend([str(r.get("title") or "") for r in batch if r.get("title")])
 
@@ -3233,6 +3264,7 @@ def execute_tool(
             )
             return {
                 "framing_for_creator": framing,
+                "fresh_public_search": fresh,
                 "channel": channel_block,
                 "trending_sample": videos[:15],
                 "recommended_topics": predictions[:12],
