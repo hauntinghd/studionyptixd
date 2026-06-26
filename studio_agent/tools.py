@@ -137,6 +137,21 @@ def _video_metric_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         rows,
         key=lambda row: -int(float(row.get("views", row.get("view_count", 0)) or 0)),
     )
+    latest_upload = {}
+    dated_rows = [
+        row for row in rows
+        if str(row.get("published_at") or "").strip()
+    ]
+    if dated_rows:
+        latest_upload = dict(max(
+            dated_rows,
+            key=lambda row: (
+                str(row.get("published_at") or ""),
+                str(row.get("video_id") or ""),
+            ),
+        ))
+    elif uploaded:
+        latest_upload = dict(uploaded[0] or {})
     return {
         "video_rows_available": len(rows),
         "video_level_retention_available": bool(rows_with_retention),
@@ -144,6 +159,7 @@ def _video_metric_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         "top_by_retention": _compact_video_metric_rows(by_retention, limit=12),
         "top_shorts_by_retention": _compact_video_metric_rows(short_candidates, limit=12),
         "top_by_views": _compact_video_metric_rows(by_views, limit=12),
+        "latest_upload": (_compact_video_metric_rows([latest_upload], limit=1) or [{}])[0] if latest_upload else {},
     }
 
 
@@ -953,6 +969,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "registry_key": {
                             "type": "string",
                             "description": "long_form channel key e.g. cryptic_science",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "enum": ["general", "latest_upload"],
+                            "description": "Use latest_upload when the user asks about the current/latest posted video or short.",
                         },
                     },
                     "required": [],
@@ -2690,6 +2711,7 @@ def execute_tool(
 
             ch_id = str(args.get("channel_id") or "").strip()
             reg_key = str(args.get("registry_key") or "").strip()
+            focus = str(args.get("focus") or "general").strip().lower()
             if not ch_id and reg_key:
                 ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
             if not ch_id:
@@ -2805,7 +2827,12 @@ def execute_tool(
             live_metrics = (live_analytics.get("video_metrics") or {}) if isinstance(live_analytics, dict) else {}
             live_retention_rows = int((live_metrics or {}).get("retention_rows_available") or 0)
             harvest_retention_rows = int((video_metrics or {}).get("retention_rows_available") or 0)
-            use_live_metrics = bool(live_analytics.get("oauth_connected")) and live_retention_rows >= harvest_retention_rows
+            live_video_rows = int((live_metrics or {}).get("video_rows_available") or 0)
+            latest_upload_focus = focus in {"latest_upload", "current", "current_video", "latest"}
+            use_live_metrics = bool(live_analytics.get("oauth_connected")) and (
+                (latest_upload_focus and live_video_rows > 0)
+                or live_retention_rows >= harvest_retention_rows
+            )
             effective_video_metrics = (
                 live_metrics
                 if use_live_metrics
@@ -2882,6 +2909,11 @@ def execute_tool(
                     "lookup_channel_id": lookup_channel_id,
                     "snapshot_channel_id": snapshot_channel_id,
                     "requested_registry_key": reg_key,
+                    "focus": "latest_upload" if latest_upload_focus else "general",
+                    "latest_upload_available": bool(
+                        isinstance(effective_video_metrics.get("latest_upload"), dict)
+                        and effective_video_metrics.get("latest_upload")
+                    ),
                     "channel_resolution": {
                         "matched": bool(channel_resolution.get("matched")),
                         "matched_by": str(channel_resolution.get("matched_by") or "none"),
@@ -2894,6 +2926,11 @@ def execute_tool(
                     "limitation": limitation,
                 },
                 "video_metrics": effective_video_metrics,
+                "latest_upload": (
+                    effective_video_metrics.get("latest_upload")
+                    if isinstance(effective_video_metrics.get("latest_upload"), dict)
+                    else {}
+                ),
                 "harvest_video_metrics": video_metrics,
                 "youtube_analytics_live": live_analytics,
                 "latest_video_velocity": velocity,

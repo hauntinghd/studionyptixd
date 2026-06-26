@@ -7,7 +7,7 @@ sys.modules.setdefault("stripe", types.SimpleNamespace())
 from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text
 from studio_agent.tone import sanitize_assistant_text
-from studio_agent.tools import _normalize_shortform_category_args, _resolve_user_channel_connection
+from studio_agent.tools import _normalize_shortform_category_args, _resolve_user_channel_connection, _video_metric_summary
 
 
 def test_current_text_zerotier_overrides_stale_empire_context():
@@ -200,6 +200,12 @@ def test_pull_all_data_requires_channel_preflight():
     )
 
 
+def test_current_posted_video_requires_latest_upload_channel_preflight():
+    text = "I want you to look at the current video we posted on the channel and get all its data."
+    assert runner._needs_channel_data_preflight(text)
+    assert runner._needs_latest_upload_focus(text)
+
+
 def test_fake_channel_analytics_tool_text_is_detected():
     text = 'Let me pull that data right now.\n\nTool: get_channel_analytics\n\n{"registry_key": "mrskelewelly"}'
     assert runner._assistant_stalled_on_channel_data(text)
@@ -327,6 +333,79 @@ def test_short_plan_uses_actual_live_video_rows_when_returned():
     assert "Best returned reference: The Reason You Never stay Consistant" in text
     assert "follow the strongest returned pattern" in text
     assert "The Real Reason You Overthink Everything" not in text
+
+
+def test_grounded_channel_status_names_latest_upload_separately_from_best_retention():
+    result = {
+        "channel_title": "MrSkeleWelly",
+        "analytics_data_quality": {
+            "effective_source": "youtube_analytics_live",
+            "oauth_connected": True,
+            "video_rows_available": 2,
+            "retention_rows_available": 2,
+            "focus": "latest_upload",
+            "channel_resolution": {"matched_by": "exact_channel_id"},
+        },
+        "latest_upload": {
+            "video_id": "latest",
+            "title": "The Real Reason Men Build Emotional Walls",
+            "views": 565,
+            "average_view_percentage": 88.2,
+            "average_view_duration_sec": 49,
+            "published_at": "2026-06-26T01:00:00Z",
+            "duration_sec": 55,
+            "is_short": True,
+        },
+        "video_metrics": {
+            "video_rows_available": 2,
+            "retention_rows_available": 2,
+            "top_shorts_by_retention": [
+                {
+                    "video_id": "older",
+                    "title": "The Reason You Never stay Consistant",
+                    "views": 302,
+                    "average_view_percentage": 51.31,
+                    "average_view_duration_sec": 28,
+                    "published_at": "2026-06-20T01:00:00Z",
+                    "duration_sec": 55,
+                    "is_short": True,
+                }
+            ],
+        },
+    }
+    text = runner._grounded_channel_status_from_tools(
+        [ToolFire("get_channel_analytics", {"registry_key": "mrskelewelly", "focus": "latest_upload"}, json.dumps(result))],
+        active_label="MrSkeleWelly",
+    )
+    assert "Latest upload: The Real Reason Men Build Emotional Walls" in text
+    assert "565 views" in text
+    assert "88.20% avg view" in text
+    assert "The Reason You Never stay Consistant" not in text
+
+
+def test_video_metric_summary_tracks_latest_upload_by_publish_date():
+    summary = _video_metric_summary({
+        "uploaded_videos": [
+            {
+                "video_id": "old",
+                "title": "Older Short",
+                "published_at": "2026-06-20T00:00:00Z",
+                "views": 302,
+                "average_view_percentage": 51.31,
+                "duration_sec": 55,
+            },
+            {
+                "video_id": "new",
+                "title": "The Real Reason Men Build Emotional Walls",
+                "published_at": "2026-06-26T00:00:00Z",
+                "views": 565,
+                "average_view_percentage": 88.2,
+                "duration_sec": 55,
+            },
+        ]
+    })
+    assert summary["latest_upload"]["title"] == "The Real Reason Men Build Emotional Walls"
+    assert summary["latest_upload"]["average_view_percentage"] == 88.2
 
 
 def test_public_search_request_requires_public_search_preflight():

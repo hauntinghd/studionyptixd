@@ -187,6 +187,15 @@ def _needs_channel_data_preflight(user_text: str) -> bool:
         "can you see",
         "fetch data",
         "refresh data",
+        "current video",
+        "current short",
+        "latest video",
+        "latest short",
+        "newest video",
+        "newest short",
+        "video we posted",
+        "video i posted",
+        "posted on the channel",
     )
     if any(phrase in low for phrase in direct_phrases):
         return True
@@ -230,6 +239,24 @@ def _needs_channel_data_preflight(user_text: str) -> bool:
         "continue from saved tool",
     )
     return any(phrase in low for phrase in retry_phrases)
+
+
+def _needs_latest_upload_focus(user_text: str) -> bool:
+    low = str(user_text or "").lower()
+    return any(
+        phrase in low
+        for phrase in (
+            "current video",
+            "current short",
+            "latest video",
+            "latest short",
+            "newest video",
+            "newest short",
+            "video we posted",
+            "video i posted",
+            "posted on the channel",
+        )
+    )
 
 
 def _is_channel_data_followup(user_text: str) -> bool:
@@ -785,6 +812,7 @@ def _grounded_channel_status_from_tools(
         quality = data.get("analytics_data_quality") if isinstance(data.get("analytics_data_quality"), dict) else {}
         metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
         live = data.get("youtube_analytics_live") if isinstance(data.get("youtube_analytics_live"), dict) else {}
+        latest_upload = data.get("latest_upload") if isinstance(data.get("latest_upload"), dict) else {}
         source = str(quality.get("effective_source") or "unknown").strip()
         reported_title = str(data.get("channel_title") or "").strip()
         title = str(active_label or reported_title or "selected channel").strip()
@@ -810,6 +838,8 @@ def _grounded_channel_status_from_tools(
             lines.append(f"- Channel match: {matched_by}")
         if reported_title and reported_title.lower() != title.lower():
             lines.append(f"- Tool-reported channel title ignored: {reported_title} (selected chat channel is {title})")
+        if latest_upload:
+            lines.append(f"- Latest upload: {_metric_row_line(latest_upload).lstrip('- ')}")
         if limitation:
             lines.extend(["", f"Limitation: {limitation}"])
         lines.append("")
@@ -2062,6 +2092,7 @@ async def _run_turn_impl(
         messages = list(session.get("messages") or messages)
 
     channel_data_preflight_required = _needs_channel_data_preflight(user_text)
+    latest_upload_focus_required = _needs_latest_upload_focus(user_text)
     if not channel_data_preflight_required and _is_channel_data_followup(user_text):
         channel_data_preflight_required = _recent_assistant_promised_channel_data(messages)
     public_search_preflight_required = _needs_public_search_preflight(user_text)
@@ -2077,11 +2108,14 @@ async def _run_turn_impl(
         )
         preflight_plan: list[tuple[str, dict[str, Any]]] = []
         if channel_data_preflight_required:
+            analytics_args = {"registry_key": active_registry, "channel_id": active_channel_id}
+            if latest_upload_focus_required:
+                analytics_args["focus"] = "latest_upload"
             preflight_plan.extend([
                 ("list_youtube_channels", {}),
                 (
                     "get_channel_analytics",
-                    {"registry_key": active_registry, "channel_id": active_channel_id},
+                    analytics_args,
                 ),
                 (
                     "recommend_video_topics",
@@ -2664,7 +2698,11 @@ async def _run_turn_impl(
                 ("list_youtube_channels", {}),
                 (
                     "get_channel_analytics",
-                    {"registry_key": active_registry, "channel_id": active_channel_id},
+                    {
+                        "registry_key": active_registry,
+                        "channel_id": active_channel_id,
+                        **({"focus": "latest_upload"} if _needs_latest_upload_focus(user_text) else {}),
+                    },
                 ),
                 (
                     "recommend_video_topics",
