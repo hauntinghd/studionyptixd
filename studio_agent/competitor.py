@@ -233,6 +233,76 @@ STAGES = [
 ]
 
 
+def _normalize_content_format(value: str | None) -> str:
+    value = str(value or "short").strip().lower().replace("-", "")
+    if value in {"long", "longform"}:
+        return "long"
+    return "short"
+
+
+def analysis_profile(content_format: str | None) -> dict[str, Any]:
+    """Return the correct learning/evaluation contract for each video format."""
+    fmt = _normalize_content_format(content_format)
+    if fmt == "long":
+        return {
+            "content_format": "long",
+            "label": "long-form",
+            "reference_archetypes": [
+                "Jake Tran",
+                "Magnates Media",
+                "Lume",
+                "high-retention documentary channels",
+            ],
+            "observable_reference_metrics": [
+                "cold_open_duration_sec",
+                "avg_shot_sec",
+                "cuts_per_minute",
+                "chapter_lengths_sec",
+                "pattern_interrupt_interval_sec",
+                "visual_source_mix",
+                "music_and_silence_transitions",
+                "cta_timing_sec",
+            ],
+            "channel_learning_metrics": [
+                "impressions_ctr",
+                "first_30_second_retention",
+                "average_view_duration",
+                "average_percentage_viewed",
+                "watch_time_hours",
+                "chapter_retention_and_dropoffs",
+                "returning_viewers",
+                "end_screen_click_rate",
+            ],
+        }
+    return {
+        "content_format": "short",
+        "label": "short-form",
+        "reference_archetypes": [
+            "high-retention Shorts in the selected niche",
+            "channel-specific Shorts outliers",
+        ],
+        "observable_reference_metrics": [
+            "first_visual_change_sec",
+            "avg_shot_sec",
+            "cuts_per_10_seconds",
+            "hook_clarity_first_1_to_3_seconds",
+            "caption_density",
+            "loop_or_exit_pattern",
+            "cta_timing_sec",
+        ],
+        "channel_learning_metrics": [
+            "viewed_vs_swiped_away",
+            "first_1_to_3_second_retention",
+            "average_percentage_viewed",
+            "completion_rate",
+            "rewatch_or_loop_rate",
+            "engaged_views",
+            "likes_comments_shares_per_view",
+            "subscribers_gained_per_1000_views",
+        ],
+    }
+
+
 def _status_path(work: Path) -> Path:
     return work / "status.json"
 
@@ -288,6 +358,7 @@ def analyze(
     max_frames: int = 32,
     keep_video: bool = False,
     job_id: str | None = None,
+    content_format: str = "short",
     progress: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Full competitor analysis: metadata + scene keyframes + audio.
@@ -296,6 +367,7 @@ def analyze(
     default after frames/audio are extracted to save volume space.
     """
     job_id = job_id or uuid.uuid4().hex[:12]
+    profile = analysis_profile(content_format)
     work = (WORK_ROOT / job_id).resolve()
     work.mkdir(parents=True, exist_ok=True)
 
@@ -333,11 +405,16 @@ def analyze(
     frames = extract_scene_keyframes(video_path, work / "frames", scene_threshold=scene_threshold, max_frames=max_frames)
     _write_status(work, frames_extracted=frames.get("frame_count", 0), frame_method=frames.get("method"))
 
-    _step("analyzing_pacing", "Building cut timeline for MrBeast/Lume-style pacing…")
+    pacing_note = (
+        "Building documentary pacing, chapter, and pattern-interrupt signals…"
+        if profile["content_format"] == "long"
+        else "Building Shorts hook, cut-rhythm, caption, and loop signals…"
+    )
+    _step("analyzing_pacing", pacing_note)
     pacing = extract_cut_timeline(video_path, scene_threshold=scene_threshold)
     _write_status(work, pacing=pacing)
 
-    _step("extracting_audio", "Extracting audio for transcription…")
+    _step("extracting_audio", "Extracting the audio track for downstream transcription and sound analysis…")
     audio = extract_audio(video_path, work / "audio")
 
     if not keep_video:
@@ -366,6 +443,7 @@ def analyze(
         "metadata": meta,
         "engagement": engagement,
         "pacing": pacing,
+        "analysis_profile": profile,
         "frames": {
             "method": frames.get("method"),
             "count": frames.get("frame_count", 0),
@@ -382,8 +460,11 @@ def analyze(
             "get_channel_analytics or recommend_video_topics to pick the user's next niche topic.",
         ],
         "style_reference_note": (
-            "Reference pacing extracted (Lume / MrBeast / Jake Tran tier). Same character identity; "
-            "change wardrobe/background/props per scene via seedream edit."
+            "Long-form documentary pacing profile extracted. Evaluate chapter retention, first-30-second "
+            "retention, AVD, APV, watch time, and drop-offs separately from Shorts."
+            if profile["content_format"] == "long"
+            else "Short-form pacing profile extracted. Evaluate viewed-vs-swiped, first-1-to-3-second "
+            "retention, completion, APV, rewatches, and engagement separately from long-form."
         ),
     }
     try:
@@ -393,7 +474,12 @@ def analyze(
     except Exception:
         pass
     final_status = {k: v for k, v in result.items() if k != "metadata"}
-    final_status.update({"status": "complete", "stage": "complete", "percent": 100})
+    final_status.update({
+        "status": "complete",
+        "stage": "complete",
+        "percent": 100,
+        "note": "Reference analysis complete. Pacing, keyframes, audio track, and format-specific metrics are ready.",
+    })
     _write_status(work, **final_status)
     return result
 
@@ -403,6 +489,7 @@ def start_analysis(
     *,
     scene_threshold: float = 0.3,
     max_frames: int = 32,
+    content_format: str = "short",
 ) -> str:
     """Spawn analysis in a background thread; return job_id immediately.
 
@@ -412,11 +499,26 @@ def start_analysis(
     job_id = uuid.uuid4().hex[:12]
     work = (WORK_ROOT / job_id).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    _write_status(work, job_id=job_id, url=url, status="running", stage="queued", percent=0)
+    profile = analysis_profile(content_format)
+    _write_status(
+        work,
+        job_id=job_id,
+        url=url,
+        status="running",
+        stage="queued",
+        percent=0,
+        analysis_profile=profile,
+    )
 
     def _work() -> None:
         try:
-            analyze(url, scene_threshold=scene_threshold, max_frames=max_frames, job_id=job_id)
+            analyze(
+                url,
+                scene_threshold=scene_threshold,
+                max_frames=max_frames,
+                job_id=job_id,
+                content_format=profile["content_format"],
+            )
         except Exception as exc:
             _write_status(work, job_id=job_id, status="failed", stage="error", error=str(exc)[:300])
 

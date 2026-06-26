@@ -1134,6 +1134,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "url": {"type": "string", "description": "YouTube video URL"},
                         "scene_threshold": {"type": "number", "default": 0.3},
                         "max_frames": {"type": "integer", "default": 40},
+                        "content_format": {
+                            "type": "string",
+                            "enum": ["short", "long"],
+                            "description": "Analyze with Shorts metrics or long-form documentary metrics.",
+                        },
                     },
                     "required": ["url"],
                 },
@@ -1154,6 +1159,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "description": "Scene-cut sensitivity (0.2 = more frames, 0.4 = fewer).",
                         },
                         "max_frames": {"type": "integer", "default": 32},
+                        "content_format": {
+                            "type": "string",
+                            "enum": ["short", "long"],
+                            "description": "Analyze with Shorts metrics or long-form documentary metrics.",
+                        },
                     },
                     "required": ["url"],
                 },
@@ -3092,11 +3102,15 @@ def execute_tool(
             url,
             scene_threshold=float(args.get("scene_threshold") or 0.3),
             max_frames=int(args.get("max_frames") or 40),
+            content_format=str(args.get("content_format") or content_format or "short"),
         )
         out = {
-            "status": "awaiting_scene_review",
+            "status": "running",
             "job_id": job_id,
             "kind": "competitor",
+            "content_format": competitor.analysis_profile(
+                str(args.get("content_format") or content_format or "short")
+            )["content_format"],
             "stages": [s[0] for s in competitor.STAGES],
             "note": (
                 "Poll poll_render_job(job_id, kind='competitor'): metadata â†’ download â†’ keyframes â†’ "

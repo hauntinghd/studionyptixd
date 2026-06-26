@@ -628,7 +628,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         if (isImplicitCancelFailure(snap)) return;
         const label =
             snap.kind === 'competitor'
-                ? 'Reference analysis finished — pacing and blueprint signals are in the card below.'
+                ? snap.status === 'complete'
+                    ? 'Reference analysis finished — format-specific pacing and blueprint signals are in the card below.'
+                    : 'Reference analysis is still running.'
                 : snap.status === 'failed'
                   ? snap.error
                       ? `Production failed: ${snap.error}`

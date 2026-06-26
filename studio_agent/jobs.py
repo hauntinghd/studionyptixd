@@ -513,10 +513,11 @@ def _competitor_status(job_id: str) -> dict[str, Any]:
     from studio_agent import competitor
 
     raw = competitor.read_status(job_id)
-    stage = str(raw.get("status") or raw.get("stage") or "queued")
+    status = str(raw.get("status") or "running").strip().lower()
+    stage = str(raw.get("stage") or status or "queued").strip().lower()
     pct = int(raw.get("percent") or competitor._stage_percent(stage) or 0)
-    complete = stage == "complete"
-    failed = stage in ("error", "failed")
+    complete = status == "complete" or stage == "complete"
+    failed = status in ("error", "failed") or stage in ("error", "failed")
     pacing = raw.get("pacing") if isinstance(raw.get("pacing"), dict) else {}
     meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     engagement = raw.get("engagement") if isinstance(raw.get("engagement"), dict) else {}
@@ -534,6 +535,8 @@ def _competitor_status(job_id: str) -> dict[str, Any]:
         "title": str(meta.get("title") or "Reference analysis")[:120],
         "analysis_ready": complete,
     }
+    if isinstance(raw.get("analysis_profile"), dict):
+        snap["analysis_profile"] = raw["analysis_profile"]
     if pacing:
         snap["pacing"] = {
             "avg_shot_sec": pacing.get("avg_shot_sec"),

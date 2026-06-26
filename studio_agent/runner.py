@@ -265,7 +265,7 @@ def _is_channel_data_followup(user_text: str) -> bool:
 
 def _is_job_status_followup(user_text: str) -> bool:
     compact = str(user_text or "").strip().lower().strip(" ?!.")
-    return compact in {
+    if compact in {
         "continue",
         "resume",
         "status",
@@ -276,7 +276,24 @@ def _is_job_status_followup(user_text: str) -> bool:
         "any update",
         "what happened",
         "is it done",
-    }
+        "what did you find",
+        "so what did you find",
+        "what'd you find",
+        "what have you found",
+        "show me the results",
+        "show the results",
+        "what are the results",
+        "tell me what you found",
+        "is the analysis done",
+    }:
+        return True
+    return bool(
+        re.search(
+            r"\b(?:what|show|tell|give)\b.*\b(?:find|found|findings|results?|analysis|update|status)\b",
+            compact,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
@@ -316,7 +333,35 @@ def _format_polled_job_status(result: str) -> str:
     if data.get("error"):
         return f"I couldn’t check the production yet: {data['error']}"
     status = str(data.get("status") or data.get("phase") or data.get("stage") or "running")
+    kind = str(data.get("kind") or "").strip().lower()
     job_id = str(data.get("job_id") or "").strip()
+    if kind == "competitor":
+        stage = str(data.get("stage") or status or "running").replace("_", " ")
+        percent = data.get("percent", data.get("progress"))
+        suffix = f" ({percent}%)" if percent is not None else ""
+        if status == "complete":
+            pacing = data.get("pacing") if isinstance(data.get("pacing"), dict) else {}
+            avg_shot = pacing.get("avg_shot_sec")
+            cut_count = pacing.get("cut_count")
+            format_label = str(
+                data.get("analysis_profile", {}).get("label")
+                if isinstance(data.get("analysis_profile"), dict)
+                else ""
+            ).strip()
+            facts = []
+            if avg_shot is not None:
+                facts.append(f"average shot length {avg_shot}s")
+            if cut_count is not None:
+                facts.append(f"{cut_count} detected cuts")
+            evidence = ", ".join(facts)
+            return (
+                f"The reference analysis is complete{f' for {format_label}' if format_label else ''}. "
+                + (f"Observed pacing: {evidence}. " if evidence else "")
+                + "The reference card now contains the grounded pacing and blueprint signals."
+            )
+        if status == "failed":
+            return f"The reference analysis failed during {stage}: {data.get('error') or 'unknown error'}"
+        return f"The reference analysis is still running: {stage}{suffix}."
     if status in {"awaiting_scene_review", "awaiting_approval"}:
         approved = int(data.get("approved_scene_count") or 0)
         total = int(data.get("total_scenes") or data.get("scene_count") or 0)
@@ -1231,8 +1276,8 @@ def system_prompt(
         )
 
     return f"""You are NYPTID Studio Agent — the primary NYPTID Studio product. You help creators who
-do NOT know what to film: pick niche + topic, frame the video beat-by-beat, then produce at
-Lume / MrBeast / Jake Tran / Magnates Media quality (perfect pacing, packaging, delivery).
+do NOT know what to film: pick niche + topic, frame the video beat-by-beat, then produce with
+format-specific, channel-specific pacing, packaging, and delivery.
 
 {fmt_hint}
 {thinking_hint}
@@ -1301,6 +1346,8 @@ When the user asks to "go on YouTube", "look up" a public channel/creator, or fi
 
 When user links a YouTube URL (especially "watch this and improve my video" or "learn editing from this"):
 1. Immediately call `analyze_reference_video` (yt-dlp download + scene keyframes + cut pacing + audio analysis + story structure).
+   Pass content_format="short" for Shorts and content_format="long" for long-form. Never apply long-form
+   documentary benchmark labels or metrics to a Short.
 2. Poll `poll_render_job` kind=competitor — report every stage live.
 3. Deeply study and extract **exact editing lessons**: hook timing, cut frequency & rhythm, story beat structure, visual grammar, CTA/subscribe placement, pacing patterns that drive retention, packaging (title/thumbnail synergy).
 4. `build_scene_blueprint_from_reference` — per-scene rows using the learned patterns.
@@ -1333,6 +1380,9 @@ Quality target: feels like a $5k+ edit — NOT "good enough AI."
 
 ═══ SHORTFORM RENDER (start_shortform_generate + poll_render_job kind=shortform) ═══
 REQUIRED on every short render: `render_style` from list_render_styles OR the user's session Art Style picker.
+- Shorts quality target: benchmark against the selected channel's own Shorts outliers and niche-specific
+  high-retention Shorts. Optimize viewed-vs-swiped, first-1-to-3-second retention, completion/APV, rewatches,
+  engaged views, and interactions per view. Do not use long-form CTR/AVD/chapter benchmarks as substitutes.
 - Default for most channels: cinematic, ultra_realism, comic_book, historical_18th_century, etc. — real subjects.
 - `skeleton_host` is a niche art style like comic or Ghibli — use it only when the user picked Skeleton in Art Style.
 - Before approving render, state the render_style label so the user sees what visuals they are buying.
@@ -2177,6 +2227,11 @@ async def _run_turn_impl(
             session = compacted
         model_messages = store.trim_messages_for_model(messages, session=session)
         await _fire_event(emit, "model_round", round=round_idx + 1)
+        must_execute_tool = (
+            not preflight_tool_fires
+            and not tool_fires
+            and _requires_tool_execution(user_text)
+        )
         training_capture.capture_event(
             str(user_id),
             "model_request",
@@ -2187,11 +2242,7 @@ async def _run_turn_impl(
                 "tools": tools,
                 "reasoning_depth": reasoning_depth,
                 "web_search": web_search,
-                "force_tool_call": (
-                    round_idx == 0
-                    and not preflight_tool_fires
-                    and _requires_tool_execution(user_text)
-                ),
+                "force_tool_call": must_execute_tool,
             },
             session_id=sid,
             turn_id=turn_id,
@@ -2202,11 +2253,7 @@ async def _run_turn_impl(
             model=model,
             reasoning_depth=reasoning_depth,
             web_search=web_search,
-            force_tool_call=(
-                round_idx == 0
-                and not preflight_tool_fires
-                and _requires_tool_execution(user_text)
-            ),
+            force_tool_call=must_execute_tool,
         )
         msg = openrouter.message_from_response(resp)
         usage = openrouter.usage_from_response(resp)
@@ -2395,6 +2442,29 @@ async def _run_turn_impl(
                 break
             continue
 
+        if must_execute_tool:
+            # A required-action turn is not successful until the backend has
+            # received and executed a real tool call.
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Studio execution contract violation: this request requires a real tool call, but the "
+                    "model returned only text. Call the matching Studio tool now. Do not narrate, promise, "
+                    "or describe the call.]"
+                ),
+            })
+            if round_idx + 1 < MAX_TOOL_ROUNDS:
+                await _fire_event(
+                    emit,
+                    "status",
+                    message="Retrying the required Studio tool call...",
+                )
+                continue
+            assistant_text = (
+                "Studio could not execute the required tool after repeated forced attempts. "
+                "No tool result was created, so I will not claim the work ran. Retry once or choose a stronger runner model."
+            )
+            break
         assistant_text = sanitize_assistant_text(content or "")
         break
 
