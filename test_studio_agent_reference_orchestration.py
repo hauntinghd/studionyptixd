@@ -79,6 +79,23 @@ class ReferenceOrchestrationTests(unittest.TestCase):
         self.assertIn("extracting audio", text.lower())
         self.assertNotIn("production", text.lower())
 
+    def test_complete_reference_status_returns_findings_and_conclusion(self):
+        text = runner._format_polled_job_status(json.dumps({
+            "job_id": "abcdef123456",
+            "kind": "competitor",
+            "status": "complete",
+            "metadata": {"title": "The Reason You Never stay Consistant", "duration": 55},
+            "analysis_profile": competitor.analysis_profile("short"),
+            "pacing": {"avg_shot_sec": 5, "cut_count": 10, "duration_sec": 55, "hook_window_sec": 3},
+            "frames": {"count": 11},
+            "engagement": {"like_rate_pct": 3.2},
+        }))
+        self.assertIn("What I found from The Reason You Never stay Consistant", text)
+        self.assertIn("average shot length 5.00s", text)
+        self.assertIn("10 detected cuts", text)
+        self.assertIn("Conclusion:", text)
+        self.assertIn("fresh channel analytics and fresh public YouTube demand", text)
+
     def test_recover_poll_target_infers_12_hex_job_as_competitor(self):
         session = {
             "session_id": "s1",

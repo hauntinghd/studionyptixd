@@ -626,10 +626,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         const ownerSession = jobSessionRef.current.get(snap.job_id);
         if (ownerSession && ownerSession !== sessionIdRef.current) return;
         if (isImplicitCancelFailure(snap)) return;
+        const referenceFacts = (() => {
+            if (snap.kind !== 'competitor' || snap.status !== 'complete') return '';
+            const facts: string[] = [];
+            if (snap.pacing?.avg_shot_sec != null) facts.push(`avg shot ${snap.pacing.avg_shot_sec}s`);
+            if (snap.pacing?.cut_count != null) facts.push(`${snap.pacing.cut_count} cuts`);
+            if (snap.pacing?.duration_sec != null) facts.push(`${snap.pacing.duration_sec}s duration`);
+            if (snap.frame_count != null) facts.push(`${snap.frame_count} keyframes`);
+            const evidence = facts.length ? ` Extracted: ${facts.join(', ')}.` : '';
+            return `${evidence} Conclusion: use this pacing as reference evidence, then combine it with fresh channel analytics and public YouTube demand before generating the next script.`;
+        })();
         const label =
             snap.kind === 'competitor'
                 ? snap.status === 'complete'
-                    ? 'Reference analysis finished — format-specific pacing and blueprint signals are in the card below.'
+                    ? `Reference analysis finished — format-specific pacing and blueprint signals are ready.${referenceFacts}`
                     : snap.status === 'failed'
                       ? `Reference analysis failed: ${snap.error || 'the analysis workspace could not be read.'}`
                       : 'Reference analysis is still running.'

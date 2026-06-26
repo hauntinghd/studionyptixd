@@ -418,25 +418,7 @@ def _format_polled_job_status(result: str) -> str:
         percent = data.get("percent", data.get("progress"))
         suffix = f" ({percent}%)" if percent is not None else ""
         if status == "complete":
-            pacing = data.get("pacing") if isinstance(data.get("pacing"), dict) else {}
-            avg_shot = pacing.get("avg_shot_sec")
-            cut_count = pacing.get("cut_count")
-            format_label = str(
-                data.get("analysis_profile", {}).get("label")
-                if isinstance(data.get("analysis_profile"), dict)
-                else ""
-            ).strip()
-            facts = []
-            if avg_shot is not None:
-                facts.append(f"average shot length {avg_shot}s")
-            if cut_count is not None:
-                facts.append(f"{cut_count} detected cuts")
-            evidence = ", ".join(facts)
-            return (
-                f"The reference analysis is complete{f' for {format_label}' if format_label else ''}. "
-                + (f"Observed pacing: {evidence}. " if evidence else "")
-                + "The reference card now contains the grounded pacing and blueprint signals."
-            )
+            return _format_reference_analysis_findings(data)
         if status == "failed":
             return f"The reference analysis failed during {stage}: {data.get('error') or 'unknown error'}"
         return f"The reference analysis is still running: {stage}{suffix}."
@@ -465,6 +447,70 @@ def _format_polled_job_status(result: str) -> str:
         "running": "The production is still running.",
     }.get(status, f"The production is {status.replace('_', ' ')}.")
     return f"{friendly}{suffix}"
+
+
+def _format_reference_analysis_findings(data: dict[str, Any]) -> str:
+    pacing = data.get("pacing") if isinstance(data.get("pacing"), dict) else {}
+    profile = data.get("analysis_profile") if isinstance(data.get("analysis_profile"), dict) else {}
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    engagement = data.get("engagement") if isinstance(data.get("engagement"), dict) else {}
+    frames = data.get("frames") if isinstance(data.get("frames"), dict) else {}
+
+    title = str(meta.get("title") or data.get("title") or "the reference video").strip()
+    format_label = str(profile.get("label") or profile.get("content_format") or "").strip()
+    avg_shot = _safe_float(pacing.get("avg_shot_sec"), 0.0)
+    cut_count = _safe_int(pacing.get("cut_count"), 0)
+    duration = _safe_float(pacing.get("duration_sec") or meta.get("duration"), 0.0)
+    hook_window = _safe_float(pacing.get("hook_window_sec"), 0.0)
+    frame_count = _safe_int(frames.get("count") or data.get("frames_extracted"), 0)
+    like_rate = _safe_float(engagement.get("like_rate_pct"), 0.0)
+    comment_rate = _safe_float(engagement.get("comment_rate_pct"), 0.0)
+
+    facts: list[str] = []
+    if duration:
+        facts.append(f"duration about {duration:.1f}s")
+    if avg_shot:
+        facts.append(f"average shot length {avg_shot:.2f}s")
+    if cut_count:
+        facts.append(f"{cut_count} detected cuts")
+    if frame_count:
+        facts.append(f"{frame_count} keyframes extracted")
+    if like_rate:
+        facts.append(f"{like_rate:.2f}% like rate")
+    if comment_rate:
+        facts.append(f"{comment_rate:.2f}% comment rate")
+
+    if avg_shot and avg_shot <= 3.0:
+        pacing_conclusion = "fast-cut retention pattern; match the energy with frequent visual interrupts"
+    elif avg_shot and avg_shot <= 7.0:
+        pacing_conclusion = "balanced short-form pacing; keep the hook tight and escalate every few seconds"
+    elif avg_shot:
+        pacing_conclusion = "slow-hold pacing; use it only if the visual promise is strong enough to prevent swipes"
+    else:
+        pacing_conclusion = "pacing extracted, but the cut rhythm was not strong enough to summarize numerically"
+
+    metric_focus = "completion/APV, first-1-to-3-second hold, rewatches, and swipe-away points"
+    if str(profile.get("content_format") or "").lower().startswith("long"):
+        metric_focus = "first-30-second retention, chapter retention, AVD, APV, and watch-time per chapter"
+
+    lines = [
+        f"Reference analysis complete{f' for {format_label}' if format_label else ''}.",
+        "",
+        f"What I found from {title}:",
+    ]
+    if facts:
+        lines.extend(f"- {fact}" for fact in facts)
+    else:
+        lines.append("- The analysis finished, but the returned payload did not include enough numeric pacing fields.")
+    if hook_window:
+        lines.append(f"- Hook window target: first {hook_window:.1f}s")
+    lines.extend([
+        "",
+        f"Conclusion: this reference is a {pacing_conclusion}. For this format, judge success by {metric_focus}, not generic long-form metrics.",
+        "",
+        "Next move: combine this reference pacing with fresh channel analytics and fresh public YouTube demand, then build the next script/scene plan from the overlap. If you want to proceed, say: plan the next short from this data.",
+    ])
+    return "\n".join(lines)
 
 
 def _recent_assistant_promised_channel_data(messages: list[dict[str, Any]], lookback: int = 6) -> bool:
@@ -2125,6 +2171,9 @@ async def _run_turn_impl(
         channel_data_preflight_required = _recent_assistant_promised_channel_data(messages)
     public_search_preflight_required = _needs_public_search_preflight(user_text)
     fresh_public_search_required = _needs_fresh_public_search(user_text)
+    if not public_search_preflight_required and channel_data_preflight_required and latest_upload_focus_required:
+        public_search_preflight_required = True
+        fresh_public_search_required = True
     if not public_search_preflight_required and _is_channel_data_followup(user_text):
         public_search_preflight_required = _recent_assistant_promised_channel_data(messages)
 
@@ -2148,7 +2197,12 @@ async def _run_turn_impl(
                 ),
                 (
                     "recommend_video_topics",
-                    {"registry_key": active_registry, "channel_id": active_channel_id, "days": 30},
+                    {
+                        "registry_key": active_registry,
+                        "channel_id": active_channel_id,
+                        "days": 30,
+                        "fresh": fresh_public_search_required,
+                    },
                 ),
             ])
         if public_search_preflight_required:
@@ -2736,7 +2790,12 @@ async def _run_turn_impl(
                 ),
                 (
                     "recommend_video_topics",
-                    {"registry_key": active_registry, "channel_id": active_channel_id, "days": 30},
+                    {
+                        "registry_key": active_registry,
+                        "channel_id": active_channel_id,
+                        "days": 30,
+                        "fresh": _needs_fresh_public_search(user_text),
+                    },
                 ),
             ]
             for pf_name, pf_args in retry_plan:
