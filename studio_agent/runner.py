@@ -17,7 +17,7 @@ EventEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
 from studio_agent import openrouter, production_budget, skills
 from studio_agent.anti_hallucination import ToolFire, audit_turn, guard_text
 from studio_agent import memory, store
-from studio_agent import telemetry
+from studio_agent import telemetry, training_capture
 from studio_agent.tone import (
     CONTENT_TYPE_ROUTING_BLOCK,
     PROFESSIONAL_VOICE_BLOCK,
@@ -1632,6 +1632,8 @@ async def _run_turn_impl(
 ) -> dict[str, Any]:
     sid = session["session_id"]
     user_id = session["user_id"]
+    turn_id = f"turn_{uuid.uuid4().hex}"
+    original_user_text = str(user_text or "")
     model = session.get("model") or openrouter.DEFAULT_MODEL
     approval_mode = session.get("approval_mode") or "confirm"
     content_format = session.get("content_format") or "both"
@@ -1652,6 +1654,29 @@ async def _run_turn_impl(
             f"{user_text}\n\n[Studio system: {len(persisted_attachment_paths)} image attachment(s) "
             "were persisted for production. For a product advertisement, call "
             "ingest_product_reference with use_attached_images=true.]"
+        )
+    training_capture.capture_event(
+        str(user_id),
+        "user_turn",
+        {
+            "text": original_user_text,
+            "content_format": content_format,
+            "reasoning_depth": reasoning_depth,
+            "approval_mode": approval_mode,
+            "channel_id": active_channel_id,
+            "registry_key": active_registry,
+            "reply_to": reply_to or {},
+        },
+        session_id=sid,
+        turn_id=turn_id,
+    )
+    for attachment_path in persisted_attachment_paths:
+        training_capture.capture_event(
+            str(user_id),
+            "attachment",
+            {"artifact": training_capture.artifact_manifest(attachment_path, role="user_reference")},
+            session_id=sid,
+            turn_id=turn_id,
         )
 
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
@@ -2152,6 +2177,25 @@ async def _run_turn_impl(
             session = compacted
         model_messages = store.trim_messages_for_model(messages, session=session)
         await _fire_event(emit, "model_round", round=round_idx + 1)
+        training_capture.capture_event(
+            str(user_id),
+            "model_request",
+            {
+                "round": round_idx + 1,
+                "model": model,
+                "messages": model_messages,
+                "tools": tools,
+                "reasoning_depth": reasoning_depth,
+                "web_search": web_search,
+                "force_tool_call": (
+                    round_idx == 0
+                    and not preflight_tool_fires
+                    and _requires_tool_execution(user_text)
+                ),
+            },
+            session_id=sid,
+            turn_id=turn_id,
+        )
         resp = await openrouter.chat_completion(
             messages=model_messages,
             tools=tools,
@@ -2166,6 +2210,19 @@ async def _run_turn_impl(
         )
         msg = openrouter.message_from_response(resp)
         usage = openrouter.usage_from_response(resp)
+        training_capture.capture_event(
+            str(user_id),
+            "model_response",
+            {
+                "round": round_idx + 1,
+                "provider": str(resp.get("provider") or "openrouter"),
+                "model": str(resp.get("model") or model),
+                "message": msg,
+                "usage": usage,
+            },
+            session_id=sid,
+            turn_id=turn_id,
+        )
         model_provider = str(resp.get("provider") or "openrouter")
         effective_model = str(resp.get("model") or model)
         usage_total = usage
@@ -2611,6 +2668,21 @@ async def _run_turn_impl(
         telemetry.record_session_turn(
             user_id, sid, role="assistant", content_preview=assistant_text,
             model=model, content_format=content_format,
+        )
+        training_capture.capture_event(
+            str(user_id),
+            "assistant_turn",
+            {
+                "text": assistant_text,
+                "tool_fires": [
+                    {"name": fire.name, "args": fire.args, "result": fire.result}
+                    for fire in tool_fires
+                ],
+                "pending_actions": pending,
+                "active_jobs": active_jobs,
+            },
+            session_id=sid,
+            turn_id=turn_id,
         )
 
     if active_jobs:

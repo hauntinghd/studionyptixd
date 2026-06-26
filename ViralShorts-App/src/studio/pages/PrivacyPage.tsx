@@ -55,7 +55,7 @@ export default function PrivacyPage() {
             <main className="mx-auto max-w-3xl px-6 py-14">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">NYPTID Studio</p>
                 <h1 className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl">Privacy Policy</h1>
-                <p className="mt-2 text-sm text-gray-500">Last updated: April 19, 2026</p>
+                <p className="mt-2 text-sm text-gray-500">Last updated: June 25, 2026</p>
 
                 <P>
                     NYPTID Studio ("Studio," "we," "us") is a creator-tools platform operated by NYPTID Industries.
@@ -86,7 +86,7 @@ export default function PrivacyPage() {
                 <UL>
                     <li>Scripts, scenes, thumbnails, and renders you produce</li>
                     <li>Your prompts, reference images, and voice selections</li>
-                    <li>Training feedback signals you explicitly provide</li>
+                    <li>Edits, approvals, rejections, tool results, errors, and training feedback signals</li>
                 </UL>
 
                 <H3>Technical data</H3>
@@ -100,7 +100,17 @@ export default function PrivacyPage() {
                     <li><strong className="text-white">To provide Studio's features.</strong> Your YouTube data powers the Catalyst research and learning engine that suggests scripts, titles, and thumbnails based on what has performed well on your own channel.</li>
                     <li><strong className="text-white">To publish on your behalf.</strong> The <Code>youtube.upload</Code> scope is only used when you explicitly click "Publish" — never automatically.</li>
                     <li><strong className="text-white">To operate the service.</strong> Authentication, plan enforcement, billing reconciliation, and anti-abuse.</li>
-                    <li><strong className="text-white">To improve Studio.</strong> Aggregated, non-identifying usage metrics help us understand which features are useful.</li>
+                    <li><strong className="text-white">To improve Studio.</strong> Operational metrics help us diagnose and improve the service.</li>
+                    <li><strong className="text-white">Optional NYPTID model training.</strong> If you explicitly enable training contribution in Settings, Studio may retain your prompts, uploaded references, generated outputs, edits, tool results, approvals, rejections, and feedback as versioned training examples.</li>
+                </UL>
+
+                <H3>Training contribution controls</H3>
+                <UL>
+                    <li>General model-training collection is disabled until you explicitly opt in from Settings.</li>
+                    <li>You can separately decide whether authorized NYPTID reviewers may inspect selected examples for quality control.</li>
+                    <li>Secrets, authentication tokens, payment credentials, authorization headers, and detected contact information are redacted from training exports.</li>
+                    <li>YouTube OAuth-authorized analytics are quarantined and excluded from general model-training exports.</li>
+                    <li>You can disable future collection or delete previously collected training examples from Settings.</li>
                 </UL>
 
                 <H2>3. How YouTube Data Is Handled Specifically</H2>
@@ -113,19 +123,21 @@ export default function PrivacyPage() {
                     <li><strong className="text-white">Never sold.</strong> We do not sell, rent, or share YouTube data with third parties for advertising or any other purpose.</li>
                     <li><strong className="text-white">No human review.</strong> No NYPTID employee reads your YouTube data outside of what is strictly required to diagnose a support issue you've explicitly reported, or to comply with law.</li>
                     <li><strong className="text-white">Server-side tokens.</strong> Refresh tokens are stored server-side only, never exposed to the browser or any third party. Access tokens are refreshed server-to-server and are not persisted beyond the request lifecycle.</li>
-                    <li><strong className="text-white">Cached, not warehoused.</strong> Retrieved data is cached with short TTLs (1–24 hours depending on kind) to reduce API quota usage. Caches are purged on expiry.</li>
+                    <li><strong className="text-white">Purpose-limited storage.</strong> YouTube analytics and authorized channel statistics may be retained while authorization remains active to power creator-facing Catalyst and Studio Agent features. Authorization and data validity are periodically rechecked.</li>
+                    <li><strong className="text-white">Not used for general model training.</strong> YouTube OAuth-authorized data is segregated from NYPTID model-training datasets.</li>
                     <li><strong className="text-white">No redistribution.</strong> Studio never re-exposes one creator's private data to another creator or to the public internet.</li>
                 </UL>
 
                 <H2>4. Data Retention &amp; Deletion</H2>
                 <UL>
-                    <li>YouTube-derived caches: up to 24 hours per kind; older entries are purged automatically.</li>
+                    <li>YouTube-authorized data: retained only while needed for connected creator-facing features and refreshed or revalidated according to YouTube API requirements.</li>
                     <li>Generated content you create: retained while your account is active; deleted within 30 days of account deletion.</li>
+                    <li>Opted-in model-training examples: retained while training consent remains active, subject to your deletion request and applicable legal requirements.</li>
                     <li>Account records: retained for as long as required by billing, tax, and fraud-prevention regulations.</li>
                     <li><strong className="text-white">Disconnect &amp; delete:</strong> You can disconnect your YouTube channel at any time from <em>Settings → YouTube → Disconnect</em>. This revokes the refresh token at Google and deletes the stored token on our side. You can also revoke access directly from your{' '}
                         <A href="https://myaccount.google.com/permissions">Google Account → Third-party apps with account access</A> page.</li>
                     <li><strong className="text-white">Account deletion:</strong> Email{' '}
-                        <A href="mailto:atlassetter@nyptidindustries.com">atlassetter@nyptidindustries.com</A> to request full account deletion. We'll purge your account, connections, and stored tokens within 30 days.</li>
+                        <A href="mailto:atlassetter@nyptidindustries.com">atlassetter@nyptidindustries.com</A> to request full account deletion. YouTube-authorized data is deleted as soon as possible and within 7 calendar days; other generated account content is deleted within 30 days unless retention is legally required.</li>
                 </UL>
 
                 <H2>5. Who We Share Data With</H2>

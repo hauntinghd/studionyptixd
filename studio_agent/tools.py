@@ -3412,8 +3412,40 @@ def execute_tool_logged(
         telemetry.record_tool_call(
             user_id, name, arguments, session_id=session_id, result_preview=f"error: {exc}"
         )
+        try:
+            from studio_agent import training_capture
+
+            training_capture.capture_event(
+                str(user_id or ""),
+                "tool_call",
+                {
+                    "tool": name,
+                    "arguments": arguments,
+                    "error": str(exc),
+                    "content_format": content_format,
+                },
+                session_id=str(session_id or ""),
+            )
+        except Exception:
+            pass
         raise
     telemetry.record_tool_call(user_id, name, arguments, session_id=session_id, result_preview=result[:800])
+    try:
+        from studio_agent import training_capture
+
+        training_capture.capture_event(
+            str(user_id or ""),
+            "tool_call",
+            {
+                "tool": name,
+                "arguments": arguments,
+                "result": result,
+                "content_format": content_format,
+            },
+            session_id=str(session_id or ""),
+        )
+    except Exception:
+        pass
     return result
 
 

@@ -708,18 +708,22 @@ _frontend_cache_buster = str(int(time.time()))
 async def _start_persistent_background_maintenance() -> None:
     import catalyst_backfill
     import youtube as youtube_module
+    from studio_agent import training_capture
 
     catalyst_backfill.start_auto_loop()
     youtube_module.start_youtube_token_maintenance()
+    training_capture.start_compiler_loop()
 
 
 @app.on_event("shutdown")
 async def _stop_persistent_background_maintenance() -> None:
     import catalyst_backfill
     import youtube as youtube_module
+    from studio_agent import training_capture
 
     catalyst_backfill.stop_auto_loop()
     youtube_module.stop_youtube_token_maintenance()
+    training_capture.stop_compiler_loop()
 
 
 def _resolve_latest_frontend_assets() -> tuple[str, str]:

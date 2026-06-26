@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
-import { ArrowLeft, Bell, CheckCircle2, Globe2, ShieldCheck, SlidersHorizontal, WalletCards, Youtube } from 'lucide-react';
+import { ArrowLeft, Bell, BrainCircuit, CheckCircle2, Globe2, ShieldCheck, SlidersHorizontal, Trash2, WalletCards, Youtube } from 'lucide-react';
 import StudioShell from '../components/layout/StudioShell';
 import { type PageNav } from '../components/NavBar';
 import { API, AuthContext, BILLING_SITE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
@@ -13,6 +13,16 @@ type ConnectedYouTubeChannel = {
     };
 };
 
+type TrainingConsent = {
+    training_opt_in: boolean;
+    human_review_opt_in: boolean;
+    include_prompts: boolean;
+    include_uploads: boolean;
+    include_outputs: boolean;
+    include_feedback: boolean;
+    consent_version: string;
+};
+
 export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
     const { session, role, longformOwnerBeta } = useContext(AuthContext);
     const isAdmin = role === 'admin';
@@ -21,6 +31,9 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
     const [youtubeLoading, setYoutubeLoading] = useState(false);
     const [youtubeConnecting, setYoutubeConnecting] = useState(false);
     const [youtubeError, setYoutubeError] = useState('');
+    const [trainingConsent, setTrainingConsent] = useState<TrainingConsent | null>(null);
+    const [trainingBusy, setTrainingBusy] = useState(false);
+    const [trainingMessage, setTrainingMessage] = useState('');
 
     useEffect(() => {
         if (!session) onNavigate('auth');
@@ -64,6 +77,65 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
         if (!accessToken) return;
         void loadYouTubeChannels(false);
     }, [accessToken, loadYouTubeChannels]);
+
+    const loadTrainingConsent = useCallback(async () => {
+        if (!accessToken) return;
+        const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/training-consent'), {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(String((payload as any)?.detail || 'Could not load training controls'));
+        setTrainingConsent((payload as any).consent as TrainingConsent);
+    }, [accessToken]);
+
+    useEffect(() => {
+        if (!accessToken) return;
+        void loadTrainingConsent().catch(() => undefined);
+    }, [accessToken, loadTrainingConsent]);
+
+    const saveTrainingConsent = useCallback(async (next: TrainingConsent) => {
+        if (!accessToken) return;
+        setTrainingBusy(true);
+        setTrainingMessage('');
+        try {
+            const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/training-consent'), {
+                method: 'PATCH',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(next),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any)?.detail || 'Could not save training controls'));
+            setTrainingConsent((payload as any).consent as TrainingConsent);
+            setTrainingMessage(next.training_opt_in ? 'Training contribution enabled.' : 'Training contribution disabled.');
+        } catch (e: any) {
+            setTrainingMessage(String(e?.message || 'Could not save training controls'));
+        } finally {
+            setTrainingBusy(false);
+        }
+    }, [accessToken]);
+
+    const deleteTrainingData = useCallback(async () => {
+        if (!accessToken || !window.confirm('Permanently delete your collected NYPTID training data and disable future collection?')) return;
+        setTrainingBusy(true);
+        setTrainingMessage('');
+        try {
+            const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/training-data'), {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((payload as any)?.detail || 'Could not delete training data'));
+            await loadTrainingConsent();
+            setTrainingMessage(`Training data deletion completed. Removed ${Number((payload as any)?.deletion?.deleted_rows || 0)} records.`);
+        } catch (e: any) {
+            setTrainingMessage(String(e?.message || 'Could not delete training data'));
+        } finally {
+            setTrainingBusy(false);
+        }
+    }, [accessToken, loadTrainingConsent]);
 
     if (!session) return null;
 
@@ -169,6 +241,64 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                         description="720p launch profile · ElevenLabs voice · Generate-first quick run."
                     />
                 </div>
+
+                <SettingsBlock
+                    icon={BrainCircuit}
+                    iconClass="text-violet-300"
+                    title="Help train NYPTID models"
+                    description="Optional, consent-based collection of your Studio prompts, uploads, generated outputs, edits, tool results, and feedback."
+                    actions={
+                        trainingConsent ? (
+                            <button
+                                type="button"
+                                disabled={trainingBusy}
+                                onClick={() => void saveTrainingConsent({
+                                    ...trainingConsent,
+                                    training_opt_in: !trainingConsent.training_opt_in,
+                                    include_prompts: !trainingConsent.training_opt_in,
+                                    include_uploads: !trainingConsent.training_opt_in,
+                                    include_outputs: !trainingConsent.training_opt_in,
+                                    include_feedback: !trainingConsent.training_opt_in,
+                                })}
+                                className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:opacity-60 ${
+                                    trainingConsent.training_opt_in
+                                        ? 'border border-violet-400/30 bg-violet-500/10 text-violet-100 hover:bg-violet-500/20'
+                                        : 'bg-violet-600 text-white hover:bg-violet-500'
+                                }`}
+                            >
+                                {trainingBusy ? 'Saving...' : trainingConsent.training_opt_in ? 'Disable contribution' : 'Enable contribution'}
+                            </button>
+                        ) : null
+                    }
+                >
+                    <p className="text-xs leading-relaxed text-gray-400">
+                        YouTube OAuth analytics are isolated and excluded from general model-training exports. Secrets, tokens, payment data, email addresses, and authorization headers are redacted.
+                    </p>
+                    {trainingConsent?.training_opt_in && (
+                        <label className="flex items-start gap-3 rounded-xl border border-white/[0.08] bg-black/20 p-3 text-sm text-gray-300">
+                            <input
+                                type="checkbox"
+                                checked={trainingConsent.human_review_opt_in}
+                                disabled={trainingBusy}
+                                onChange={(e) => void saveTrainingConsent({ ...trainingConsent, human_review_opt_in: e.target.checked })}
+                                className="mt-0.5"
+                            />
+                            Permit authorized NYPTID reviewers to inspect selected examples for quality control. Automated training collection remains available without this permission.
+                        </label>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3">
+                        <button
+                            type="button"
+                            onClick={() => void deleteTrainingData()}
+                            disabled={trainingBusy}
+                            className="inline-flex items-center gap-2 rounded-xl border border-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"
+                        >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete my training data
+                        </button>
+                        {trainingMessage && <p className="text-xs text-gray-300">{trainingMessage}</p>}
+                    </div>
+                </SettingsBlock>
 
                 <SettingsBlock
                     icon={Bell}

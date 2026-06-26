@@ -33,7 +33,7 @@ from studio_agent.access import account_profile, can_use_studio_agent, is_owner
 from studio_agent.dictation import transcribe_audio_bytes
 
 from studio_agent import openrouter, skills
-from studio_agent import memory, production_budget, runner, store
+from studio_agent import memory, production_budget, runner, store, training_capture
 from studio_agent.queue import (
     StudioAgentQueueFullError,
     StudioAgentQueueTimeoutError,
@@ -131,6 +131,15 @@ class SceneBulkApprovalRequest(BaseModel):
     scene_indices: list[int] | None = None
 
 
+class TrainingConsentRequest(BaseModel):
+    training_opt_in: bool
+    human_review_opt_in: bool = False
+    include_prompts: bool = True
+    include_uploads: bool = True
+    include_outputs: bool = True
+    include_feedback: bool = True
+
+
 def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: ChatRequest) -> dict[str, Any]:
     has_channel_selection = any(
         str(value or "").strip()
@@ -177,6 +186,31 @@ def build_studio_agent_router(
 
     def _billing_profile(user: dict) -> dict:
         return account_profile(user, is_admin_check=is_admin_check)
+
+    @router.get("/training-consent")
+    async def get_training_consent(user: dict = Depends(_agent_user)):
+        return {"consent": training_capture.get_consent(_user_id(user))}
+
+    @router.patch("/training-consent")
+    async def update_training_consent(
+        body: TrainingConsentRequest,
+        user: dict = Depends(_agent_user),
+    ):
+        consent = training_capture.set_consent(
+            _user_id(user),
+            training_opt_in=body.training_opt_in,
+            human_review_opt_in=body.human_review_opt_in,
+            include_prompts=body.include_prompts,
+            include_uploads=body.include_uploads,
+            include_outputs=body.include_outputs,
+            include_feedback=body.include_feedback,
+        )
+        return {"consent": consent}
+
+    @router.delete("/training-data")
+    async def delete_training_data(user: dict = Depends(_agent_user)):
+        training_capture.set_consent(_user_id(user), training_opt_in=False)
+        return {"deletion": training_capture.delete_user_training_data(_user_id(user))}
 
     @router.get("/models")
     async def list_models(user: dict = Depends(_agent_user)):
@@ -731,12 +765,19 @@ def build_studio_agent_router(
         plan = _membership_plan_for_user(user)
         profile = _billing_profile(user)
         try:
-            return await runner.approve_action(
+            result = await runner.approve_action(
                 session,
                 body.action_id,
                 membership_plan=plan,
                 billing_profile=profile,
             )
+            training_capture.capture_event(
+                _user_id(user),
+                "production_feedback",
+                {"decision": "approved", "action_id": body.action_id, "result": result},
+                session_id=session_id,
+            )
+            return result
         except (StudioAgentQueueFullError, StudioAgentQueueTimeoutError) as exc:
             raise HTTPException(503, detail=str(exc)) from exc
         except KeyError as exc:
@@ -783,6 +824,18 @@ def build_studio_agent_router(
             "content": f"[Rejected {action.get('tool')}] {reason}",
         })
         store.update_session(session_id, messages=messages)
+        training_capture.capture_event(
+            _user_id(user),
+            "production_feedback",
+            {
+                "decision": "rejected",
+                "action_id": body.action_id,
+                "tool": action.get("tool"),
+                "arguments": action.get("arguments") or {},
+                "reason": reason,
+            },
+            session_id=session_id,
+        )
         return {"ok": True, "rejected": action}
 
     return router
