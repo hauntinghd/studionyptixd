@@ -7,7 +7,12 @@ sys.modules.setdefault("stripe", types.SimpleNamespace())
 from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text
 from studio_agent.tone import sanitize_assistant_text
-from studio_agent.tools import _normalize_shortform_category_args, _resolve_user_channel_connection, _video_metric_summary
+from studio_agent.tools import (
+    _normalize_shortform_category_args,
+    _promote_latest_upload_from_velocity,
+    _resolve_user_channel_connection,
+    _video_metric_summary,
+)
 
 
 def test_current_text_zerotier_overrides_stale_empire_context():
@@ -204,6 +209,75 @@ def test_current_posted_video_requires_latest_upload_channel_preflight():
     text = "I want you to look at the current video we posted on the channel and get all its data."
     assert runner._needs_channel_data_preflight(text)
     assert runner._needs_latest_upload_focus(text)
+
+
+def test_latest_upload_focus_promotes_youtube_date_ordered_latest_video():
+    metrics = _video_metric_summary({
+        "uploaded_videos": [
+            {
+                "video_id": "old123",
+                "title": "The Reason You Never stay Consistant",
+                "published_at": "2026-06-24T00:00:00Z",
+                "views": 302,
+                "average_view_percentage": 51.31,
+                "average_view_duration_sec": 28,
+                "duration_sec": 55,
+            }
+        ],
+        "retention_videos": [
+            {
+                "video_id": "old123",
+                "title": "The Reason You Never stay Consistant",
+                "average_view_percentage": 51.31,
+                "average_view_duration_sec": 28,
+            }
+        ],
+    })
+
+    promoted = _promote_latest_upload_from_velocity(metrics, {
+        "video_id": "new456",
+        "title": "The Real Reason Men Build Emotional Walls",
+        "published_at": "2026-06-26T00:00:00Z",
+        "watch_url": "https://www.youtube.com/watch?v=new456",
+        "views": 565,
+        "hours_since_upload": 34.0,
+        "velocity_vph": 16.62,
+    })
+
+    latest = promoted["latest_upload"]
+    assert latest["video_id"] == "new456"
+    assert latest["title"] == "The Real Reason Men Build Emotional Walls"
+    assert latest["watch_url"] == "https://www.youtube.com/watch?v=new456"
+    assert latest["latest_upload_source"] == "youtube_latest_video_velocity"
+    assert latest.get("average_view_percentage", 0) == 0
+
+
+def test_latest_upload_focus_keeps_matching_private_analytics_for_same_video():
+    metrics = _video_metric_summary({
+        "uploaded_videos": [
+            {
+                "video_id": "new456",
+                "title": "The Real Reason Men Build Emotional Walls",
+                "published_at": "2026-06-26T00:00:00Z",
+                "views": 560,
+                "average_view_percentage": 88.2,
+                "average_view_duration_sec": 48,
+                "duration_sec": 55,
+            }
+        ],
+    })
+
+    promoted = _promote_latest_upload_from_velocity(metrics, {
+        "video_id": "new456",
+        "title": "The Real Reason Men Build Emotional Walls",
+        "published_at": "2026-06-26T00:00:00Z",
+        "views": 565,
+    })
+
+    latest = promoted["latest_upload"]
+    assert latest["video_id"] == "new456"
+    assert latest["views"] == 565
+    assert latest["average_view_percentage"] == 88.2
 
 
 def test_current_public_demand_requires_fresh_public_search():

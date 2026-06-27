@@ -84,6 +84,7 @@ def _compact_video_metric_rows(rows: list[dict[str, Any]], *, limit: int = 12) -
         item = {
             "video_id": video_id,
             "title": title,
+            "watch_url": str(row.get("watch_url") or (f"https://www.youtube.com/watch?v={video_id}" if video_id else "")).strip(),
             "published_at": str(row.get("published_at") or "").strip(),
             "views": int(float(row.get("views", row.get("view_count", 0)) or 0)),
             "average_view_duration_sec": int(float(row.get("average_view_duration_sec", 0) or 0)),
@@ -161,6 +162,57 @@ def _video_metric_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         "top_by_views": _compact_video_metric_rows(by_views, limit=12),
         "latest_upload": (_compact_video_metric_rows([latest_upload], limit=1) or [{}])[0] if latest_upload else {},
     }
+
+
+def _promote_latest_upload_from_velocity(
+    video_metrics: dict[str, Any],
+    velocity: dict[str, Any],
+) -> dict[str, Any]:
+    """Use YouTube's date-ordered latest video as the authoritative current upload.
+
+    The analytics snapshot can be stale or retention/top-video ordered. For requests
+    about "the current/latest video", the latest identity must come from the
+    date-ordered YouTube Data API result, then matching analytics metrics can be
+    layered onto that same video ID.
+    """
+    metrics = dict(video_metrics or {})
+    latest_video_id = str((velocity or {}).get("video_id") or "").strip()
+    if not latest_video_id:
+        return metrics
+
+    matching_metric_row: dict[str, Any] = {}
+    for bucket_name in ("latest_upload", "top_by_retention", "top_shorts_by_retention", "top_by_views"):
+        bucket = metrics.get(bucket_name)
+        candidates = bucket if isinstance(bucket, list) else [bucket]
+        for row in list(candidates or []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("video_id") or "").strip() == latest_video_id:
+                matching_metric_row = dict(row)
+                break
+        if matching_metric_row:
+            break
+
+    latest = dict(matching_metric_row)
+    title = str((velocity or {}).get("title") or "").strip()
+    published_at = str((velocity or {}).get("published_at") or "").strip()
+    latest.update({
+        "video_id": latest_video_id,
+        "title": title or str(latest.get("title") or "").strip(),
+        "watch_url": str((velocity or {}).get("watch_url") or f"https://www.youtube.com/watch?v={latest_video_id}").strip(),
+        "published_at": published_at or str(latest.get("published_at") or "").strip(),
+        "views": int(float((velocity or {}).get("views", latest.get("views", 0)) or 0)),
+        "latest_upload_source": "youtube_latest_video_velocity",
+    })
+    if (velocity or {}).get("hours_since_upload") is not None:
+        latest["hours_since_upload"] = float((velocity or {}).get("hours_since_upload") or 0)
+    if (velocity or {}).get("velocity_vph") is not None:
+        latest["velocity_vph"] = float((velocity or {}).get("velocity_vph") or 0)
+    if (velocity or {}).get("is_decaying") is not None:
+        latest["is_decaying"] = bool((velocity or {}).get("is_decaying"))
+
+    metrics["latest_upload"] = latest
+    return metrics
 
 
 def _channel_match_token(value: Any) -> str:
@@ -2848,6 +2900,11 @@ def execute_tool(
                 if use_live_metrics
                 else video_metrics
             )
+            if latest_upload_focus and isinstance(velocity, dict) and str(velocity.get("video_id") or "").strip():
+                effective_video_metrics = _promote_latest_upload_from_velocity(
+                    effective_video_metrics,
+                    velocity,
+                )
             oauth_error = str(live_analytics.get("error") or "").strip()
             oauth_error_lower = oauth_error.lower()
             oauth_record_found = bool(live_analytics.get("record_found"))
@@ -2923,6 +2980,11 @@ def execute_tool(
                     "latest_upload_available": bool(
                         isinstance(effective_video_metrics.get("latest_upload"), dict)
                         and effective_video_metrics.get("latest_upload")
+                    ),
+                    "latest_upload_source": (
+                        str((effective_video_metrics.get("latest_upload") or {}).get("latest_upload_source") or "").strip()
+                        if isinstance(effective_video_metrics.get("latest_upload"), dict)
+                        else ""
                     ),
                     "channel_resolution": {
                         "matched": bool(channel_resolution.get("matched")),

@@ -5555,7 +5555,7 @@ async def youtube_get_latest_video_velocity(
 ) -> dict:
     """Get the latest video's view velocity (views per hour since upload).
 
-    Returns {"video_id", "title", "views", "hours_since_upload", "velocity_vph", "is_decaying"}.
+    Returns {"video_id", "title", "published_at", "views", "hours_since_upload", "velocity_vph", "is_decaying"}.
     """
     # Route through _youtube_api_get so quota is reserved + tracked per method.
     # search.list = 100 units, videos.list = 1 unit. Kind=background because this
@@ -5605,6 +5605,8 @@ async def youtube_get_latest_video_velocity(
     return {
         "video_id": video_id,
         "title": title,
+        "published_at": published,
+        "watch_url": _youtube_watch_url(video_id) if video_id else "",
         "views": views,
         "hours_since_upload": round(hours, 1),
         "velocity_vph": velocity,
