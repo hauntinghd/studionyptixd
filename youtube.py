@@ -2659,6 +2659,11 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
         _clip_text(str(series_cluster_playbook.get("summary", "") or "").strip(), 220) if str(series_cluster_playbook.get("summary", "") or "").strip() else "",
     ]
     snapshot = {
+        "channel_title": str(channel_meta.get("title", "") or "").strip(),
+        "channel_handle": str(channel_meta.get("channel_handle", "") or channel_meta.get("custom_url", "") or "").strip(),
+        "subscriber_count": int(float(channel_meta.get("subscriber_count", 0) or 0) or 0),
+        "video_count": int(float(channel_meta.get("video_count", 0) or 0) or 0),
+        "view_count": int(float(channel_meta.get("view_count", 0) or 0) or 0),
         "channel_summary": " | ".join(part for part in summary_parts if part),
         "uploads_playlist_id": uploads_playlist_id,
         "channel_video_count": int(len(inventory_rows or recent_uploads or [])),

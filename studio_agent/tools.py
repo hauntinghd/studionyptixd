@@ -212,7 +212,40 @@ def _promote_latest_upload_from_velocity(
         latest["is_decaying"] = bool((velocity or {}).get("is_decaying"))
 
     metrics["latest_upload"] = latest
+    for bucket_name in ("top_by_retention", "top_shorts_by_retention", "top_by_views"):
+        bucket = metrics.get(bucket_name)
+        if not isinstance(bucket, list):
+            continue
+        updated_bucket: list[dict[str, Any]] = []
+        for row in bucket:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("video_id") or "").strip() == latest_video_id:
+                patched = dict(row)
+                patched.update({
+                    "title": latest["title"],
+                    "watch_url": latest["watch_url"],
+                    "published_at": latest["published_at"],
+                    "views": latest["views"],
+                    "latest_upload_source": "youtube_latest_video_velocity",
+                })
+                updated_bucket.append(patched)
+            else:
+                updated_bucket.append(row)
+        metrics[bucket_name] = updated_bucket
     return metrics
+
+
+def _live_channel_record_from_snapshot(snapshot: dict[str, Any], fallback_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    fallback_record = fallback_record or {}
+    return {
+        "title": snapshot.get("channel_title") or fallback_record.get("title") or fallback_record.get("channel_handle") or "",
+        "channel_handle": snapshot.get("channel_handle") or fallback_record.get("channel_handle") or "",
+        "subscriber_count": int(float(snapshot.get("subscriber_count", 0) or 0)),
+        "video_count": int(float(snapshot.get("video_count", snapshot.get("channel_video_count", 0)) or 0)),
+        "view_count": int(float(snapshot.get("view_count", 0) or 0)),
+        "analytics_snapshot": snapshot,
+    }
 
 
 def _channel_match_token(value: Any) -> str:
@@ -2803,6 +2836,8 @@ def execute_tool(
 
             velocity: dict[str, Any] = {}
             live_analytics: dict[str, Any] = {}
+            live_insights: dict[str, Any] = {}
+            live_growth: dict[str, Any] = {}
             uid = str(user_id or "").strip()
             if uid:
                 try:
@@ -2823,10 +2858,19 @@ def execute_tool(
                         snap = await _youtube_fetch_channel_analytics(access_token, ch_id)
                         if isinstance(snap, dict) and snap:
                             live_video_metrics = _video_metric_summary(snap)
+                            live_record = _live_channel_record_from_snapshot(snap, record)
+                            live_insights = shape_catalyst_insights(live_record)
+                            live_growth = assess_channel_growth(live_insights, harvest_present=True)
                             live_analytics = {
                                 "oauth_connected": True,
                                 "period": "90d channel aggregate + lifetime retention-ranked videos",
                                 "source": "youtube_data_v3+youtube_analytics_reporting",
+                                "channel_title": live_record.get("title") or "",
+                                "channel_counts": {
+                                    "subscribers": live_insights.get("subscribers", 0),
+                                    "videos": live_insights.get("videos", 0),
+                                    "channel_views": live_insights.get("channel_views", 0),
+                                },
                                 "channel_summary": snap.get("channel_summary"),
                                 "recent_upload_titles": (snap.get("recent_upload_titles") or [])[:10],
                                 "top_video_titles": (snap.get("top_video_titles") or [])[:10],
@@ -2905,6 +2949,9 @@ def execute_tool(
                     effective_video_metrics,
                     velocity,
                 )
+            effective_insights = live_insights if bool(live_analytics.get("oauth_connected")) and live_insights else insights
+            effective_growth = live_growth if bool(live_analytics.get("oauth_connected")) and live_growth else growth
+            effective_harvest = True if bool(live_analytics.get("oauth_connected")) and live_insights else harvest
             oauth_error = str(live_analytics.get("error") or "").strip()
             oauth_error_lower = oauth_error.lower()
             oauth_record_found = bool(live_analytics.get("record_found"))
@@ -2950,11 +2997,14 @@ def execute_tool(
                     (k for k, v in CHANNEL_KEY_TO_ID.items() if v == ch_id),
                     "",
                 ),
-                "channel_title": record.get("title") or record.get("channel_handle") or "",
-                "insights": insights,
-                "growth_playbook": growth,
+                "channel_title": (
+                    str((live_analytics.get("channel_title") if isinstance(live_analytics, dict) else "") or "").strip()
+                    or str(record.get("title") or record.get("channel_handle") or "").strip()
+                ),
+                "insights": effective_insights,
+                "growth_playbook": effective_growth,
                 "analytics_data_quality": {
-                    "harvest_present": harvest,
+                    "harvest_present": effective_harvest,
                     "oauth_connected": bool(live_analytics.get("oauth_connected")),
                     "oauth_status": oauth_status,
                     "oauth_record_found": oauth_record_found,
@@ -2969,6 +3019,11 @@ def execute_tool(
                     "effective_source": (
                         "youtube_analytics_live"
                         if use_live_metrics
+                        else "catalyst_harvest_snapshot"
+                    ),
+                    "channel_counts_source": (
+                        "youtube_live_oauth"
+                        if bool(live_analytics.get("oauth_connected")) and live_insights
                         else "catalyst_harvest_snapshot"
                     ),
                     "requested_channel_id": str(args.get("channel_id") or "").strip(),

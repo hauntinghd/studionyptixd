@@ -8,6 +8,7 @@ from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text
 from studio_agent.tone import sanitize_assistant_text
 from studio_agent.tools import (
+    _live_channel_record_from_snapshot,
     _normalize_shortform_category_args,
     _promote_latest_upload_from_velocity,
     _resolve_user_channel_connection,
@@ -285,6 +286,59 @@ def test_latest_upload_focus_keeps_matching_private_analytics_for_same_video():
     assert latest["video_id"] == "new456"
     assert latest["views"] == 565
     assert latest["average_view_percentage"] == 88.2
+
+
+def test_latest_upload_velocity_updates_matching_retention_rows_public_count():
+    metrics = _video_metric_summary({
+        "uploaded_videos": [
+            {
+                "video_id": "new456",
+                "title": "The Real Reason Men Build Emotional Walls",
+                "published_at": "2026-06-26T00:00:00Z",
+                "views": 558,
+                "average_view_percentage": 88.73,
+                "average_view_duration_sec": 28,
+                "duration_sec": 31,
+            }
+        ],
+        "retention_videos": [
+            {
+                "video_id": "new456",
+                "title": "The Real Reason Men Build Emotional Walls",
+                "views": 558,
+                "average_view_percentage": 88.73,
+                "average_view_duration_sec": 28,
+            }
+        ],
+    })
+
+    promoted = _promote_latest_upload_from_velocity(metrics, {
+        "video_id": "new456",
+        "title": "The Real Reason Men Build Emotional Walls",
+        "published_at": "2026-06-26T00:00:00Z",
+        "views": 570,
+    })
+
+    assert promoted["latest_upload"]["views"] == 570
+    assert promoted["top_by_retention"][0]["views"] == 570
+    assert promoted["top_by_retention"][0]["average_view_percentage"] == 88.73
+
+
+def test_live_channel_snapshot_overrides_stale_catalyst_counts():
+    live_record = _live_channel_record_from_snapshot(
+        {
+            "channel_title": "MrSkelewelly",
+            "subscriber_count": 5,
+            "video_count": 3,
+            "view_count": 933,
+            "top_videos": [{"video_id": "new456", "title": "Winner", "views": 570}],
+        },
+        {"title": "MrSkelewelly", "subscriber_count": 1, "video_count": 3, "view_count": 363},
+    )
+
+    assert live_record["subscriber_count"] == 5
+    assert live_record["view_count"] == 933
+    assert live_record["video_count"] == 3
 
 
 def test_current_public_demand_requires_fresh_public_search():
