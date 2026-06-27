@@ -209,6 +209,13 @@ def test_current_posted_video_requires_latest_upload_channel_preflight():
     text = "I want you to look at the current video we posted on the channel and get all its data."
     assert runner._needs_channel_data_preflight(text)
     assert runner._needs_latest_upload_focus(text)
+    assert runner._needs_current_video_audit(text)
+
+
+def test_plain_latest_upload_question_does_not_force_full_video_audit():
+    text = "what is my latest video title?"
+    assert runner._needs_latest_upload_focus(text)
+    assert not runner._needs_current_video_audit(text)
 
 
 def test_latest_upload_focus_promotes_youtube_date_ordered_latest_video():

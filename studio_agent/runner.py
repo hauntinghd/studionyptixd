@@ -259,6 +259,38 @@ def _needs_latest_upload_focus(user_text: str) -> bool:
     )
 
 
+def _needs_current_video_audit(user_text: str) -> bool:
+    """Detect requests that require the full current-video evidence chain.
+
+    This is not a response guard. It routes a concrete workflow:
+    latest upload identity + private channel metrics + exact-video analysis +
+    fresh public YouTube demand before final synthesis.
+    """
+    low = str(user_text or "").lower()
+    if not _needs_latest_upload_focus(low):
+        return False
+    audit_terms = (
+        "all its data",
+        "get all",
+        "pull all",
+        "look at",
+        "analyze",
+        "analyse",
+        "understand where",
+        "where we are",
+        "why",
+        "what's wrong",
+        "whats wrong",
+        "what is wrong",
+        "fix",
+        "improve",
+        "retention",
+        "avd",
+        "watch time",
+    )
+    return any(term in low for term in audit_terms)
+
+
 def _needs_fresh_public_search(user_text: str) -> bool:
     low = str(user_text or "").lower()
     return any(
@@ -1046,6 +1078,120 @@ def _latest_channel_analytics_evidence(tool_fires: list[ToolFire]) -> dict[str, 
         "oauth_connected": False,
         "video_rows": [],
     }
+
+
+def _latest_upload_from_tool_fires(tool_fires: list[ToolFire]) -> dict[str, Any]:
+    for fire in reversed(tool_fires or []):
+        if str(fire.name or "") != "get_channel_analytics":
+            continue
+        try:
+            data = json.loads(fire.result or "{}")
+        except Exception:
+            data = {}
+        if not isinstance(data, dict) or data.get("error"):
+            continue
+        latest = data.get("latest_upload") if isinstance(data.get("latest_upload"), dict) else {}
+        if latest:
+            return dict(latest)
+        metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
+        latest = metrics.get("latest_upload") if isinstance(metrics.get("latest_upload"), dict) else {}
+        if latest:
+            return dict(latest)
+    return {}
+
+
+async def _run_current_video_analysis_preflight(
+    *,
+    emit: EventEmitter | None,
+    user_id: str,
+    content_format: str,
+    session_id: str,
+    messages: list[dict[str, Any]],
+    tool_fires: list[ToolFire],
+) -> None:
+    latest = _latest_upload_from_tool_fires(tool_fires)
+    url = str(latest.get("watch_url") or "").strip()
+    video_id = str(latest.get("video_id") or "").strip()
+    if not url and video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        result = json.dumps({
+            "error": "latest_upload_missing_watch_url",
+            "message": "get_channel_analytics did not return a latest upload URL, so exact-video analysis could not start.",
+            "latest_upload": latest,
+        }, indent=2)
+        tool_fires.append(ToolFire("analyze_reference_video", {"url": "", "content_format": content_format}, result))
+        messages.append(_tool_observation_message("analyze_reference_video", result))
+        store.update_session(session_id, messages=messages)
+        return
+
+    await _fire_event(emit, "tool_start", tool="analyze_reference_video", round=0, awaiting_approval=False)
+    args = {"url": url, "content_format": "short" if content_format != "long" else "long", "max_frames": 40}
+    try:
+        start_result = execute_tool_logged(
+            "analyze_reference_video",
+            args,
+            user_id=user_id,
+            content_format=content_format,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        start_result = json.dumps({"error": str(exc)}, indent=2)
+    tool_fires.append(ToolFire("analyze_reference_video", dict(args), start_result))
+    messages.append(_tool_observation_message("analyze_reference_video", start_result))
+    store.update_session(session_id, messages=messages)
+    await _fire_event(emit, "tool_end", tool="analyze_reference_video", status="ok")
+
+    try:
+        started = json.loads(start_result or "{}")
+    except Exception:
+        started = {}
+    job_id = str(started.get("job_id") or "").strip() if isinstance(started, dict) else ""
+    if not job_id:
+        return
+
+    final_poll = ""
+    for _idx in range(24):
+        await asyncio.sleep(2.5)
+        await _fire_event(emit, "tool_start", tool="poll_render_job", round=0, awaiting_approval=False)
+        poll_args = {"job_id": job_id, "kind": "competitor"}
+        try:
+            poll_result = execute_tool_logged(
+                "poll_render_job",
+                poll_args,
+                user_id=user_id,
+                content_format=content_format,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            poll_result = json.dumps({"job_id": job_id, "kind": "competitor", "error": str(exc)}, indent=2)
+        final_poll = poll_result
+        tool_fires.append(ToolFire("poll_render_job", dict(poll_args), poll_result))
+        messages.append(_tool_observation_message("poll_render_job", poll_result))
+        store.update_session(session_id, messages=messages)
+        try:
+            polled = json.loads(poll_result or "{}")
+        except Exception:
+            polled = {}
+        status = str((polled or {}).get("status") or "").lower() if isinstance(polled, dict) else ""
+        await _fire_event(
+            emit,
+            "tool_end",
+            tool="poll_render_job",
+            status="error" if status in {"failed", "error"} else "ok",
+        )
+        if status in {"complete", "failed", "error"}:
+            break
+
+    if final_poll:
+        messages.append({
+            "role": "system",
+            "content": (
+                "[Current-video exact analysis preflight completed. The latest upload URL above was analyzed/polled "
+                "before final synthesis. If status is not complete, state the exact stage/error instead of inferring missing analysis.]"
+            ),
+        })
+        store.update_session(session_id, messages=messages)
 
 
 def _grounded_channel_plan_from_tools(
@@ -2167,10 +2313,17 @@ async def _run_turn_impl(
 
     channel_data_preflight_required = _needs_channel_data_preflight(user_text)
     latest_upload_focus_required = _needs_latest_upload_focus(user_text)
+    current_video_audit_required = _needs_current_video_audit(user_text)
+    if current_video_audit_required:
+        channel_data_preflight_required = True
+        latest_upload_focus_required = True
     if not channel_data_preflight_required and _is_channel_data_followup(user_text):
         channel_data_preflight_required = _recent_assistant_promised_channel_data(messages)
     public_search_preflight_required = _needs_public_search_preflight(user_text)
     fresh_public_search_required = _needs_fresh_public_search(user_text)
+    if current_video_audit_required:
+        public_search_preflight_required = True
+        fresh_public_search_required = True
     if not public_search_preflight_required and channel_data_preflight_required and latest_upload_focus_required:
         public_search_preflight_required = True
         fresh_public_search_required = True
@@ -2263,6 +2416,15 @@ async def _run_turn_impl(
                 tool=pf_name,
                 status="error" if err_preview else "ok",
                 error=err_preview or None,
+            )
+        if current_video_audit_required and any(str(f.name or "") == "get_channel_analytics" for f in preflight_tool_fires):
+            await _run_current_video_analysis_preflight(
+                emit=emit,
+                user_id=user_id,
+                content_format=content_format,
+                session_id=sid,
+                messages=messages,
+                tool_fires=preflight_tool_fires,
             )
         if preflight_tool_fires:
             messages.append({
