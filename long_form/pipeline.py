@@ -1250,7 +1250,27 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
     state["phase"] = "ambient"
     save_state(job_id, state)
     ambient = audio_dir / "ambient.mp3"
-    await loop.run_in_executor(None, lambda: _gen_ambient(ambient))
+    bgm_choice = str(outline.get("background_music") or "auto").strip()
+    sound_brief = str(outline.get("sound_design_brief") or channel.get("sound_design") or "").strip()
+    if bgm_choice.lower() in {"off", "none", "no", "no background music"}:
+        ambient_prompt = (
+            f"{sound_brief}. " if sound_brief else ""
+        ) + "Very subtle natural room tone and sparse sound effects only, no music, no melody, no vocals, no lyrics."
+    elif sound_brief or bgm_choice.lower() not in {"", "auto"}:
+        ambient_prompt = (
+            f"{sound_brief}. Background music direction: {bgm_choice}. "
+            "Long-form cinematic ambient bed, instrumental only, no vocals, no lyrics, low-volume under narration."
+        )
+    else:
+        ambient_prompt = DEFAULT_AMBIENT_PROMPT
+    await loop.run_in_executor(None, lambda: _gen_ambient(ambient, prompt=ambient_prompt))
+    state["sound_design"] = {
+        "sfx_enabled": bool(outline.get("sfx_enabled", True)),
+        "background_music": bgm_choice,
+        "sound_design_brief": sound_brief,
+        "ambient_prompt": ambient_prompt,
+        "ambient_path": str(ambient.relative_to(LF_OUTPUT_ROOT)),
+    }
     state["percent"] = 82
     save_state(job_id, state)
 

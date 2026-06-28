@@ -23,6 +23,117 @@ from .styled_stills import build_styled_scene_prompt, generate_still_t2i
 from .voice_fal import FalVoiceClient
 
 
+def _derive_short_sfx_prompt(scene: dict[str, Any], *, sound_design_brief: str = "") -> str:
+    explicit = str(scene.get("sfx_direction") or "").strip()
+    action = str(scene.get("scene_action") or scene.get("prompt") or "").strip()
+    narration = str(scene.get("narration") or "").strip()
+    brief = str(sound_design_brief or "").strip()
+    parts = [
+        explicit,
+        brief,
+        f"Visual beat: {action}" if action else "",
+        f"Narration beat: {narration}" if narration else "",
+        "Create subtle short-form sound design only: ambience, soft risers, whooshes, reveal hits, and clean transition accents. No vocals, no distracting melody, do not overpower narration.",
+    ]
+    return " ".join(part for part in parts if part).strip()[:900]
+
+
+def _generate_short_audio_bed(prompt: str, duration_sec: float, out_path: Path) -> Path | None:
+    out_path = Path(out_path)
+    if out_path.exists() and out_path.stat().st_size > 1024:
+        return out_path
+    try:
+        from long_form.pipeline import MMAUDIO_URL, _download, _fal_post
+
+        data = _fal_post(
+            MMAUDIO_URL,
+            {"prompt": prompt, "duration": int(max(2, min(30, float(duration_sec or 0))))},
+            timeout_s=180,
+        )
+        url = (data.get("audio") or {}).get("url") or data.get("audio_url")
+        if not url:
+            return None
+        _download(url, out_path, timeout_s=120)
+        return out_path if out_path.exists() and out_path.stat().st_size > 1024 else None
+    except Exception:
+        return None
+
+
+def _concat_audio_tracks(paths: list[Path], out_path: Path) -> Path | None:
+    valid = [Path(p) for p in paths if Path(p).exists() and Path(p).stat().st_size > 1024]
+    if not valid:
+        return None
+    out_path = Path(out_path)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for path in valid:
+        cmd.extend(["-i", str(path)])
+    concat_inputs = "".join(f"[{i}:a:0]" for i in range(len(valid)))
+    cmd.extend([
+        "-filter_complex",
+        f"{concat_inputs}concat=n={len(valid)}:v=0:a=1[aout]",
+        "-map", "[aout]",
+        "-c:a", "libmp3lame",
+        "-q:a", "2",
+        str(out_path),
+    ])
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except Exception:
+        return None
+    return out_path if out_path.exists() and out_path.stat().st_size > 1024 else None
+
+
+def _mix_short_sound_design(
+    narration_audio: Path,
+    *,
+    sfx_track: Path | None = None,
+    bgm_track: Path | None = None,
+    out_path: Path,
+    sfx_gain: float = 0.16,
+    bgm_gain: float = 0.08,
+) -> Path:
+    inputs = [Path(narration_audio)]
+    labels = ["[0:a]volume=1.0[voice]"]
+    mix_parts = ["[voice]"]
+    if sfx_track and Path(sfx_track).exists() and Path(sfx_track).stat().st_size > 1024:
+        inputs.append(Path(sfx_track))
+        labels.append(f"[{len(inputs) - 1}:a]volume={max(0.0, float(sfx_gain or 0.16)):.3f}[sfx]")
+        mix_parts.append("[sfx]")
+    if bgm_track and Path(bgm_track).exists() and Path(bgm_track).stat().st_size > 1024:
+        inputs.append(Path(bgm_track))
+        labels.append(f"[{len(inputs) - 1}:a]volume={max(0.0, float(bgm_gain or 0.08)):.3f}[bgm]")
+        mix_parts.append("[bgm]")
+    if len(inputs) == 1:
+        return Path(narration_audio)
+    out_path = Path(out_path)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for path in inputs:
+        cmd.extend(["-i", str(path)])
+    cmd.extend([
+        "-filter_complex",
+        ";".join(labels) + ";" + "".join(mix_parts) + f"amix=inputs={len(mix_parts)}:duration=first:dropout_transition=1,apad=pad_dur=0.4[aout]",
+        "-map", "[aout]",
+        "-c:a", "libmp3lame",
+        "-q:a", "2",
+        str(out_path),
+    ])
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out_path if out_path.exists() and out_path.stat().st_size > 1024 else Path(narration_audio)
+
+
+def _default_scene_sfx_direction(narration: str, scene_action: str, *, index: int, total: int) -> str:
+    low = f"{narration} {scene_action}".lower()
+    if index == 0:
+        return "tight hook accent, subtle riser, quick attention-grab hit under the first phrase"
+    if index >= max(0, total - 2):
+        return "clean payoff resolve, soft impact hit, subtle tail-out for the final idea"
+    if any(word in low for word in ("reveal", "truth", "secret", "real reason", "hidden")):
+        return "controlled reveal riser and low cinematic hit timed to the insight"
+    if any(word in low for word in ("fear", "danger", "wall", "sabotage", "ignore", "dark")):
+        return "dark ambient pulse, faint tension texture, restrained whoosh transition"
+    return "subtle ambient texture with a clean transition whoosh, kept below narration"
+
+
 def _plan_system(style: RenderStyle) -> str:
     return (
         f"You are the visual planner for a short-form YouTube video rendered in "
@@ -236,6 +347,7 @@ def plan_scenes(
     user_id: str | None = None,
     default_animate: bool = True,
     reference_images: list[str] | None = None,
+    sound_design_brief: str | None = None,
 ) -> dict[str, Any]:
     """Write the script, plan beats, render one Seedream still per scene, then
     stop at the awaiting_scene_review gate so the user can edit/animate per scene."""
@@ -322,6 +434,16 @@ def plan_scenes(
                     topic=topic or cat["label"], visual_brief=visual_brief or "",
                 )
         sid = f"b{i:02d}"
+        sfx_direction = str(prev.get("sfx_direction") or "").strip()
+        if not sfx_direction:
+            sfx_direction = _default_scene_sfx_direction(
+                narration,
+                str(action or prompt or ""),
+                index=i,
+                total=total,
+            )
+        if sound_design_brief:
+            sfx_direction = f"{str(sound_design_brief).strip()} {sfx_direction}".strip()
         still_target = stills_dir / f"{sid}.png"
         if not (still_target.exists() and still_target.stat().st_size > 0):
             if is_skeleton:
@@ -350,6 +472,7 @@ def plan_scenes(
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
             "outfit": outfit, "scene_action": action,
             "motion_prompt": apply_wardrobe_motion_lock(motion, outfit) if is_skeleton else motion,
+            "sfx_direction": sfx_direction,
             "still_rel": f"stills/{sid}.png", "clip_rel": None,
             "animate": bool(prev.get("animate", default_animate)),
             "approved_for_video": bool(prev.get("approved_for_video", False)),
@@ -367,6 +490,7 @@ def plan_scenes(
         "category": category_key, "topic": topic, "tier": tier,
         "scene_count": len(scenes),
         "product_reference_count": len(reference_images or []),
+        "sound_design_brief": sound_design_brief or "",
     })
     return {"status": "awaiting_scene_review", "scene_count": len(scenes), "job_id": workspace.name}
 
@@ -614,6 +738,11 @@ def finalize_stage(
     watermark_text: str = "Studio",
     captions_enabled: bool = True,
     caption_mode: str = "word",
+    sfx_enabled: bool = True,
+    sound_design_brief: str = "",
+    background_music: str = "auto",
+    sfx_gain: float = 0.16,
+    bgm_gain: float = 0.08,
 ) -> dict[str, Any]:
     """Ensure every scene has a clip (Ken Burns for non-animated), then VO + compose.
     If reedit_instruction is provided (from Reply & re-edit or re_edit_production tool), we apply
@@ -719,9 +848,74 @@ def finalize_stage(
     else:
         narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
 
+    mixed_audio = narration_audio
+    sound_result: dict[str, Any] = {
+        "sfx_enabled": bool(sfx_enabled),
+        "sfx_generated": 0,
+        "sfx_track": "",
+        "background_music": background_music,
+        "bgm_generated": False,
+        "bgm_track": "",
+        "mixed_audio_path": "",
+    }
+    if sfx_enabled:
+        try:
+            _write_progress(workspace, stage="sound_design", progress=84, detail="Generating sound design")
+            sfx_paths: list[Path] = []
+            for idx, sc in enumerate(scenes):
+                prompt = _derive_short_sfx_prompt(sc, sound_design_brief=sound_design_brief)
+                if not prompt:
+                    continue
+                duration = (
+                    probe_duration(narration_audios[idx])
+                    if idx < len(narration_audios)
+                    else float(sc.get("duration_sec") or 5.0)
+                )
+                generated = _generate_short_audio_bed(prompt, duration, work_dir / f"sfx_{sc['sid']}.mp3")
+                if generated:
+                    sfx_paths.append(generated)
+            sfx_track = _concat_audio_tracks(sfx_paths, work_dir / "sfx_full.mp3")
+            if sfx_track:
+                sound_result["sfx_generated"] = len(sfx_paths)
+                sound_result["sfx_track"] = str(sfx_track)
+
+            bgm_track: Path | None = None
+            bgm_choice = str(background_music or "auto").strip()
+            if bgm_choice.lower() not in {"", "off", "none", "no", "no background music"}:
+                bgm_prompt = (
+                    f"{sound_design_brief}. "
+                    if sound_design_brief else ""
+                ) + (
+                    f"Short-form background music bed: {bgm_choice}. "
+                    "Instrumental only, low-volume, subtle, loopable, no vocals, no lyrics, no lead melody that fights narration."
+                )
+                bgm_track = _generate_short_audio_bed(
+                    bgm_prompt,
+                    float(probe_duration(narration_audio) or 30.0),
+                    work_dir / "bgm.mp3",
+                )
+                if bgm_track:
+                    sound_result["bgm_generated"] = True
+                    sound_result["bgm_track"] = str(bgm_track)
+
+            if sfx_track or bgm_track:
+                mixed = _mix_short_sound_design(
+                    narration_audio,
+                    sfx_track=sfx_track,
+                    bgm_track=bgm_track,
+                    out_path=work_dir / "narration_sound_mix.mp3",
+                    sfx_gain=sfx_gain,
+                    bgm_gain=bgm_gain,
+                )
+                mixed_audio = mixed
+                sound_result["mixed_audio_path"] = str(mixed)
+        except Exception as exc:  # noqa: BLE001 - sound design should not destroy a finished render
+            sound_result["warning"] = str(exc)[:300]
+            mixed_audio = narration_audio
+
     _write_progress(workspace, stage="compose", progress=92, detail="Muxing final MP4")
     silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
-    final = mux_narration(silent, narration_audio, workspace / "styled_short.mp4")
+    final = mux_narration(silent, mixed_audio, workspace / "styled_short.mp4")
 
     animated = [s["index"] for s in scenes if s.get("animate")]
     meta = _read_result(workspace)
@@ -734,6 +928,8 @@ def finalize_stage(
         "status": "complete", "job_id": workspace.name,
         "video_path": str(final), "script_path": str(workspace / "script.txt"),
         "narration_path": str(narration_audio),
+        "final_audio_path": str(mixed_audio),
+        "sound_design": sound_result,
         "scene_count": len(scenes), "animated_scenes": animated,
         "tier": tier, "ac_charged": ac_cost,
     }

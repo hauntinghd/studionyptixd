@@ -504,6 +504,18 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "number",
                             "description": "Hard preflight budget cap. Studio refuses to start if estimated provider spend is higher.",
                         },
+                        "sfx_enabled": {
+                            "type": "boolean",
+                            "description": "Whether to include sound design / ambient SFX in the long-form render. Default true.",
+                        },
+                        "sound_design_brief": {
+                            "type": "string",
+                            "description": "Long-form sound direction: ambience, SFX motifs, soundscape, tension beds, product sounds, etc.",
+                        },
+                        "background_music": {
+                            "type": "string",
+                            "description": "Music bed direction, or off/no background music.",
+                        },
                     },
                     "required": ["channel_key", "title", "topic"],
                 },
@@ -694,6 +706,18 @@ def tool_schemas() -> list[dict[str, Any]]:
                                 "Caption mode for burned captions. Use word for one caption per spoken word in sync. "
                                 "Use off only when the user explicitly says no captions."
                             ),
+                        },
+                        "sfx_enabled": {
+                            "type": "boolean",
+                            "description": "Generate and mix per-scene sound effects/ambience during finalization. Default true unless the user asks for no sound design.",
+                        },
+                        "sound_design_brief": {
+                            "type": "string",
+                            "description": "Global sound design direction: ambience, hits, risers, whooshes, product sounds, or emotional tone.",
+                        },
+                        "background_music": {
+                            "type": "string",
+                            "description": "Background music direction. Use auto by default, or off/no background music when the user asks.",
                         },
                         "_full_auto": {
                             "type": "boolean",
@@ -1586,6 +1610,9 @@ def _spawn_shortform_job(
     watermark_text: str = "Studio",
     captions_enabled: bool = True,
     caption_mode: str = "word",
+    sfx_enabled: bool = True,
+    sound_design_brief: str = "",
+    background_music: str = "auto",
     resume_job_id: str | None = None,
     reference_images: list[str] | None = None,
     product_reference: dict[str, Any] | None = None,
@@ -1629,6 +1656,9 @@ def _spawn_shortform_job(
         "watermark_text": watermark_text,
         "captions_enabled": captions_enabled,
         "caption_mode": caption_mode,
+        "sfx_enabled": bool(sfx_enabled),
+        "sound_design_brief": sound_design_brief,
+        "background_music": background_music,
         "user_id": user_id,
         "reference_images": list(reference_images or []),
         "product_reference": product_reference or None,
@@ -1684,6 +1714,7 @@ def _spawn_shortform_job(
                 user_id=user_id,
                 default_animate=False,
                 reference_images=list(reference_images or []),
+                sound_design_brief=sound_design_brief,
             )
         except Exception as exc:
             from skeleton_ai.pipeline import RenderCancelled
@@ -2001,10 +2032,20 @@ def _shortform_job_spec_options(ws: Path) -> dict[str, Any]:
                 "watermark_text": (str(spec.get("watermark_text") or "Studio").strip() or "Studio")[:48],
                 "captions_enabled": captions_enabled,
                 "caption_mode": caption_mode,
+                "sfx_enabled": bool(spec.get("sfx_enabled", True)),
+                "sound_design_brief": str(spec.get("sound_design_brief") or "").strip(),
+                "background_music": str(spec.get("background_music") or "auto").strip() or "auto",
             }
     except Exception:
         pass
-    return {"watermark_text": "Studio", "captions_enabled": True, "caption_mode": "word"}
+    return {
+        "watermark_text": "Studio",
+        "captions_enabled": True,
+        "caption_mode": "word",
+        "sfx_enabled": True,
+        "sound_design_brief": "",
+        "background_music": "auto",
+    }
 
 
 def _apply_caption_instruction_to_options(ws: Path, instruction: str, opts: dict[str, Any]) -> dict[str, Any]:
@@ -2025,6 +2066,9 @@ def _apply_caption_instruction_to_options(ws: Path, instruction: str, opts: dict
         spec["watermark_text"] = opts.get("watermark_text") or "Studio"
         spec["captions_enabled"] = bool(opts.get("captions_enabled", True))
         spec["caption_mode"] = str(opts.get("caption_mode") or "word")
+        spec["sfx_enabled"] = bool(opts.get("sfx_enabled", True))
+        spec["sound_design_brief"] = str(opts.get("sound_design_brief") or "")
+        spec["background_music"] = str(opts.get("background_music") or "auto")
         spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -2078,6 +2122,8 @@ def finalize_production(job_id: str) -> str:
         "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
         "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
         "animated_scenes": result.get("animated_scenes"),
+        "sound_design": result.get("sound_design"),
+        "final_audio_path": result.get("final_audio_path"),
         "watermark_text": opts.get("watermark_text"),
         "captions_enabled": opts.get("captions_enabled"),
         "caption_mode": "word" if opts.get("captions_enabled") else "off",
@@ -2144,6 +2190,8 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
         "video_path": result.get("video_path"),
         "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
         "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
+        "sound_design": result.get("sound_design"),
+        "final_audio_path": result.get("final_audio_path"),
         "watermark_text": opts.get("watermark_text"),
         "captions_enabled": opts.get("captions_enabled"),
         "caption_mode": "word" if opts.get("captions_enabled") else "off",
@@ -2242,6 +2290,7 @@ def _reclaim_orphaned_shortform_jobs() -> int:
                         script_override=s.get("script"),
                         user_id=s.get("user_id"),
                         default_animate=False,
+                        sound_design_brief=str(s.get("sound_design_brief") or ""),
                     )
                 except Exception as e2:
                     try:
@@ -2365,6 +2414,11 @@ def execute_tool(
         outline["render_style_label"] = style.label
         outline["render_style_lock"] = style_lock
         outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
+        outline["sfx_enabled"] = bool(args.get("sfx_enabled", True))
+        outline["sound_design_brief"] = str(args.get("sound_design_brief") or outline.get("sound_design_brief") or "").strip()
+        outline["background_music"] = str(args.get("background_music") or outline.get("background_music") or "auto").strip() or "auto"
+        if outline["sound_design_brief"]:
+            channel["sound_design"] = outline["sound_design_brief"]
         if args.get("hero_motion_ratio") is not None:
             outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
         job_id = lf_pipeline.start_render(channel, outline)
@@ -2381,6 +2435,9 @@ def execute_tool(
             "chapters": len(outline.get("chapters") or []),
             "motion_policy": outline.get("motion_policy"),
             "hero_motion_ratio": lf_pipeline.resolve_motion_ratio(outline)[1],
+            "sfx_enabled": outline.get("sfx_enabled"),
+            "sound_design_brief": outline.get("sound_design_brief"),
+            "background_music": outline.get("background_music"),
         }, indent=2)
 
     if name == "list_skeleton_video_models":
@@ -2532,6 +2589,9 @@ def execute_tool(
             caption_mode = "word"
         elif caption_mode not in {"word", "single_word", "one_word"}:
             caption_mode = "word"
+        sfx_enabled = bool(args.get("sfx_enabled", True))
+        sound_design_brief = str(args.get("sound_design_brief") or "").strip()
+        background_music = str(args.get("background_music") or "auto").strip() or "auto"
         watermark_text = _session_channel_brand(session_id)
         resume_job_id = str(args.get("_resume_job_id") or "").strip() or None
         product_manifest: dict[str, Any] | None = None
@@ -2564,6 +2624,9 @@ def execute_tool(
             watermark_text=watermark_text,
             captions_enabled=captions_enabled,
             caption_mode=caption_mode,
+            sfx_enabled=sfx_enabled,
+            sound_design_brief=sound_design_brief,
+            background_music=background_music,
             resume_job_id=resume_job_id,
             reference_images=reference_images,
             product_reference=product_manifest,
@@ -2600,8 +2663,11 @@ def execute_tool(
             "watermark_text": watermark_text,
             "captions_enabled": captions_enabled,
             "caption_mode": "word" if captions_enabled else "off",
+            "sfx_enabled": sfx_enabled,
+            "sound_design_brief": sound_design_brief,
+            "background_music": background_music,
             "poll_url": f"/api/skeleton-ai/jobs/{job_id}",
-            "note": pipeline_note + f" Channel watermark/package is locked to {watermark_text}. Captions are {'word-level and enabled' if captions_enabled else 'disabled'}. Poll until result.json reaches awaiting_scene_review. Then list scenes, edit artifacted stills, approve scenes with set_production_scenes_animate, optionally animate approved scenes, and only then finalize_production.",
+            "note": pipeline_note + f" Channel watermark/package is locked to {watermark_text}. Captions are {'word-level and enabled' if captions_enabled else 'disabled'}. Sound design is {'enabled' if sfx_enabled else 'disabled'} and will be mixed during finalize_production. Poll until result.json reaches awaiting_scene_review. Then list scenes, edit artifacted stills, approve scenes with set_production_scenes_animate, optionally animate approved scenes, and only then finalize_production.",
         }, indent=2)
 
     # === Granular scene control tools (full creative control) ===
