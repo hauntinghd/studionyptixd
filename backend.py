@@ -69,6 +69,7 @@ from routes import (
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
 from studio_agent_router import build_studio_agent_router
+from studio_analytics_router import build_studio_analytics_router
 from studio_hub_router import build_studio_hub_router
 from backend_settings import (
     XAI_API_KEY,
@@ -19214,6 +19215,14 @@ app.include_router(
         require_auth=require_auth,
         is_admin_check=_is_admin_user,
         lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("studio_agent")),
+    )
+)
+
+app.include_router(
+    build_studio_analytics_router(
+        require_auth=require_auth,
+        is_admin_check=_is_admin_user,
+        admin_analytics_fn=_admin_analytics_payload,
     )
 )
 
