@@ -243,8 +243,8 @@ def configure_backend_runtime(app: FastAPI) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_event_handler("startup", _start_persistent_background_maintenance)
-    app.add_event_handler("shutdown", _stop_persistent_background_maintenance)
+    app.on_event("startup")(_start_persistent_background_maintenance)
+    app.on_event("shutdown")(_stop_persistent_background_maintenance)
     app.middleware("http")(_studio_error_reporter)
     app.middleware("http")(_disable_html_cache)
     app.add_api_route("/assets/runtime-hotfix.js", serve_runtime_hotfix_js, methods=["GET"])
