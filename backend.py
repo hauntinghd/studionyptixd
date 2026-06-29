@@ -27,6 +27,7 @@ from typing import Optional
 import stripe as stripe_lib
 import uvicorn
 from backend_router_mounts import mount_router
+from backend_refunds import build_refund_handlers
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from audio import (
     DEFAULT_ELEVENLABS_VOICES,
@@ -19010,195 +19011,15 @@ mount_router(
 )
 
 
-async def _billing_refund_request(req: Request):
-    """User-submitted refund request. No Discord join required.
-    Writes a row to public.refund_requests in Supabase. If the table
-    doesn't exist yet (migration not applied), writes a local JSON
-    fallback under APP_DATA_DIR/refund_requests.jsonl so no requests
-    are lost.
-
-    As of 2026-04-21 all four fields are required: reason, amount_usd,
-    payment_reference (PayPal order id / invoice), and image_proof
-    (data URL or https URL to a screenshot). This prevents bad-faith
-    requests where we can't match a charge.
-    """
-    user = await get_current_user_from_request(req) if req else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
-    reason = str(body.get("reason", "") or "").strip()
-    amount_raw = body.get("amount_usd")
-    payment_reference = str(body.get("payment_reference", "") or "").strip()
-    image_proof = str(body.get("image_proof", "") or "").strip()
-    if not reason:
-        raise HTTPException(400, "Reason is required")
-    if len(reason) > 4000:
-        reason = reason[:4000]
-    try:
-        amount_usd = float(amount_raw) if amount_raw is not None and amount_raw != "" else None
-    except (TypeError, ValueError):
-        raise HTTPException(400, "Amount paid must be a number")
-    if amount_usd is None or amount_usd <= 0:
-        raise HTTPException(400, "Amount paid is required and must be greater than zero")
-    if not payment_reference:
-        raise HTTPException(400, "PayPal order / invoice id is required")
-    if not image_proof:
-        raise HTTPException(400, "Image proof is required")
-    # Accept data-URL uploads (image/<type>;base64,...) OR a plain https URL
-    # pointing to a hosted screenshot. Anything else = reject.
-    is_data_url = image_proof.startswith("data:image/")
-    is_https_url = image_proof.startswith("https://") or image_proof.startswith("http://")
-    if not (is_data_url or is_https_url):
-        raise HTTPException(400, "Image proof must be an uploaded image or an https URL")
-    # Cap data-URL payload at ~3 MB (base64 expands ~1.37x, so 2 MB raw file
-    # = ~2.75 MB base64). Client enforces 2 MB raw; server gives a 3 MB safety
-    # margin before refusing.
-    if len(image_proof) > 3 * 1024 * 1024:
-        raise HTTPException(413, "Image proof is too large (max 2 MB)")
-    payload = {
-        "user_id": str(user.get("id", "") or ""),
-        "email": str(user.get("email", "") or ""),
-        "reason": reason,
-        "amount_usd": amount_usd,
-        "payment_reference": payment_reference,
-        "image_proof": image_proof,
-        "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    wrote_remote = False
-    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-                resp = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/refund_requests",
-                    headers={
-                        "apikey": key,
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=representation",
-                    },
-                    json=payload,
-                )
-                if resp.status_code in (200, 201):
-                    wrote_remote = True
-                else:
-                    log.warning(f"Refund-request Supabase insert returned {resp.status_code}: {resp.text[:300]}")
-        except Exception as e:
-            log.warning(f"Refund-request Supabase insert failed, will fallback: {e}")
-    if not wrote_remote:
-        try:
-            fallback_path = Path(APP_DATA_DIR) / "refund_requests.jsonl"
-            fallback_path.parent.mkdir(parents=True, exist_ok=True)
-            with fallback_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        except Exception as e:
-            log.error(f"Refund-request fallback write failed: {e}")
-    return {"ok": True, "stored": "supabase" if wrote_remote else "local", "status": "pending"}
-
-
-async def _admin_refunds_list(request: Request):
-    """Admin view: all refund requests + verified users roster."""
-    user = await get_current_user_from_request(request) if request else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    email = str(user.get("email", "") or "").lower()
-    if email not in {e.lower() for e in ADMIN_EMAILS}:
-        raise HTTPException(403, "Admin only")
-    refunds: list[dict] = []
-    verified_users: list[dict] = []
-    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
-        key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-        async with httpx.AsyncClient(timeout=20) as client:
-            try:
-                r = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/refund_requests?select=*&order=created_at.desc&limit=500",
-                    headers=headers,
-                )
-                if r.status_code == 200:
-                    refunds = r.json() or []
-            except Exception as e:
-                log.warning(f"/api/admin/refunds supabase fetch failed: {e}")
-            # Verified users: pull from profiles table, filter to those with
-            # email_verified=true or confirmed_at set. Shape may vary — we
-            # only surface the fields the UI needs.
-            try:
-                r = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/profiles?select=id,email,plan,created_at&order=created_at.desc&limit=1000",
-                    headers=headers,
-                )
-                if r.status_code == 200:
-                    verified_users = r.json() or []
-            except Exception as e:
-                log.warning(f"/api/admin/refunds verified-users fetch failed: {e}")
-    # Fold in local jsonl fallback if it exists.
-    try:
-        fallback_path = Path(APP_DATA_DIR) / "refund_requests.jsonl"
-        if fallback_path.exists():
-            for line in fallback_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    refunds.append(json.loads(line))
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return {
-        "refunds": refunds,
-        "verified_users": verified_users,
-    }
-
-
-async def _admin_refund_update(refund_id: str, request: Request):
-    """Admin PATCH: update status + admin note on a refund request."""
-    user = await get_current_user_from_request(request) if request else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    email = str(user.get("email", "") or "").lower()
-    if email not in {e.lower() for e in ADMIN_EMAILS}:
-        raise HTTPException(403, "Admin only")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    status_val = str(body.get("status", "") or "").strip().lower()
-    if status_val and status_val not in ("pending", "approved", "denied", "refunded"):
-        raise HTTPException(400, "Invalid status")
-    note = body.get("admin_note")
-    update_payload: dict = {}
-    if status_val:
-        update_payload["status"] = status_val
-    if isinstance(note, str):
-        update_payload["admin_note"] = note[:2000]
-    if not update_payload:
-        raise HTTPException(400, "No fields to update")
-    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
-        key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.patch(
-                    f"{SUPABASE_URL}/rest/v1/refund_requests?id=eq.{refund_id}",
-                    headers={
-                        "apikey": key,
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=minimal",
-                    },
-                    json=update_payload,
-                )
-                if r.status_code >= 400:
-                    raise HTTPException(r.status_code, f"Supabase update failed: {r.text[:300]}")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(500, f"Supabase update error: {e}")
-    return {"ok": True, "updated": update_payload}
+_billing_refund_request, _admin_refunds_list, _admin_refund_update = build_refund_handlers(
+    get_current_user_from_request=get_current_user_from_request,
+    admin_emails=ADMIN_EMAILS,
+    supabase_url=SUPABASE_URL,
+    supabase_service_key=SUPABASE_SERVICE_KEY,
+    supabase_anon_key=SUPABASE_ANON_KEY,
+    app_data_dir=APP_DATA_DIR,
+    log=log,
+)
 
 
 mount_router(
