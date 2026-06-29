@@ -40,6 +40,7 @@ from backend_misc_payloads import (
 )
 from backend_job_payloads import build_job_status_payload, build_list_jobs_payload
 from backend_media_handlers import build_download_video_response, build_render_chat_story_handler
+from backend_clone_handler import build_clone_video_handler
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -19685,66 +19686,19 @@ async def run_clone_pipeline(
             Path(video_path).unlink(missing_ok=True)
 
 
-async def _clone_video(
-    topic: str = Form(""),
-    resolution: str = Form("720p"),
-    source_url: str = Form(""),
-    analytics_notes: str = Form(""),
-    file: UploadFile = File(None),
-    background_tasks: BackgroundTasks = None,
-    request: Request = None,
-):
-    if not XAI_API_KEY or not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "API keys not configured")
-
-    user = await get_current_user_from_request(request) if request else None
-    if not user:
-        raise HTTPException(401, "Auth required")
-    if not _user_has_paid_access(user):
-        raise HTTPException(402, "Active subscription required. Please choose a plan.")
-
-    res = _normalize_output_resolution(resolution, priority_allowed=False)
-    normalized_source_url = _normalize_external_source_url(source_url)
-    if not str(topic or "").strip() and not normalized_source_url and not (file and file.filename):
-        raise HTTPException(400, "Provide a new topic, a source URL, or an uploaded source video.")
-
-    video_path = None
-    if file and file.filename:
-        video_path = str(TEMP_DIR / f"clone_upload_{int(time.time())}.mp4")
-        with open(video_path, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                f.write(chunk)
-
-    job_id = f"clone_{int(time.time())}_{random.randint(1000, 9999)}"
-    jobs[job_id] = {
-        "status": "queued",
-        "progress": 0,
-        "template": "analyzing...",
-        "topic": topic,
-        "source_url": normalized_source_url,
-        "lane": "clone",
-        "mode": "clone_rebuild",
-        "resolution": res,
-        "credit_cost": 0,
-        "billing_source": "workspace_access",
-        "user_id": str(user.get("id", "") or ""),
-        "created_at": time.time(),
-    }
-
-    try:
-        await enqueue_generation_job(
-            job_id,
-            "starter",
-            run_clone_pipeline,
-            (job_id, topic, video_path, normalized_source_url, analytics_notes, res),
-        )
-    except QueueFullError as e:
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
-        await persist_job_state(job_id, jobs[job_id])
-        raise HTTPException(429, str(e))
-    return {"status": "accepted", "job_id": job_id}
-
+_clone_video = build_clone_video_handler(
+    xai_api_key=XAI_API_KEY,
+    elevenlabs_api_key=ELEVENLABS_API_KEY,
+    get_current_user_from_request=get_current_user_from_request,
+    user_has_paid_access=_user_has_paid_access,
+    normalize_output_resolution=_normalize_output_resolution,
+    normalize_external_source_url=_normalize_external_source_url,
+    temp_dir=TEMP_DIR,
+    jobs_ref=jobs,
+    enqueue_generation_job=enqueue_generation_job,
+    run_clone_pipeline=run_clone_pipeline,
+    persist_job_state=persist_job_state,
+)
 
 _list_jobs_payload = build_list_jobs_payload(jobs_ref=jobs)
 
