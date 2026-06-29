@@ -1,5 +1,6 @@
 import os
 import json
+from dataclasses import dataclass
 from pathlib import Path
 import stripe as stripe_lib
 
@@ -423,6 +424,26 @@ LONGFORM_DEFAULT_TARGET_MINUTES = float(os.getenv("LONGFORM_DEFAULT_TARGET_MINUT
 LONGFORM_MIN_TARGET_MINUTES = float(os.getenv("LONGFORM_MIN_TARGET_MINUTES", "2"))
 LONGFORM_MAX_TARGET_MINUTES = float(os.getenv("LONGFORM_MAX_TARGET_MINUTES", "30"))
 LONGFORM_MAX_SCENE_RETRIES = max(1, int(os.getenv("LONGFORM_MAX_SCENE_RETRIES", "4")))
+
+
+@dataclass(frozen=True)
+class VideoPipelineSettings:
+    force_720p_only: bool
+    story_advanced_controls_enabled: bool
+    story_retention_tuning_enabled: bool
+    longform_default_target_minutes: float
+    longform_min_target_minutes: float
+    longform_max_target_minutes: float
+
+
+VIDEO_PIPELINE_SETTINGS = VideoPipelineSettings(
+    force_720p_only=FORCE_720P_ONLY,
+    story_advanced_controls_enabled=STORY_ADVANCED_CONTROLS_ENABLED,
+    story_retention_tuning_enabled=STORY_RETENTION_TUNING_ENABLED,
+    longform_default_target_minutes=LONGFORM_DEFAULT_TARGET_MINUTES,
+    longform_min_target_minutes=LONGFORM_MIN_TARGET_MINUTES,
+    longform_max_target_minutes=LONGFORM_MAX_TARGET_MINUTES,
+)
 MAINTENANCE_BANNER_ENABLED = os.getenv("MAINTENANCE_BANNER_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 MAINTENANCE_BANNER_MESSAGE = os.getenv(
     "MAINTENANCE_BANNER_MESSAGE",

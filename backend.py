@@ -21,12 +21,13 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
+from backend_router_mounts import mount_router
+from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from audio import (
     DEFAULT_ELEVENLABS_VOICES,
     _audio_track_exists,
@@ -696,244 +697,8 @@ configure_reference_video_audit_hooks(
 )
 
 
-def _ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
-
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
-_deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
-_frontend_asset_cache = {"ts": 0.0, "js": "", "css": ""}
-_frontend_cache_buster = str(int(time.time()))
-
-
-@app.on_event("startup")
-async def _start_persistent_background_maintenance() -> None:
-    import catalyst_backfill
-    import youtube as youtube_module
-    from studio_agent import training_capture
-
-    catalyst_backfill.start_auto_loop()
-    youtube_module.start_youtube_token_maintenance()
-    training_capture.start_compiler_loop()
-
-
-@app.on_event("shutdown")
-async def _stop_persistent_background_maintenance() -> None:
-    import catalyst_backfill
-    import youtube as youtube_module
-    from studio_agent import training_capture
-
-    catalyst_backfill.stop_auto_loop()
-    youtube_module.stop_youtube_token_maintenance()
-    training_capture.stop_compiler_loop()
-
-
-def _resolve_latest_frontend_assets() -> tuple[str, str]:
-    now = time.time()
-    if now - float(_frontend_asset_cache.get("ts", 0.0)) < 10.0:
-        return str(_frontend_asset_cache.get("js", "")), str(_frontend_asset_cache.get("css", ""))
-    js_name = ""
-    css_name = ""
-    try:
-        default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
-        dist_root = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
-        assets_dir = dist_root / "assets"
-        if assets_dir.exists():
-            js_candidates = sorted(assets_dir.glob("index-*.js"), key=lambda p: p.stat().st_mtime, reverse=True)
-            css_candidates = sorted(assets_dir.glob("index-*.css"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if js_candidates:
-                js_name = js_candidates[0].name
-            if css_candidates:
-                css_name = css_candidates[0].name
-    except Exception:
-        js_name = ""
-        css_name = ""
-    _frontend_asset_cache["ts"] = now
-    _frontend_asset_cache["js"] = js_name
-    _frontend_asset_cache["css"] = css_name
-    return js_name, css_name
-
-
-def _resolve_frontend_asset_path(filename: str) -> Path:
-    default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
-    dist_root = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
-    return dist_root / "assets" / filename
-
-
-def _apply_runtime_js_text_hotfix(js: str) -> str:
-    """Patch legacy pricing strings in stale frontend bundles."""
-    if not js:
-        return js
-    js = js.replace("Unlimited videos", "300 videos/month")
-    js = js.replace("Sign Up Free", "Sign Up to Subscribe")
-    js = js.replace("Start Creating Free", "Start Creating")
-    return js
-
-
-def _read_deploy_meta() -> tuple[str, str]:
-    now = time.time()
-    if now - float(_deploy_meta_cache.get("ts", 0.0)) < 15.0:
-        return str(_deploy_meta_cache.get("backend_commit", "")), str(_deploy_meta_cache.get("frontend_bundle", ""))
-
-    backend_commit = (os.getenv("STUDIO_COMMIT_SHA", "") or os.getenv("GITHUB_SHA", "")).strip()
-    if not backend_commit:
-        try:
-            backend_commit = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(Path(__file__).resolve().parent),
-                text=True,
-                timeout=2,
-            ).strip()
-        except Exception:
-            backend_commit = ""
-
-    frontend_bundle = ""
-    try:
-        default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
-        current_dist = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
-        index_path = current_dist / "index.html"
-        if index_path.exists():
-            html = index_path.read_text(encoding="utf-8", errors="ignore")
-            m = re.search(r"/assets/(index-[^\"']+\.js)", html)
-            if m:
-                frontend_bundle = m.group(1)
-        if not frontend_bundle:
-            latest_js, _ = _resolve_latest_frontend_assets()
-            frontend_bundle = latest_js
-    except Exception:
-        frontend_bundle = ""
-
-    _deploy_meta_cache["ts"] = now
-    _deploy_meta_cache["backend_commit"] = backend_commit
-    _deploy_meta_cache["frontend_bundle"] = frontend_bundle
-    return backend_commit, frontend_bundle
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# Error telemetry: every unhandled exception fires a Discord webhook alert.
-# Dedup'd in-memory for 60s per (kind, error-signature) so one bug × 1000 users
-# doesn't produce 1000 alerts. See studio_alerts.py.
-import studio_alerts as _studio_alerts
-
-
-@app.middleware("http")
-async def _studio_error_reporter(request: Request, call_next):
-    try:
-        return await call_next(request)
-    except HTTPException:
-        # HTTPExceptions are user-visible intended errors (401, 403, 400, etc.) —
-        # they already produce clean responses. Don't alert on these.
-        raise
-    except Exception as e:  # noqa: BLE001 — we want to catch literally everything
-        path = request.url.path or "?"
-        method = request.method or "?"
-        user_hint = ""
-        try:
-            auth = str(request.headers.get("authorization", "") or request.headers.get("x-access-token", ""))
-            if auth.lower().startswith("bearer "):
-                # Decode the JWT "sub" claim without verifying — only for logging.
-                import base64 as _b64, json as _json
-                parts = auth.split(" ", 1)[1].split(".")
-                if len(parts) >= 2:
-                    pad = "=" * (-len(parts[1]) % 4)
-                    user_hint = str(_json.loads(_b64.urlsafe_b64decode(parts[1] + pad)).get("email", ""))
-        except Exception:
-            user_hint = ""
-        _studio_alerts.send_exception(
-            e,
-            source=f"{method} {path}",
-            context={
-                "endpoint": f"{method} {path}",
-                "user": user_hint or "(anonymous)",
-                "query": dict(request.query_params) or "-",
-            },
-        )
-        raise  # re-raise so FastAPI returns the 500 response to the caller
-
-
-@app.middleware("http")
-async def _disable_html_cache(request: Request, call_next):
-    """Prevent stale frontend shell and asset caching so new bundles load immediately."""
-    response = await call_next(request)
-    path = request.url.path or ""
-    if path == "/" or path.endswith(".html"):
-        try:
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if "text/html" in content_type and hasattr(response, "body_iterator"):
-                body = b""
-                async for chunk in response.body_iterator:
-                    body += chunk
-                html = body.decode("utf-8", errors="ignore")
-                latest_js, latest_css = _resolve_latest_frontend_assets()
-                # Keep the compiled JS asset path from the built index.html.
-                # Overriding to runtime-hotfix.js can mask newly deployed frontend bundles.
-                if latest_css:
-                    html = re.sub(r"/assets/index-[^\"']+\.css(\?[^\"']*)?", f"/assets/{latest_css}?v={_frontend_cache_buster}", html)
-                headers = dict(response.headers)
-                headers.pop("content-length", None)
-                headers.pop("Content-Length", None)
-                headers.pop("content-type", None)
-                headers.pop("Content-Type", None)
-                response = Response(
-                    content=html,
-                    status_code=response.status_code,
-                    headers=headers,
-                    media_type="text/html",
-                )
-        except Exception:
-            pass
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-    if path.startswith("/assets/") and (path.endswith(".js") or path.endswith(".css")):
-        # Do not consume streaming asset responses in middleware.
-        # Reading body_iterator here can drain the response and cause truncated JS (blank page).
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        # Extra hints for CDN layers to avoid stale bundle reuse.
-        response.headers["CDN-Cache-Control"] = "no-store"
-        response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
-    return response
-
-
-@app.get("/assets/runtime-hotfix.js")
-async def serve_runtime_hotfix_js():
-    """Serve JS with runtime text hotfixes to bypass stale CDN bundle caching."""
-    latest_js, _ = _resolve_latest_frontend_assets()
-    target = _resolve_frontend_asset_path(latest_js) if latest_js else _resolve_frontend_asset_path("index-BlMPK7KO.js")
-    if not target.exists():
-        fallback = _resolve_frontend_asset_path("index-BlMPK7KO.js")
-        if fallback.exists():
-            target = fallback
-        else:
-            raise HTTPException(status_code=404, detail="Hotfix JS not found")
-    js = _apply_runtime_js_text_hotfix(target.read_text(encoding="utf-8", errors="ignore"))
-    resp = Response(content=js, media_type="text/javascript")
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
-
-
-@app.get("/assets/index-BlMPK7KO.js")
-async def serve_legacy_firefox_bundle_alias():
-    """Alias stale cached bundle URL to the latest built JS asset."""
-    latest_js, _ = _resolve_latest_frontend_assets()
-    if latest_js:
-        latest_path = _resolve_frontend_asset_path(latest_js)
-        if latest_path.exists():
-            return FileResponse(str(latest_path), media_type="text/javascript")
-    legacy_path = _resolve_frontend_asset_path("index-BlMPK7KO.js")
-    if legacy_path.exists():
-        return FileResponse(str(legacy_path), media_type="text/javascript")
-    raise HTTPException(status_code=404, detail="Asset not found")
-
+configure_backend_runtime(app)
 
 jobs: dict = {}
 security, get_current_user, get_current_user_from_request, require_auth = build_auth_helpers(
@@ -18569,7 +18334,8 @@ async def _run_creative_pipeline(
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
 
-app.include_router(
+mount_router(
+    app,
     build_longform_creative_router(
         create_longform_session_endpoint=_create_longform_session,
         create_longform_session_bootstrap_endpoint=_create_longform_session_bootstrap,
@@ -19164,7 +18930,8 @@ async def _landing_notifications_payload():
     return {"events": events}
 
 
-app.include_router(
+mount_router(
+    app,
     build_core_router(
         require_auth=require_auth,
         admin_emails=ADMIN_EMAILS,
@@ -19194,7 +18961,8 @@ app.include_router(
     )
 )
 
-app.include_router(
+mount_router(
+    app,
     build_misc_router(
         require_auth=require_auth,
         list_languages_payload=_languages_payload,
@@ -19210,7 +18978,8 @@ app.include_router(
     )
 )
 
-app.include_router(
+mount_router(
+    app,
     build_studio_agent_router(
         require_auth=require_auth,
         is_admin_check=_is_admin_user,
@@ -19218,7 +18987,8 @@ app.include_router(
     )
 )
 
-app.include_router(
+mount_router(
+    app,
     build_studio_analytics_router(
         require_auth=require_auth,
         is_admin_check=_is_admin_user,
@@ -19226,7 +18996,8 @@ app.include_router(
     )
 )
 
-app.include_router(
+mount_router(
+    app,
     build_studio_hub_router(
         require_auth=require_auth,
         supabase_url=SUPABASE_URL,
@@ -19616,7 +19387,8 @@ async def _youtube_get_velocity_for_user(*, user: dict, channel_id: str) -> dict
     return await youtube_get_latest_video_velocity(access_token=access_token, channel_id=channel_id)
 
 
-app.include_router(
+mount_router(
+    app,
     build_youtube_catalyst_app_router(
         require_auth=require_auth,
         get_current_user=get_current_user,
@@ -19876,7 +19648,8 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
     return {"status": "accepted", "job_id": job_id}
 
 
-app.include_router(
+mount_router(
+    app,
     build_generation_router(
         generate_short_endpoint=_generate_short,
     )
@@ -20728,7 +20501,8 @@ async def _list_jobs_payload():
     return {jid: {k: v for k, v in j.items() if k != "output_file"} for jid, j in jobs.items()}
 
 
-app.include_router(
+mount_router(
+    app,
     build_media_router(
         auto_scene_image_handler=_auto_scene_image,
         auto_regenerate_scene_image_handler=_auto_regenerate_scene_image,

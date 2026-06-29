@@ -16,13 +16,8 @@ from backend_catalyst_profiles import _catalyst_scene_execution_profile
 from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 from backend_settings import (
     FAL_AI_KEY,
-    FORCE_720P_ONLY,
-    LONGFORM_DEFAULT_TARGET_MINUTES,
-    LONGFORM_MAX_TARGET_MINUTES,
-    LONGFORM_MIN_TARGET_MINUTES,
-    STORY_ADVANCED_CONTROLS_ENABLED,
-    STORY_RETENTION_TUNING_ENABLED,
     TEMP_DIR,
+    VIDEO_PIPELINE_SETTINGS,
     XAI_API_KEY,
 )
 
@@ -477,7 +472,7 @@ def _creative_video_credit_multiplier(value: str | None) -> int:
 
 def _normalize_output_resolution(requested: str, priority_allowed: bool = False) -> str:
     resolution = requested if requested in RESOLUTION_CONFIGS else "720p"
-    if FORCE_720P_ONLY:
+    if VIDEO_PIPELINE_SETTINGS.force_720p_only:
         if resolution.endswith("_landscape"):
             return "720p_landscape"
         return "720p"
@@ -520,9 +515,9 @@ def _normalize_longform_target_minutes(value) -> float:
     try:
         minutes = float(value)
     except Exception:
-        minutes = float(LONGFORM_DEFAULT_TARGET_MINUTES)
-    effective_max = max(30.0, float(LONGFORM_MAX_TARGET_MINUTES))
-    return max(float(LONGFORM_MIN_TARGET_MINUTES), min(effective_max, minutes))
+        minutes = float(VIDEO_PIPELINE_SETTINGS.longform_default_target_minutes)
+    effective_max = max(30.0, float(VIDEO_PIPELINE_SETTINGS.longform_max_target_minutes))
+    return max(float(VIDEO_PIPELINE_SETTINGS.longform_min_target_minutes), min(effective_max, minutes))
 
 
 def _normalize_longform_whisper_mode(value: str) -> str:
@@ -654,7 +649,7 @@ def _creative_template_force_sfx(template: str) -> bool:
 
 
 def _creative_template_supports_voice_controls(template: str) -> bool:
-    if not STORY_ADVANCED_CONTROLS_ENABLED:
+    if not VIDEO_PIPELINE_SETTINGS.story_advanced_controls_enabled:
         return False
     return str(template or "").strip().lower() in {"story", "daytrading"}
 
@@ -2563,7 +2558,7 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
 
     log.warning(f"Story script quality low ({first_score}); retrying with stricter constraints: {','.join(first_notes)}")
     retention_tuning = ""
-    if STORY_RETENTION_TUNING_ENABLED:
+    if VIDEO_PIPELINE_SETTINGS.story_retention_tuning_enabled:
         retention_tuning = (
             " Add explicit pattern interrupts every 2-3 scenes, keep narration punchy with short sentences, "
             "and force escalating stakes so each scene feels higher consequence than the previous one."
