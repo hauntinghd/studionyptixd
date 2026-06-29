@@ -5,7 +5,6 @@ stripe
 PyJWT
 pydantic
 python-multipart
-moviepy
 google-auth-oauthlib
 google-api-python-client
 paramiko
