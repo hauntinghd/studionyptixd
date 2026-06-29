@@ -29,6 +29,7 @@ import uvicorn
 from backend_router_mounts import mount_router
 from backend_refunds import build_refund_handlers
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
+from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
     DEFAULT_ELEVENLABS_VOICES,
     _audio_track_exists,
@@ -19032,81 +19033,10 @@ mount_router(
 )
 
 
-async def _studio_shorts_ideas(q: str = "", max_results: int = 8, seed: str = ""):
-    """Live YouTube Shorts idea pull for the Spark modal.
-    Uses Catalyst's existing public-YouTube plumbing (quota + cache) so
-    we don't double-count against the 10k-unit daily budget.
-
-    Pulls a large candidate pool (up to 12) and samples `max_results`
-    items using the client-supplied `seed` so each Refresh click shows
-    a fresh rotation without re-hitting the YouTube search quota.
-    Falls back to empty list on upstream failure — frontend drops back
-    to its hardcoded preset ideas so the UX never shows a dead tab.
-    """
-    query = (q or "").strip()
-    if not query:
-        return {"ideas": []}
-    # Pull the max the upstream fetcher allows (12). The Spark UI usually
-    # wants 8 so we have a 4-candidate shuffle pool that gives meaningful
-    # variety between refreshes.
-    candidate_cap = 12
-    wanted = max(3, min(int(max_results or 8), candidate_cap))
-    try:
-        candidates = await _youtube_fetch_public_trend_titles(query, max_results=candidate_cap)
-    except Exception as e:
-        log.warning(f"/api/studio/shorts/ideas upstream failed for q={query!r}: {e}")
-        return {"ideas": []}
-    candidates = [str(t).strip() for t in (candidates or []) if t]
-    candidates = [t for t in candidates if t]
-    if not candidates:
-        return {"ideas": []}
-    if len(candidates) <= wanted:
-        return {"ideas": candidates}
-    # Deterministic-per-seed shuffle so the same seed yields the same list
-    # (client can dedupe/compare) but seed rotation from the frontend gives
-    # every Refresh click a new mix.
-    import hashlib
-    seed_text = (seed or str(time.time())).encode("utf-8", errors="ignore")
-    digest = hashlib.sha256(seed_text + query.encode("utf-8", errors="ignore")).digest()
-    rng = random.Random(int.from_bytes(digest[:8], "big", signed=False))
-    shuffled = list(candidates)
-    rng.shuffle(shuffled)
-    return {"ideas": shuffled[:wanted]}
-
-
-async def _studio_queue_status():
-    """Public read-only fal.ai queue snapshot for the user-facing queue UI.
-    Used by the frontend to surface 'You're #N in line' during Reddit-promo-
-    class traffic. No auth: the numbers are non-sensitive and need to load
-    fast during queue saturation.
-
-    Post 2026-04-19 key pool expansion: cap = pool_size × per-key cap, so
-    the frontend's saturation threshold stays at 75% of the real ceiling.
-    """
-    try:
-        import fal_gate
-        waiting = int(fal_gate.queue_depth())
-        slots_free = int(fal_gate.available_slots())
-        pool_size = int(fal_gate.pool_size())
-    except Exception:
-        waiting = 0
-        slots_free = 16
-        pool_size = 1
-    per_key_cap = int(os.getenv("FAL_CONCURRENT_SOFT_CAP", "16") or "16")
-    cap = per_key_cap * max(1, pool_size)
-    in_flight = max(0, cap - slots_free)
-    eta_sec = int(waiting * 4.0) if waiting > 0 else 0
-    saturation_threshold = int(cap * 0.75)
-    saturated = bool(waiting > 0 or in_flight >= saturation_threshold)
-    return {
-        "in_flight": in_flight,
-        "waiting": waiting,
-        "cap": cap,
-        "slots_free": slots_free,
-        "pool_size": pool_size,
-        "eta_sec": eta_sec,
-        "saturated": saturated,
-    }
+_studio_shorts_ideas, _studio_queue_status = build_studio_utility_handlers(
+    youtube_fetch_public_trend_titles=_youtube_fetch_public_trend_titles,
+    log=log,
+)
 
 
 mount_router(
