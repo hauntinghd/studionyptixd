@@ -32,6 +32,12 @@ from backend_public_config import build_public_config_payload
 from backend_health import build_health_payload
 from backend_admin_analytics import build_admin_analytics_payload
 from backend_billing_audit import build_admin_billing_audit_payload
+from backend_misc_payloads import (
+    build_admin_waiting_list_payload,
+    build_landing_notifications_payload,
+    build_maintenance_banner_payload,
+    build_training_stats_payload,
+)
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -18417,23 +18423,11 @@ async def _set_comfyui_url(body: dict, user: dict):
     return {"ok": True, "comfyui_url": COMFYUI_URL, "wan22_ready": wan_ready}
 
 
-async def _training_stats_payload(user: dict):
-    """Admin: get training data collection stats."""
-    email = user.get("email", "")
-    if email not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin only")
-    pairs = list(TRAINING_DATA_DIR.glob("*.png"))
-    accepted = sum(1 for e in _pending_training.values() if e["status"] == "accepted")
-    rejected = sum(1 for e in _pending_training.values() if e["status"] == "rejected")
-    pending = sum(1 for e in _pending_training.values() if e["status"] == "pending")
-    return {
-        "total_on_disk": len(pairs),
-        "accepted": accepted,
-        "rejected": rejected,
-        "pending_review": pending,
-        "disk_mb": round(sum(p.stat().st_size for p in pairs) / (1024 * 1024), 1),
-    }
-
+_training_stats_payload = build_training_stats_payload(
+    admin_emails=ADMIN_EMAILS,
+    training_data_dir=TRAINING_DATA_DIR,
+    pending_training_ref=_pending_training,
+)
 
 _admin_analytics_payload = build_admin_analytics_payload(
     admin_emails=ADMIN_EMAILS,
@@ -18453,28 +18447,10 @@ _admin_analytics_payload = build_admin_analytics_payload(
     log=log,
 )
 
-async def _admin_waiting_list_payload(user: dict):
-    if user.get("email", "") not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin only")
-    rows = await _supabase_get_waitlist_rows(limit=3000)
-    total = len(rows)
-    by_plan = {"starter": 0, "creator": 0, "pro": 0, "elite": 0}
-    paid_revenue_monthly = 0.0
-    for row in rows:
-        plan = str((row or {}).get("plan", "") or "").strip().lower()
-        if plan in by_plan:
-            by_plan[plan] += 1
-        if bool((row or {}).get("paid")):
-            paid_revenue_monthly += float((row or {}).get("price_usd", 0.0) or 0.0)
-    return {
-        "rows": rows,
-        "summary": {
-            "total": total,
-            "by_plan": by_plan,
-            "paid_revenue_monthly_usd": round(paid_revenue_monthly, 2),
-        },
-    }
-
+_admin_waiting_list_payload = build_admin_waiting_list_payload(
+    admin_emails=ADMIN_EMAILS,
+    supabase_get_waitlist_rows=_supabase_get_waitlist_rows,
+)
 
 @app.delete("/api/admin/waiting-list/{email}", include_in_schema=False)
 async def _admin_waiting_list_remove(email: str, request: Request):
@@ -18505,37 +18481,21 @@ _admin_billing_audit_payload = build_admin_billing_audit_payload(
     log=log,
 )
 
-async def _set_maintenance_banner_payload(body: dict, user: dict):
+def _set_maintenance_banner_state(enabled: bool, message: str) -> tuple[bool, str]:
     global _maintenance_banner_enabled, _maintenance_banner_message
-    email = user.get("email", "")
-    if email not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin only")
-
-    enabled = _bool_from_any(body.get("enabled"), _maintenance_banner_enabled)
-    message = str(body.get("message", _maintenance_banner_message)).strip()
-    if not message:
-        message = "Studio is under high load. Queue times may be longer than usual while we scale capacity."
-
     _maintenance_banner_enabled = enabled
     _maintenance_banner_message = message
+    return _maintenance_banner_enabled, _maintenance_banner_message
 
-    try:
-        escaped_message = '"' + message.replace('"', '\\"') + '"'
-        _persist_env_overrides(
-            {
-                "MAINTENANCE_BANNER_ENABLED": "1" if enabled else "0",
-                "MAINTENANCE_BANNER_MESSAGE": escaped_message,
-            }
-        )
-    except Exception as e:
-        log.warning(f"Failed to persist maintenance banner settings to .env: {e}")
 
-    return {
-        "ok": True,
-        "maintenance_banner_enabled": _maintenance_banner_enabled,
-        "maintenance_banner_message": _maintenance_banner_message,
-    }
-
+_set_maintenance_banner_payload = build_maintenance_banner_payload(
+    admin_emails=ADMIN_EMAILS,
+    maintenance_snapshot=lambda: (_maintenance_banner_enabled, _maintenance_banner_message),
+    set_maintenance_snapshot=_set_maintenance_banner_state,
+    bool_from_any=_bool_from_any,
+    persist_env_overrides=_persist_env_overrides,
+    log=log,
+)
 
 _public_config_payload = build_public_config_payload(
     maintenance_snapshot=lambda: (_maintenance_banner_enabled, _maintenance_banner_message),
@@ -18547,16 +18507,11 @@ _public_config_payload = build_public_config_payload(
 )
 
 
-async def _landing_notifications_payload():
-    cutoff = time.time() - (7 * 24 * 3600)
-    async with _landing_notifications_lock:
-        events = [
-            e for e in _landing_notifications
-            if isinstance(e, dict) and float(e.get("ts") or 0.0) >= cutoff
-        ]
-        events = events[-LANDING_NOTIFICATIONS_PUBLIC_LIMIT:]
-    return {"events": events}
-
+_landing_notifications_payload = build_landing_notifications_payload(
+    landing_notifications_ref=_landing_notifications,
+    landing_notifications_lock=_landing_notifications_lock,
+    public_limit=LANDING_NOTIFICATIONS_PUBLIC_LIMIT,
+)
 
 mount_router(
     app,
