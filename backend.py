@@ -39,6 +39,7 @@ from backend_misc_payloads import (
     build_training_stats_payload,
 )
 from backend_job_payloads import build_job_status_payload, build_list_jobs_payload
+from backend_media_handlers import build_download_video_response, build_render_chat_story_handler
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -19147,111 +19148,18 @@ _job_status_payload = build_job_status_payload(
     persist_job_state=persist_job_state,
 )
 
-async def _download_video_response(filename: str):
-    safe_filename = Path(filename).name  # Strip directory traversal (../ etc)
-    if not safe_filename:
-        raise HTTPException(400, "Invalid filename")
-    path = OUTPUT_DIR / safe_filename
-    if not path.exists():
-        raise HTTPException(404, "Video not found")
-    return FileResponse(str(path), media_type="video/mp4", filename=safe_filename)
+_download_video_response = build_download_video_response(output_dir=OUTPUT_DIR)
 
 
-async def _render_chat_story(
-    request: Request,
-    payload: str = Form(...),
-    avatar: Optional[UploadFile] = File(None),
-    background_video: Optional[UploadFile] = File(None),
-):
-    user = await get_current_user_from_request(request)
-    if not user:
-        raise HTTPException(401, "Authentication required")
-    if not _chat_story_access_for_user(user):
-        raise HTTPException(403, "Chat Story requires an active Starter, Creator, or Pro monthly plan.")
-
-    try:
-        parsed_payload = json.loads(payload or "{}")
-    except Exception:
-        raise HTTPException(400, "Invalid chat story payload")
-
-    messages = parsed_payload.get("messages") or []
-    if not isinstance(messages, list) or not any(str(item.get("text", "") or "").strip() for item in messages if isinstance(item, dict)):
-        raise HTTPException(400, "Add at least one chat message before rendering.")
-
-    render_id = f"chatstory_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
-    work_dir = TEMP_DIR / render_id
-    work_dir.mkdir(parents=True, exist_ok=True)
-    avatar_path = ""
-    bg_video_path = ""
-
-    try:
-        if avatar and avatar.filename:
-            avatar_ext = Path(avatar.filename).suffix or ".png"
-            avatar_path = str(work_dir / f"avatar{avatar_ext}")
-            with open(avatar_path, "wb") as handle:
-                while chunk := await avatar.read(1024 * 1024):
-                    handle.write(chunk)
-
-        if background_video and background_video.filename:
-            bg_ext = Path(background_video.filename).suffix or ".mp4"
-            bg_video_path = str(work_dir / f"background{bg_ext}")
-            with open(bg_video_path, "wb") as handle:
-                while chunk := await background_video.read(1024 * 1024):
-                    handle.write(chunk)
-
-        payload_path = work_dir / "payload.json"
-        payload_path.write_text(json.dumps(parsed_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        output_name = f"{render_id}.mp4"
-        output_path = OUTPUT_DIR / output_name
-        script_path = Path(__file__).resolve().parent / "ops" / "render_chat_story.py"
-
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(script_path),
-            "--payload",
-            str(payload_path),
-            "--output",
-            str(output_path),
-            "--avatar",
-            avatar_path,
-            "--background-video",
-            bg_video_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            log.error("Chat Story render failed: %s", (stderr or b"").decode("utf-8", errors="replace"))
-            raise HTTPException(500, "Chat Story render failed.")
-
-        meta = {}
-        try:
-            meta = json.loads((stdout or b"{}").decode("utf-8", errors="replace").strip() or "{}")
-        except Exception:
-            meta = {}
-
-        if not output_path.exists():
-            raise HTTPException(500, "Chat Story render did not produce an output video.")
-
-        return {
-            "ok": True,
-            "output_file": output_name,
-            "download_url": f"/api/download/{quote(output_name)}",
-            "lane": "chatstory",
-            "mode": "chatstory_render",
-            "credit_cost": 0,
-            "billing_source": "workspace_access" if not _is_admin_user(user) else "owner_override",
-            "duration_sec": meta.get("duration_sec"),
-            "message_count": meta.get("message_count"),
-            "voice": meta.get("voice"),
-            "theme": meta.get("theme"),
-            "background": meta.get("background"),
-            "used_background_video": bool(meta.get("used_background_video")),
-        }
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
+_render_chat_story = build_render_chat_story_handler(
+    get_current_user_from_request=get_current_user_from_request,
+    chat_story_access_for_user=_chat_story_access_for_user,
+    is_admin_user=_is_admin_user,
+    temp_dir=TEMP_DIR,
+    output_dir=OUTPUT_DIR,
+    render_script_path=Path(__file__).resolve().parent / "ops" / "render_chat_story.py",
+    log=log,
+)
 
 CLONE_ANALYSIS_PROMPT = """You are a viral video reverse-engineering expert. Analyze the source video and extract its EXACT winning formula so it can be replicated on a new topic.
 
