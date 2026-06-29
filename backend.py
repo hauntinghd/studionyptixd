@@ -19800,7 +19800,12 @@ _create_checkout = build_create_checkout_handler(
     billing_stripe_primary=BILLING_STRIPE_PRIMARY,
     create_stripe_membership_checkout=_create_stripe_membership_checkout,
     paypal_enabled=_paypal_enabled,
-    create_paypal_subscription_order=_create_paypal_subscription_order,
+    create_paypal_subscription_order=lambda user, price_id, plan, price_usd: _create_paypal_subscription_order(
+        user,
+        price_id,
+        plan,
+        price_usd,
+    ),
 )
 
 async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
