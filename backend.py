@@ -29,6 +29,7 @@ import uvicorn
 from backend_router_mounts import mount_router
 from backend_refunds import build_refund_handlers
 from backend_public_config import build_public_config_payload
+from backend_health import build_health_payload
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -18377,123 +18378,28 @@ def _languages_payload():
     return {"languages": [{"code": k, "name": v["name"]} for k, v in SUPPORTED_LANGUAGES.items()]}
 
 
-_HEALTH_PROBE_CACHE: dict[str, tuple[float, bool]] = {}
-_HEALTH_PROBE_TTL_SEC = 30.0
-
-
-async def _cached_probe(name: str, fn) -> bool:
-    """Memoize a probe coroutine for _HEALTH_PROBE_TTL_SEC seconds.
-
-    Render hits /api/health frequently. Without caching, every probe (skeleton
-    LoRA, HiDream, Wan2.2, ComfyUI) re-runs on each call, and a single slow
-    external service stacks 15s timeouts into a 502 wave. The probes themselves
-    already cache the *underlying* availability state — this just stops us from
-    paying their per-call overhead on every health check."""
-    entry = _HEALTH_PROBE_CACHE.get(name)
-    now = time.time()
-    if entry and (now - entry[0]) < _HEALTH_PROBE_TTL_SEC:
-        return entry[1]
-    try:
-        value = bool(await fn())
-    except Exception as e:
-        log.warning("Health probe %s raised: %s", name, str(e)[:200])
-        value = False
-    _HEALTH_PROBE_CACHE[name] = (now, value)
-    return value
-
-
-async def _health_payload():
-    skeleton_lora = await _cached_probe("skeleton_lora", check_skeleton_lora_available)
-    provider_order = _configured_image_provider_order()
-    hidream_configured = any(_normalize_image_provider_key(p) == "hidream" for p in provider_order)
-    wan_configured = any(_normalize_image_provider_key(p) == "wan22" for p in provider_order)
-    hidream_ready = await _cached_probe("hidream", check_hidream_available) if hidream_configured else False
-    hidream_edit_ready = await _cached_probe("hidream_edit", check_hidream_edit_available) if hidream_configured else False
-    wan_ready = await _cached_probe("wan22", check_wan22_available) if wan_configured else False
-    wan_t2i_ready = await _cached_probe("wan22_t2i", check_wan22_t2i_available) if wan_configured else False
-    now_ts = time.time()
-    hidream_checked_ts = float(_hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
-    hidream_last_ok_ts = float(_hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-    hidream_last_error = str(_hidream_availability_cache.get("last_error", "") or "")
-    hidream_model = str(_hidream_availability_cache.get("model_name", "") or "")
-    hidream_edit_checked_ts = float(_hidream_edit_availability_cache.get("checked_ts", 0.0) or 0.0)
-    hidream_edit_last_ok_ts = float(_hidream_edit_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-    hidream_edit_last_error = str(_hidream_edit_availability_cache.get("last_error", "") or "")
-    hidream_edit_model = str(_hidream_edit_availability_cache.get("model_name", "") or "")
-    wan_t2i_checked_ts = float(_wan22_t2i_availability_cache.get("checked_ts", 0.0) or 0.0)
-    wan_t2i_last_ok_ts = float(_wan22_t2i_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-    wan_t2i_last_error = str(_wan22_t2i_availability_cache.get("last_error", "") or "")
-    wan_t2i_mode = str(_wan22_t2i_availability_cache.get("mode", "") or "")
-    wan_t2i_checkpoint = str(_wan22_t2i_availability_cache.get("ckpt_name", "") or "")
-    wan_t2i_unet = str(_wan22_t2i_availability_cache.get("unet_name", "") or "")
-    provider_label = " > ".join(provider_order)
-    backend_commit, frontend_bundle = _read_deploy_meta()
-    fal_video_enabled = bool(FAL_AI_KEY)
-    runway_video_enabled = bool(RUNWAY_API_KEY)
-    if runway_video_enabled and fal_video_enabled:
-        video_engine = "Runway (primary) + FalAI Kling fallback"
-    elif fal_video_enabled:
-        video_engine = "FalAI Kling 2.1"
-    elif runway_video_enabled:
-        video_engine = "Runway Image-to-Video"
-    elif wan_ready:
-        video_engine = "Wan 2.2 (RunPod)"
-    else:
-        video_engine = "Static"
-    return {
-        "status": "online",
-        "engine": "NYPTID Studio Engine v3.0",
-        "ffmpeg_available": _ffmpeg_available(),
-        "kling_enabled": bool(FAL_AI_KEY),
-        "hidream_ready": hidream_ready,
-        "hidream_model": hidream_model,
-        "hidream_checked_ago_sec": int(max(0.0, now_ts - hidream_checked_ts)) if hidream_checked_ts else -1,
-        "hidream_last_ok_ago_sec": int(max(0.0, now_ts - hidream_last_ok_ts)) if hidream_last_ok_ts else -1,
-        "hidream_last_error": hidream_last_error,
-        "hidream_edit_ready": hidream_edit_ready,
-        "hidream_edit_model": hidream_edit_model,
-        "hidream_edit_checked_ago_sec": int(max(0.0, now_ts - hidream_edit_checked_ts)) if hidream_edit_checked_ts else -1,
-        "hidream_edit_last_ok_ago_sec": int(max(0.0, now_ts - hidream_edit_last_ok_ts)) if hidream_edit_last_ok_ts else -1,
-        "hidream_edit_last_error": hidream_edit_last_error,
-        "wan22_ready": wan_ready,
-        "wan22_t2i_ready": wan_t2i_ready,
-        "wan22_t2i_mode": wan_t2i_mode,
-        "wan22_t2i_checkpoint": wan_t2i_checkpoint,
-        "wan22_t2i_unet": wan_t2i_unet,
-        "wan22_t2i_checked_ago_sec": int(max(0.0, now_ts - wan_t2i_checked_ts)) if wan_t2i_checked_ts else -1,
-        "wan22_t2i_last_ok_ago_sec": int(max(0.0, now_ts - wan_t2i_last_ok_ts)) if wan_t2i_last_ok_ts else -1,
-        "wan22_t2i_last_error": wan_t2i_last_error,
-        "video_engine": video_engine,
-        "runway_key_configured": runway_video_enabled,
-        "runway_key_source": RUNWAY_API_KEY_SOURCE if runway_video_enabled else "",
-        "runway_video_model": RUNWAY_VIDEO_MODEL if runway_video_enabled else "",
-        "comfyui_url": COMFYUI_URL[:50],
-        "skeleton_lora": skeleton_lora,
-        "image_engine_skeleton": (
-            ("Skeleton LoRA (local) > " + provider_label)
-            if skeleton_lora
-            else provider_label
-        ),
-        "image_provider_order": provider_order,
-        "xai_image_fallback_enabled": bool(XAI_IMAGE_FALLBACK_ENABLED),
-        "fal_image_backup_model": _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL) if FAL_AI_KEY else "",
-        "image_local_provider_retries": int(IMAGE_LOCAL_PROVIDER_RETRIES),
-        "image_provider_failure_cooldown_sec": int(IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC),
-        "image_provider_wan_skip_if_unavailable": bool(IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE),
-        "skeleton_require_wan22": bool(SKELETON_REQUIRE_WAN22),
-        "image_provider_fail_counts": dict(_image_provider_fail_counts),
-        "image_provider_success_counts": dict(_image_provider_success_counts),
-        "image_provider_cooldowns_sec": _provider_cooldown_snapshot(),
-        "image_fallback_events_total": int(_image_provider_fallback_total),
-        "image_fallback_events_pairs": dict(_image_provider_fallback_pairs),
-        "template_adapter_routing_enabled": bool(TEMPLATE_ADAPTER_ROUTING_ENABLED),
-        "template_adapter_routes": sorted(k for k in (TEMPLATE_ADAPTER_ROUTING or {}).keys()),
-        "backend_commit": backend_commit,
-        "frontend_bundle": frontend_bundle,
-        "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
-        "force_720p_only": FORCE_720P_ONLY,
-    }
-
+_health_payload = build_health_payload(
+    log=log,
+    ffmpeg_available=_ffmpeg_available,
+    comfyui_url=lambda: COMFYUI_URL,
+    read_deploy_meta=_read_deploy_meta,
+    check_skeleton_lora_available=check_skeleton_lora_available,
+    check_hidream_available=check_hidream_available,
+    check_hidream_edit_available=check_hidream_edit_available,
+    check_wan22_available=check_wan22_available,
+    check_wan22_t2i_available=check_wan22_t2i_available,
+    configured_image_provider_order=_configured_image_provider_order,
+    normalize_image_provider_key=_normalize_image_provider_key,
+    normalize_fal_image_backup_model=_normalize_fal_image_backup_model,
+    provider_cooldown_snapshot=_provider_cooldown_snapshot,
+    hidream_availability_cache=_hidream_availability_cache,
+    hidream_edit_availability_cache=_hidream_edit_availability_cache,
+    wan22_t2i_availability_cache=_wan22_t2i_availability_cache,
+    image_provider_fail_counts=_image_provider_fail_counts,
+    image_provider_success_counts=_image_provider_success_counts,
+    image_provider_fallback_total=lambda: _image_provider_fallback_total,
+    image_provider_fallback_pairs=_image_provider_fallback_pairs,
+)
 
 async def _set_comfyui_url(body: dict, user: dict):
     """Admin-only: update the ComfyUI URL at runtime (e.g. after cloudflared restart)."""
