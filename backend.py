@@ -38,6 +38,7 @@ from backend_misc_payloads import (
     build_maintenance_banner_payload,
     build_training_stats_payload,
 )
+from backend_job_payloads import build_job_status_payload, build_list_jobs_payload
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -19138,19 +19139,13 @@ async def _auto_regenerate_scene_image(body: dict, request: Request = None):
     return {"ok": True, "job_id": job_id, "scene_index": scene_index, "image": updated}
 
 
-async def _job_status_payload(job_id: str):
-    _prune_in_memory_jobs()
-    persisted = await get_persisted_job_state(job_id)
-    if isinstance(persisted, dict):
-        _record_kpi_for_job(job_id, persisted)
-        if persisted.get("kpi_recorded"):
-            await persist_job_state(job_id, persisted)
-        return persisted
-    if job_id not in jobs:
-        raise HTTPException(404, "Job not found")
-    _record_kpi_for_job(job_id, jobs[job_id])
-    return jobs[job_id]
-
+_job_status_payload = build_job_status_payload(
+    jobs_ref=jobs,
+    prune_in_memory_jobs=_prune_in_memory_jobs,
+    get_persisted_job_state=get_persisted_job_state,
+    record_kpi_for_job=_record_kpi_for_job,
+    persist_job_state=persist_job_state,
+)
 
 async def _download_video_response(filename: str):
     safe_filename = Path(filename).name  # Strip directory traversal (../ etc)
@@ -19843,9 +19838,7 @@ async def _clone_video(
     return {"status": "accepted", "job_id": job_id}
 
 
-async def _list_jobs_payload():
-    return {jid: {k: v for k, v in j.items() if k != "output_file"} for jid, j in jobs.items()}
-
+_list_jobs_payload = build_list_jobs_payload(jobs_ref=jobs)
 
 mount_router(
     app,
