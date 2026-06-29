@@ -30,6 +30,7 @@ from backend_router_mounts import mount_router
 from backend_refunds import build_refund_handlers
 from backend_public_config import build_public_config_payload
 from backend_health import build_health_payload
+from backend_admin_analytics import build_admin_analytics_payload
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -18433,133 +18434,23 @@ async def _training_stats_payload(user: dict):
     }
 
 
-async def _admin_analytics_payload(user: dict):
-    """Admin dashboard analytics: active usage + paid tier totals + monthly revenue estimate."""
-    email = user.get("email", "")
-    if email not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin only")
-
-    active_job_statuses = {"queued", "generating_script", "generating_images", "animating_scenes", "generating_voice", "generating_sfx", "compositing", "analyzing"}
-    active_jobs = []
-    for j in jobs.values():
-        if isinstance(j, dict) and j.get("status") in active_job_statuses:
-            active_jobs.append(j)
-    active_generations = len(active_jobs)
-    active_generating_users = len({j.get("user_id") for j in active_jobs if j.get("user_id")})
-
-    tier_counts = {"starter": 0, "creator": 0, "pro": 0, "elite": 0, "demo_pro": 0}
-    monthly_revenue_usd = 0.0
-    revenue_source = "none"
-
-    if STRIPE_SECRET_KEY:
-        try:
-            subs = stripe_lib.Subscription.list(status="all", limit=100, expand=["data.items.data.price"])
-            for sub in subs.auto_paging_iter():
-                sub_status = sub.get("status")
-                if sub_status not in ("active", "trialing", "past_due", "unpaid"):
-                    continue
-                for item in sub.get("items", {}).get("data", []):
-                    price = item.get("price", {}) or {}
-                    price_id = price.get("id", "")
-                    plan = STRIPE_PRICE_TO_PLAN.get(price_id)
-                    if plan in tier_counts:
-                        qty = int(item.get("quantity", 1) or 1)
-                        tier_counts[plan] += qty
-                        monthly_revenue_usd += ((price.get("unit_amount") or 0) / 100.0) * qty
-            revenue_source = "stripe"
-        except Exception as e:
-            log.warning(f"Admin analytics stripe read failed: {e}")
-
-    if revenue_source != "stripe" and SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
-        # Fallback: infer subscriber counts from profile plans if Stripe is unavailable.
-        try:
-            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/profiles?select=plan&limit=5000",
-                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
-                )
-                if resp.status_code == 200:
-                    for row in resp.json():
-                        p = row.get("plan")
-                        if p in tier_counts:
-                            tier_counts[p] += 1
-                            monthly_revenue_usd += float(PLAN_PRICE_USD.get(p, 0.0) or 0.0)
-                    revenue_source = "profiles"
-        except Exception as e:
-            log.warning(f"Admin analytics profiles fallback failed: {e}")
-
-    active_users_signins_15m = 0
-    if SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY):
-        try:
-            svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-            now_utc = datetime.now(timezone.utc)
-            async with httpx.AsyncClient(timeout=20) as client:
-                users_resp = await client.get(
-                    f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
-                    headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
-                )
-                if users_resp.status_code == 200:
-                    users_data = users_resp.json()
-                    user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
-                    for u in user_list:
-                        ts = u.get("last_sign_in_at")
-                        if not ts:
-                            continue
-                        try:
-                            signed_in_at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            if (now_utc - signed_in_at).total_seconds() <= 15 * 60:
-                                active_users_signins_15m += 1
-                        except Exception:
-                            continue
-        except Exception as e:
-            log.warning(f"Admin analytics active-users fetch failed: {e}")
-
-    queue_depth = 0
-    queue_workers = 1
-    queue_max_depth = 1
-    try:
-        queue_depth = max(0, int(await get_queue_depth()))
-    except Exception as e:
-        log.warning(f"Admin analytics queue depth read failed: {e}")
-    try:
-        queue_workers = max(1, int(get_queue_workers()))
-    except Exception as e:
-        log.warning(f"Admin analytics queue workers read failed: {e}")
-    try:
-        queue_max_depth = max(1, int(get_queue_max_depth()))
-    except Exception as e:
-        log.warning(f"Admin analytics queue max-depth read failed: {e}")
-    active_users_estimate = max(active_generating_users, active_users_signins_15m)
-    queue_utilization_pct = round((queue_depth / queue_max_depth) * 100, 1)
-    active_generations_per_worker = round(active_generations / queue_workers, 2)
-    high_load_detected = queue_utilization_pct >= 70.0 or active_generations_per_worker >= 1.0
-    voice_diag = await _voice_provider_snapshot(force_refresh=False)
-    return {
-        "active_generations": active_generations,
-        "queue_depth": queue_depth,
-        "queue_workers": queue_workers,
-        "queue_max_depth": queue_max_depth,
-        "queue_utilization_pct": queue_utilization_pct,
-        "active_generations_per_worker": active_generations_per_worker,
-        "high_load_detected": high_load_detected,
-        "active_users_generating": active_generating_users,
-        "active_users_signins_15m": active_users_signins_15m,
-        "active_users_estimate": active_users_estimate,
-        "maintenance_banner_enabled": _maintenance_banner_enabled,
-        "maintenance_banner_message": _maintenance_banner_message,
-        "subscribers_by_tier": tier_counts,
-        "total_paid_subscribers": sum(tier_counts.values()),
-        "monthly_revenue_usd": round(monthly_revenue_usd, 2),
-        # We currently expose gross subscription revenue as a profit proxy.
-        "monthly_profit_usd": round(monthly_revenue_usd, 2),
-        "revenue_source": revenue_source,
-        "voice_provider_ok": voice_diag["provider_ok"],
-        "voice_catalog_source": voice_diag["source"],
-        "voice_catalog_count": voice_diag["count"],
-        "voice_catalog_warning": voice_diag["warning"],
-    }
-
+_admin_analytics_payload = build_admin_analytics_payload(
+    admin_emails=ADMIN_EMAILS,
+    jobs_ref=jobs,
+    stripe_secret_key=STRIPE_SECRET_KEY,
+    stripe_lib=stripe_lib,
+    stripe_price_to_plan=STRIPE_PRICE_TO_PLAN,
+    supabase_url=SUPABASE_URL,
+    supabase_service_key=SUPABASE_SERVICE_KEY,
+    supabase_anon_key=SUPABASE_ANON_KEY,
+    plan_price_usd=PLAN_PRICE_USD,
+    get_queue_depth=get_queue_depth,
+    get_queue_workers=get_queue_workers,
+    get_queue_max_depth=get_queue_max_depth,
+    voice_provider_snapshot=_voice_provider_snapshot,
+    maintenance_snapshot=lambda: (_maintenance_banner_enabled, _maintenance_banner_message),
+    log=log,
+)
 
 async def _admin_waiting_list_payload(user: dict):
     if user.get("email", "") not in ADMIN_EMAILS:
