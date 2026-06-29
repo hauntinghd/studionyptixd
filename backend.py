@@ -31,6 +31,7 @@ from backend_refunds import build_refund_handlers
 from backend_public_config import build_public_config_payload
 from backend_health import build_health_payload
 from backend_admin_analytics import build_admin_analytics_payload
+from backend_billing_audit import build_admin_billing_audit_payload
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -18493,88 +18494,16 @@ async def _admin_waiting_list_remove(email: str, request: Request):
     return {"ok": bool(removed), "email": target, "removed": bool(removed)}
 
 
-async def _admin_billing_audit_payload(user: dict):
-    email = str(user.get("email", "") or "")
-    if email not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin only")
-    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-    if not SUPABASE_URL or not svc_key:
-        raise HTTPException(500, "Supabase not configured")
-
-    rows: list[dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
-                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
-            )
-            if resp.status_code != 200:
-                raise HTTPException(500, "Failed to read auth users for billing audit")
-            users_data = resp.json()
-            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
-            by_email = {
-                str(u.get("email", "") or "").strip().lower(): str(u.get("id", "") or "")
-                for u in (user_list or [])
-                if u and str(u.get("email", "") or "").strip()
-            }
-
-            prof = await client.get(
-                f"{SUPABASE_URL}/rest/v1/profiles?select=id,plan",
-                headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
-            )
-            if prof.status_code != 200:
-                raise HTTPException(500, "Failed to read profile plans for billing audit")
-            profiles = prof.json()
-            profiles = profiles if isinstance(profiles, list) else []
-            for p in profiles:
-                plan = str((p or {}).get("plan", "none") or "none").strip().lower()
-                if not _profile_plan_is_paid(plan):
-                    continue
-                uid = str((p or {}).get("id", "") or "")
-                acct_email = ""
-                for e, eid in by_email.items():
-                    if eid == uid:
-                        acct_email = e
-                        break
-                if not acct_email:
-                    continue
-                stripe_diag = _stripe_subscription_snapshot(acct_email)
-                stripe_status = str(stripe_diag.get("status", "") or "")
-                stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing", "past_due"}
-                cancel_at_period_end = bool(stripe_diag.get("cancel_at_period_end", False))
-                status_source = "stripe" if stripe_ok else "profile_fallback"
-                next_renewal_unix = int(stripe_diag.get("next_renewal_unix", 0) or 0)
-                next_renewal_source = str(stripe_diag.get("next_renewal_source", "") or "")
-                paid_at_unix = int(stripe_diag.get("paid_at_unix", 0) or 0)
-                interval_months = max(1, int(stripe_diag.get("interval_months", 1) or 1))
-                if next_renewal_unix <= 0 and paid_at_unix > 0 and not cancel_at_period_end:
-                    rolled = _next_renewal_from_anchor(paid_at_unix, interval_months)
-                    if rolled > 0:
-                        next_renewal_unix = int(rolled)
-                        next_renewal_source = next_renewal_source or "paid_at_rollforward_fallback"
-                rows.append(
-                    {
-                        "email": acct_email,
-                        "user_id": uid,
-                        "plan": plan,
-                        "status_source": status_source,
-                        "stripe_status": stripe_status or "unknown",
-                        "cancel_at_period_end": cancel_at_period_end,
-                        "billing_active": bool(stripe_ok or _profile_plan_is_paid(plan)),
-                        "next_renewal_unix": next_renewal_unix,
-                        "next_renewal_source": next_renewal_source,
-                        "paid_at_unix": paid_at_unix,
-                    }
-                )
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Admin billing audit failed: {e}")
-        raise HTTPException(500, "Billing audit failed")
-
-    rows.sort(key=lambda r: (r.get("plan", ""), r.get("email", "")))
-    return {"rows": rows, "total_paid_profiles": len(rows)}
-
+_admin_billing_audit_payload = build_admin_billing_audit_payload(
+    admin_emails=ADMIN_EMAILS,
+    supabase_url=SUPABASE_URL,
+    supabase_service_key=SUPABASE_SERVICE_KEY,
+    supabase_anon_key=SUPABASE_ANON_KEY,
+    profile_plan_is_paid=_profile_plan_is_paid,
+    stripe_subscription_snapshot=lambda email: _stripe_subscription_snapshot(email),
+    next_renewal_from_anchor=lambda anchor_unix, months: _next_renewal_from_anchor(anchor_unix, months),
+    log=log,
+)
 
 async def _set_maintenance_banner_payload(body: dict, user: dict):
     global _maintenance_banner_enabled, _maintenance_banner_message
