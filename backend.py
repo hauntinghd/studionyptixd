@@ -21208,3 +21208,21 @@ async def _admin_refund_credits(body: dict, user: dict = Depends(require_auth)):
         pass
     log.info(f"Admin refund: {credits} AC to {target_email} (source={applied_source}) by {user.get('email', '?')}")
     return {"ok": True, "email": target_email, "credits": credits, "source": applied_source}
+
+
+mount_router(
+    app,
+    build_billing_router(
+        create_checkout_endpoint=_create_checkout,
+        create_topup_checkout_endpoint=_create_topup_checkout,
+        paypal_return_endpoint=_paypal_return,
+        paypal_webhook_endpoint=_paypal_webhook,
+        paypal_verify_order_endpoint=_paypal_verify_order,
+        create_billing_portal_session_endpoint=_create_billing_portal_session,
+        join_waitlist_endpoint=_join_waitlist,
+        stripe_webhook_endpoint=_stripe_webhook,
+        admin_set_plan_endpoint=_admin_set_plan,
+        admin_cancel_subscription_endpoint=_admin_cancel_subscription,
+        admin_refund_credits_endpoint=_admin_refund_credits,
+    ),
+)

@@ -338,14 +338,14 @@ def build_billing_router(
     admin_set_plan_endpoint,
     admin_cancel_subscription_endpoint,
     admin_refund_credits_endpoint,
-    admin_grant_unified_credits_endpoint,
-    submit_feedback_endpoint,
-    get_all_feedback_endpoint,
-    get_admin_kpi_endpoint,
-    get_admin_youtube_quota_endpoint,
-    admin_catalyst_backfill_tick_endpoint,
-    get_admin_catalyst_corpus_endpoint,
-    get_admin_youtube_video_retention_endpoint,
+    admin_grant_unified_credits_endpoint=None,
+    submit_feedback_endpoint=None,
+    get_all_feedback_endpoint=None,
+    get_admin_kpi_endpoint=None,
+    get_admin_youtube_quota_endpoint=None,
+    admin_catalyst_backfill_tick_endpoint=None,
+    get_admin_catalyst_corpus_endpoint=None,
+    get_admin_youtube_video_retention_endpoint=None,
 ):
     router = APIRouter()
     router.add_api_route("/api/checkout", create_checkout_endpoint, methods=["POST"])
@@ -359,14 +359,22 @@ def build_billing_router(
     router.add_api_route("/api/admin/set-plan", admin_set_plan_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/cancel-subscription", admin_cancel_subscription_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/refund-credits", admin_refund_credits_endpoint, methods=["POST"])
-    router.add_api_route("/api/admin/grant-credits", admin_grant_unified_credits_endpoint, methods=["POST"])
-    router.add_api_route("/api/feedback", submit_feedback_endpoint, methods=["POST"])
-    router.add_api_route("/api/admin/feedback", get_all_feedback_endpoint, methods=["GET"])
-    router.add_api_route("/api/admin/kpi", get_admin_kpi_endpoint, methods=["GET"])
-    router.add_api_route("/api/admin/youtube-quota", get_admin_youtube_quota_endpoint, methods=["GET"])
-    router.add_api_route("/api/admin/catalyst/backfill-tick", admin_catalyst_backfill_tick_endpoint, methods=["POST"])
-    router.add_api_route("/api/admin/catalyst/corpus", get_admin_catalyst_corpus_endpoint, methods=["GET"])
-    router.add_api_route("/api/admin/youtube/video-retention", get_admin_youtube_video_retention_endpoint, methods=["GET"])
+    if admin_grant_unified_credits_endpoint:
+        router.add_api_route("/api/admin/grant-credits", admin_grant_unified_credits_endpoint, methods=["POST"])
+    if submit_feedback_endpoint:
+        router.add_api_route("/api/feedback", submit_feedback_endpoint, methods=["POST"])
+    if get_all_feedback_endpoint:
+        router.add_api_route("/api/admin/feedback", get_all_feedback_endpoint, methods=["GET"])
+    if get_admin_kpi_endpoint:
+        router.add_api_route("/api/admin/kpi", get_admin_kpi_endpoint, methods=["GET"])
+    if get_admin_youtube_quota_endpoint:
+        router.add_api_route("/api/admin/youtube-quota", get_admin_youtube_quota_endpoint, methods=["GET"])
+    if admin_catalyst_backfill_tick_endpoint:
+        router.add_api_route("/api/admin/catalyst/backfill-tick", admin_catalyst_backfill_tick_endpoint, methods=["POST"])
+    if get_admin_catalyst_corpus_endpoint:
+        router.add_api_route("/api/admin/catalyst/corpus", get_admin_catalyst_corpus_endpoint, methods=["GET"])
+    if get_admin_youtube_video_retention_endpoint:
+        router.add_api_route("/api/admin/youtube/video-retention", get_admin_youtube_video_retention_endpoint, methods=["GET"])
     return router
 
 
