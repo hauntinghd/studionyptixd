@@ -41,6 +41,7 @@ from backend_misc_payloads import (
 from backend_job_payloads import build_job_status_payload, build_list_jobs_payload
 from backend_media_handlers import build_download_video_response, build_render_chat_story_handler
 from backend_clone_handler import build_clone_video_handler
+from backend_billing_handlers import build_create_checkout_handler
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
@@ -19786,34 +19787,21 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
     return str(session.url)
 
 
-async def _create_checkout(req: CheckoutRequest, user: dict = Depends(require_auth)):
-    requested_product = str(getattr(req, "product", "") or "").strip().lower()
-    requested_plan = str(getattr(req, "plan", "") or "").strip().lower()
-    price_id = str(req.price_id or "").strip()
-    if requested_product == "membership" and not requested_plan and not price_id:
-        requested_plan = _default_membership_plan_id()
-    if requested_plan and not price_id:
-        price_id = _price_id_for_plan_id(requested_plan)
-    plan = str(STRIPE_PRICE_TO_PLAN.get(price_id, requested_plan) or "").strip().lower()
-    if plan in UNIFIED_PLANS:
-        price_usd = float(UNIFIED_PLANS[plan]["price_usd"])
-    else:
-        price_usd = float(PLAN_PRICE_USD.get(plan, 0.0) or 0.0)
-    if plan not in CHAT_STORY_ALLOWED_PLANS:
-        raise HTTPException(400, "This membership plan is not available for checkout.")
-    if price_usd <= 0:
-        raise HTTPException(400, f"Membership pricing is not configured for {plan}.")
-    if STRIPE_SECRET_KEY and BILLING_STRIPE_PRIMARY:
-        checkout_url = await _create_stripe_membership_checkout(user, plan, price_usd)
-        return {"checkout_url": checkout_url, "provider": "stripe"}
-    if _paypal_enabled():
-        checkout_url = await _create_paypal_subscription_order(user, price_id, plan, price_usd)
-        return {"checkout_url": checkout_url, "provider": "paypal"}
-    if STRIPE_SECRET_KEY:
-        checkout_url = await _create_stripe_membership_checkout(user, plan, price_usd)
-        return {"checkout_url": checkout_url, "provider": "stripe"}
-    raise HTTPException(503, "No payment provider configured")
-
+_create_checkout = build_create_checkout_handler(
+    checkout_request_model=CheckoutRequest,
+    require_auth=require_auth,
+    default_membership_plan_id=_default_membership_plan_id,
+    price_id_for_plan_id=_price_id_for_plan_id,
+    stripe_price_to_plan=STRIPE_PRICE_TO_PLAN,
+    unified_plans=UNIFIED_PLANS,
+    plan_price_usd=PLAN_PRICE_USD,
+    chat_story_allowed_plans=CHAT_STORY_ALLOWED_PLANS,
+    stripe_secret_key=STRIPE_SECRET_KEY,
+    billing_stripe_primary=BILLING_STRIPE_PRIMARY,
+    create_stripe_membership_checkout=_create_stripe_membership_checkout,
+    paypal_enabled=_paypal_enabled,
+    create_paypal_subscription_order=_create_paypal_subscription_order,
+)
 
 async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
     """
