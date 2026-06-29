@@ -34,15 +34,22 @@ async def _fetch_public_search_videos(
     order: str = "viewCount",
     fresh: bool = False,
 ) -> list[dict[str, Any]]:
-    """Recent public YouTube search results (Data API key, no OAuth)."""
-    from youtube import _youtube_public_api_get
+    """Recent public YouTube search results (Data API key, no OAuth).
+
+    Search results alone are not evidence for view-count or "trend" claims.
+    This helper always tries to hydrate returned IDs through videos.list and
+    labels the evidence quality so Catalyst/Studio Agent cannot quietly treat
+    snippet-only rows as verified performance data.
+    """
+    from youtube import _youtube_fetch_public_videos_api_key, _youtube_public_api_get
 
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return []
     published_after = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days or 30), 90)))
+    search_key = ""
     try:
-        payload, _key = await _youtube_public_api_get(
+        payload, search_key = await _youtube_public_api_get(
             "/search",
             params={
                 "part": "snippet",
@@ -61,19 +68,100 @@ async def _fetch_public_search_videos(
     except Exception as exc:
         return [{"error": str(exc)[:200]}]
 
-    out: list[dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    video_ids: list[str] = []
     for item in list(payload.get("items") or []):
         sn = (item or {}).get("snippet") or {}
         vid = ((item or {}).get("id") or {}).get("videoId") or ""
-        out.append({
+        if vid:
+            video_ids.append(str(vid))
+        raw_rows.append({
             "video_id": vid,
             "title": str(sn.get("title") or ""),
             "channel": str(sn.get("channelTitle") or ""),
+            "channel_title": str(sn.get("channelTitle") or ""),
+            "channel_id": str(sn.get("channelId") or ""),
             "published_at": str(sn.get("publishedAt") or ""),
             "description": str(sn.get("description") or "")[:240],
             "watch_url": f"https://www.youtube.com/watch?v={vid}" if vid else "",
         })
+
+    hydrate_error = ""
+    hydrated_by_id: dict[str, dict[str, Any]] = {}
+    if video_ids:
+        try:
+            hydrated = await _youtube_fetch_public_videos_api_key(video_ids)
+            hydrated_by_id = {str(row.get("video_id") or ""): row for row in hydrated if isinstance(row, dict)}
+        except Exception as exc:
+            hydrate_error = str(exc)[:200]
+
+    def _cache_status(active_key: str) -> str:
+        if active_key == "(cache)":
+            return "cache"
+        if active_key == "(stale-cache)":
+            return "stale-cache"
+        return "fresh"
+
+    out: list[dict[str, Any]] = []
+    for row in raw_rows:
+        vid = str(row.get("video_id") or "")
+        stats = hydrated_by_id.get(vid) or {}
+        if stats:
+            row.update({
+                "title": stats.get("title") or row.get("title") or "",
+                "channel": stats.get("channel_title") or row.get("channel") or "",
+                "channel_title": stats.get("channel_title") or row.get("channel_title") or "",
+                "published_at": stats.get("published_at") or row.get("published_at") or "",
+                "thumbnail_url": stats.get("thumbnail_url") or "",
+                "views": int(stats.get("views") or 0),
+                "likes": int(stats.get("likes") or 0),
+                "comments": int(stats.get("comments") or 0),
+                "duration_sec": int(stats.get("duration_sec") or 0),
+                "tags": stats.get("tags") or [],
+                "evidence_level": "hydrated_video_stats",
+                "support_label": _trend_support_label(
+                    views=int(stats.get("views") or 0),
+                    published_at=str(stats.get("published_at") or row.get("published_at") or ""),
+                    days=days,
+                ),
+            })
+        else:
+            row.update({
+                "views": None,
+                "likes": None,
+                "comments": None,
+                "duration_sec": None,
+                "tags": [],
+                "evidence_level": "snippet_only",
+                "support_label": "unsupported_no_hydrated_stats",
+                **({"evidence_error": hydrate_error} if hydrate_error else {}),
+            })
+        row.update({
+            "search_order": order,
+            "query_window_days": days,
+            "cache_status": _cache_status(search_key),
+            "private_analytics": False,
+        })
+        out.append(row)
     return out
+
+
+def _trend_support_label(*, views: int, published_at: str, days: int) -> str:
+    """Conservative public-search support labels for agent/UI wording."""
+    try:
+        published = datetime.fromisoformat(str(published_at or "").replace("Z", "+00:00"))
+        age_days = max(0.0, (datetime.now(timezone.utc) - published).total_seconds() / 86400)
+    except Exception:
+        age_days = float(days or 30)
+    views = int(views or 0)
+    window = max(1, min(int(days or 30), 90))
+    if views >= 1_000_000 and age_days <= window:
+        return "strong_public_precedent"
+    if views >= 100_000 and age_days <= window:
+        return "supported_public_precedent"
+    if views >= 10_000:
+        return "weak_public_precedent"
+    return "unsupported_or_low_signal"
 
 
 def _default_queries_for_registry(registry_key: str) -> list[str]:
@@ -126,6 +214,37 @@ def _predict_topics(
         )
     scored.sort(key=lambda x: float(x.get("composite_score") or 0), reverse=True)
     return scored[:limit]
+
+
+def _public_search_evidence_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    hydrated = [r for r in list(rows or []) if r.get("evidence_level") == "hydrated_video_stats"]
+    supported = [
+        r for r in hydrated
+        if str(r.get("support_label") or "") in {"strong_public_precedent", "supported_public_precedent"}
+    ]
+    stale = [r for r in list(rows or []) if str(r.get("cache_status") or "") == "stale-cache"]
+    errors = [r for r in list(rows or []) if r.get("error") or r.get("evidence_error")]
+    return {
+        "total_rows": len(list(rows or [])),
+        "hydrated_rows": len(hydrated),
+        "supported_rows": len(supported),
+        "stale_rows": len(stale),
+        "error_rows": len(errors),
+        "strongest_public_evidence": [
+            {
+                "title": r.get("title"),
+                "channel": r.get("channel") or r.get("channel_title"),
+                "views": r.get("views"),
+                "likes": r.get("likes"),
+                "duration_sec": r.get("duration_sec"),
+                "published_at": r.get("published_at"),
+                "watch_url": r.get("watch_url"),
+                "support_label": r.get("support_label"),
+                "cache_status": r.get("cache_status"),
+            }
+            for r in sorted(supported, key=lambda item: int(item.get("views") or 0), reverse=True)[:5]
+        ],
+    }
 
 
 def build_studio_analytics_router(
@@ -325,8 +444,15 @@ def build_studio_analytics_router(
             "window_days": days,
             "queries": queries,
             "results_by_query": by_query,
+            "evidence_summary": _public_search_evidence_summary(
+                [row for rows in by_query.values() for row in list(rows or [])]
+            ),
             "predicted_topics": predictions,
-            "note": "Public search uses YouTube Data API (recent + high-view videos in window). Predictions score niche fit, channel gap, and trend momentum.",
+            "evidence_contract": (
+                "Public search rows must be hydrated before they support view-count or trend claims. "
+                "Predicted topics are candidate ideas unless tied to strongest_public_evidence."
+            ),
+            "note": "Public search uses YouTube Data API. Predictions score niche fit, channel gap, and public-search title momentum; they are not private YouTube Analytics.",
         }
 
     @router.get("/product")

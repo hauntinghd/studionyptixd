@@ -1127,7 +1127,9 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "get_public_search_trends",
                 "description": (
                     "Public YouTube search demand (last 30 days) + predicted topic scores. "
-                    "Use registry_key to bias queries to a channel niche."
+                    "Use registry_key to bias queries to a channel niche. Returned videos include "
+                    "hydrated public stats when available; do not call something trending/high-volume "
+                    "unless support_label and hydrated stats justify it."
                 ),
                 "parameters": {
                     "type": "object",
@@ -3133,7 +3135,12 @@ def execute_tool(
 
     if name == "get_public_search_trends":
         async def _fetch():
-            from studio_analytics_router import _fetch_public_search_videos, _default_queries_for_registry, _predict_topics
+            from studio_analytics_router import (
+                _default_queries_for_registry,
+                _fetch_public_search_videos,
+                _predict_topics,
+                _public_search_evidence_summary,
+            )
             from long_form.catalyst_bridge import CHANNEL_KEY_TO_ID, fetch_channel_snapshot, shape_catalyst_insights
 
             reg_key = str(args.get("registry_key") or "").strip()
@@ -3173,11 +3180,17 @@ def execute_tool(
                 "window_days": days,
                 "queries": queries,
                 "videos": rows[:20],
+                "evidence_summary": _public_search_evidence_summary(rows),
                 "predicted_topics": predictions,
+                "evidence_contract": (
+                    "Every public trend claim must cite hydrated video_id/title/channel/views/likes/"
+                    "duration/published_at/cache_status. Snippet-only rows are candidates, not proof."
+                ),
                 "note": (
                     "Fresh=true bypassed the public search cache for this request."
                     if fresh
-                    else "Public search may use a short-lived cache to conserve YouTube quota."
+                    else "Public search may use a short-lived cache to conserve YouTube quota. "
+                    "Use support_label instead of guessing from search order."
                 ),
             }
 
@@ -3186,6 +3199,7 @@ def execute_tool(
     if name == "search_youtube_public":
         async def _fetch():
             from youtube import _youtube_fetch_public_videos_api_key, _youtube_public_api_get
+            from studio_analytics_router import _trend_support_label
 
             query = str(args.get("query") or "").strip()
             if not query:
@@ -3245,8 +3259,27 @@ def execute_tool(
                             "comments": stats.get("comments"),
                             "duration_sec": stats.get("duration_sec"),
                             "tags": stats.get("tags") or [],
+                            "evidence_level": "hydrated_video_stats",
+                            "support_label": _trend_support_label(
+                                views=int(stats.get("views") or 0),
+                                published_at=str(stats.get("published_at") or base.get("published_at") or ""),
+                                days=90,
+                            ),
                         }
                     )
+                else:
+                    base.update({
+                        "views": None,
+                        "likes": None,
+                        "comments": None,
+                        "duration_sec": None,
+                        "tags": [],
+                        "evidence_level": "snippet_only",
+                        "support_label": "unsupported_no_hydrated_stats",
+                    })
+                base["cache_status"] = (
+                    "fresh" if active_key not in {"(cache)", "(stale-cache)"} else str(active_key).strip("()")
+                )
                 videos.append(base)
             return {
                 "source": "youtube_data_api_public_search",
@@ -3259,6 +3292,10 @@ def execute_tool(
                     "fresh" if active_key not in {"(cache)", "(stale-cache)"} else str(active_key).strip("()")
                 ),
                 "videos": videos,
+                "evidence_contract": (
+                    "Use hydrated_video_stats rows for performance claims. Snippet-only rows are lookup "
+                    "candidates, not proof of views, momentum, CTR, AVD, or retention."
+                ),
                 "note": (
                     "Use these public results to choose a reference URL. Do not claim private AVD, CTR, "
                     "or retention from this tool."
@@ -3400,7 +3437,7 @@ def execute_tool(
                 fetch_channel_snapshot,
                 shape_catalyst_insights,
             )
-            from studio_analytics_router import _fetch_public_search_videos, _predict_topics
+            from studio_analytics_router import _fetch_public_search_videos, _predict_topics, _public_search_evidence_summary
 
             reg_key = str(args.get("registry_key") or "").strip()
             selected_channel_id = str(args.get("channel_id") or "").strip()
@@ -3450,7 +3487,13 @@ def execute_tool(
                 "fresh_public_search": fresh,
                 "channel": channel_block,
                 "trending_sample": videos[:15],
+                "evidence_summary": _public_search_evidence_summary(videos),
                 "recommended_topics": predictions[:12],
+                "evidence_contract": (
+                    "Recommendations are only as strong as their cited evidence. Quote the matching "
+                    "trending_sample rows with hydrated stats and cache_status; if rows are snippet_only "
+                    "or low-signal, label the recommendation experimental."
+                ),
                 "next_actions": (playbook.get("recommended_next_actions") or [])[:5],
                 "hardest_steps_reminder": [
                     "Script-writing + story beats (use reference blueprint if you linked a Lume/MrBeast video)",

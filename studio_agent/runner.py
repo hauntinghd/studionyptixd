@@ -1639,6 +1639,13 @@ This is how the agent (and you) learn what actually makes videos perform — use
    `analytics_data_quality`. Use `growth_playbook` for brand_new / early / growing / established.
    For 0-sub channels: positioning + competitor homework, NOT "why X failed."
 4. `get_public_search_trends` — demand when harvest is thin or channel is new.
+   Public trend evidence contract:
+   - Public search is not private YouTube Analytics. For every trend/topic claim, cite hydrated
+     evidence rows with video_id/title/channel/views/likes/duration/published_at/cache_status.
+   - Never say "fresh YouTube search data", "trending", "high search volume", or exact view-count
+     precedent unless the tool returned hydrated_video_stats and a support_label that justifies it.
+   - Snippet-only, stale-cache, weak, or low-signal rows must be described as experimental or
+     unsupported, not proven.
 5. `get_studio_credits` before expensive renders; low balance → Wallet top-up (unlimited purchases).
 
 Always explain: what's working, what's not, recommended next 1–3 actions, then offer to render.
