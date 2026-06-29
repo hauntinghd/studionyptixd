@@ -68,6 +68,7 @@ from routes import (
     build_media_router,
     build_misc_router,
     build_refund_router,
+    build_studio_utility_router,
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
 from studio_agent_router import build_studio_agent_router
@@ -19210,7 +19211,6 @@ mount_router(
 )
 
 
-@app.get("/api/studio/shorts/ideas", include_in_schema=False)
 async def _studio_shorts_ideas(q: str = "", max_results: int = 8, seed: str = ""):
     """Live YouTube Shorts idea pull for the Spark modal.
     Uses Catalyst's existing public-YouTube plumbing (quota + cache) so
@@ -19253,7 +19253,6 @@ async def _studio_shorts_ideas(q: str = "", max_results: int = 8, seed: str = ""
     return {"ideas": shuffled[:wanted]}
 
 
-@app.get("/api/studio/queue/status", include_in_schema=False)
 async def _studio_queue_status():
     """Public read-only fal.ai queue snapshot for the user-facing queue UI.
     Used by the frontend to surface 'You're #N in line' during Reddit-promo-
@@ -19287,6 +19286,15 @@ async def _studio_queue_status():
         "eta_sec": eta_sec,
         "saturated": saturated,
     }
+
+
+mount_router(
+    app,
+    build_studio_utility_router(
+        shorts_ideas_endpoint=_studio_shorts_ideas,
+        queue_status_endpoint=_studio_queue_status,
+    ),
+)
 
 
 async def _youtube_upload_video_for_user(*, user: dict, session_id: str, channel_id: str, privacy: str = "private") -> dict:

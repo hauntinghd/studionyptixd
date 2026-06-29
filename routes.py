@@ -240,6 +240,27 @@ def build_refund_router(
     return router
 
 
+def build_studio_utility_router(
+    *,
+    shorts_ideas_endpoint,
+    queue_status_endpoint,
+):
+    router = APIRouter()
+    router.add_api_route(
+        "/api/studio/shorts/ideas",
+        shorts_ideas_endpoint,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    router.add_api_route(
+        "/api/studio/queue/status",
+        queue_status_endpoint,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    return router
+
+
 def build_media_router(
     *,
     auto_scene_image_handler,
