@@ -212,6 +212,34 @@ def build_misc_router(
     return router
 
 
+def build_refund_router(
+    *,
+    refund_request_endpoint,
+    admin_refunds_list_endpoint,
+    admin_refund_update_endpoint,
+):
+    router = APIRouter()
+    router.add_api_route(
+        "/api/billing/refund-request",
+        refund_request_endpoint,
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    router.add_api_route(
+        "/api/admin/refunds",
+        admin_refunds_list_endpoint,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    router.add_api_route(
+        "/api/admin/refunds/{refund_id}",
+        admin_refund_update_endpoint,
+        methods=["PATCH"],
+        include_in_schema=False,
+    )
+    return router
+
+
 def build_media_router(
     *,
     auto_scene_image_handler,

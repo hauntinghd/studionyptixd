@@ -67,6 +67,7 @@ from routes import (
     build_longform_creative_router,
     build_media_router,
     build_misc_router,
+    build_refund_router,
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
 from studio_agent_router import build_studio_agent_router
@@ -19008,7 +19009,6 @@ mount_router(
 )
 
 
-@app.post("/api/billing/refund-request", include_in_schema=False)
 async def _billing_refund_request(req: Request):
     """User-submitted refund request. No Discord join required.
     Writes a row to public.refund_requests in Supabase. If the table
@@ -19099,7 +19099,6 @@ async def _billing_refund_request(req: Request):
     return {"ok": True, "stored": "supabase" if wrote_remote else "local", "status": "pending"}
 
 
-@app.get("/api/admin/refunds", include_in_schema=False)
 async def _admin_refunds_list(request: Request):
     """Admin view: all refund requests + verified users roster."""
     user = await get_current_user_from_request(request) if request else None
@@ -19155,7 +19154,6 @@ async def _admin_refunds_list(request: Request):
     }
 
 
-@app.patch("/api/admin/refunds/{refund_id}", include_in_schema=False)
 async def _admin_refund_update(refund_id: str, request: Request):
     """Admin PATCH: update status + admin note on a refund request."""
     user = await get_current_user_from_request(request) if request else None
@@ -19200,6 +19198,16 @@ async def _admin_refund_update(refund_id: str, request: Request):
         except Exception as e:
             raise HTTPException(500, f"Supabase update error: {e}")
     return {"ok": True, "updated": update_payload}
+
+
+mount_router(
+    app,
+    build_refund_router(
+        refund_request_endpoint=_billing_refund_request,
+        admin_refunds_list_endpoint=_admin_refunds_list,
+        admin_refund_update_endpoint=_admin_refund_update,
+    ),
+)
 
 
 @app.get("/api/studio/shorts/ideas", include_in_schema=False)
