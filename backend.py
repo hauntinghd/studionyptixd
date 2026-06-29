@@ -19696,6 +19696,7 @@ _clone_video = build_clone_video_handler(
     temp_dir=TEMP_DIR,
     jobs_ref=jobs,
     enqueue_generation_job=enqueue_generation_job,
+    queue_full_error=QueueFullError,
     run_clone_pipeline=run_clone_pipeline,
     persist_job_state=persist_job_state,
 )

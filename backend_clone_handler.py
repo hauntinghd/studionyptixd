@@ -8,8 +8,6 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from queue_manager import QueueFullError
-
 
 def build_clone_video_handler(
     *,
@@ -22,6 +20,7 @@ def build_clone_video_handler(
     temp_dir: Path,
     jobs_ref: dict,
     enqueue_generation_job,
+    queue_full_error,
     run_clone_pipeline,
     persist_job_state,
 ):
@@ -78,7 +77,7 @@ def build_clone_video_handler(
                 run_clone_pipeline,
                 (job_id, topic, video_path, normalized_source_url, analytics_notes, res),
             )
-        except QueueFullError as exc:
+        except queue_full_error as exc:
             jobs_ref[job_id]["status"] = "error"
             jobs_ref[job_id]["error"] = str(exc)
             await persist_job_state(job_id, jobs_ref[job_id])
