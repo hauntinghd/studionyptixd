@@ -11,12 +11,14 @@ __pycache__/
 *.log
 ViralShorts-App/node_modules/
 shadow_v10_edge.py
+shadow_*
 PASTE_*.txt
 gen_dataset_xai.py
 deploy_*.sh
 restart_be.sh
 agent-transcripts/
 terminals/
+analysis/incoming_review/
 /build/
 /dist/
 ViralShorts-App/dist/

@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all top-level Python modules so backend splits are always packaged.
 COPY *.py ./
-COPY client_secrets.json .
 COPY ops ./ops
 # Skeleton AI short-form pipeline package — Casey 2026-05-05 rebuild.
 # Top-level *.py glob above does NOT recurse into subpackages.

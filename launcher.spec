@@ -1,10 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('ViralShorts-App/dist', 'ViralShorts-App/dist'), ('client_secrets.json', '.')],
+    datas=[('ViralShorts-App/dist', 'ViralShorts-App/dist')] + ([('client_secrets.json', '.')] if os.path.exists('client_secrets.json') else []),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

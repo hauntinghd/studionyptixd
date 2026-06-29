@@ -38,7 +38,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Copy all top-level Python modules (backend is ~30 files including routes.py)
 COPY *.py ./
-COPY client_secrets.json ./
 COPY ops ./ops
 
 # Frontend static assets
