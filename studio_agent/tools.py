@@ -3501,7 +3501,7 @@ def execute_tool(
                 ],
             }
 
-        result = _run_async(_topics())
+        result = json.dumps(_run_async(_topics()), indent=2, ensure_ascii=False)
         telemetry.record_event(
             user_id,
             "topic_recommendations",

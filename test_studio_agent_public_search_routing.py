@@ -2,12 +2,15 @@ import os
 import sys
 import types
 import asyncio
+import json
+from unittest.mock import patch
 
 os.environ["REDIS_QUEUE_ENABLED"] = "0"
 os.environ["REDIS_URL"] = ""
 sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent.runner import _fire_verification_step, _needs_fresh_public_search, _needs_public_search_preflight
+from studio_agent import tools as agent_tools
 
 
 def test_updated_data_followup_requires_public_search_preflight():
@@ -45,6 +48,32 @@ def test_verification_step_event_payload_is_structured():
             "required": True,
         }
     ]
+
+
+def test_recommend_video_topics_returns_serialized_tool_result():
+    def fake_run_async(coro):
+        coro.close()
+        return {
+            "recommended_topics": [{"topic": "Why People Fall Under Your Influence"}],
+            "trending_sample": [],
+        }
+
+    with (
+        patch.object(agent_tools, "_run_async", side_effect=fake_run_async),
+        patch.object(agent_tools.telemetry, "record_event"),
+        patch.object(agent_tools.telemetry, "record_tool_call"),
+    ):
+        result = agent_tools.execute_tool_logged(
+            "recommend_video_topics",
+            {"niche_query": "psychology"},
+            user_id="test-user",
+            content_format="short",
+            session_id="test-session",
+        )
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["recommended_topics"][0]["topic"] == "Why People Fall Under Your Influence"
 
 
 if __name__ == "__main__":
