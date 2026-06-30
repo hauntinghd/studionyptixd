@@ -33,6 +33,7 @@ from backend_health import build_health_payload
 from backend_admin_analytics import build_admin_analytics_payload
 from backend_billing_audit import build_admin_billing_audit_payload
 from backend_feedback_handlers import build_admin_youtube_quota_handler, build_submit_feedback_handler
+from backend_generation_helpers import estimate_auto_short_credits
 from backend_misc_payloads import (
     build_admin_waiting_list_payload,
     build_landing_notifications_payload,
@@ -18833,10 +18834,12 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
     _auto_estimated_scene_count = 10
     _auto_video_per_scene = _creative_video_credit_multiplier(resolved_video_model_id)
     _auto_image_per_scene = _creative_image_credit_cost(resolved_image_model_id, template=req.template)
-    if animation_enabled:
-        credits_required = max(1, _auto_estimated_scene_count * _auto_video_per_scene + _auto_estimated_scene_count * _auto_image_per_scene)
-    else:
-        credits_required = max(1, _auto_estimated_scene_count * _auto_image_per_scene)
+    credits_required = estimate_auto_short_credits(
+        scene_count=_auto_estimated_scene_count,
+        video_per_scene=_auto_video_per_scene,
+        image_per_scene=_auto_image_per_scene,
+        animation_enabled=animation_enabled,
+    )
 
     user_plan = "starter"
     plan_limits = PLAN_LIMITS["starter"]
