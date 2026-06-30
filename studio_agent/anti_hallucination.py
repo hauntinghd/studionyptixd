@@ -618,7 +618,8 @@ def guard_text(assistant_text: str, report: AuditReport) -> str:
         if "video-level avd" in joined or "video-level retention" in joined:
             return (
                 "I cannot name an exact high-AVD winner from this tool result yet because per-video retention rows "
-                "are unavailable. I should continue from the available selected-channel snapshot/public data, make "
+                "are unavailable. I need YouTube Analytics OAuth with video-level retention rows before claiming a "
+                "specific winner. I should continue from the available selected-channel snapshot/public data, make "
                 "that limitation explicit, and avoid inventing a specific winner."
             )
         return (
