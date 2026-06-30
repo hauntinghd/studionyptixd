@@ -48,7 +48,7 @@ export default function MembershipPremiumView({
                             <Sparkles className="h-4 w-4" />
                             Membership
                         </div>
-                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Studio & Studio Pro</h1>
+                        <h1 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Studio Pro credit tiers</h1>
                         <p className="mt-3 max-w-xl text-sm leading-relaxed text-gray-400">
                             One membership unlocks Studio Agent, premium rendering, packaging analysis, and the unified credit wallet.
                         </p>
@@ -80,13 +80,13 @@ export default function MembershipPremiumView({
             <section className="grid gap-3 md:grid-cols-3">
                 <ValueTile title="Production command" body="Studio Agent plans, edits, animates, packages, and keeps the user in the approval loop." />
                 <ValueTile title="Usage-based wallet" body="Credits map to real OpenRouter, fal, and ElevenLabs usage instead of fake render limits." />
-                <ValueTile title="Scale path" body="Studio is the creator plan. Studio Pro is built for premium long-form and multiple channels." />
+                <ValueTile title="Scale path" body="Start with the monthly credits you need, then upgrade the same Studio Pro plan as production grows." />
             </section>
 
             <section>
-                <h2 className="text-lg font-bold text-white">Plans</h2>
+                <h2 className="text-lg font-bold text-white">Monthly credit tiers</h2>
                 <p className="mt-1 text-sm text-gray-500">Unused monthly credits roll over for one additional month.</p>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     {plans.map((plan) => (
                         <div
                             key={plan.id}
@@ -135,7 +135,7 @@ export default function MembershipPremiumView({
             <section className="rounded-2xl border border-white/[0.08] bg-gradient-to-br from-white/[0.04] to-white/[0.015] p-6">
                 <h2 className="text-lg font-semibold text-white">How billing works</h2>
                 <ol className="mt-4 list-decimal space-y-2 pl-4 text-sm text-gray-400">
-                    <li>Pick Studio ($60 / 2,000 credits) or Studio Pro ($200 / 8,000 credits).</li>
+                    <li>Pick the Studio Pro monthly credit tier that fits your production volume.</li>
                     <li>Credits debit from real usage - OpenRouter tokens, fal renders, ElevenLabs characters.</li>
                     <li>Reload 1,000 additional credits for $25 whenever a production needs more capacity.</li>
                     <li>Purchased reload credits stay on your account if membership lapses.</li>

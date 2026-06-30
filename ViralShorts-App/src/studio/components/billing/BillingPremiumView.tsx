@@ -54,6 +54,7 @@ export default function BillingPremiumView({
     topUpSectionRef: RefObject<HTMLElement>;
     refundSection: React.ReactNode;
 }) {
+    const currentPlanTitle = publicPlans.find((plan) => plan.id === normalizedCurrentPlan)?.title || 'Active';
     return (
         <div className="mx-auto max-w-7xl space-y-8">
             {paypalBanner}
@@ -82,11 +83,7 @@ export default function BillingPremiumView({
                             label="Plan"
                             value={
                                 billingActive
-                                    ? normalizedCurrentPlan === 'creator'
-                                        ? 'Studio'
-                                        : normalizedCurrentPlan === 'studio'
-                                            ? 'Studio Pro'
-                                            : 'Active'
+                                    ? currentPlanTitle
                                     : 'No plan'
                             }
                             sub="membership"
@@ -98,14 +95,14 @@ export default function BillingPremiumView({
             <section>
                 <div className="flex flex-wrap items-end justify-between gap-4">
                     <div>
-                        <h2 className="text-lg font-bold text-white">Plans</h2>
-                        <p className="mt-1 text-sm text-gray-500">Monthly credits roll over once. Purchased reloads remain available until used.</p>
+                        <h2 className="text-lg font-bold text-white">Monthly credit tiers</h2>
+                        <p className="mt-1 text-sm text-gray-500">One Studio Pro plan. Upgrade monthly credits when production needs more capacity.</p>
                     </div>
                     <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
                         Usage-priced
                     </span>
                 </div>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     {publicPlans.map((planCard) => {
                         const isCurrent = billingActive && normalizedCurrentPlan === planCard.id;
                         const actionLabel = isCurrent

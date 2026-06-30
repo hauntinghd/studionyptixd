@@ -157,7 +157,7 @@ export const PUBLIC_TEMPLATE_IDS = new Set([
     'skeleton',
     'chatstory',
 ]);
-export const CHAT_STORY_MONTHLY_PLAN_IDS = new Set(['starter', 'creator', 'pro']);
+export const CHAT_STORY_MONTHLY_PLAN_IDS = new Set(['starter', 'creator', 'pro', 'studio', 'studio_pro_2k', 'studio_pro_5k', 'studio_pro_8k', 'studio_pro_15k']);
 export const hasChatStoryTemplateAccess = (
     planName: string | null | undefined,
     billingActive: boolean,
@@ -280,7 +280,7 @@ const readJsonResponse = async <T = any>(res: Response): Promise<{ data: T | nul
 
 const normalizeWaitlistPlan = (planName: string): string => {
     const normalized = String(planName || "").trim().toLowerCase();
-    if (["starter", "creator", "pro"].includes(normalized)) return normalized;
+    if (["starter", "creator", "pro", "studio", "studio_pro_2k", "studio_pro_5k", "studio_pro_8k", "studio_pro_15k"].includes(normalized)) return normalized;
     return "starter";
 };
 
@@ -500,7 +500,7 @@ export const upsertWaitlistFallbackRow = async (
 // ── Waiting List Plan Config ────────────────────────────────────────────────
 export const WAITLIST_PLANS: { name: string; label: string; price: number }[] = [];
 
-export type Plan = 'none' | 'free' | 'starter' | 'creator' | 'pro';
+export type Plan = 'none' | 'free' | 'starter' | 'creator' | 'pro' | 'studio' | 'studio_pro_2k' | 'studio_pro_5k' | 'studio_pro_8k' | 'studio_pro_15k';
 export type TopupPack = { price_id: string; pack: string; credits: number; price_usd: number };
 export type PlanLimit = {
     videos_per_month?: number;
@@ -526,14 +526,26 @@ export type LaneAccessMap = Record<string, boolean>;
 export const PUBLIC_PLAN_LIMITS_FALLBACK: PlanLimitMap = {
     creator: { monthly_credits: 2000, price_usd: 60 },
     studio: { monthly_credits: 8000, price_usd: 200 },
+    studio_pro_2k: { monthly_credits: 2000, price_usd: 60 },
+    studio_pro_5k: { monthly_credits: 5000, price_usd: 125 },
+    studio_pro_8k: { monthly_credits: 8000, price_usd: 200 },
+    studio_pro_15k: { monthly_credits: 15000, price_usd: 350 },
 };
 export const PUBLIC_PLAN_PRICES_FALLBACK: PlanPriceMap = {
     creator: 60,
     studio: 200,
+    studio_pro_2k: 60,
+    studio_pro_5k: 125,
+    studio_pro_8k: 200,
+    studio_pro_15k: 350,
 };
 export const PUBLIC_PLAN_FEATURES_FALLBACK: PlanFeatureMap = {
     creator: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs'],
     studio: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
+    studio_pro_2k: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs'],
+    studio_pro_5k: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
+    studio_pro_8k: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
+    studio_pro_15k: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
 };
 export const PUBLIC_TOPUP_PACKS_FALLBACK: TopupPack[] = [
     { price_id: 'uc_reload', pack: 'reload', credits: 1000, price_usd: 25 },
@@ -601,7 +613,7 @@ export const AuthContext = createContext<AuthContextType>({
     nextRenewalUnix: 0, nextRenewalSource: '',
     billingAnchorUnix: 0,
     monthlyCreditsRemaining: 0, topupCreditsRemaining: 0, creditsTotalRemaining: 0, requiresTopup: false, topupPacks: PUBLIC_TOPUP_PACKS_FALLBACK,
-    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: PUBLIC_PLAN_LIMITS_FALLBACK, publicPlanFeatures: PUBLIC_PLAN_FEATURES_FALLBACK, publicPlanPrices: PUBLIC_PLAN_PRICES_FALLBACK, studioLaneAccess: {}, defaultMembershipPlanId: 'creator',
+    demoAccess: false, demoPriceId: '', demoComingSoon: true, publicPlanLimits: PUBLIC_PLAN_LIMITS_FALLBACK, publicPlanFeatures: PUBLIC_PLAN_FEATURES_FALLBACK, publicPlanPrices: PUBLIC_PLAN_PRICES_FALLBACK, studioLaneAccess: {}, defaultMembershipPlanId: 'studio_pro_2k',
     maintenanceBannerEnabled: false, maintenanceBannerMessage: '',
     longformOwnerBeta: false,
     waitlistOnlyMode: false,
@@ -639,7 +651,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [publicPlanFeatures, setPublicPlanFeatures] = useState<PlanFeatureMap>(PUBLIC_PLAN_FEATURES_FALLBACK);
     const [publicPlanPrices, setPublicPlanPrices] = useState<PlanPriceMap>(PUBLIC_PLAN_PRICES_FALLBACK);
     const [studioLaneAccess, setStudioLaneAccess] = useState<LaneAccessMap>({});
-    const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('creator');
+    const [defaultMembershipPlanId, setDefaultMembershipPlanId] = useState('studio_pro_2k');
     const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
     const [maintenanceBannerMessage, setMaintenanceBannerMessage] = useState('');
     const [longformOwnerBeta, setLongformOwnerBeta] = useState(false);
@@ -680,7 +692,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const normalized = String(rawValue || '').trim().toLowerCase();
         if (normalized === 'demo_pro' || normalized === 'elite') return 'pro';
         if (normalized === 'free' || normalized === 'none') return 'free';
-        if (normalized === 'starter' || normalized === 'creator' || normalized === 'pro') return normalized as Plan;
+        if (normalized === 'starter' || normalized === 'creator' || normalized === 'pro' || normalized === 'studio' || normalized === 'studio_pro_2k' || normalized === 'studio_pro_5k' || normalized === 'studio_pro_8k' || normalized === 'studio_pro_15k') return normalized as Plan;
         return fallback;
     }, []);
     useEffect(() => {
@@ -1100,8 +1112,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!session) return "Missing membership checkout details";
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
-        const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'creator') : normalizedPlanName;
-        const validPlan = targetPlanId === 'creator' || targetPlanId === 'studio';
+        const targetPlanId = isMembershipCheckout ? (defaultMembershipPlanId || 'studio_pro_2k') : normalizedPlanName;
+        const validPlan = ['creator', 'studio', 'studio_pro_2k', 'studio_pro_5k', 'studio_pro_8k', 'studio_pro_15k'].includes(targetPlanId);
         if (!validPlan) return "Missing membership checkout details";
         try {
             const res = await fetch(`${API}/api/checkout`, {

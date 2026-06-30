@@ -4231,24 +4231,24 @@ def _profile_plan_is_paid(plan: str) -> bool:
     normalized = str(plan or "").strip().lower()
     if not normalized or normalized in {"none", "free"}:
         return False
-    return normalized in PLAN_LIMITS
+    return normalized in PLAN_LIMITS or normalized in UNIFIED_PLANS
 
 
-CHAT_STORY_ALLOWED_PLANS = {"creator", "studio", "starter", "pro"}
-DEFAULT_MEMBERSHIP_PLAN_ID = "creator"
+CHAT_STORY_ALLOWED_PLANS = set(PUBLIC_PLAN_IDS) | {"creator", "studio", "starter", "pro"}
+DEFAULT_MEMBERSHIP_PLAN_ID = "studio_pro_2k"
 
 
 def _default_membership_plan_id() -> str:
-    return DEFAULT_MEMBERSHIP_PLAN_ID if DEFAULT_MEMBERSHIP_PLAN_ID in PLAN_LIMITS else "starter"
+    return DEFAULT_MEMBERSHIP_PLAN_ID if DEFAULT_MEMBERSHIP_PLAN_ID in UNIFIED_PLANS else "creator"
 
 
 def _membership_plan_for_user(user: Optional[dict], access_snapshot: Optional[dict] = None) -> str:
     snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
     plan = str((snapshot or {}).get("plan", "none") or "none").strip().lower()
-    if plan in PLAN_LIMITS:
+    if plan in PLAN_LIMITS or plan in UNIFIED_PLANS:
         return plan
     stored_plan = str((user or {}).get("plan", "free") or "free").strip().lower()
-    if stored_plan in PLAN_LIMITS:
+    if stored_plan in PLAN_LIMITS or stored_plan in UNIFIED_PLANS:
         return stored_plan
     return _default_membership_plan_id() if bool((snapshot or {}).get("billing_active")) else "free"
 
@@ -4272,7 +4272,7 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     )
     agent_live = is_admin or (
         bool((snapshot or {}).get("billing_active"))
-        and membership_plan in ("creator", "studio")
+        and membership_plan in UNIFIED_PLANS
     )
     return {
         "create": public_live,
@@ -19713,6 +19713,7 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
     if normalized_plan not in CHAT_STORY_ALLOWED_PLANS:
         raise HTTPException(400, "This membership plan is not available for checkout.")
     unified = UNIFIED_PLANS.get(normalized_plan) or {}
+    plan_display_name = str(unified.get("name") or normalized_plan.replace("_", " ").title()).strip()
     monthly_credits = int(unified.get("monthly_credits", 0) or 0)
     price_usd = float(unified.get("price_usd") or price_usd or 0.0)
     if price_usd <= 0:
@@ -19730,7 +19731,7 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
             "price_data": {
                 "currency": "usd",
                 "product_data": {
-                    "name": f"NYPTID Studio {normalized_plan.title()}",
+                    "name": f"NYPTID Studio {plan_display_name}",
                     "description": description,
                 },
                 "unit_amount": int(round(price_usd * 100)),

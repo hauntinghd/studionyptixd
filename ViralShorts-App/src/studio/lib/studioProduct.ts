@@ -238,7 +238,7 @@ export function estimateShortsRemaining(totalAc: number, tier: RenderTierId = 'd
     return Math.max(0, Math.floor(totalAc / cost));
 }
 
-export type UnifiedPlanId = 'creator' | 'studio';
+export type UnifiedPlanId = 'studio_pro_2k' | 'studio_pro_5k' | 'studio_pro_8k' | 'studio_pro_15k' | 'creator' | 'studio';
 
 export interface UnifiedPlan {
     id: UnifiedPlanId;
@@ -252,11 +252,11 @@ export interface UnifiedPlan {
 
 export const UNIFIED_PLANS: UnifiedPlan[] = [
     {
-        id: 'creator',
-        title: 'Studio',
+        id: 'studio_pro_2k',
+        title: 'Studio Pro 2K',
         priceUsd: 60,
         monthlyCredits: 2000,
-        description: 'Everything you need to ship consistently — Studio Agent, OpenRouter, fal renders, and ElevenLabs in one wallet.',
+        description: 'Starter monthly credit tier for consistent creators using Studio Agent, OpenRouter, fal, and ElevenLabs.',
         features: [
             '2,000 credits / month',
             'Unused monthly credits roll over for one month',
@@ -266,18 +266,46 @@ export const UNIFIED_PLANS: UnifiedPlan[] = [
         ],
     },
     {
-        id: 'studio',
-        title: 'Studio Pro',
+        id: 'studio_pro_5k',
+        title: 'Studio Pro 5K',
+        priceUsd: 125,
+        monthlyCredits: 5000,
+        description: 'More monthly capacity for creators producing across multiple formats or channels.',
+        features: [
+            '5,000 credits / month',
+            'Unused monthly credits roll over for one month',
+            'Studio Agent + full OpenRouter catalog',
+            'More render and voice headroom',
+            'Hard cost approval before paid generation',
+        ],
+    },
+    {
+        id: 'studio_pro_8k',
+        title: 'Studio Pro 8K',
         priceUsd: 200,
         monthlyCredits: 8000,
         bestValue: true,
-        description: 'Best value per credit for daily operators and teams running multiple channels.',
+        description: 'Best value per credit for daily operators running multiple channels.',
         features: [
             '8,000 credits / month',
             'Unused monthly credits roll over for one month',
             'Priority render queue',
             'Higher concurrency and larger productions',
-            'Everything in Studio',
+            'Everything in lower Studio Pro tiers',
+        ],
+    },
+    {
+        id: 'studio_pro_15k',
+        title: 'Studio Pro 15K',
+        priceUsd: 350,
+        monthlyCredits: 15000,
+        description: 'High-volume monthly capacity for heavy production runs and channel scaling.',
+        features: [
+            '15,000 credits / month',
+            'Unused monthly credits roll over for one month',
+            'Priority render queue',
+            'Highest monthly production headroom',
+            'Everything in lower Studio Pro tiers',
         ],
     },
 ];

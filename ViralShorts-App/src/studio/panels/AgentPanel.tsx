@@ -47,6 +47,15 @@ interface ChatMessage {
     productionUpdate?: ProductionProgressUpdate;
 }
 
+interface AgentToolTrace {
+    id: string;
+    event: 'status' | 'tool_start' | 'tool_end' | 'error';
+    label: string;
+    detail?: string;
+    status?: string;
+    at: number;
+}
+
 interface SessionUiCache {
     messages: ChatMessage[];
     pending: PendingAction[];
@@ -435,6 +444,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [runningBySession, setRunningBySession] = useState<Record<string, string>>({});
     const [resuming, setResuming] = useState(false);
     const [toolActivity, setToolActivity] = useState('');
+    const [toolTrace, setToolTrace] = useState<AgentToolTrace[]>([]);
     const [booting, setBooting] = useState(true);
     const [history, setHistory] = useState<SessionSummary[]>([]);
     const [historyQuery, setHistoryQuery] = useState('');
@@ -495,6 +505,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const value = typeof next === 'function' ? next(old) : next;
             return { ...prev, [sid]: value };
         });
+    }, []);
+
+    const appendToolTrace = useCallback((entry: Omit<AgentToolTrace, 'id' | 'at'>) => {
+        setToolTrace((rows) => [
+            {
+                ...entry,
+                id: `${Date.now()}-${rows.length}`,
+                at: Date.now(),
+            },
+            ...rows,
+        ].slice(0, 12));
     }, []);
 
     const markSessionRunning = useCallback((sid: string, label = 'Thinking...') => {
@@ -1425,6 +1446,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setError('');
             setQueueHint('');
             setToolActivity('');
+            setToolTrace([]);
             stickToBottomRef.current = true;
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
@@ -1440,12 +1462,27 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 const onStreamEvent = (ev: AgentStreamEvent) => {
                     if (sessionIdRef.current !== activeSessionId) return;
                     if (ev.event === 'tool_start' && ev.tool) {
+                        const label = toolLabel(ev.tool);
+                        appendToolTrace({
+                            event: 'tool_start',
+                            label: ev.awaiting_approval ? `Queued: ${label}` : `Starting: ${label}`,
+                            detail: ev.round ? `Round ${ev.round}` : undefined,
+                            status: ev.awaiting_approval ? 'approval' : 'running',
+                        });
                         setToolActivity(
                             ev.awaiting_approval
                                 ? `Queued for approval: ${toolLabel(ev.tool)}`
                                 : toolLabel(ev.tool),
                         );
                     } else if (ev.event === 'tool_end' && ev.tool) {
+                        const label = toolLabel(ev.tool);
+                        const failed = ev.status === 'error';
+                        appendToolTrace({
+                            event: 'tool_end',
+                            label: failed ? `Failed: ${label}` : `Finished: ${label}`,
+                            detail: ev.error || ev.status || (failed ? 'Tool failed' : 'ok'),
+                            status: failed ? 'error' : 'done',
+                        });
                         setToolActivity(
                             ev.status === 'error'
                                 ? `${toolLabel(ev.tool)} — error`
@@ -1453,6 +1490,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         );
                     } else if (ev.event === 'status' && ev.message) {
                         setToolActivity(ev.message);
+                        if (!/still working/i.test(String(ev.message))) {
+                            appendToolTrace({
+                                event: 'status',
+                                label: String(ev.message),
+                                status: 'status',
+                            });
+                        }
+                    } else if (ev.event === 'error') {
+                        appendToolTrace({
+                            event: 'error',
+                            label: 'Stream error',
+                            detail: String(ev.message || 'Studio Agent stream error'),
+                            status: 'error',
+                        });
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
                         ingestActiveJobs(ev.jobs, activeSessionId);
                     } else if (ev.event === 'pending_actions' && Array.isArray(ev.actions)) {
@@ -1526,6 +1577,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 await refreshHistory();
             } catch (e) {
                 if (sessionIdRef.current !== activeSessionId) return;
+                appendToolTrace({
+                    event: 'error',
+                    label: 'Request failed',
+                    detail: (e as Error).message,
+                    status: 'error',
+                });
                 setError((e as Error).message);
                 setQueueHint('');
             } finally {
@@ -1538,6 +1595,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         },
         [
             authFetch,
+            appendToolTrace,
             buildOutboundAttachments,
             buildOutboundMessage,
             captionMode,
@@ -2279,6 +2337,49 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     >
                         {dictation.error || dictationPreview}
                     </p>
+                )}
+
+                {(toolTrace.length > 0 || toolActivity) && (
+                    <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] px-3 py-2 shadow-lg shadow-black/20">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-100">
+                                <Shield className="h-3.5 w-3.5 text-cyan-300" />
+                                Agent activity
+                            </p>
+                            <p className="truncate text-[11px] text-cyan-100/80">
+                                {toolActivity || 'Watching tool events'}
+                            </p>
+                        </div>
+                        {toolTrace.length > 0 && (
+                            <div className="mt-2 grid gap-1">
+                                {toolTrace.slice(0, 4).map((row) => (
+                                    <div
+                                        key={row.id}
+                                        className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
+                                            row.status === 'error'
+                                                ? 'border-red-400/25 bg-red-500/10 text-red-100'
+                                                : row.status === 'done'
+                                                    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100'
+                                                    : 'border-white/10 bg-black/20 text-gray-200'
+                                        }`}
+                                    >
+                                        <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-80" />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="truncate font-medium">{row.label}</span>
+                                                <span className="shrink-0 text-[10px] text-white/35">
+                                                    {new Date(row.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                                                </span>
+                                            </div>
+                                            {row.detail && (
+                                                <p className="mt-0.5 line-clamp-2 text-white/55">{row.detail}</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 )}
 
                 <div

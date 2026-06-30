@@ -511,6 +511,10 @@ PLAN_PRICE_USD = {
     "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
     "creator": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", os.getenv("PLAN_PRICE_CREATOR_USD", "60"))),
     "studio": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
+    "studio_pro_2k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_USD", "60")),
+    "studio_pro_5k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "125")),
+    "studio_pro_8k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_USD", "200")),
+    "studio_pro_15k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_USD", "350")),
     "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
     "elite": float(os.getenv("PLAN_PRICE_ELITE_USD", "300")),
     "demo_pro": float(os.getenv("PLAN_PRICE_DEMO_PRO_USD", "150")),
@@ -518,7 +522,7 @@ PLAN_PRICE_USD = {
 
 # ---------------------------------------------------------------------------
 # Unified credit system (single wallet across OpenRouter + fal + ElevenLabs).
-# Replaces the fragmented animation/render-fuel/shorts wallets. Two plans only.
+# Replaces the fragmented animation/render-fuel/shorts wallets.
 # Credits are debited per operation from actual provider USD cost; see
 # CREDIT_USD_VALUE for the conversion rate.
 #
@@ -528,18 +532,49 @@ PLAN_PRICE_USD = {
 UNIFIED_PLANS = {
     "creator": {
         "id": "creator",
-        "name": "Studio",
+        "name": "Studio Pro 2K",
         "price_usd": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", "60")),
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_CREATOR_CREDITS", "2000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_CREATOR_PRICE_ID", "").strip(),
+        "legacy": True,
     },
     "studio": {
         "id": "studio",
-        "name": "Studio Pro",
+        "name": "Studio Pro 8K",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_CREDITS", "8000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRICE_ID", "").strip(),
         "best_value": True,
+        "legacy": True,
+    },
+    "studio_pro_2k": {
+        "id": "studio_pro_2k",
+        "name": "Studio Pro 2K",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_USD", "60")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_CREDITS", "2000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_PRICE_ID", os.getenv("UNIFIED_PLAN_CREATOR_PRICE_ID", "")).strip(),
+    },
+    "studio_pro_5k": {
+        "id": "studio_pro_5k",
+        "name": "Studio Pro 5K",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "125")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_CREDITS", "5000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_PRICE_ID", "").strip(),
+    },
+    "studio_pro_8k": {
+        "id": "studio_pro_8k",
+        "name": "Studio Pro 8K",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_USD", "200")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_CREDITS", "8000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_PRICE_ID", os.getenv("UNIFIED_PLAN_STUDIO_PRICE_ID", "")).strip(),
+        "best_value": True,
+    },
+    "studio_pro_15k": {
+        "id": "studio_pro_15k",
+        "name": "Studio Pro 15K",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_USD", "350")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_CREDITS", "15000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_PRICE_ID", "").strip(),
     },
 }
 for _plan_id, _plan_spec in UNIFIED_PLANS.items():
@@ -577,8 +612,8 @@ TOPUP_PACKS = {
     }
     for spec in TOPUP_PACK_SPECS
 }
-# Public-facing membership is the unified two-tier model only.
-PUBLIC_PLAN_IDS = ("creator", "studio")
+# Public-facing membership is a single Studio Pro product with selectable monthly credit tiers.
+PUBLIC_PLAN_IDS = ("studio_pro_2k", "studio_pro_5k", "studio_pro_8k", "studio_pro_15k")
 PUBLIC_TOPUP_PACK_IDS = tuple(str(spec["id"]) for spec in TOPUP_PACK_SPECS)
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
