@@ -1,9 +1,12 @@
 import json
+import os
 import shutil
 import sys
+import time
 import types
 import unittest
 import uuid
+from unittest.mock import patch
 
 sys.modules.setdefault("stripe", types.SimpleNamespace())
 
@@ -154,6 +157,40 @@ class ProductionBudgetControlTests(unittest.TestCase):
             self.assertEqual(snap["queue_lane"], "render")
             self.assertIn("await_scene_review", snap["stage_gates"])
             self.assertTrue(snap["production_control"]["resume_safe"])
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_stale_shortform_snapshot_reclaims_from_durable_job_spec(self):
+        job_id = f"test{uuid.uuid4().hex[:12]}"
+        workspace = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "job_spec.json").write_text(
+                json.dumps({"category_key": "people_blogs", "topic": "Recovered short"}),
+                encoding="utf-8",
+            )
+            (workspace / "progress.json").write_text(
+                json.dumps({"progress": 20, "stage": "stills", "detail": "Scene 1/12 still"}),
+                encoding="utf-8",
+            )
+            (workspace / "heartbeat.txt").write_text("old", encoding="utf-8")
+            old_ts = time.time() - 10
+            for name in ("job_spec.json", "progress.json", "heartbeat.txt"):
+                os.utime(workspace / name, (old_ts, old_ts))
+
+            with (
+                patch.object(jobs, "SHORTFORM_RECLAIM_SEC", 1),
+                patch.object(jobs, "SHORTFORM_STALE_SEC", 999999),
+                patch.object(jobs, "_start_shortform_reclaim_job", return_value=True) as reclaim,
+            ):
+                snap = jobs.get_job_snapshot(job_id, "shortform")
+
+            reclaim.assert_called_once_with(workspace, job_id)
+            self.assertEqual(snap["status"], "running")
+            self.assertEqual(snap["stage"], "restarting")
+            self.assertEqual(snap["stage_label"], "Restarting")
+            self.assertGreaterEqual(snap["progress"], 22)
+            self.assertIn("Resuming from the saved job spec", snap["stage_detail"])
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 

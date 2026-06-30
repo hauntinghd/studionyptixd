@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,9 @@ SKELETON_OUTPUT.mkdir(parents=True, exist_ok=True)
 # Shortform jobs with no progress.json / heartbeat update for this long are marked failed.
 # Heartbeat is written by a sidecar thread during long blocking ops (fal subscribe etc.)
 # so that slow-but-alive i2v / still renders don't get falsely timed out.
-SHORTFORM_STALE_SEC = int(os.getenv("SHORTFORM_JOB_STALE_SEC", "14400"))  # 4 hours default (was 2h)
+SHORTFORM_STALE_SEC = int(os.getenv("SHORTFORM_JOB_STALE_SEC", "900"))  # 15 min before surfacing failure
+SHORTFORM_RECLAIM_SEC = int(os.getenv("SHORTFORM_JOB_RECLAIM_SEC", "180"))  # resume after deploy/restart
+SHORTFORM_RECLAIM_MARKER_SEC = int(os.getenv("SHORTFORM_JOB_RECLAIM_MARKER_SEC", "240"))
 
 JOB_START_TOOLS = frozenset({
     "start_longform_render",
@@ -273,6 +276,88 @@ def _write_shortform_result(workspace: Path, *, status: str, error: str = "", **
     (workspace / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _heartbeat_loop(stop_event: threading.Event, hb_path: Path, interval: float = 20.0) -> None:
+    while not stop_event.wait(interval):
+        try:
+            hb_path.touch(exist_ok=True)
+        except Exception:
+            pass
+
+
+def _start_shortform_reclaim_job(workspace: Path, job_id: str) -> bool:
+    """Relaunch a shortform still-planning worker from its durable job spec."""
+    spec_path = workspace / "job_spec.json"
+    if not spec_path.is_file() or (workspace / "result.json").is_file():
+        return False
+    marker = workspace / "RECLAIMING"
+    now = time.time()
+    if marker.is_file() and (now - marker.stat().st_mtime) < SHORTFORM_RECLAIM_MARKER_SEC:
+        return False
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            return False
+        marker.write_text(str(now), encoding="utf-8")
+        (workspace / "progress.json").write_text(
+            json.dumps({
+                "stage": "restarting",
+                "progress": 22,
+                "detail": "Worker was interrupted; resuming still generation from saved job spec.",
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        return False
+
+    def _relaunch() -> None:
+        import traceback as _tb
+
+        hb = workspace / "heartbeat.txt"
+        stop = threading.Event()
+        hb_thread = threading.Thread(target=_heartbeat_loop, args=(stop, hb), daemon=True, name=f"hb-reclaim-{job_id}")
+        hb_thread.start()
+        try:
+            hb.touch(exist_ok=True)
+            from skeleton_ai.styled_pipeline import plan_scenes
+
+            plan_scenes(
+                category_key=str(spec.get("category_key") or "people_blogs"),
+                topic=spec.get("topic"),
+                workspace=workspace,
+                render_style=str(spec.get("render_style") or "cinematic"),
+                tier=str(spec.get("tier") or "standard"),
+                video_model=spec.get("video_model"),
+                visual_brief=spec.get("visual_brief"),
+                script_override=spec.get("script"),
+                user_id=spec.get("user_id"),
+                default_animate=False,
+                reference_images=list(spec.get("reference_images") or []),
+                sound_design_brief=str(spec.get("sound_design_brief") or ""),
+            )
+        except Exception as exc:
+            try:
+                (workspace / "job.log").write_text(
+                    f"RECLAIM FAILED {time.time()}\n{exc}\n\n{_tb.format_exc()}",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            try:
+                _write_shortform_result(workspace, status="failed", error=str(exc), job_id=job_id)
+            except Exception:
+                pass
+        finally:
+            stop.set()
+            try:
+                hb.touch(exist_ok=True)
+                marker.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    threading.Thread(target=_relaunch, daemon=True, name=f"reclaim-{job_id}").start()
+    return True
+
+
 def _shortform_failed_snap(job_id: str, error: str, *, progress: int = 0) -> dict[str, Any]:
     return {
         "job_id": job_id,
@@ -327,7 +412,8 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
         for p in (progress_path, spec_path, workspace / "script.txt", workspace / "heartbeat.txt"):
             if p.is_file():
                 last_touch = max(last_touch, p.stat().st_mtime)
-        if last_touch and (time.time() - last_touch) > SHORTFORM_STALE_SEC:
+        age = time.time() - last_touch if last_touch else 0.0
+        if last_touch and age > SHORTFORM_STALE_SEC:
             # Include diagnostic info so user (and future training data) can see why it looked dead.
             ages = {}
             for p in (progress_path, spec_path, workspace / "script.txt", workspace / "heartbeat.txt"):
@@ -335,6 +421,11 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                     ages[p.name] = int(time.time() - p.stat().st_mtime)
             err = (
                 f"No progress for {SHORTFORM_STALE_SEC // 3600}+ hours — "
+                "production timed out. Tap Retry to run again."
+                f" (last file ages: {ages})"
+            )
+            err = (
+                f"No progress for {max(1, SHORTFORM_STALE_SEC // 60)}+ minutes - "
                 "production timed out. Tap Retry to run again."
                 f" (last file ages: {ages})"
             )
@@ -354,6 +445,12 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                     stage_detail = str(prog.get("detail") or stage_detail)
             except Exception:
                 pass
+        if last_touch and age > SHORTFORM_RECLAIM_SEC and spec_path.is_file():
+            if _start_shortform_reclaim_job(workspace, job_id):
+                progress = max(progress, 22)
+                stage = "restarting"
+                stage_label = "Restarting"
+                stage_detail = "The worker was interrupted, likely by a deploy/restart. Resuming from the saved job spec."
         snap = {
             "job_id": job_id,
             "kind": "shortform",
