@@ -32,6 +32,7 @@ from backend_public_config import build_public_config_payload
 from backend_health import build_health_payload
 from backend_admin_analytics import build_admin_analytics_payload
 from backend_billing_audit import build_admin_billing_audit_payload
+from backend_feedback_handlers import build_admin_youtube_quota_handler, build_submit_feedback_handler
 from backend_misc_payloads import (
     build_admin_waiting_list_payload,
     build_landing_notifications_payload,
@@ -18479,47 +18480,18 @@ _landing_notifications_payload = build_landing_notifications_payload(
     public_limit=LANDING_NOTIFICATIONS_PUBLIC_LIMIT,
 )
 
+_submit_feedback = build_submit_feedback_handler(
+    feedback_request_model=FeedbackRequest,
+    require_auth=require_auth,
+    training_data_dir=TRAINING_DATA_DIR,
+    clip_text=_clip_text,
+    log=log,
+)
 
-async def _submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
-    try:
-        rating = int(req.rating)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "rating must be an integer")
-    if rating < 1 or rating > 5:
-        raise HTTPException(400, "rating must be between 1 and 5")
-    row = {
-        "type": "studio_feedback",
-        "ts": time.time(),
-        "user_id": str(user.get("id", "") or ""),
-        "email": str(user.get("email", "") or ""),
-        "job_id": _clip_text(str(req.job_id or "").strip(), 120),
-        "rating": rating,
-        "comment": _clip_text(str(req.comment or "").strip(), 2000),
-        "template": _clip_text(str(req.template or "").strip(), 120),
-        "language": _clip_text(str(req.language or "").strip(), 40),
-        "feature": _clip_text(str(req.feature or "").strip(), 120),
-    }
-    try:
-        feedback_path = Path(TRAINING_DATA_DIR) / "studio_feedback.jsonl"
-        feedback_path.parent.mkdir(parents=True, exist_ok=True)
-        with feedback_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
-    except Exception as exc:
-        log.warning("Failed to persist Studio feedback: %s", exc)
-        raise HTTPException(500, "Failed to record feedback") from exc
-    return {"ok": True}
-
-
-async def _admin_youtube_quota(user: dict = Depends(require_auth)):
-    if str(user.get("email", "") or "") not in ADMIN_EMAILS:
-        raise HTTPException(403, "Admin access required")
-    import youtube_quota
-
-    return {
-        "ok": True,
-        "quota": await youtube_quota.breakdown(),
-        "history": await youtube_quota.history(days=7),
-    }
+_admin_youtube_quota = build_admin_youtube_quota_handler(
+    require_auth=require_auth,
+    admin_emails=ADMIN_EMAILS,
+)
 
 
 mount_router(
