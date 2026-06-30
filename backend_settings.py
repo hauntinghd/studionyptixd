@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 import stripe as stripe_lib
@@ -244,6 +245,48 @@ PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
 # non-sensitive events; payment-affecting events require a verified signature.
 PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "")
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
+
+
+def billing_site_url() -> str:
+    configured = str(os.getenv("BILLING_SITE_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    site = str(SITE_URL or "").strip().rstrip("/")
+    if not site:
+        return "https://studio.nyptidindustries.com"
+    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
+    if not match:
+        return "https://studio.nyptidindustries.com"
+    scheme, host, suffix = match.groups()
+    host_l = host.lower()
+    for apex in ("nyptidindustries.com", "niptidindustries.com"):
+        if host_l == f"studio.{apex}":
+            return f"{scheme}{host}{suffix}"
+        if host_l in {apex, f"billing.{apex}", f"invoicer.{apex}"} or host_l.endswith("." + apex):
+            return f"{scheme}studio.{apex}{suffix}"
+    return "https://studio.nyptidindustries.com"
+
+
+def api_public_url() -> str:
+    configured = str(os.getenv("API_PUBLIC_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    site = str(SITE_URL or "").strip().rstrip("/")
+    if not site:
+        return "https://nyptid-studio.fly.dev"
+    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
+    if not match:
+        return "https://nyptid-studio.fly.dev"
+    scheme, host, suffix = match.groups()
+    host_l = host.lower()
+    for apex in ("nyptidindustries.com", "niptidindustries.com"):
+        if host_l in {f"api.{apex}", f"api-studio.{apex}"}:
+            return f"{scheme}{host}{suffix}"
+        if host_l in {apex, f"studio.{apex}", f"billing.{apex}"} or host_l.endswith("." + apex):
+            return f"{scheme}api-studio.{apex}{suffix}"
+    return "https://nyptid-studio.fly.dev"
+
+
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")
 if FAL_AI_KEY and not os.getenv("FAL_KEY"):
     # fal_client reads FAL_KEY, while the platform secret is FAL_AI_KEY.

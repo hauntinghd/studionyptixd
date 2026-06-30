@@ -209,6 +209,8 @@ from backend_settings import (
     TEMP_DIR,
     THUMBNAIL_DIR,
     TRAINING_DATA_DIR,
+    billing_site_url as _billing_site_url,
+    api_public_url as _api_public_url,
 )
 from video_pipeline import (
     DEFAULT_CREATIVE_IMAGE_MODEL_ID,
@@ -2224,46 +2226,6 @@ async def _extract_reference_profile(reference_image_url: str, template: str, lo
     quality = _analyze_reference_quality(raw_ref, lock_mode=lock_mode)
     reference_dna = _extract_reference_dna(raw_ref, template=template)
     return reference_dna, quality
-
-
-def _billing_site_url() -> str:
-    configured = str(os.getenv("BILLING_SITE_URL", "") or "").strip().rstrip("/")
-    if configured:
-        return configured
-    site = str(SITE_URL or "").strip().rstrip("/")
-    if not site:
-        return "https://studio.nyptidindustries.com"
-    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
-    if not match:
-        return "https://studio.nyptidindustries.com"
-    scheme, host, suffix = match.groups()
-    host_l = host.lower()
-    for apex in ("nyptidindustries.com", "niptidindustries.com"):
-        if host_l == f"studio.{apex}":
-            return f"{scheme}{host}{suffix}"
-        if host_l in {apex, f"billing.{apex}", f"invoicer.{apex}"} or host_l.endswith("." + apex):
-            return f"{scheme}studio.{apex}{suffix}"
-    return "https://studio.nyptidindustries.com"
-
-
-def _api_public_url() -> str:
-    configured = str(os.getenv("API_PUBLIC_URL", "") or "").strip().rstrip("/")
-    if configured:
-        return configured
-    site = str(SITE_URL or "").strip().rstrip("/")
-    if not site:
-        return "https://nyptid-studio.fly.dev"
-    match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
-    if not match:
-        return "https://nyptid-studio.fly.dev"
-    scheme, host, suffix = match.groups()
-    host_l = host.lower()
-    for apex in ("nyptidindustries.com", "niptidindustries.com"):
-        if host_l in {f"api.{apex}", f"api-studio.{apex}"}:
-            return f"{scheme}{host}{suffix}"
-        if host_l in {apex, f"studio.{apex}", f"billing.{apex}"} or host_l.endswith("." + apex):
-            return f"{scheme}api-studio.{apex}{suffix}"
-    return "https://nyptid-studio.fly.dev"
 
 
 def _paypal_enabled() -> bool:
