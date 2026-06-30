@@ -2,6 +2,7 @@ import { resolveStudioBackendUrl } from './backend';
 
 export type AgentStreamEvent =
     | { event: 'status'; message?: string }
+    | { event: 'verification_step'; step?: string; status?: string; label?: string; detail?: string; required?: boolean }
     | { event: 'model_round'; round?: number }
     | { event: 'tool_start'; tool?: string; round?: number; awaiting_approval?: boolean }
     | { event: 'tool_end'; tool?: string; status?: string; error?: string | null }

@@ -1404,6 +1404,26 @@ async def _fire_event(emit: EventEmitter | None, event: str, **payload: Any) -> 
         await out
 
 
+async def _fire_verification_step(
+    emit: EventEmitter | None,
+    step: str,
+    status: str,
+    *,
+    label: str,
+    detail: str = "",
+    required: bool = True,
+) -> None:
+    await _fire_event(
+        emit,
+        "verification_step",
+        step=step,
+        status=status,
+        label=label,
+        detail=detail,
+        required=required,
+    )
+
+
 def _valid_image_attachments(attachments: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     valid: list[dict[str, str]] = []
     for item in list(attachments or [])[:4]:
@@ -2361,6 +2381,30 @@ async def _run_turn_impl(
     if not public_search_preflight_required and _is_channel_data_followup(user_text):
         public_search_preflight_required = _recent_assistant_promised_channel_data(messages)
 
+    await _fire_verification_step(
+        emit,
+        "request_scope",
+        "done",
+        label="Understand the request",
+        detail="Classified whether this turn needs private channel analytics, public YouTube search data, production tools, or a direct answer.",
+    )
+    required_sources: list[str] = []
+    if channel_data_preflight_required:
+        required_sources.append("connected-channel analytics")
+    if public_search_preflight_required:
+        required_sources.append("public YouTube search")
+    await _fire_verification_step(
+        emit,
+        "source_plan",
+        "done",
+        label="Decide required data sources",
+        detail=(
+            f"Required: {', '.join(required_sources)}."
+            if required_sources
+            else "No live data source was required for this turn."
+        ),
+    )
+
     preflight_tool_fires: list[ToolFire] = []
     can_run_channel_preflight = bool(active_registry or active_channel_id)
     can_run_public_preflight = bool(public_search_preflight_required)
@@ -2418,7 +2462,15 @@ async def _run_turn_impl(
             scope = "public search data"
         else:
             scope = "channel data"
+        await _fire_verification_step(
+            emit,
+            "tool_evidence",
+            "running",
+            label="Run required data tools",
+            detail=f"Pulling {active_label} {scope}.",
+        )
         await _fire_event(emit, "status", message=f"Pulling {active_label} {scope}...")
+        any_preflight_error = False
         for pf_name, pf_args in preflight_plan:
             await _fire_event(emit, "tool_start", tool=pf_name, round=0, awaiting_approval=False)
             try:
@@ -2445,6 +2497,7 @@ async def _run_turn_impl(
                     err_preview = str(parsed_pf.get("error"))[:160]
             except Exception:
                 pass
+            any_preflight_error = any_preflight_error or bool(err_preview)
             await _fire_event(
                 emit,
                 "tool_end",
@@ -2452,6 +2505,17 @@ async def _run_turn_impl(
                 status="error" if err_preview else "ok",
                 error=err_preview or None,
             )
+        await _fire_verification_step(
+            emit,
+            "tool_evidence",
+            "error" if any_preflight_error else "done",
+            label="Run required data tools",
+            detail=(
+                "At least one required data tool returned an error; the final answer must name that blocker."
+                if any_preflight_error
+                else f"Completed {len(preflight_tool_fires)} required data tool call(s)."
+            ),
+        )
         if current_video_audit_required and any(str(f.name or "") == "get_channel_analytics" for f in preflight_tool_fires):
             await _run_current_video_analysis_preflight(
                 emit=emit,
@@ -2472,6 +2536,33 @@ async def _run_turn_impl(
                 ),
             })
             store.update_session(sid, messages=messages)
+            await _fire_verification_step(
+                emit,
+                "source_integrity",
+                "done",
+                label="Verify tool results before answer",
+                detail="Tool observations were added to the model context; final answer must use those observations or state exact limitations.",
+            )
+    else:
+        await _fire_verification_step(
+            emit,
+            "tool_evidence",
+            "skipped",
+            label="Run required data tools",
+            detail=(
+                "No live data tool was required."
+                if not (channel_data_preflight_required or public_search_preflight_required)
+                else "Required channel data was not available; the final answer must say what is missing."
+            ),
+            required=bool(channel_data_preflight_required or public_search_preflight_required),
+        )
+        await _fire_verification_step(
+            emit,
+            "source_integrity",
+            "done",
+            label="Verify tool results before answer",
+            detail="No tool evidence was available for this turn; unsupported live-data claims are blocked by the final audit.",
+        )
 
     if reply_to:
         job_id = str(reply_to.get("job_id") or "").strip()
@@ -2848,6 +2939,13 @@ async def _run_turn_impl(
                     tool_fires,
                     active_label=active_label,
                 )
+        await _fire_verification_step(
+            emit,
+            "final_audit",
+            "running",
+            label="Audit final answer before replying",
+            detail="Checking the draft against executed tool evidence and blocking unsupported claims.",
+        )
         audit = audit_turn(
             assistant_text=assistant_text,
             user_text=user_text,
@@ -3057,6 +3155,7 @@ async def _run_turn_impl(
                 user_text=user_text,
                 tool_fires=tool_fires,
             )
+        audit_blocked = bool(audit.has_issues)
         if audit.has_issues:
             correction = audit.for_history_correction()
             if correction:
@@ -3089,6 +3188,17 @@ async def _run_turn_impl(
                             active_label=active_label,
                         )
             assistant_text = sanitize_assistant_text(grounded_status or guard_text(assistant_text, audit))
+        await _fire_verification_step(
+            emit,
+            "final_audit",
+            "done",
+            label="Audit final answer before replying",
+            detail=(
+                "Final answer passed evidence audit."
+                if not audit_blocked
+                else "Final answer had unsupported claims; Studio Agent corrected or replaced it before sending."
+            ),
+        )
         messages.append({"role": "assistant", "content": assistant_text})
 
     store.update_session(sid, messages=messages)

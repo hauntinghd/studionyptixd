@@ -47,13 +47,15 @@ interface ChatMessage {
     productionUpdate?: ProductionProgressUpdate;
 }
 
-interface AgentToolTrace {
+type VerificationStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
+
+interface AgentVerificationStep {
     id: string;
-    event: 'status' | 'tool_start' | 'tool_end' | 'error';
     label: string;
-    detail?: string;
-    status?: string;
-    at: number;
+    detail: string;
+    status: VerificationStepStatus;
+    required: boolean;
+    at?: number;
 }
 
 interface SessionUiCache {
@@ -67,6 +69,43 @@ const SESSION_UI_CACHE_VERSION = 1;
 const MAX_SESSION_UI_CACHE_ENTRIES = 30;
 const MAX_SESSION_UI_CACHE_MESSAGES = 160;
 const MAX_SESSION_UI_CACHE_MESSAGE_CHARS = 24000;
+const DEFAULT_VERIFICATION_STEPS: AgentVerificationStep[] = [
+    {
+        id: 'request_scope',
+        label: 'Understand the request',
+        detail: 'Classify whether this needs channel analytics, public YouTube data, production tools, or a direct answer.',
+        status: 'pending',
+        required: true,
+    },
+    {
+        id: 'source_plan',
+        label: 'Decide required data sources',
+        detail: 'Choose the exact evidence needed before answering.',
+        status: 'pending',
+        required: true,
+    },
+    {
+        id: 'tool_evidence',
+        label: 'Run required data tools',
+        detail: 'Execute the needed Studio/YouTube tools, or mark the exact blocker.',
+        status: 'pending',
+        required: true,
+    },
+    {
+        id: 'source_integrity',
+        label: 'Verify tool results before answer',
+        detail: 'Check whether tool results are usable, stale, empty, or errored.',
+        status: 'pending',
+        required: true,
+    },
+    {
+        id: 'final_audit',
+        label: 'Audit final answer before replying',
+        detail: 'Block unsupported claims and force the answer to match the tool evidence.',
+        status: 'pending',
+        required: true,
+    },
+];
 
 function sessionUiCacheStorageKey(userKey?: string) {
     return `studio_agent_ui_cache_v${SESSION_UI_CACHE_VERSION}:${userKey || 'anon'}`;
@@ -444,7 +483,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [runningBySession, setRunningBySession] = useState<Record<string, string>>({});
     const [resuming, setResuming] = useState(false);
     const [toolActivity, setToolActivity] = useState('');
-    const [toolTrace, setToolTrace] = useState<AgentToolTrace[]>([]);
+    const [verificationSteps, setVerificationSteps] = useState<AgentVerificationStep[]>([]);
     const [booting, setBooting] = useState(true);
     const [history, setHistory] = useState<SessionSummary[]>([]);
     const [historyQuery, setHistoryQuery] = useState('');
@@ -507,15 +546,40 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         });
     }, []);
 
-    const appendToolTrace = useCallback((entry: Omit<AgentToolTrace, 'id' | 'at'>) => {
-        setToolTrace((rows) => [
-            {
-                ...entry,
-                id: `${Date.now()}-${rows.length}`,
-                at: Date.now(),
-            },
-            ...rows,
-        ].slice(0, 12));
+    const resetVerificationChecklist = useCallback(() => {
+        setVerificationSteps(DEFAULT_VERIFICATION_STEPS.map((step) => ({ ...step })));
+    }, []);
+
+    const updateVerificationStep = useCallback((
+        id: string,
+        patch: Partial<Omit<AgentVerificationStep, 'id'>>,
+    ) => {
+        setVerificationSteps((rows) => {
+            const base = rows.length ? rows : DEFAULT_VERIFICATION_STEPS.map((step) => ({ ...step }));
+            let found = false;
+            const next = base.map((step) => {
+                if (step.id !== id) return step;
+                found = true;
+                return {
+                    ...step,
+                    ...patch,
+                    status: (patch.status || step.status) as VerificationStepStatus,
+                    at: Date.now(),
+                };
+            });
+            if (found) return next;
+            return [
+                ...next,
+                {
+                    id,
+                    label: patch.label || id.replace(/_/g, ' '),
+                    detail: patch.detail || '',
+                    status: (patch.status || 'running') as VerificationStepStatus,
+                    required: patch.required ?? true,
+                    at: Date.now(),
+                },
+            ];
+        });
     }, []);
 
     const markSessionRunning = useCallback((sid: string, label = 'Thinking...') => {
@@ -1446,7 +1510,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setError('');
             setQueueHint('');
             setToolActivity('');
-            setToolTrace([]);
+            resetVerificationChecklist();
             stickToBottomRef.current = true;
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
@@ -1461,13 +1525,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 const tok = await getToken();
                 const onStreamEvent = (ev: AgentStreamEvent) => {
                     if (sessionIdRef.current !== activeSessionId) return;
-                    if (ev.event === 'tool_start' && ev.tool) {
+                    if (ev.event === 'verification_step' && ev.step) {
+                        updateVerificationStep(String(ev.step), {
+                            label: String(ev.label || ev.step),
+                            detail: String(ev.detail || ''),
+                            status: (String(ev.status || 'running') as VerificationStepStatus),
+                            required: ev.required !== false,
+                        });
+                    } else if (ev.event === 'tool_start' && ev.tool) {
                         const label = toolLabel(ev.tool);
-                        appendToolTrace({
-                            event: 'tool_start',
-                            label: ev.awaiting_approval ? `Queued: ${label}` : `Starting: ${label}`,
-                            detail: ev.round ? `Round ${ev.round}` : undefined,
-                            status: ev.awaiting_approval ? 'approval' : 'running',
+                        updateVerificationStep('tool_evidence', {
+                            status: 'running',
+                            label: 'Run required data tools',
+                            detail: ev.awaiting_approval ? `Queued for approval: ${label}` : `Running: ${label}`,
                         });
                         setToolActivity(
                             ev.awaiting_approval
@@ -1477,11 +1547,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     } else if (ev.event === 'tool_end' && ev.tool) {
                         const label = toolLabel(ev.tool);
                         const failed = ev.status === 'error';
-                        appendToolTrace({
-                            event: 'tool_end',
-                            label: failed ? `Failed: ${label}` : `Finished: ${label}`,
-                            detail: ev.error || ev.status || (failed ? 'Tool failed' : 'ok'),
+                        updateVerificationStep('tool_evidence', {
                             status: failed ? 'error' : 'done',
+                            label: 'Run required data tools',
+                            detail: failed ? `Failed: ${label}${ev.error ? ` - ${ev.error}` : ''}` : `Completed: ${label}`,
                         });
                         setToolActivity(
                             ev.status === 'error'
@@ -1490,19 +1559,24 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         );
                     } else if (ev.event === 'status' && ev.message) {
                         setToolActivity(ev.message);
-                        if (!/still working/i.test(String(ev.message))) {
-                            appendToolTrace({
-                                event: 'status',
-                                label: String(ev.message),
-                                status: 'status',
+                        if (/pulling/i.test(String(ev.message))) {
+                            updateVerificationStep('tool_evidence', {
+                                status: 'running',
+                                label: 'Run required data tools',
+                                detail: String(ev.message),
+                            });
+                        } else if (/thinking/i.test(String(ev.message))) {
+                            updateVerificationStep('final_audit', {
+                                status: 'running',
+                                label: 'Audit final answer before replying',
+                                detail: 'Drafting from available context and preparing evidence audit.',
                             });
                         }
                     } else if (ev.event === 'error') {
-                        appendToolTrace({
-                            event: 'error',
-                            label: 'Stream error',
-                            detail: String(ev.message || 'Studio Agent stream error'),
+                        updateVerificationStep('final_audit', {
                             status: 'error',
+                            label: 'Audit final answer before replying',
+                            detail: String(ev.message || 'Studio Agent stream error'),
                         });
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
                         ingestActiveJobs(ev.jobs, activeSessionId);
@@ -1558,6 +1632,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
                 const reply = String(data?.assistant_message || '').trim();
                 const nextPending = (data?.pending_actions as PendingAction[]) || [];
+                updateVerificationStep('final_audit', {
+                    status: 'done',
+                    label: 'Audit final answer before replying',
+                    detail: reply
+                        ? 'Final answer passed the backend evidence gate and was returned.'
+                        : nextPending.length > 0
+                            ? 'Final response is gated on your approval before paid/writing tools run.'
+                            : 'Backend completed without a usable assistant message.',
+                });
                 if (reply) {
                     setMessages((m) => [...m, { role: 'assistant', content: reply }]);
                 } else if (nextPending.length > 0) {
@@ -1577,11 +1660,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 await refreshHistory();
             } catch (e) {
                 if (sessionIdRef.current !== activeSessionId) return;
-                appendToolTrace({
-                    event: 'error',
-                    label: 'Request failed',
-                    detail: (e as Error).message,
+                updateVerificationStep('final_audit', {
                     status: 'error',
+                    label: 'Audit final answer before replying',
+                    detail: (e as Error).message,
                 });
                 setError((e as Error).message);
                 setQueueHint('');
@@ -1595,7 +1677,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         },
         [
             authFetch,
-            appendToolTrace,
             buildOutboundAttachments,
             buildOutboundMessage,
             captionMode,
@@ -1605,10 +1686,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             markSessionRunning,
             pollQueueWhileLoading,
             refreshHistory,
+            resetVerificationChecklist,
             resumeSession,
             runningBySession,
             selectedChannel,
             sessionId,
+            updateVerificationStep,
         ],
     );
 
@@ -2339,36 +2422,42 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </p>
                 )}
 
-                {(toolTrace.length > 0 || toolActivity) && (
+                {(verificationSteps.length > 0 || toolActivity) && (
                     <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] px-3 py-2 shadow-lg shadow-black/20">
                         <div className="flex items-center justify-between gap-3">
                             <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-100">
                                 <Shield className="h-3.5 w-3.5 text-cyan-300" />
-                                Agent activity
+                                Verification checklist
                             </p>
                             <p className="truncate text-[11px] text-cyan-100/80">
-                                {toolActivity || 'Watching tool events'}
+                                {toolActivity || 'Required before Studio Agent replies'}
                             </p>
                         </div>
-                        {toolTrace.length > 0 && (
+                        {verificationSteps.length > 0 && (
                             <div className="mt-2 grid gap-1">
-                                {toolTrace.slice(0, 4).map((row) => (
+                                {verificationSteps.map((row, index) => (
                                     <div
                                         key={row.id}
                                         className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
                                             row.status === 'error'
                                                 ? 'border-red-400/25 bg-red-500/10 text-red-100'
-                                                : row.status === 'done'
-                                                    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100'
-                                                    : 'border-white/10 bg-black/20 text-gray-200'
+                                            : row.status === 'done'
+                                                ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100'
+                                            : row.status === 'skipped'
+                                                ? 'border-white/10 bg-white/[0.03] text-gray-400'
+                                            : row.status === 'running'
+                                                ? 'border-cyan-400/25 bg-cyan-500/10 text-cyan-100'
+                                            : 'border-white/10 bg-black/20 text-gray-200'
                                         }`}
                                     >
-                                        <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-80" />
+                                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[9px] font-semibold">
+                                            {row.status === 'done' ? '✓' : row.status === 'error' ? '!' : index + 1}
+                                        </span>
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className="truncate font-medium">{row.label}</span>
-                                                <span className="shrink-0 text-[10px] text-white/35">
-                                                    {new Date(row.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                                                <span className="shrink-0 text-[10px] uppercase tracking-wider text-white/35">
+                                                    {row.status}
                                                 </span>
                                             </div>
                                             {row.detail && (
