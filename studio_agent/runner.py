@@ -304,6 +304,8 @@ def _needs_fresh_public_search(user_text: str) -> bool:
             "live",
             "fresh",
             "most updated",
+            "updated data",
+            "more updated data",
             "up to date",
             "up-to-date",
             "actual youtube",
@@ -845,6 +847,28 @@ def _recover_requested_production(
 
 def _needs_public_search_preflight(user_text: str) -> bool:
     low = str(user_text or "").lower()
+    followup_update_terms = (
+        "same thing again",
+        "do that again",
+        "run it again",
+        "rerun",
+        "re-run",
+        "updated data",
+        "more updated data",
+    )
+    if any(term in low for term in followup_update_terms) and any(
+        term in low
+        for term in (
+            "data",
+            "youtube",
+            "search",
+            "trend",
+            "topic",
+            "fact",
+            "updated",
+        )
+    ):
+        return True
     demand_terms = (
         "what people are actually looking for",
         "what people are looking for",
@@ -2338,14 +2362,16 @@ async def _run_turn_impl(
         public_search_preflight_required = _recent_assistant_promised_channel_data(messages)
 
     preflight_tool_fires: list[ToolFire] = []
-    if (active_registry or active_channel_id) and (channel_data_preflight_required or public_search_preflight_required):
+    can_run_channel_preflight = bool(active_registry or active_channel_id)
+    can_run_public_preflight = bool(public_search_preflight_required)
+    if (can_run_channel_preflight and channel_data_preflight_required) or can_run_public_preflight:
         active_label = (
             str(session.get("channel_title") or "").strip()
-            or active_registry.replace("_", " ")
-            or "selected"
+            or str(active_registry or "").replace("_", " ")
+            or "YouTube"
         )
         preflight_plan: list[tuple[str, dict[str, Any]]] = []
-        if channel_data_preflight_required:
+        if channel_data_preflight_required and can_run_channel_preflight:
             analytics_args = {"registry_key": active_registry, "channel_id": active_channel_id}
             if latest_upload_focus_required:
                 analytics_args["focus"] = "latest_upload"
@@ -2366,14 +2392,16 @@ async def _run_turn_impl(
                 ),
             ])
         if public_search_preflight_required:
+            search_args = {
+                "query": _public_search_query_for_channel(active_label, user_text),
+                "days": 30,
+                "fresh": fresh_public_search_required,
+            }
+            if active_registry:
+                search_args["registry_key"] = active_registry
             preflight_plan.append((
                 "get_public_search_trends",
-                {
-                    "registry_key": active_registry,
-                    "query": _public_search_query_for_channel(active_label, user_text),
-                    "days": 30,
-                    "fresh": fresh_public_search_required,
-                },
+                search_args,
             ))
         deduped_plan: list[tuple[str, dict[str, Any]]] = []
         seen_plan: set[tuple[str, str]] = set()
