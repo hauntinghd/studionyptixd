@@ -2318,7 +2318,14 @@ async def run_turn(
         operation="chat",
         unlimited=bool(profile.get("unlimited")),
     ) as admission:
-        result = await _run_turn_impl(session, user_text, billing_profile=billing_profile, reply_to=reply_to, attachments=attachments)
+        result = await _run_turn_impl(
+            session,
+            user_text,
+            membership_plan=membership_plan,
+            billing_profile=billing_profile,
+            reply_to=reply_to,
+            attachments=attachments,
+        )
         if admission.mode != "disabled":
             result["queue"] = admission.as_dict()
         return result
@@ -2369,6 +2376,7 @@ async def stream_turn(
                 result = await _run_turn_impl(
                     session,
                     user_text,
+                    membership_plan=membership_plan,
                     billing_profile=billing_profile,
                     emit=emit,
                     reply_to=reply_to,
@@ -2475,6 +2483,7 @@ async def _run_turn_impl(
     session: dict[str, Any],
     user_text: str,
     *,
+    membership_plan: str = "",
     billing_profile: dict[str, Any] | None = None,
     emit: EventEmitter | None = None,
     reply_to: dict | None = None,
@@ -3979,6 +3988,7 @@ async def _approve_action_impl(
     follow_up = await _run_turn_impl(
         refreshed,
         "Continue production from the approved action result.",
+        membership_plan=membership_plan,
         billing_profile=billing_profile,
     )
     follow_up["active_jobs"] = merge_active_jobs(

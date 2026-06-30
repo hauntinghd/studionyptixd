@@ -282,6 +282,53 @@ class ProductionBudgetControlTests(unittest.TestCase):
         self.assertIn("finished the MP4", result["assistant_message"])
         self.assertEqual(result["active_jobs"][-1]["kind"], "shortform")
 
+    def test_run_turn_threads_membership_plan_into_continue_shortcut(self):
+        session = {
+            "session_id": f"sa_{uuid.uuid4().hex[:16]}",
+            "user_id": "owner",
+            "content_format": "short",
+            "approval_mode": "confirm",
+            "reasoning_depth": "deep",
+            "messages": [],
+            "active_jobs": [{"job_id": uuid.uuid4().hex[:12], "kind": "shortform"}],
+        }
+        seen: dict[str, str] = {}
+
+        @asynccontextmanager
+        async def fake_slot(**_kwargs):
+            yield types.SimpleNamespace(mode="disabled", as_dict=lambda: {})
+
+        async def fake_continue(**kwargs):
+            seen["membership_plan"] = kwargs["membership_plan"]
+            return {
+                "session_id": session["session_id"],
+                "assistant_message": "continued",
+                "pending_actions": [],
+                "active_jobs": session["active_jobs"],
+                "approval_mode": "confirm",
+                "reasoning_depth": "deep",
+                "usage": {},
+                "billing": {"credits_charged": 0, "provider_usd": 0.0},
+            }
+
+        with (
+            patch.object(runner, "studio_agent_slot", fake_slot),
+            patch.object(runner, "_continue_active_production", side_effect=fake_continue),
+            patch.object(runner.store, "touch_title_from_user_message"),
+            patch.object(runner.memory, "observe_user_message"),
+        ):
+            result = asyncio.run(
+                runner.run_turn(
+                    session,
+                    "continue",
+                    membership_plan="owner",
+                    billing_profile={"unlimited": True},
+                )
+            )
+
+        self.assertEqual(result["assistant_message"], "continued")
+        self.assertEqual(seen["membership_plan"], "owner")
+
 
 if __name__ == "__main__":
     unittest.main()
