@@ -733,6 +733,21 @@ def _has_channel_analytics_tool(tool_fires: list[ToolFire]) -> bool:
     return any(str(fire.name or "") == "get_channel_analytics" for fire in tool_fires or [])
 
 
+def _has_public_demand_tool(tool_fires: list[ToolFire]) -> bool:
+    return any(str(fire.name or "") in {"get_public_search_trends", "recommend_video_topics"} for fire in tool_fires or [])
+
+
+def _is_channel_status_only_answer(assistant_text: str) -> bool:
+    low = str(assistant_text or "").strip().lower()
+    return (
+        low.startswith("i can see data for ")
+        and "- source:" in low
+        and "- oauth connected for private analytics:" in low
+        and "recommended topics" not in low
+        and "public youtube demand" not in low
+    )
+
+
 def _wants_short_plan(user_text: str) -> bool:
     low = str(user_text or "").lower()
     if "short" not in low and "short-form" not in low and "shortform" not in low:
@@ -887,6 +902,12 @@ def _needs_public_search_preflight(user_text: str) -> bool:
         "live search",
         "trend data",
         "topic demand",
+        "what people want to watch",
+        "people want to watch",
+        "verify all of your information",
+        "verify your information",
+        "fact-check",
+        "fact check",
     )
     action_terms = (
         "pull",
@@ -900,6 +921,9 @@ def _needs_public_search_preflight(user_text: str) -> bool:
         "make",
         "create",
         "figure out",
+        "verify",
+        "fact-check",
+        "fact check",
     )
     return any(term in low for term in demand_terms) and any(term in low for term in action_terms)
 
@@ -1329,6 +1353,147 @@ def _grounded_channel_plan_from_tools(
             f"- Tags: {tags}",
         ]
     )
+    return "\n".join(lines)
+
+
+def _topic_label(row: dict[str, Any]) -> str:
+    return str(
+        row.get("topic")
+        or row.get("title")
+        or row.get("prediction")
+        or row.get("name")
+        or ""
+    ).strip()
+
+
+def _public_video_line(row: dict[str, Any]) -> str:
+    title = str(row.get("title") or row.get("video_id") or "Untitled video").strip()
+    stats: list[str] = []
+    channel = str(row.get("channel_title") or row.get("channel") or "").strip()
+    views = _safe_int(row.get("views", row.get("view_count", 0)))
+    likes = _safe_int(row.get("likes", row.get("like_count", 0)))
+    published = str(row.get("published_at") or "").strip()
+    support = str(row.get("support_label") or row.get("cache_status") or "").strip()
+    if channel:
+        stats.append(channel)
+    if views:
+        stats.append(f"{views:,} views")
+    if likes:
+        stats.append(f"{likes:,} likes")
+    if published:
+        stats.append(f"published {published[:10]}")
+    if support:
+        stats.append(support)
+    return f"- {title}" + (f": {'; '.join(stats)}" if stats else "")
+
+
+def _grounded_research_summary_from_tools(
+    tool_fires: list[ToolFire],
+    *,
+    active_label: str,
+    user_text: str = "",
+) -> str:
+    """Deterministic fallback for fact-check / topic-demand turns."""
+    status = _grounded_channel_status_from_tools(tool_fires, active_label=active_label)
+    evidence = _latest_channel_analytics_evidence(tool_fires)
+    channel_rows = evidence.get("video_rows") if isinstance(evidence.get("video_rows"), list) else []
+    best_row = _best_retention_row(channel_rows)
+
+    recommended: list[dict[str, Any]] = []
+    public_rows: list[dict[str, Any]] = []
+    evidence_summaries: list[Any] = []
+    saw_fresh = False
+    for fire in tool_fires or []:
+        if str(fire.name or "") not in {"recommend_video_topics", "get_public_search_trends"}:
+            continue
+        try:
+            payload = json.loads(fire.result or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("error"):
+            continue
+        saw_fresh = saw_fresh or bool(payload.get("fresh") or payload.get("fresh_public_search"))
+        recs = payload.get("recommended_topics")
+        if isinstance(recs, list):
+            recommended.extend([dict(row) for row in recs if isinstance(row, dict)])
+        videos = payload.get("videos") or payload.get("trending_sample")
+        if isinstance(videos, list):
+            public_rows.extend([dict(row) for row in videos if isinstance(row, dict)])
+        summary = payload.get("evidence_summary")
+        if summary:
+            evidence_summaries.append(summary)
+
+    seen_topics: set[str] = set()
+    topic_lines: list[str] = []
+    for row in recommended:
+        label = _topic_label(row)
+        key = label.lower()
+        if not label or key in seen_topics:
+            continue
+        seen_topics.add(key)
+        reason = str(row.get("reason") or row.get("why") or row.get("evidence") or row.get("support_label") or "").strip()
+        topic_lines.append(f"- {label}" + (f" — {reason}" if reason else ""))
+        if len(topic_lines) >= 6:
+            break
+
+    public_lines: list[str] = []
+    seen_videos: set[str] = set()
+    for row in public_rows:
+        key = str(row.get("video_id") or row.get("url") or row.get("title") or "").strip().lower()
+        if not key or key in seen_videos:
+            continue
+        seen_videos.add(key)
+        public_lines.append(_public_video_line(row))
+        if len(public_lines) >= 6:
+            break
+
+    channel_lines: list[str] = []
+    if channel_rows:
+        channel_lines.extend(_metric_row_line(row) for row in channel_rows[:4])
+    elif best_row:
+        channel_lines.append(_metric_row_line(best_row))
+
+    lines = [
+        f"I verified this against the selected-channel data and public YouTube demand for {active_label}.",
+        "",
+        "Selected-channel evidence:",
+        status or "- No selected-channel analytics summary was available.",
+    ]
+    if channel_lines:
+        lines.extend(["", "Returned selected-channel video rows:", *channel_lines])
+    lines.extend([
+        "",
+        "Public YouTube demand evidence:",
+    ])
+    if public_lines:
+        lines.extend(public_lines)
+    else:
+        lines.append("- Public search ran, but no hydrated public video rows were returned. I should not claim a trend from search snippets alone.")
+
+    if evidence_summaries:
+        lines.extend(["", "Evidence summary from public search:"])
+        for summary in evidence_summaries[:2]:
+            if isinstance(summary, str):
+                lines.append(f"- {summary[:300]}")
+            elif isinstance(summary, dict):
+                for key, value in list(summary.items())[:5]:
+                    lines.append(f"- {key}: {str(value)[:220]}")
+
+    lines.extend(["", "Recommended topics to test now:"])
+    if topic_lines:
+        lines.extend(topic_lines)
+    elif best_row:
+        lines.append(f"- Build from the strongest selected-channel row: {str(best_row.get('title') or 'selected video').strip()}.")
+    else:
+        lines.append("- Use a conservative psychology/self-improvement topic only after public rows return enough hydrated evidence.")
+
+    lines.extend([
+        "",
+        "What is confirmed vs blocked:",
+        f"- Confirmed: private channel analytics are {'connected' if evidence.get('oauth_connected') else 'not connected'} and source is {evidence.get('source') or 'unknown'}.",
+        f"- Confirmed: public search {'used fresh data' if saw_fresh else 'ran with the available search/cache path'}.",
+        "- Blocked: do not reuse old viral view-count claims unless the current public rows cite the exact title, channel, views, date, and support label.",
+    ])
     return "\n".join(lines)
 
 
@@ -2928,7 +3093,13 @@ async def _run_turn_impl(
                 or str(active_registry or active_channel_id or "").replace("_", " ")
                 or "selected"
             )
-            if _wants_short_plan(user_text):
+            if public_search_preflight_required and _has_public_demand_tool(tool_fires):
+                assistant_text = _grounded_research_summary_from_tools(
+                    tool_fires,
+                    active_label=active_label,
+                    user_text=user_text,
+                )
+            elif _wants_short_plan(user_text):
                 assistant_text = _grounded_channel_plan_from_tools(
                     tool_fires,
                     active_label=active_label,
@@ -3176,7 +3347,13 @@ async def _run_turn_impl(
                     or "video-level retention" in guarded.lower()
                     or "per-video retention" in guarded.lower()
                 ):
-                    if _wants_short_plan(user_text):
+                    if public_search_preflight_required and _has_public_demand_tool(tool_fires):
+                        grounded_status = _grounded_research_summary_from_tools(
+                            tool_fires,
+                            active_label=active_label,
+                            user_text=user_text,
+                        )
+                    elif _wants_short_plan(user_text):
                         grounded_status = _grounded_channel_plan_from_tools(
                             tool_fires,
                             active_label=active_label,
@@ -3188,6 +3365,21 @@ async def _run_turn_impl(
                             active_label=active_label,
                         )
             assistant_text = sanitize_assistant_text(grounded_status or guard_text(assistant_text, audit))
+        if (
+            public_search_preflight_required
+            and _has_public_demand_tool(tool_fires)
+            and _is_channel_status_only_answer(assistant_text)
+        ):
+            active_label = (
+                str(session.get("channel_title") or "").strip()
+                or str(active_registry or active_channel_id or "").replace("_", " ")
+                or "selected"
+            )
+            assistant_text = sanitize_assistant_text(_grounded_research_summary_from_tools(
+                tool_fires,
+                active_label=active_label,
+                user_text=user_text,
+            ))
         await _fire_verification_step(
             emit,
             "final_audit",
