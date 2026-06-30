@@ -945,12 +945,6 @@ def _dedupe_preserve_order(values: list[str], max_items: int = 8, max_chars: int
     return out
 
 
-_maintenance_banner_message = (
-    (MAINTENANCE_BANNER_MESSAGE or "").strip()
-    or "Studio is under high load. Queue times may be longer than usual while we scale capacity."
-)
-
-
 def _resolve_user_plan_for_limits(user: dict | None) -> tuple[str, dict]:
     if not user:
         return "free", PLAN_LIMITS.get("free", PLAN_LIMITS["starter"])
@@ -21189,6 +21183,69 @@ async def _admin_refund_credits(body: dict, user: dict = Depends(require_auth)):
     return {"ok": True, "email": target_email, "credits": credits, "source": applied_source}
 
 
+async def _admin_grant_credits(body: dict, user: dict = Depends(require_auth)):
+    if user.get("email") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    target_email = str((body or {}).get("email", "") or "").strip().lower()
+    if not target_email:
+        raise HTTPException(400, "email required")
+    try:
+        credits = int((body or {}).get("credits", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "credits must be an integer")
+    if credits <= 0 or credits > 100000:
+        raise HTTPException(400, "credits must be between 1 and 100000")
+    reason = _clip_text(str((body or {}).get("reason", "admin_grant") or "admin_grant").strip(), 200)
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    if not svc_key or not SUPABASE_URL:
+        raise HTTPException(500, "Supabase not configured")
+    target_id = ""
+    async with httpx.AsyncClient(timeout=15) as client:
+        users_resp = await client.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+            headers={"apikey": svc_key, "Authorization": f"Bearer {svc_key}"},
+        )
+        if users_resp.status_code == 200:
+            users_data = users_resp.json()
+            user_list = users_data.get("users", users_data) if isinstance(users_data, dict) else users_data
+            for item in user_list:
+                if str(item.get("email", "") or "").lower() == target_email:
+                    target_id = str(item.get("id", "") or "")
+                    break
+    if not target_id:
+        raise HTTPException(404, f"No Supabase user found for {target_email}")
+    try:
+        import unified_credits as uc
+        wallet = uc.add_credits(
+            target_id,
+            credits,
+            reason=reason,
+            metadata={
+                "email": target_email,
+                "admin_email": str(user.get("email", "") or ""),
+                "source": "admin_api",
+            },
+        )
+    except Exception as exc:
+        log.error(f"Admin grant credits failed for {target_email}: {exc}")
+        raise HTTPException(500, f"Grant failed: {exc}") from exc
+    _append_usage_ledger({
+        "type": "admin_grant",
+        "target_user_id": target_id,
+        "target_email": target_email,
+        "credits": credits,
+        "reason": reason,
+        "admin_email": str(user.get("email", "") or ""),
+        "ts": time.time(),
+    })
+    return {
+        "ok": True,
+        "email": target_email,
+        "credits": credits,
+        "balance": int(wallet.get("balance", 0) or 0),
+    }
+
+
 mount_router(
     app,
     build_billing_router(
@@ -21203,5 +21260,6 @@ mount_router(
         admin_set_plan_endpoint=_admin_set_plan,
         admin_cancel_subscription_endpoint=_admin_cancel_subscription,
         admin_refund_credits_endpoint=_admin_refund_credits,
+        admin_grant_credits_endpoint=_admin_grant_credits,
     ),
 )

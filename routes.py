@@ -343,6 +343,7 @@ def build_billing_router(
     admin_set_plan_endpoint,
     admin_cancel_subscription_endpoint,
     admin_refund_credits_endpoint,
+    admin_grant_credits_endpoint,
 ):
     router = APIRouter()
     router.add_api_route("/api/checkout", create_checkout_endpoint, methods=["POST"])
@@ -356,6 +357,7 @@ def build_billing_router(
     router.add_api_route("/api/admin/set-plan", admin_set_plan_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/cancel-subscription", admin_cancel_subscription_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/refund-credits", admin_refund_credits_endpoint, methods=["POST"])
+    router.add_api_route("/api/admin/grant-credits", admin_grant_credits_endpoint, methods=["POST"])
     return router
 
 
