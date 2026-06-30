@@ -301,6 +301,264 @@ def record_feedback_memory(
     )
 
 
+def _short_text(value: Any, limit: int = 180) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_count(value: Any) -> str:
+    count = _as_int(value)
+    return f"{count:,}" if count > 0 else "unknown"
+
+
+def _tool_channel_scope(args: dict[str, Any], data: dict[str, Any]) -> dict[str, str]:
+    channel = data.get("channel") if isinstance(data.get("channel"), dict) else {}
+    return {
+        "channel_id": str(data.get("channel_id") or channel.get("channel_id") or args.get("channel_id") or "").strip(),
+        "registry_key": str(data.get("registry_key") or channel.get("registry_key") or args.get("registry_key") or "").strip(),
+        "title": str(data.get("channel_title") or channel.get("title") or "").strip(),
+    }
+
+
+def _remember_scoped_tool_lesson(
+    user_id: str,
+    note: str,
+    *,
+    args: dict[str, Any],
+    data: dict[str, Any],
+    kind: str,
+    source: str,
+    importance: int,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    scope_data = _tool_channel_scope(args, data)
+    scope = "channel" if scope_data.get("channel_id") or scope_data.get("registry_key") else "global"
+    return remember(
+        user_id,
+        note,
+        scope=scope,
+        channel_id=scope_data.get("channel_id", ""),
+        registry_key=scope_data.get("registry_key", ""),
+        title=scope_data.get("title", ""),
+        kind=kind,
+        source=source,
+        importance=importance,
+        metadata=metadata or {},
+    )
+
+
+def _public_evidence_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in ("videos", "trending_sample"):
+        for row in list(data.get(key) or []):
+            if isinstance(row, dict):
+                rows.append(row)
+    seen: set[str] = set()
+    clean_rows: list[dict[str, Any]] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        video_id = str(row.get("video_id") or "").strip()
+        dedupe = video_id or title.lower()
+        if not dedupe or dedupe in seen:
+            continue
+        seen.add(dedupe)
+        clean_rows.append(row)
+    clean_rows.sort(
+        key=lambda r: (
+            str(r.get("evidence_level") or "") != "hydrated_video_stats",
+            -_as_int(r.get("views")),
+            str(r.get("title") or "").lower(),
+        )
+    )
+    return clean_rows[:5]
+
+
+def _remember_public_youtube_evidence(
+    user_id: str,
+    tool_name: str,
+    args: dict[str, Any],
+    data: dict[str, Any],
+) -> None:
+    rows = _public_evidence_rows(data)
+    query = str(data.get("query") or args.get("query") or args.get("niche_query") or "").strip()
+    if not query:
+        queries = [str(q).strip() for q in list(data.get("queries") or []) if str(q).strip()]
+        query = queries[0] if queries else str(args.get("registry_key") or "public YouTube").strip()
+    cache_status = str(data.get("cache_status") or ("fresh" if data.get("fresh") else "cache_allowed")).strip()
+    order = str(data.get("order") or args.get("order") or "viewCount").strip()
+    saved_any = False
+    for row in rows:
+        title = _short_text(row.get("title"), 140)
+        if not title:
+            continue
+        evidence_level = str(row.get("evidence_level") or "").strip()
+        support_label = str(row.get("support_label") or "unknown_support").strip()
+        hydrated = evidence_level == "hydrated_video_stats" and row.get("views") is not None
+        verdict = (
+            "supported public precedent"
+            if hydrated and support_label.startswith(("supported", "strong", "moderate"))
+            else "weak public signal"
+            if hydrated
+            else "candidate only, not performance proof"
+        )
+        note = (
+            f"Public YouTube evidence for '{query}': '{title}'"
+            f"{' by ' + _short_text(row.get('channel_title'), 80) if row.get('channel_title') else ''} "
+            f"has {_format_count(row.get('views'))} views, {_format_count(row.get('likes'))} likes, "
+            f"support={support_label}, evidence={evidence_level or 'unknown'}, cache={cache_status}. "
+            f"Verdict: {verdict}. Do not claim CTR, AVD, retention, high search volume, or trending unless a later tool returns that exact data."
+        )
+        _remember_scoped_tool_lesson(
+            user_id,
+            note,
+            args=args,
+            data=data,
+            kind="public_youtube_evidence",
+            source=tool_name,
+            importance=4 if hydrated else 3,
+            metadata={
+                "query": query,
+                "order": order,
+                "cache_status": cache_status,
+                "video_id": str(row.get("video_id") or ""),
+                "views": _as_int(row.get("views")),
+                "support_label": support_label,
+                "evidence_level": evidence_level,
+                "private_analytics": False,
+            },
+        )
+        saved_any = True
+    if not saved_any:
+        _remember_scoped_tool_lesson(
+            user_id,
+            (
+                f"Public YouTube search for '{query}' returned no hydrated performance proof. "
+                "Treat related recommendations as experimental until hydrated views/likes and support labels are available."
+            ),
+            args=args,
+            data=data,
+            kind="public_youtube_limitation",
+            source=tool_name,
+            importance=4,
+            metadata={"query": query, "cache_status": cache_status, "private_analytics": False},
+        )
+
+
+def _remember_recommended_topics(
+    user_id: str,
+    tool_name: str,
+    args: dict[str, Any],
+    data: dict[str, Any],
+) -> None:
+    for row in list(data.get("recommended_topics") or data.get("predicted_topics") or [])[:5]:
+        if isinstance(row, dict):
+            topic = _short_text(row.get("topic") or row.get("title") or row.get("angle") or row.get("query"), 140)
+            score = row.get("score")
+        else:
+            topic = _short_text(row, 140)
+            score = None
+        if not topic:
+            continue
+        note = (
+            f"Catalyst candidate topic: '{topic}'. Use it only with the cited public evidence rows and selected-channel analytics; "
+            "label it experimental if the supporting public rows are weak or cache-only."
+        )
+        if score is not None:
+            note += f" Candidate score: {score}."
+        _remember_scoped_tool_lesson(
+            user_id,
+            note,
+            args=args,
+            data=data,
+            kind="candidate_topic",
+            source=tool_name,
+            importance=3,
+            metadata={"topic": topic, "private_analytics": False},
+        )
+
+
+def _remember_channel_analytics_lessons(
+    user_id: str,
+    args: dict[str, Any],
+    data: dict[str, Any],
+) -> None:
+    playbook = data.get("growth_playbook") if isinstance(data.get("growth_playbook"), dict) else {}
+    quality = data.get("analytics_data_quality") if isinstance(data.get("analytics_data_quality"), dict) else {}
+    insights = data.get("insights") if isinstance(data.get("insights"), dict) else {}
+    notes: list[str] = []
+    source = str(quality.get("effective_source") or "").strip() or "unknown_source"
+    stage = str(playbook.get("stage") or "").strip()
+    if stage:
+        notes.append(f"Growth stage/playbook: {stage}.")
+    for key, label in (
+        ("hook_patterns", "Hook/package lessons"),
+        ("thumbnail_signals", "Retention/thumbnail signals"),
+    ):
+        vals = [str(v).strip() for v in list(insights.get(key) or []) if str(v).strip()]
+        if vals:
+            notes.append(f"{label}: " + "; ".join(_short_text(v, 140) for v in vals[:3]) + ".")
+    top_titles = [row for row in list(insights.get("top_titles") or []) if isinstance(row, dict)]
+    if top_titles:
+        top = top_titles[0]
+        notes.append(
+            f"Top channel performer visible to Catalyst: '{_short_text(top.get('title'), 140)}' "
+            f"with {_format_count(top.get('views'))} views."
+        )
+    breakouts = [row for row in list(insights.get("breakout_titles") or []) if isinstance(row, dict)]
+    if breakouts:
+        b = breakouts[0]
+        notes.append(
+            f"Breakout pattern candidate: '{_short_text(b.get('title'), 140)}' "
+            f"lift {float(b.get('lift_vs_baseline') or 0.0):.1f}x vs channel baseline."
+        )
+    limitation = str(quality.get("limitation") or "").strip()
+    if limitation:
+        notes.append("Analytics limitation: " + _short_text(limitation, 220) + ".")
+    if not notes:
+        notes.append(
+            "Channel analytics tool ran but did not return enough reusable performance lessons. "
+            "Do not infer private CTR, AVD, retention, or per-video winners from missing rows."
+        )
+    remember_channel_profile(
+        user_id,
+        channel_id=str(data.get("channel_id") or args.get("channel_id") or ""),
+        registry_key=str(data.get("registry_key") or args.get("registry_key") or ""),
+        title=str(data.get("channel_title") or ""),
+        note=" ".join(notes)[:900],
+    )
+    _remember_scoped_tool_lesson(
+        user_id,
+        (
+            f"Private/channel analytics evidence source: {source}; "
+            f"OAuth connected={bool(quality.get('oauth_connected'))}; "
+            f"video rows={int(quality.get('video_rows_available') or 0)}; "
+            f"retention rows={int(quality.get('retention_rows_available') or 0)}. "
+            "Studio Agent may use this for this creator/channel only; do not mix it into other channels or public trend claims."
+        ),
+        args=args,
+        data=data,
+        kind="channel_analytics_contract",
+        source="get_channel_analytics",
+        importance=5,
+        metadata={
+            "effective_source": source,
+            "oauth_connected": bool(quality.get("oauth_connected")),
+            "video_rows_available": int(quality.get("video_rows_available") or 0),
+            "retention_rows_available": int(quality.get("retention_rows_available") or 0),
+            "youtube_authorized_data": bool(quality.get("oauth_connected")),
+        },
+    )
+
+
 def _message_should_be_remembered(text: str) -> bool:
     lower = text.lower()
     return any(
@@ -379,23 +637,11 @@ def observe_tool_result(
             )
         return
     if tool_name == "get_channel_analytics" and isinstance(data, dict):
-        playbook = data.get("growth_playbook") if isinstance(data.get("growth_playbook"), dict) else {}
-        live = data.get("youtube_analytics_live") if isinstance(data.get("youtube_analytics_live"), dict) else {}
-        notes: list[str] = []
-        stage = str(playbook.get("stage") or "").strip()
-        if stage:
-            notes.append(f"Growth stage/playbook: {stage}.")
-        for key in ("packaging_learnings", "retention_learnings", "title_pattern_hints"):
-            vals = live.get(key) or []
-            if vals:
-                notes.append(f"{key.replace('_', ' ').title()}: " + "; ".join(map(str, vals[:3])))
-        remember_channel_profile(
-            uid,
-            channel_id=str(data.get("channel_id") or args.get("channel_id") or ""),
-            registry_key=str(data.get("registry_key") or args.get("registry_key") or ""),
-            title=str(data.get("channel_title") or ""),
-            note=" ".join(notes)[:900],
-        )
+        _remember_channel_analytics_lessons(uid, args, data)
+        return
+    if tool_name in {"search_youtube_public", "get_public_search_trends", "recommend_video_topics"} and isinstance(data, dict):
+        _remember_public_youtube_evidence(uid, tool_name, args, data)
+        _remember_recommended_topics(uid, tool_name, args, data)
         return
     if tool_name == "refresh_channel_intelligence" and isinstance(data, dict):
         learnings = []
