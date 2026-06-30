@@ -96,7 +96,21 @@ class ReferenceOrchestrationTests(unittest.TestCase):
         self.assertIn("Conclusion:", text)
         self.assertIn("fresh channel analytics and fresh public YouTube demand", text)
 
-    def test_recover_poll_target_infers_12_hex_job_as_competitor(self):
+    def test_recover_poll_target_uses_explicit_competitor_kind_not_hex_shape(self):
+        session = {
+            "session_id": "s1",
+            "active_jobs": [],
+            "messages": [
+                {
+                    "role": "tool",
+                    "content": json.dumps({"job_id": "abcdef123456", "kind": "competitor", "status": "running"}),
+                }
+            ],
+        }
+        with patch.object(runner.store, "get_session", return_value=session):
+            self.assertEqual(runner._recover_poll_target(session), ("abcdef123456", "competitor"))
+
+    def test_recover_poll_target_does_not_treat_12_hex_as_competitor_without_evidence(self):
         session = {
             "session_id": "s1",
             "active_jobs": [],
@@ -108,7 +122,7 @@ class ReferenceOrchestrationTests(unittest.TestCase):
             ],
         }
         with patch.object(runner.store, "get_session", return_value=session):
-            self.assertEqual(runner._recover_poll_target(session), ("abcdef123456", "competitor"))
+            self.assertEqual(runner._recover_poll_target(session), ("abcdef123456", "shortform"))
 
 
 if __name__ == "__main__":

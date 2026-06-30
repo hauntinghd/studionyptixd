@@ -56,13 +56,14 @@ export function useAgentProductionJobs({
             if (!res.ok) return;
 
             const stageKey = `${data.stage || ''}:${data.progress}:${data.status}`;
+            const snapshotKind = data.kind || track.kind;
             const prevStage = lastStageRef.current[track.job_id];
             if (prevStage !== stageKey) {
                 lastStageRef.current[track.job_id] = stageKey;
                 onProgress?.(
                     {
                         job_id: track.job_id,
-                        kind: track.kind,
+                        kind: snapshotKind,
                         stage_label: data.stage_label || data.stage || 'Working',
                         progress: Number(data.progress || 0),
                         title: track.title || data.title,
@@ -73,7 +74,7 @@ export function useAgentProductionJobs({
 
             setSnapshots((prev) => ({ ...prev, [track.job_id]: data }));
 
-            const key = `${track.kind}:${track.job_id}`;
+            const key = `${snapshotKind}:${track.job_id}`;
             if (!isTerminalJob(data)) return;
             if (completedRef.current.has(key)) return;
             completedRef.current.add(key);

@@ -38,6 +38,7 @@ from studio_agent.queue import (
 from studio_agent.jobs import (
     JOB_START_TOOLS,
     extract_jobs_from_tool,
+    get_job_snapshot,
     merge_active_jobs,
 )
 
@@ -382,9 +383,40 @@ def _is_job_status_followup(user_text: str) -> bool:
     )
 
 
+def _is_continue_production_request(user_text: str) -> bool:
+    compact = str(user_text or "").strip().lower().strip(" ?!.")
+    if compact in {
+        "continue",
+        "resume",
+        "keep going",
+        "continue it",
+        "continue working",
+        "continue the short",
+        "finish it",
+        "finish the short",
+        "make the short",
+        "keep working on the short",
+    }:
+        return True
+    return bool(
+        re.search(
+            r"\b(?:continue|resume|finish|keep going)\b.*\b(?:short|video|production|render|job)\b",
+            compact,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
     """Find the most recent durable production job even if active_jobs was cleared."""
     def _infer_kind(job_id: str, candidate: str = "") -> str:
+        try:
+            from studio_agent.jobs import ROOT as _JOBS_ROOT, SKELETON_OUTPUT as _SKELETON_OUTPUT
+
+            if (_JOBS_ROOT / _SKELETON_OUTPUT / job_id).resolve().is_dir():
+                return "shortform"
+        except Exception:
+            pass
         kind = str(candidate or "").strip().lower()
         if kind in {"shortform", "longform", "competitor"}:
             return kind
@@ -395,10 +427,6 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
                 return "competitor"
         except Exception:
             pass
-        if re.fullmatch(r"[0-9a-f]{12}", job_id or "", re.IGNORECASE):
-            # Reference-analysis jobs are short UUID hex ids. Shortform jobs in Studio
-            # are usually timestamp/underscore ids with a skeleton workspace.
-            return "competitor"
         return "shortform"
 
     fresh = store.get_session(str(session.get("session_id") or "")) or session
@@ -425,6 +453,191 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
             job_id = match.group(1)
             return job_id, _infer_kind(job_id, kind)
     return None
+
+
+def _shortform_continue_plan(snapshot: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    status = str(snapshot.get("status") or snapshot.get("phase") or snapshot.get("stage") or "").strip().lower()
+    job_id = str(snapshot.get("job_id") or "").strip()
+    if not job_id or status in {"running", "restarting", "starting"}:
+        return []
+    if status in {"awaiting_scene_review", "awaiting_approval"}:
+        total = int(snapshot.get("total_scenes") or snapshot.get("scene_count") or 0)
+        approved = int(snapshot.get("approved_scene_count") or 0)
+        pending_animation = int(snapshot.get("animation_pending_count") or 0)
+        complete_animation = int(snapshot.get("animation_complete_count") or 0)
+        if total and approved < total:
+            return [
+                ("set_production_scenes_animate", {"job_id": job_id, "animate": False}),
+                ("finalize_production", {"job_id": job_id}),
+            ]
+        if pending_animation > 0:
+            return [
+                ("animate_production_scenes", {"job_id": job_id}),
+                ("finalize_production", {"job_id": job_id}),
+            ]
+        if complete_animation > 0 or approved >= max(total, 1):
+            return [("finalize_production", {"job_id": job_id})]
+    if status in {"scenes_approved"}:
+        pending_animation = int(snapshot.get("animation_pending_count") or 0)
+        if pending_animation > 0:
+            return [
+                ("animate_production_scenes", {"job_id": job_id}),
+                ("finalize_production", {"job_id": job_id}),
+            ]
+        return [("finalize_production", {"job_id": job_id})]
+    return []
+
+
+async def _continue_active_production(
+    *,
+    session: dict[str, Any],
+    user_id: str,
+    content_format: str,
+    emit: EventEmitter | None,
+    membership_plan: str,
+    billing_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    target = _recover_poll_target(session)
+    if not target:
+        return None
+    job_id, kind = target
+    if kind != "shortform":
+        return None
+
+    sid = str(session.get("session_id") or "")
+    messages = list((store.get_session(sid) or session).get("messages") or [])
+    snapshot = get_job_snapshot(job_id, "shortform")
+    status = str(snapshot.get("status") or "").lower()
+    tool_fires: list[ToolFire] = [ToolFire("poll_render_job", {"job_id": job_id, "kind": "shortform"}, json.dumps(snapshot))]
+    active_jobs = merge_active_jobs(
+        list(session.get("active_jobs") or []),
+        [{
+            "job_id": job_id,
+            "kind": "shortform",
+            "title": str(snapshot.get("title") or "Short-form video"),
+            "started_at": time.time(),
+        }],
+    )
+    await _fire_event(emit, "active_jobs", jobs=active_jobs)
+
+    if status in {"failed", "error", "cancelled"}:
+        try:
+            retry_out = await retry_last_production(
+                session,
+                membership_plan=membership_plan,
+                billing_profile=billing_profile,
+            )
+            assistant_text = "That short had stopped, so I restarted it from the saved production state instead of starting from scratch."
+            retry_jobs = list(retry_out.get("active_jobs") or [])
+            active_jobs = merge_active_jobs(active_jobs, retry_jobs)
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(sid, messages=messages, active_jobs=active_jobs)
+            await _fire_event(emit, "active_jobs", jobs=active_jobs)
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": [],
+                "active_jobs": active_jobs,
+                "approval_mode": str(session.get("approval_mode") or "confirm"),
+                "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+                "usage": {},
+                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+            }
+        except Exception as exc:
+            assistant_text = f"I tried to resume that short from saved state, but the restart failed: {str(exc)[:500]}"
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(sid, messages=messages, active_jobs=active_jobs)
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": [],
+                "active_jobs": active_jobs,
+                "approval_mode": str(session.get("approval_mode") or "confirm"),
+                "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+                "usage": {},
+                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+            }
+
+    plan = _shortform_continue_plan(snapshot)
+    if not plan:
+        assistant_text = _format_polled_job_status(json.dumps(snapshot))
+        messages.append(_tool_observation_message("poll_render_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        await _fire_event(emit, "tool_end", tool="poll_render_job", status="ok")
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [],
+            "active_jobs": active_jobs,
+            "approval_mode": str(session.get("approval_mode") or "confirm"),
+            "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    profile = billing_profile or {}
+    last_result: dict[str, Any] = {}
+    async with studio_agent_slot(
+        user_id=user_id,
+        plan=membership_plan,
+        operation="continue_production",
+        unlimited=bool(profile.get("unlimited")),
+    ):
+        for tool_name, args in plan:
+            await _fire_event(emit, "tool_start", tool=tool_name, round=0, awaiting_approval=False, deterministic_continue=True)
+            try:
+                result = execute_tool_logged(
+                    tool_name,
+                    args,
+                    user_id=user_id,
+                    content_format=content_format,
+                    session_id=sid,
+                )
+                tool_fires.append(ToolFire(tool_name, dict(args), result))
+                messages.append(_tool_observation_message(tool_name, result))
+                try:
+                    parsed = json.loads(result or "{}")
+                except Exception:
+                    parsed = {}
+                last_result = parsed if isinstance(parsed, dict) else {}
+                if _production_result_failed(last_result):
+                    await _fire_event(emit, "tool_end", tool=tool_name, status="error", error=str(last_result.get("error") or "")[:160])
+                    break
+                await _fire_event(emit, "tool_end", tool=tool_name, status="ok")
+                active_jobs = merge_active_jobs(active_jobs, extract_jobs_from_tool(tool_name, result))
+                await _fire_event(emit, "active_jobs", jobs=active_jobs)
+            except Exception as exc:
+                last_result = {"error": str(exc), "status": "failed"}
+                await _fire_event(emit, "tool_end", tool=tool_name, status="error", error=str(exc)[:160])
+                break
+
+    final_snapshot = get_job_snapshot(job_id, "shortform")
+    active_jobs = merge_active_jobs(active_jobs, [{
+        "job_id": job_id,
+        "kind": "shortform",
+        "title": str(final_snapshot.get("title") or "Short-form video"),
+        "started_at": time.time(),
+    }])
+    if _production_result_failed(last_result):
+        assistant_text = f"I continued the short, but the next production step failed: {str(last_result.get('error') or last_result)[:500]}"
+    elif _production_result_complete(last_result) or final_snapshot.get("status") == "complete":
+        assistant_text = "I continued the short and finished the MP4. The production card has the download."
+    else:
+        assistant_text = _format_polled_job_status(json.dumps(final_snapshot))
+    messages.append({"role": "assistant", "content": assistant_text})
+    store.update_session(sid, messages=messages, active_jobs=active_jobs)
+    await _fire_event(emit, "active_jobs", jobs=active_jobs)
+    return {
+        "session_id": sid,
+        "assistant_message": assistant_text,
+        "pending_actions": [],
+        "active_jobs": active_jobs,
+        "approval_mode": str(session.get("approval_mode") or "confirm"),
+        "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+        "usage": {},
+        "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+    }
 
 
 def _format_polled_job_status(result: str) -> str:
@@ -2323,6 +2536,18 @@ async def _run_turn_impl(
         memory.observe_user_message(str(user_id), user_text, session=session)
     except Exception:
         pass
+
+    if not reply_to and _is_continue_production_request(user_text):
+        continued = await _continue_active_production(
+            session=session,
+            user_id=user_id,
+            content_format=content_format,
+            emit=emit,
+            membership_plan=membership_plan,
+            billing_profile=billing_profile,
+        )
+        if continued is not None:
+            return continued
 
     if not reply_to and _is_job_status_followup(user_text):
         poll_target = _recover_poll_target(session)

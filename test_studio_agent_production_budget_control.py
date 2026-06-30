@@ -6,11 +6,14 @@ import time
 import types
 import unittest
 import uuid
+import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import patch
 
 sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import jobs, production_budget
+from studio_agent import runner
 
 
 class ProductionBudgetControlTests(unittest.TestCase):
@@ -212,6 +215,72 @@ class ProductionBudgetControlTests(unittest.TestCase):
             self.assertNotEqual(snap["title"], "Reference analysis")
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_continue_shortform_executes_next_production_steps_without_model_chat(self):
+        job_id = uuid.uuid4().hex[:12]
+        session = {
+            "session_id": f"sa_{uuid.uuid4().hex[:16]}",
+            "user_id": "owner",
+            "content_format": "short",
+            "approval_mode": "confirm",
+            "reasoning_depth": "deep",
+            "messages": [],
+            "active_jobs": [{"job_id": job_id, "kind": "competitor"}],
+        }
+        first_snapshot = {
+            "job_id": job_id,
+            "kind": "shortform",
+            "status": "awaiting_approval",
+            "total_scenes": 2,
+            "approved_scene_count": 0,
+            "animation_pending_count": 0,
+            "title": "Recovered short",
+        }
+        final_snapshot = {
+            "job_id": job_id,
+            "kind": "shortform",
+            "status": "complete",
+            "progress": 100,
+            "title": "Recovered short",
+        }
+        calls: list[str] = []
+
+        @asynccontextmanager
+        async def fake_slot(**_kwargs):
+            yield
+
+        def fake_execute(name, args, **_kwargs):
+            calls.append(name)
+            if name == "set_production_scenes_animate":
+                self.assertFalse(args["animate"])
+                return json.dumps({"ok": True, "job_id": job_id, "status": "scenes_approved"})
+            if name == "finalize_production":
+                return json.dumps({"status": "complete", "job_id": job_id, "video_path": "out.mp4"})
+            raise AssertionError(f"unexpected tool {name}")
+
+        with (
+            patch.object(runner, "_recover_poll_target", return_value=(job_id, "shortform")),
+            patch.object(runner, "get_job_snapshot", side_effect=[first_snapshot, final_snapshot]),
+            patch.object(runner, "execute_tool_logged", side_effect=fake_execute),
+            patch.object(runner.store, "get_session", return_value=session),
+            patch.object(runner.store, "update_session"),
+            patch.object(runner, "studio_agent_slot", fake_slot),
+        ):
+            result = asyncio.run(
+                runner._continue_active_production(
+                    session=session,
+                    user_id="owner",
+                    content_format="short",
+                    emit=None,
+                    membership_plan="owner",
+                    billing_profile={"unlimited": True},
+                )
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(calls, ["set_production_scenes_animate", "finalize_production"])
+        self.assertIn("finished the MP4", result["assistant_message"])
+        self.assertEqual(result["active_jobs"][-1]["kind"], "shortform")
 
 
 if __name__ == "__main__":

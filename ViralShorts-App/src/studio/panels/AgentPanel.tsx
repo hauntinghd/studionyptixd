@@ -686,7 +686,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const normalized = list
                 .map((j) => ({
                     job_id: String(j.job_id || ''),
-                    kind: (j.kind || 'longform') as AgentJobTrack['kind'],
+                    kind: (j.kind || 'shortform') as AgentJobTrack['kind'],
                     title: String(j.title || ''),
                     started_at: Number(j.started_at || Date.now()),
                 }))

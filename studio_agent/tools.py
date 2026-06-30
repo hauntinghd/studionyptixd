@@ -3640,21 +3640,10 @@ def execute_tool(
         kind = str(args.get("kind") or "longform").strip().lower()
         if not job_id:
             raise ValueError("job_id required")
-        if kind == "competitor":
-            from studio_agent import competitor
+        if kind in {"shortform", "competitor"}:
+            from studio_agent.jobs import get_job_snapshot
 
-            data = competitor.read_status(job_id)
-            if isinstance(data, dict):
-                data = {"job_id": job_id, "kind": "competitor", **data}
-            else:
-                data = {"job_id": job_id, "kind": "competitor", "status": "failed", "error": "invalid analysis status"}
-            return json.dumps(data, indent=2, ensure_ascii=True)
-        if kind == "shortform":
-            result_path = (ROOT / SKELETON_OUTPUT / job_id / "result.json").resolve()
-            if not result_path.is_file():
-                return json.dumps({"job_id": job_id, "status": "running", "kind": kind})
-            data = json.loads(result_path.read_text(encoding="utf-8"))
-            return json.dumps({"job_id": job_id, "kind": kind, **data}, indent=2)
+            return json.dumps(get_job_snapshot(job_id, kind), indent=2, ensure_ascii=True)
         from long_form.pipeline import load_state, get_status
 
         st = load_state(job_id) or {}
