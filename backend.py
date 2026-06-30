@@ -33,7 +33,7 @@ from backend_health import build_health_payload
 from backend_admin_analytics import build_admin_analytics_payload
 from backend_billing_audit import build_admin_billing_audit_payload
 from backend_feedback_handlers import build_admin_youtube_quota_handler, build_submit_feedback_handler
-from backend_generation_helpers import estimate_auto_short_credits
+from backend_generation_helpers import auto_scene_channel_context, build_auto_scene_update, estimate_auto_short_credits
 from backend_misc_payloads import (
     build_admin_waiting_list_payload,
     build_landing_notifications_payload,
@@ -19073,9 +19073,7 @@ async def _auto_regenerate_scene_image(body: dict, request: Request = None):
     out_name = f"scene_{scene_index + 1:02d}_regen_{ts}.png"
     out_path = str(_auto_scene_dir(job_id) / out_name)
     scene_reference_url = _resolve_reference_for_scene(state, template, scene_index) or reference_image_url
-    channel_context = dict((dict(state.get("metadata_pack") or {})).get("youtube_channel") or {})
-    if not channel_context and str(state.get("youtube_channel_id", "") or "").strip():
-        channel_context = {"channel_id": str(state.get("youtube_channel_id", "") or "").strip()}
+    channel_context = auto_scene_channel_context(state)
     img_result = await generate_scene_image(
         full_prompt,
         out_path,
@@ -19095,19 +19093,18 @@ async def _auto_regenerate_scene_image(body: dict, request: Request = None):
         except Exception:
             pass
 
-    updated = {
-        "scene_index": scene_index,
-        "filename": out_name,
-        "image_url": _auto_scene_url(job_id, out_name),
-        "local_path": str(Path(out_path)),
-        "visual_description": scene_prompt,
-        "template": template,
-        "quality_mode": quality_mode,
-        "generation_id": new_gen_id,
-        "cdn_url": str(img_result.get("cdn_url", "") or ""),
-        "source": "regenerated_auto",
-        "updated_at": time.time(),
-    }
+    updated = build_auto_scene_update(
+        scene_index=scene_index,
+        filename=out_name,
+        image_url=_auto_scene_url(job_id, out_name),
+        local_path=str(Path(out_path)),
+        visual_description=scene_prompt,
+        template=template,
+        quality_mode=quality_mode,
+        generation_id=new_gen_id,
+        cdn_url=str(img_result.get("cdn_url", "") or ""),
+        updated_at=time.time(),
+    )
     scene_images[scene_index] = updated
     state["scene_images"] = scene_images
     state["regenerate_count"] = int(state.get("regenerate_count", 0) or 0) + 1
