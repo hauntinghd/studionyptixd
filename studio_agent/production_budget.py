@@ -169,10 +169,18 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         est = _fallback("seedream_v45_per_image")
         breakdown = {"seedream_v45_edit_images": 1}
     elif name == "animate_production_scenes":
-        count = len(args.get("scene_indices") or []) or 3
-        seconds = count * 5.0
-        est = seconds * _fallback("kling_v21_standard_per_second")
-        breakdown = {"scene_count": count, "video_seconds": seconds, "model": "standard_i2v"}
+        count = _scene_index_count(args, default=3)
+        seconds = _video_seconds(args, count=count, default_per_scene=5.0)
+        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
+        video_rate = _video_rate(video_model)
+        est = seconds * video_rate
+        breakdown = {
+            "scene_count": count,
+            "video_seconds": seconds,
+            "video_model": video_model,
+            "video_usd_per_second": video_rate,
+            "video_usd": round(est, 4),
+        }
     elif name in {"finalize_production", "re_edit_production"}:
         est = _fallback("fal_minimax_per_1k_chars") + 0.25
         breakdown = {"recompose": "local_or_cached", "tts_safety_allowance_usd": round(est, 4)}
@@ -241,31 +249,36 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
 
 
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    scenes = max(1, int(args.get("scene_count") or 12))
+    scenes = max(1, min(60, int(args.get("scene_count") or args.get("beats") or 12)))
     full_auto = bool(args.get("_full_auto") or args.get("full_auto"))
     animate = bool(args.get("animate", False)) and full_auto
     stills = scenes * _fallback("seedream_v45_per_image")
-    seconds = scenes * 5.0 if animate else 0.0
-    video_model = str(args.get("video_model") or "seedance").strip()
-    if video_model == "kling_pro":
-        video_rate = _fallback("kling_v21_pro_per_second")
-    elif video_model == "pixverse":
-        video_rate = _fallback("pixverse_v6_per_second")
-    else:
-        video_rate = _fallback("kling_v21_standard_per_second")
+    requested_seconds = _video_seconds(args, count=scenes, default_per_scene=5.0)
+    seconds = requested_seconds if animate else 0.0
+    video_model = str(args.get("video_model") or "seedance").strip().lower()
+    video_rate = _video_rate(video_model)
     video = seconds * video_rate
-    tts = _fallback("fal_minimax_per_1k_chars")
-    total = (stills + video + tts) * 1.15
+    script_chars = max(1000, int(args.get("script_char_count") or len(str(args.get("script") or "")) or scenes * 140))
+    tts_units = max(1.0, script_chars / 1000.0)
+    tts_rate = _fallback("fal_minimax_per_1k_chars")
+    tts = tts_units * tts_rate
+    cushion = _cushion_pct()
+    total = (stills + video + tts) * (1.0 + cushion)
     return total, {
         "scene_count": scenes,
         "review_gate": not full_auto,
         "i2v_deferred_until_scene_approval": not full_auto,
+        "seedream_v45_per_image": _fallback("seedream_v45_per_image"),
         "stills_usd": round(stills, 4),
         "video_seconds": seconds,
+        "requested_video_seconds": requested_seconds,
         "video_model": video_model,
+        "video_usd_per_second": video_rate,
         "video_usd": round(video, 4),
+        "tts_chars": script_chars,
+        "fal_minimax_per_1k_chars": tts_rate,
         "tts_allowance_usd": round(tts, 4),
-        "cushion_pct": 0.15,
+        "cushion_pct": cushion,
     }
 
 
@@ -317,6 +330,48 @@ def _chapter_count(args: dict[str, Any]) -> int:
         except Exception:
             pass
     return 1
+
+
+def _scene_index_count(args: dict[str, Any], *, default: int) -> int:
+    raw = args.get("scene_indices")
+    if isinstance(raw, list) and raw:
+        return max(1, min(60, len(raw)))
+    return max(1, min(60, int(args.get("scene_count") or default)))
+
+
+def _video_seconds(args: dict[str, Any], *, count: int, default_per_scene: float) -> float:
+    explicit_total = _float(args.get("duration_seconds"), None)
+    if explicit_total is not None and explicit_total > 0:
+        return round(max(float(count), min(3600.0, explicit_total)), 4)
+    per_scene = _float(args.get("seconds_per_scene"), None)
+    if per_scene is not None and per_scene > 0:
+        return round(max(float(count), min(3600.0, float(count) * per_scene)), 4)
+    durations = args.get("scene_durations")
+    if isinstance(durations, list) and durations:
+        total = 0.0
+        for item in durations[:60]:
+            val = _float(item, None)
+            if val is not None and val > 0:
+                total += val
+        if total > 0:
+            return round(max(float(count), min(3600.0, total)), 4)
+    return round(max(float(count), float(count) * default_per_scene), 4)
+
+
+def _video_rate(video_model: str) -> float:
+    model = str(video_model or "").strip().lower()
+    if model in {"kling_pro", "premium"} or ("kling" in model and "pro" in model):
+        return _fallback("kling_v21_pro_per_second")
+    if "pixverse" in model:
+        return _fallback("pixverse_v6_per_second")
+    return _fallback("kling_v21_standard_per_second")
+
+
+def _cushion_pct() -> float:
+    raw = _fallback("cushion_pct")
+    if raw <= 0:
+        raw = 0.25
+    return max(0.25, min(0.5, raw))
 
 
 def _default_cap(tool_name: str) -> float:

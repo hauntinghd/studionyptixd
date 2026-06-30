@@ -194,6 +194,25 @@ class ProductionBudgetControlTests(unittest.TestCase):
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
+    def test_competitor_poll_for_shortform_workspace_returns_shortform_snapshot(self):
+        job_id = uuid.uuid4().hex[:12]
+        workspace = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "progress.json").write_text(
+                json.dumps({"progress": 30, "stage": "stills", "detail": "Scene 3/12 still"}),
+                encoding="utf-8",
+            )
+
+            snap = jobs.get_job_snapshot(job_id, "competitor")
+
+            self.assertEqual(snap["kind"], "shortform")
+            self.assertEqual(snap["status"], "running")
+            self.assertEqual(snap["progress"], 30)
+            self.assertNotEqual(snap["title"], "Reference analysis")
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -669,6 +669,10 @@ def prune_session_job(session_id: str, job_id: str, *, user_id: str | None = Non
 
 def get_job_snapshot(job_id: str, kind: str) -> dict[str, Any]:
     kind = str(kind or "longform").strip().lower()
+    if kind == "competitor":
+        shortform_workspace = (ROOT / SKELETON_OUTPUT / job_id).resolve()
+        if shortform_workspace.is_dir():
+            kind = "shortform"
     if kind == "shortform":
         snap = _shortform_status(job_id)
     elif kind == "competitor":

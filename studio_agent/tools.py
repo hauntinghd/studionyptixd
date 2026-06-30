@@ -666,6 +666,22 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                         "topic": {"type": "string"},
                         "script": {"type": "string", "description": "Optional pre-written script"},
+                        "scene_count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 60,
+                            "description": "Planned number of scenes/beats. Used for hard cost preflight before any provider spend.",
+                        },
+                        "duration_seconds": {
+                            "type": "number",
+                            "minimum": 1,
+                            "description": "Planned total runtime in seconds. Used for full-auto animation cost preflight.",
+                        },
+                        "seconds_per_scene": {
+                            "type": "number",
+                            "minimum": 1,
+                            "description": "Fallback per-scene animation duration when total duration is not known.",
+                        },
                         "video_model": {
                             "type": "string",
                             "enum": ["seedance", "pixverse", "kling_pro"],

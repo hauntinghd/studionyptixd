@@ -11,9 +11,8 @@ export type AgentJobTrack = {
     started_at?: number;
 };
 
-export function normalizeAgentJobKind(jobId: string, kind?: string): AgentJobKind {
+export function normalizeAgentJobKind(_jobId: string, kind?: string): AgentJobKind {
     if (kind === 'longform' || kind === 'shortform' || kind === 'competitor') return kind;
-    if (/^[0-9a-f]{12}$/i.test(String(jobId || '').trim())) return 'competitor';
     return 'shortform';
 }
 

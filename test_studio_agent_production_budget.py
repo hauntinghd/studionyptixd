@@ -52,8 +52,50 @@ def test_budget_metadata_is_attached_to_json_results():
     assert payload["budget"]["estimated_usd"] <= payload["budget"]["max_budget_usd"]
 
 
+def test_shortform_full_auto_budget_uses_duration_and_model_rate():
+    estimate = production_budget.estimate_tool_cost(
+        "start_shortform_generate",
+        {
+            "scene_count": 12,
+            "duration_seconds": 72,
+            "video_model": "kling_pro",
+            "animate": True,
+            "_full_auto": True,
+            "script": "x" * 2400,
+            "max_budget_usd": 25.0,
+        },
+    )
+
+    breakdown = estimate.breakdown
+    assert breakdown["video_seconds"] == 72
+    assert breakdown["video_model"] == "kling_pro"
+    assert breakdown["video_usd_per_second"] == production_budget._fallback("kling_v21_pro_per_second")
+    assert breakdown["tts_chars"] == 2400
+    assert breakdown["cushion_pct"] >= 0.25
+    assert estimate.estimated_usd > breakdown["stills_usd"] + breakdown["video_usd"]
+
+
+def test_animate_scene_budget_uses_selected_scene_count_and_duration():
+    estimate = production_budget.estimate_tool_cost(
+        "animate_production_scenes",
+        {
+            "scene_indices": [0, 2, 4],
+            "scene_durations": [4.5, 6.0, 7.5],
+            "video_model": "pixverse",
+            "max_budget_usd": 3.0,
+        },
+    )
+
+    assert estimate.breakdown["scene_count"] == 3
+    assert estimate.breakdown["video_seconds"] == 18.0
+    assert estimate.breakdown["video_model"] == "pixverse"
+    assert estimate.estimated_usd == round(18.0 * production_budget._fallback("pixverse_v6_per_second"), 4)
+
+
 if __name__ == "__main__":
     test_shortform_budget_passes_when_under_cap()
     test_shortform_budget_blocks_when_over_cap()
     test_budget_metadata_is_attached_to_json_results()
+    test_shortform_full_auto_budget_uses_duration_and_model_rate()
+    test_animate_scene_budget_uses_selected_scene_count_and_duration()
     print("production budget tests passed")
