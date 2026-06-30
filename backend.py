@@ -18479,6 +18479,49 @@ _landing_notifications_payload = build_landing_notifications_payload(
     public_limit=LANDING_NOTIFICATIONS_PUBLIC_LIMIT,
 )
 
+
+async def _submit_feedback(req: FeedbackRequest, user: dict = Depends(require_auth)):
+    try:
+        rating = int(req.rating)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "rating must be an integer")
+    if rating < 1 or rating > 5:
+        raise HTTPException(400, "rating must be between 1 and 5")
+    row = {
+        "type": "studio_feedback",
+        "ts": time.time(),
+        "user_id": str(user.get("id", "") or ""),
+        "email": str(user.get("email", "") or ""),
+        "job_id": _clip_text(str(req.job_id or "").strip(), 120),
+        "rating": rating,
+        "comment": _clip_text(str(req.comment or "").strip(), 2000),
+        "template": _clip_text(str(req.template or "").strip(), 120),
+        "language": _clip_text(str(req.language or "").strip(), 40),
+        "feature": _clip_text(str(req.feature or "").strip(), 120),
+    }
+    try:
+        feedback_path = Path(TRAINING_DATA_DIR) / "studio_feedback.jsonl"
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        with feedback_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+    except Exception as exc:
+        log.warning("Failed to persist Studio feedback: %s", exc)
+        raise HTTPException(500, "Failed to record feedback") from exc
+    return {"ok": True}
+
+
+async def _admin_youtube_quota(user: dict = Depends(require_auth)):
+    if str(user.get("email", "") or "") not in ADMIN_EMAILS:
+        raise HTTPException(403, "Admin access required")
+    import youtube_quota
+
+    return {
+        "ok": True,
+        "quota": await youtube_quota.breakdown(),
+        "history": await youtube_quota.history(days=7),
+    }
+
+
 mount_router(
     app,
     build_core_router(
@@ -18521,6 +18564,8 @@ mount_router(
         admin_analytics_handler=_admin_analytics_payload,
         admin_waiting_list_handler=_admin_waiting_list_payload,
         admin_billing_audit_handler=_admin_billing_audit_payload,
+        submit_feedback_handler=_submit_feedback,
+        admin_youtube_quota_handler=_admin_youtube_quota,
         set_maintenance_banner_handler=_set_maintenance_banner_payload,
         public_config_payload=_public_config_payload,
         landing_notifications_payload=_landing_notifications_payload,

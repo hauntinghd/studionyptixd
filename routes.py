@@ -159,6 +159,8 @@ def build_misc_router(
     admin_analytics_handler,
     admin_waiting_list_handler,
     admin_billing_audit_handler,
+    submit_feedback_handler,
+    admin_youtube_quota_handler,
     set_maintenance_banner_handler,
     public_config_payload,
     landing_notifications_payload,
@@ -196,6 +198,9 @@ def build_misc_router(
     @router.get("/api/admin/billing-audit")
     async def admin_billing_audit(user: dict = Depends(require_auth)):
         return await admin_billing_audit_handler(user)
+
+    router.add_api_route("/api/feedback", submit_feedback_handler, methods=["POST"])
+    router.add_api_route("/api/admin/youtube-quota", admin_youtube_quota_handler, methods=["GET"])
 
     @router.post("/api/admin/maintenance-banner")
     async def admin_set_maintenance_banner(body: dict, user: dict = Depends(require_auth)):
