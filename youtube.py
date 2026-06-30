@@ -2915,6 +2915,16 @@ async def _youtube_connected_channel_access_token(user: dict, channel_id: str) -
             chosen_id, record = _find_channel_record(channels, chosen_id)
     if not record:
         return "", {}
+    async def _persist_token_failure(failed_record: dict, error: Exception | str) -> dict:
+        failed = dict(failed_record or {})
+        failed["last_sync_error"] = _clip_text(str(error), 220)
+        failed["token_refresh_retry_at"] = time.time() + (6 * 3600)
+        async with _youtube_connections_lock:
+            bucket = _youtube_bucket_for_user(user_id)
+            bucket.setdefault("channels", {})[chosen_id] = failed
+            _save_youtube_connections()
+        return failed
+
     try:
         access_token, updated = await _youtube_ensure_access_token(record)
     except Exception as exc:
@@ -2943,20 +2953,29 @@ async def _youtube_connected_channel_access_token(user: dict, channel_id: str) -
                     return str(access_token or "").strip(), dict(updated or {})
 
         repaired_record: dict = {}
-        repair_channel_id = str(record.get("channel_id") or chosen_id).strip()
-        try:
-            repaired_record = await _youtube_repair_channel_record_from_sibling(user_id, repair_channel_id, record)
-        except Exception:
-            repaired_record = {}
+        repair_channel_ids = [
+            str(chosen_id or "").strip(),
+            str(record.get("channel_id") or "").strip(),
+        ]
+        for repair_channel_id in dict.fromkeys(cid for cid in repair_channel_ids if cid):
+            try:
+                repaired_record = await _youtube_repair_channel_record_from_sibling(user_id, repair_channel_id, record)
+            except Exception:
+                repaired_record = {}
+            if repaired_record:
+                break
         if not repaired_record and _google_oauth_error_suggests_reconnect_required(str(exc)):
-            return "", {**record, "last_sync_error": _clip_text(str(exc), 220)}
+            failed = await _persist_token_failure(record, exc)
+            return "", failed
         if repaired_record:
             try:
                 access_token, updated = await _youtube_ensure_access_token(repaired_record)
             except Exception as repaired_exc:
-                return "", {**repaired_record, "last_sync_error": _clip_text(str(repaired_exc), 220)}
+                failed = await _persist_token_failure(repaired_record, repaired_exc)
+                return "", failed
         else:
-            return "", {**record, "last_sync_error": _clip_text(str(exc), 220)}
+            failed = await _persist_token_failure(record, exc)
+            return "", failed
     async with _youtube_connections_lock:
         bucket = _youtube_bucket_for_user(user_id)
         bucket["channels"][chosen_id] = updated
