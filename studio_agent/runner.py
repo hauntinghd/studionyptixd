@@ -768,6 +768,9 @@ def _wants_short_plan(user_text: str) -> bool:
 
 def _wants_production_execution(user_text: str) -> bool:
     """Detect an explicit request to begin or resume a production."""
+    low = str(user_text or "").strip().lower()
+    if re.search(r"\b(?:let'?s|lets)\s+(?:do|make|produce|create|start|generate|render)\b", low):
+        return True
     return bool(
         re.search(
             r"\b("
@@ -858,6 +861,98 @@ def _recover_requested_production(
         return None
 
     return find_production(fresh)
+
+
+def _chosen_topic_from_user_text(user_text: str) -> str:
+    text = " ".join(str(user_text or "").strip().split())
+    if not text:
+        return ""
+    quoted = re.findall(r"['\"]([^'\"]{8,160})['\"]", text)
+    if quoted:
+        return quoted[-1].strip()
+    match = re.search(
+        r"\b(?:let'?s|lets|we should|go ahead and|please)?\s*"
+        r"(?:do|make|produce|create|start|generate|render)\s+(.{8,180})$",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        topic = match.group(1).strip(" .!?")
+        topic = re.sub(r"^(?:the\s+)?(?:video|short|long[- ]?form|render|production)\s+(?:for|about|on)\s+", "", topic, flags=re.IGNORECASE).strip()
+        if topic.lower() not in {"it", "this", "that", "the first one", "first one", "option one"}:
+            return topic[:180]
+    return ""
+
+
+def _last_recommended_topic(messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(messages or []):
+        if str(msg.get("role") or "") != "assistant":
+            continue
+        content = str(msg.get("content") or "")
+        matches = re.findall(r"\d+\.\s+['\"]([^'\"]{8,160})['\"]", content)
+        if matches:
+            return matches[0].strip()
+        matches = re.findall(r"[-*]\s+['\"]([^'\"]{8,160})['\"]", content)
+        if matches:
+            return matches[0].strip()
+    return ""
+
+
+def _build_requested_topic_production(
+    session: dict[str, Any],
+    user_text: str,
+    *,
+    content_format: str,
+    active_registry: str,
+    active_channel_id: str = "",
+    messages: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    topic = _chosen_topic_from_user_text(user_text) or _last_recommended_topic(messages or [])
+    if not topic:
+        return None
+    low = str(user_text or "").lower()
+    fmt = str(content_format or "").strip().lower()
+    render_style = str(session.get("render_style") or "cinematic").strip() or "cinematic"
+    is_long = (
+        fmt == "long"
+        or bool(re.search(r"\blong[- ]?form\b|\b8\s*-\s*15\s*min|\bdocumentary\b", low))
+    ) and "short" not in low
+    if is_long:
+        title = topic
+        args = {
+            "channel_key": active_registry or str(session.get("registry_key") or "").strip() or "default",
+            "title": title[:120],
+            "topic": topic,
+            "render_style": render_style,
+            "motion_policy": "balanced",
+            "sfx_enabled": True,
+            "background_music": "auto",
+        }
+        return "start_longform_render", args
+
+    category_key = "human_limits" if (active_registry == "mrskelewelly" or "skele" in low or "psychology" in low) else "people_blogs"
+    visual_brief = (
+        "Short-form YouTube psychology video. Keep the active channel identity locked, "
+        "use clear visual metaphors for hidden behavior, fast hook pacing, high-contrast captions, "
+        "and no unsupported analytics claims in on-screen text."
+    )
+    args = {
+        "render_style": render_style,
+        "category_key": category_key,
+        "topic": topic,
+        "video_model": "seedance",
+        "visual_brief": visual_brief,
+        "animate": False,
+        "captions_enabled": True,
+        "caption_mode": "word",
+        "sfx_enabled": True,
+        "background_music": "auto",
+    }
+    if active_channel_id:
+        args["_selected_channel_id"] = active_channel_id
+    if active_registry:
+        args["_selected_registry_key"] = active_registry
+    return "start_shortform_generate", args
 
 
 def _needs_public_search_preflight(user_text: str) -> bool:
@@ -2305,6 +2400,15 @@ async def _run_turn_impl(
                 },
             }
         recovered = _recover_requested_production(session, user_text)
+        if not recovered:
+            recovered = _build_requested_topic_production(
+                session,
+                user_text,
+                content_format=content_format,
+                active_registry=active_registry,
+                active_channel_id=active_channel_id,
+                messages=messages,
+            )
         if recovered:
             name, args = recovered
             if name == "start_shortform_generate":
@@ -3124,6 +3228,15 @@ async def _run_turn_impl(
         )
         if audit.has_issues and _promised_execution_blocked(audit):
             recovered = _recover_requested_production(session, user_text)
+            if not recovered:
+                recovered = _build_requested_topic_production(
+                    session,
+                    user_text,
+                    content_format=content_format,
+                    active_registry=active_registry,
+                    active_channel_id=active_channel_id,
+                    messages=messages,
+                )
             if recovered:
                 name, args = recovered
                 if name == "start_shortform_generate":

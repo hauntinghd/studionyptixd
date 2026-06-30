@@ -11,9 +11,11 @@ sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent.runner import (
     ToolFire,
+    _build_requested_topic_production,
     _fire_verification_step,
     _grounded_research_summary_from_tools,
     _is_channel_status_only_answer,
+    _wants_production_execution,
     _needs_fresh_public_search,
     _needs_public_search_preflight,
 )
@@ -35,6 +37,44 @@ def test_verify_what_people_want_to_watch_requires_public_search():
     text = "id like you to verify all of your information regarding what people want to watch, we cannot take any chances"
 
     assert _needs_public_search_preflight(text)
+
+
+def test_lets_do_chosen_topic_is_production_execution():
+    text = "lets do The Real Reason Men Pull Away After getting close"
+
+    assert _wants_production_execution(text)
+    recovered = _build_requested_topic_production(
+        {"render_style": "comic_book", "registry_key": "mrskelewelly"},
+        text,
+        content_format="short",
+        active_registry="mrskelewelly",
+        active_channel_id="UC-skelly",
+    )
+
+    assert recovered is not None
+    name, args = recovered
+    assert name == "start_shortform_generate"
+    assert args["topic"] == "The Real Reason Men Pull Away After getting close"
+    assert args["category_key"] == "human_limits"
+    assert args["render_style"] == "comic_book"
+    assert args["caption_mode"] == "word"
+    assert args["animate"] is False
+
+
+def test_lets_do_longform_topic_routes_to_longform_render():
+    recovered = _build_requested_topic_production(
+        {"render_style": "cinematic", "registry_key": "empire_magnates"},
+        "lets do a long-form documentary about The Wirecard Collapse",
+        content_format="long",
+        active_registry="empire_magnates",
+    )
+
+    assert recovered is not None
+    name, args = recovered
+    assert name == "start_longform_render"
+    assert args["channel_key"] == "empire_magnates"
+    assert "Wirecard Collapse" in args["topic"]
+    assert args["motion_policy"] == "balanced"
 
 
 def test_verification_step_event_payload_is_structured():
