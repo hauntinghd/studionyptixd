@@ -1516,6 +1516,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const visibleUserText = text.trim()
                 || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
             setMessages((m) => [...m, { role: 'user', content: visibleUserText }]);
+            let completedCleanly = false;
             const queuePoll = window.setInterval(() => {
                 if (sessionIdRef.current !== activeSessionId) return;
                 void pollQueueWhileLoading();
@@ -1658,6 +1659,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setPending(nextPending);
                 ingestActiveJobs(data?.active_jobs, activeSessionId);
                 await refreshHistory();
+                completedCleanly = Boolean(reply || nextPending.length > 0);
             } catch (e) {
                 if (sessionIdRef.current !== activeSessionId) return;
                 updateVerificationStep('final_audit', {
@@ -1672,6 +1674,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 clearSessionRunning(activeSessionId);
                 if (sessionIdRef.current === activeSessionId) {
                     setToolActivity('');
+                    if (completedCleanly) {
+                        setVerificationSteps([]);
+                    }
                 }
             }
         },
