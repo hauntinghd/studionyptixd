@@ -219,7 +219,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
     );
 
-    const handlePackCheckout = useCallback(async () => {
+    const handlePackCheckout = useCallback(async (method: 'stripe' | 'paypal' = 'stripe') => {
         if (!selectedPack) {
             setCheckoutError('Select a credit pack first.');
             return;
@@ -229,9 +229,9 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             return;
         }
         setCheckoutError('');
-        setPackCheckoutLoadingId(selectedPack.price_id);
+        setPackCheckoutLoadingId(method);
         try {
-            const err = await checkoutTopup(selectedPack.price_id, 'card');
+            const err = await checkoutTopup(selectedPack.price_id, method === 'paypal' ? 'paypal' : 'card');
             if (err) setCheckoutError(err);
         } finally {
             setPackCheckoutLoadingId('');
@@ -286,7 +286,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 sortedPacks={sortedPacks}
                 onSelectPack={setSelectedPackId}
                 onPlanAction={(id) => void handlePlanAction(id as UnifiedPlanId)}
-                onPackCheckout={() => void handlePackCheckout()}
+                onPackCheckout={(method) => void handlePackCheckout(method)}
                 planLoadingId={planLoadingId}
                 packCheckoutLoadingId={packCheckoutLoadingId}
                 checkoutError={checkoutError}
