@@ -3,6 +3,7 @@ import { createElement, useCallback, useContext, useEffect, useMemo, useState } 
 import { AuthContext } from '../../shared';
 import type { AgentJobSnapshot, AgentSceneSnapshot } from '../../lib/agentProduction';
 import {
+    agentJobAnimateUrl,
     agentJobFinalizeUrl,
     agentJobMediaUrl,
     agentJobPackageUrl,
@@ -297,6 +298,8 @@ export default function AgentJobDeliverable({
     const [videoSrc, setVideoSrc] = useState('');
     const [finalizing, setFinalizing] = useState(false);
     const [finalizeError, setFinalizeError] = useState('');
+    const [animating, setAnimating] = useState(false);
+    const [animateError, setAnimateError] = useState('');
     const [sceneActionBusy, setSceneActionBusy] = useState('');
     const [sceneActionError, setSceneActionError] = useState('');
     const [openModelUrl, setOpenModelUrl] = useState('');
@@ -372,17 +375,49 @@ export default function AgentJobDeliverable({
         setFinalizing(true);
         setFinalizeError('');
         try {
-            const res = await fetch(agentJobFinalizeUrl(snapshot.job_id), {
+            const res = await fetch(agentJobFinalizeUrl(snapshot.job_id, snapshot.kind), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${tok}` },
             });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(String((data as { detail?: string }).detail || res.statusText));
+            if (!res.ok) {
+                const detail = (data as { detail?: unknown }).detail;
+                if (detail && typeof detail === 'object' && Array.isArray((detail as { pending_animated_scenes?: unknown }).pending_animated_scenes)) {
+                    const pending = ((detail as { pending_animated_scenes: unknown[] }).pending_animated_scenes)
+                        .map((idx) => Number(idx) + 1)
+                        .join(', ');
+                    throw new Error(`Animate scene(s) ${pending} before exporting.`);
+                }
+                throw new Error(String(detail || res.statusText));
+            }
+            const next = (data as { snapshot?: AgentJobSnapshot }).snapshot;
+            if (next) onSnapshotUpdate?.(next);
             onFinalizeStarted?.(snapshot.job_id, (data as { active_jobs?: unknown }).active_jobs);
         } catch (e) {
             setFinalizeError((e as Error).message);
         } finally {
             setFinalizing(false);
+        }
+    };
+
+    const runAnimateApproved = async () => {
+        const tok = session?.access_token;
+        if (!tok || !snapshot.job_id) return;
+        setAnimating(true);
+        setAnimateError('');
+        try {
+            const res = await fetch(agentJobAnimateUrl(snapshot.job_id), {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${tok}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(String((data as { detail?: string }).detail || res.statusText));
+            const next = (data as { snapshot?: AgentJobSnapshot }).snapshot;
+            if (next) onSnapshotUpdate?.(next);
+        } catch (e) {
+            setAnimateError((e as Error).message);
+        } finally {
+            setAnimating(false);
         }
     };
 
@@ -551,6 +586,23 @@ export default function AgentJobDeliverable({
                                 </div>
                             </div>
                         </div>
+                        {allScenesApproved && Boolean(snapshot.animation_pending_count) && (
+                            <div className="mb-3 rounded-xl border border-violet-400/20 bg-violet-500/10 p-3">
+                                <p className="text-xs font-semibold text-violet-100">
+                                    {snapshot.animation_pending_count} approved scene(s) still need i2v animation.
+                                </p>
+                                <button
+                                    type="button"
+                                    disabled={animating}
+                                    onClick={() => void runAnimateApproved()}
+                                    className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white transition active:scale-[0.985] disabled:opacity-60"
+                                >
+                                    {animating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
+                                    Animate approved scenes
+                                </button>
+                                {animateError && <p className="mt-1.5 text-center text-[10px] text-red-300">{animateError}</p>}
+                            </div>
+                        )}
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                             {sceneCards.map((scene, rawIdx) => {
                                 const idx = Number.isFinite(scene.index) ? scene.index : rawIdx;
@@ -761,10 +813,34 @@ export default function AgentJobDeliverable({
                         <p className="mt-1 text-cyan-100/70">
                             {allScenesApproved
                                 ? snapshot.animation_pending_count
-                                    ? `${snapshot.animation_pending_count} approved scene(s) are ready for image-to-video. Tell Studio Agent to animate the approved scenes.`
+                                    ? `${snapshot.animation_pending_count} approved scene(s) are ready for image-to-video. Run animation before exporting.`
                                     : 'All scenes are approved. Review any completed animation, then finalize the production.'
                                 : 'No image-to-video should run until these stills are approved. Reply with the scene number and edit request, or approve scenes for animation.'}
                         </p>
+                        {allScenesApproved && Boolean(snapshot.animation_pending_count) && (
+                            <button
+                                type="button"
+                                disabled={animating}
+                                onClick={() => void runAnimateApproved()}
+                                className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition active:scale-[0.985] disabled:opacity-60"
+                            >
+                                {animating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
+                                Animate approved scenes
+                            </button>
+                        )}
+                        {allScenesApproved && !snapshot.animation_pending_count && (
+                            <button
+                                type="button"
+                                disabled={finalizing}
+                                onClick={() => void runFinalize()}
+                                className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2.5 text-sm font-semibold text-white transition active:scale-[0.985] disabled:opacity-60"
+                            >
+                                {finalizing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                Finalize &amp; export MP4
+                            </button>
+                        )}
+                        {finalizeError && <p className="mt-1.5 text-center text-[10px] text-red-300">{finalizeError}</p>}
+                        {animateError && <p className="mt-1.5 text-center text-[10px] text-red-300">{animateError}</p>}
                     </div>
                 )}
                 {awaiting && !isShortform && (

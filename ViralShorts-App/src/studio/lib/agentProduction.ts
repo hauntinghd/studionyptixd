@@ -94,15 +94,20 @@ export function agentJobScenesApprovalUrl(jobId: string) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/scenes/approval`);
 }
 
-export function agentJobFinalizeUrl(jobId: string) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/finalize`);
+export function agentJobAnimateUrl(jobId: string) {
+    return agentApi(`/api/studio-agent/jobs/${jobId}/animate`);
+}
+
+export function agentJobFinalizeUrl(jobId: string, kind: AgentJobKind = 'longform') {
+    const qs = new URLSearchParams({ kind });
+    return agentApi(`/api/studio-agent/jobs/${jobId}/finalize?${qs.toString()}`);
 }
 
 export async function finalizeLongformJob(
     jobId: string,
     accessToken: string,
 ): Promise<{ active_jobs?: unknown[] }> {
-    const res = await fetch(agentJobFinalizeUrl(jobId), {
+    const res = await fetch(agentJobFinalizeUrl(jobId, 'longform'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
     });

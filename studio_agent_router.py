@@ -416,13 +416,70 @@ def build_studio_agent_router(
             "snapshot": snapshot,
         }
 
-    @router.post("/jobs/{job_id}/finalize")
-    async def production_job_finalize(
+    @router.post("/jobs/{job_id}/animate")
+    async def production_job_animate(
         job_id: str,
         user: dict = Depends(_agent_user),
     ):
-        """Agent subscribers can finalize long-form after stills gate (no admin long-form tab required)."""
+        """Run i2v for short-form scenes that were explicitly approved for animation."""
+        _ = user
+        try:
+            from studio_agent import tools as agent_tools
+
+            tool_result = await run_in_threadpool(
+                agent_tools.animate_production_scenes,
+                job_id,
+            )
+            snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except Exception as exc:
+            raise HTTPException(400, f"animation_failed: {exc}") from exc
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "tool_result": tool_result,
+            "snapshot": snapshot,
+        }
+
+    @router.post("/jobs/{job_id}/finalize")
+    async def production_job_finalize(
+        job_id: str,
+        kind: str = Query("longform"),
+        user: dict = Depends(_agent_user),
+    ):
+        """Agent subscribers can finalize approved productions after the relevant review gate."""
         import time as _time
+
+        normalized_kind = str(kind or "longform").strip().lower()
+        if normalized_kind == "shortform":
+            try:
+                from studio_agent import tools as agent_tools
+
+                raw = await run_in_threadpool(agent_tools.finalize_production, job_id)
+                try:
+                    parsed = __import__("json").loads(raw or "{}")
+                except Exception:
+                    parsed = {"status": "running", "raw": raw}
+                if isinstance(parsed, dict) and parsed.get("status") == "awaiting_animation":
+                    raise HTTPException(409, parsed)
+                snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(400, f"finalize_failed: {exc}") from exc
+            return {
+                "ok": True,
+                "job_id": job_id,
+                "kind": "shortform",
+                "tool_result": parsed,
+                "snapshot": snapshot,
+                "active_jobs": [] if snapshot.get("status") == "complete" else [{
+                    "job_id": job_id,
+                    "kind": "shortform",
+                    "title": str(snapshot.get("title") or "Short-form finalize"),
+                    "started_at": _time.time(),
+                }],
+                "poll_url": f"/api/studio-agent/jobs/{job_id}?kind=shortform",
+            }
 
         try:
             out = agent_jobs.finalize_longform_job(job_id)
