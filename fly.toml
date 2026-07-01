@@ -35,16 +35,13 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   THUMBNAIL_DIR = "/var/data/thumbnails"
   DEMO_UPLOAD_DIR = "/var/data/demo_uploads"
   SKELETON_AI_OUTPUT_ROOT = "/var/data/skeleton_output"
-  # Redis disabled at launch — Render had REDIS_QUEUE_ENABLED=true but the
-  # connection wasn't actually working (live /api/config reported
-  # queue_mode: "inprocess"). In-process queue has been the de-facto behavior.
-  # To enable Redis later: provision Upstash (free tier), set REDIS_URL secret,
-  # then flip this flag to "true".
-  REDIS_QUEUE_ENABLED = "false"
+  # Redis-backed queue is required before scaling beyond one app process.
+  # REDIS_URL is stored as a Fly secret; Redis is pay-as-you-go Upstash.
+  REDIS_QUEUE_ENABLED = "true"
   REDIS_QUEUE_PREFIX = "studio"
-  # Studio Agent OpenRouter + fal concurrency gate (per worker when Redis off).
-  # 500 active users should be queued/polled, not 500 simultaneous render/tool calls
-  # on one 2GB VM. Raise this only after Redis + horizontal workers are enabled.
+  # Studio Agent OpenRouter + fal concurrency gate. With Redis enabled this is
+  # shared across app processes; 500 active users should queue/poll, not launch
+  # 500 simultaneous render/tool calls.
   STUDIO_AGENT_QUEUE_ENABLED = "true"
   STUDIO_AGENT_MAX_CONCURRENT = "30"
   STUDIO_AGENT_MAX_QUEUE_DEPTH = "500"
@@ -89,8 +86,8 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
 
   [http_service.concurrency]
     type = "requests"
-    soft_limit = 200
-    hard_limit = 250
+    soft_limit = 500
+    hard_limit = 650
 
   [[http_service.checks]]
     interval = "30s"
@@ -100,7 +97,8 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
     path = "/api/health"
 
 [[vm]]
-  size = "shared-cpu-2x"
-  memory = "2gb"
-  # Render Standard was ~$25/mo; this matches at ~$10–15/mo on Fly's per-second
-  # billing for similar utilization.
+  size = "shared-cpu-4x"
+  memory = "4gb"
+  # Single-machine launch profile because Studio media/jobs live on one attached
+  # volume. Scale horizontally only after moving job artifacts to shared object
+  # storage or adding sticky routing for job media.

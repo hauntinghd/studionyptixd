@@ -154,8 +154,12 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         est, breakdown = _estimate_longform_finalize(args)
     elif name == "generate_longform_thumbnails":
         count = max(1, min(3, int(args.get("count") or 3)))
-        est = count * _fallback("seedream_v45_per_image")
-        breakdown = {"thumbnails": count, "seedream_v45_per_image": _fallback("seedream_v45_per_image")}
+        est, note = _priced_unit("seedream_v45", fallback_key="seedream_v45_per_image", quantity=count)
+        breakdown = {
+            "thumbnails": count,
+            "seedream_v45_per_image": _unit_rate(est, count),
+            "pricing_note": note,
+        }
     elif name == "edit_production_scenes_still":
         raw_indices = args.get("scene_indices") or []
         try:
@@ -163,27 +167,31 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         except Exception:
             count = 12
         count = max(1, min(60, count))
-        est = count * _fallback("seedream_v45_per_image")
-        breakdown = {"seedream_v45_edit_images": count, "scope": str(args.get("scope") or "character")}
+        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=count)
+        breakdown = {
+            "seedream_v45_edit_images": count,
+            "seedream_v45_edit_per_image": _unit_rate(est, count),
+            "scope": str(args.get("scope") or "character"),
+            "pricing_note": note,
+        }
     elif name in {"edit_production_scene_still", "regenerate_production_scene_still", "regenerate_longform_still"}:
-        est = _fallback("seedream_v45_per_image")
-        breakdown = {"seedream_v45_edit_images": 1}
+        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=1.0)
+        breakdown = {"seedream_v45_edit_images": 1, "seedream_v45_edit_per_image": est, "pricing_note": note}
     elif name == "animate_production_scenes":
         count = _scene_index_count(args, default=3)
         seconds = _video_seconds(args, count=count, default_per_scene=5.0)
         video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
-        video_rate = _video_rate(video_model)
-        est = seconds * video_rate
+        est, video_rate, note = _video_cost(video_model, seconds)
         breakdown = {
             "scene_count": count,
             "video_seconds": seconds,
             "video_model": video_model,
             "video_usd_per_second": video_rate,
             "video_usd": round(est, 4),
+            "pricing_note": note,
         }
     elif name in {"finalize_production", "re_edit_production"}:
-        est = _fallback("fal_minimax_per_1k_chars") + 0.25
-        breakdown = {"recompose": "local_or_cached", "tts_safety_allowance_usd": round(est, 4)}
+        est, breakdown = _estimate_shortform_finalize(args)
     else:
         est = 0.0
         breakdown = {}
@@ -252,32 +260,101 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
     scenes = max(1, min(60, int(args.get("scene_count") or args.get("beats") or 12)))
     full_auto = bool(args.get("_full_auto") or args.get("full_auto"))
     animate = bool(args.get("animate", False)) and full_auto
-    stills = scenes * _fallback("seedream_v45_per_image")
+    stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=scenes)
     requested_seconds = _video_seconds(args, count=scenes, default_per_scene=5.0)
     seconds = requested_seconds if animate else 0.0
     video_model = str(args.get("video_model") or "seedance").strip().lower()
-    video_rate = _video_rate(video_model)
-    video = seconds * video_rate
+    video, video_rate, video_note = _video_cost(video_model, seconds)
     script_chars = max(1000, int(args.get("script_char_count") or len(str(args.get("script") or "")) or scenes * 140))
     tts_units = max(1.0, script_chars / 1000.0)
-    tts_rate = _fallback("fal_minimax_per_1k_chars")
-    tts = tts_units * tts_rate
+    if full_auto:
+        tts, tts_note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=tts_units)
+    else:
+        tts, tts_note = 0.0, "deferred_until_finalize"
     cushion = _cushion_pct()
     total = (stills + video + tts) * (1.0 + cushion)
     return total, {
         "scene_count": scenes,
         "review_gate": not full_auto,
         "i2v_deferred_until_scene_approval": not full_auto,
-        "seedream_v45_per_image": _fallback("seedream_v45_per_image"),
+        "seedream_v45_edit_per_image": _unit_rate(stills, scenes),
         "stills_usd": round(stills, 4),
+        "stills_pricing_note": still_note,
         "video_seconds": seconds,
         "requested_video_seconds": requested_seconds,
         "video_model": video_model,
         "video_usd_per_second": video_rate,
         "video_usd": round(video, 4),
+        "video_pricing_note": video_note,
         "tts_chars": script_chars,
-        "fal_minimax_per_1k_chars": tts_rate,
+        "fal_minimax_per_1k_chars": _unit_rate(tts, tts_units) if tts else 0.0,
         "tts_allowance_usd": round(tts, 4),
+        "tts_pricing_note": tts_note,
+        "cushion_pct": cushion,
+    }
+
+
+def _estimate_shortform_finalize(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    job_id = str(args.get("job_id") or "").strip()
+    scene_count = max(1, min(60, int(args.get("scene_count") or 12)))
+    total_seconds = _video_seconds(args, count=scene_count, default_per_scene=5.0)
+    script_chars = max(1000, int(args.get("script_char_count") or 0))
+    sfx_enabled = bool(args.get("sfx_enabled", True))
+    background_music = str(args.get("background_music") or "auto").strip().lower()
+    try:
+        if job_id:
+            from studio_agent import jobs
+
+            ws = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
+            scenes_path = ws / "scenes.json"
+            spec_path = ws / "job_spec.json"
+            scenes = json.loads(scenes_path.read_text(encoding="utf-8")) if scenes_path.exists() else []
+            if isinstance(scenes, list) and scenes:
+                scene_count = max(1, min(60, len(scenes)))
+                total_seconds = round(
+                    sum(float(sc.get("duration_sec") or 5.0) for sc in scenes[:60]),
+                    4,
+                )
+                script_chars = max(
+                    1000,
+                    sum(len(str(sc.get("narration") or "")) for sc in scenes[:60]),
+                )
+            if spec_path.exists():
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                if isinstance(spec, dict):
+                    sfx_enabled = bool(spec.get("sfx_enabled", sfx_enabled))
+                    background_music = str(spec.get("background_music") or background_music or "auto").strip().lower()
+    except Exception:
+        pass
+
+    tts_units = max(1.0, script_chars / 1000.0)
+    tts, tts_note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=tts_units)
+    sfx_seconds = total_seconds if sfx_enabled else 0.0
+    sfx, sfx_note = _priced_unit("mmaudio_v2", fallback_key="mmaudio_v2_per_second", quantity=sfx_seconds) if sfx_seconds else (0.0, "disabled")
+    bgm_seconds = total_seconds if background_music not in {"", "off", "none", "no", "no background music"} else 0.0
+    bgm, bgm_note = _priced_unit("mmaudio_v2", fallback_key="mmaudio_v2_per_second", quantity=bgm_seconds) if bgm_seconds else (0.0, "disabled")
+    local_compose_allowance = _fallback("shortform_compose_allowance_usd")
+    cushion = _cushion_pct()
+    subtotal = tts + sfx + bgm + local_compose_allowance
+    total = subtotal * (1.0 + cushion)
+    return total, {
+        "stage": "finalize",
+        "job_id": job_id or None,
+        "scene_count": scene_count,
+        "estimated_duration_seconds": total_seconds,
+        "tts_chars": script_chars,
+        "fal_minimax_per_1k_chars": _unit_rate(tts, tts_units),
+        "tts_allowance_usd": round(tts, 4),
+        "tts_pricing_note": tts_note,
+        "sfx_enabled": sfx_enabled,
+        "mmaudio_sfx_seconds": sfx_seconds,
+        "mmaudio_sfx_usd": round(sfx, 4),
+        "mmaudio_sfx_pricing_note": sfx_note,
+        "background_music": background_music or "auto",
+        "mmaudio_bgm_seconds": bgm_seconds,
+        "mmaudio_bgm_usd": round(bgm, 4),
+        "mmaudio_bgm_pricing_note": bgm_note,
+        "local_compose_allowance_usd": round(local_compose_allowance, 4),
         "cushion_pct": cushion,
     }
 
@@ -359,12 +436,20 @@ def _video_seconds(args: dict[str, Any], *, count: int, default_per_scene: float
 
 
 def _video_rate(video_model: str) -> float:
+    _cost, rate, _note = _video_cost(video_model, 1.0)
+    return rate
+
+
+def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
     model = str(video_model or "").strip().lower()
     if model in {"kling_pro", "premium"} or ("kling" in model and "pro" in model):
-        return _fallback("kling_v21_pro_per_second")
+        cost, note = _priced_unit("kling_v21_pro", fallback_key="kling_v21_pro_per_second", quantity=max(0.0, seconds))
+        return cost, _unit_rate(cost, max(0.0, seconds)), note
     if "pixverse" in model:
-        return _fallback("pixverse_v6_per_second")
-    return _fallback("kling_v21_standard_per_second")
+        cost, note = _priced_unit("pixverse_v6", fallback_key="pixverse_v6_per_second", quantity=max(0.0, seconds))
+        return cost, _unit_rate(cost, max(0.0, seconds)), note
+    cost, note = _priced_unit("kling_v21_standard", fallback_key="kling_v21_standard_per_second", quantity=max(0.0, seconds))
+    return cost, _unit_rate(cost, max(0.0, seconds)), note
 
 
 def _cushion_pct() -> float:
@@ -391,7 +476,36 @@ def _fallback(key: str) -> float:
             "kling_v21_standard_per_second": 0.056,
             "kling_v21_pro_per_second": 0.098,
             "pixverse_v6_per_second": 0.045,
+            "mmaudio_v2_per_second": 0.001,
+            "shortform_compose_allowance_usd": 0.05,
         }.get(key, 0.0)
+
+
+def _priced_unit(key: str, *, fallback_key: str, quantity: float) -> tuple[float, str]:
+    qty = max(0.0, float(quantity or 0.0))
+    if qty <= 0:
+        return 0.0, "zero_quantity"
+    try:
+        from long_form import fal_pricing
+
+        snapshot = fal_pricing.get_pricing_snapshot()
+        cost, note = fal_pricing.unit_cost(snapshot, key, fallback_key=fallback_key, quantity=qty)
+        source = str(snapshot.get("source") or "unknown")
+        error = str(snapshot.get("error") or "").strip()
+        if error:
+            note = f"{note}; source={source}; error={error[:120]}"
+        else:
+            note = f"{note}; source={source}"
+        return round(max(0.0, float(cost or 0.0)), 4), note
+    except Exception as exc:
+        return round(_fallback(fallback_key) * qty, 4), f"fallback:{fallback_key}; pricing_error={str(exc)[:120]}"
+
+
+def _unit_rate(total: float, quantity: float) -> float:
+    qty = max(0.0, float(quantity or 0.0))
+    if qty <= 0:
+        return 0.0
+    return round(float(total or 0.0) / qty, 6)
 
 
 def _float(value: Any, default: float | None = 0.0) -> float | None:

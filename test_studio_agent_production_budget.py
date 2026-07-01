@@ -75,6 +75,26 @@ def test_shortform_full_auto_budget_uses_duration_and_model_rate():
     assert estimate.estimated_usd > breakdown["stills_usd"] + breakdown["video_usd"]
 
 
+def test_shortform_review_gated_start_defers_final_audio_cost():
+    estimate = production_budget.estimate_tool_cost(
+        "start_shortform_generate",
+        {
+            "scene_count": 12,
+            "video_model": "kling",
+            "animate": False,
+            "script": "x" * 2400,
+            "max_budget_usd": 5.0,
+        },
+    )
+
+    breakdown = estimate.breakdown
+    assert breakdown["review_gate"] is True
+    assert breakdown["i2v_deferred_until_scene_approval"] is True
+    assert breakdown["video_usd"] == 0.0
+    assert breakdown["tts_allowance_usd"] == 0.0
+    assert breakdown["tts_pricing_note"] == "deferred_until_finalize"
+
+
 def test_animate_scene_budget_uses_selected_scene_count_and_duration():
     estimate = production_budget.estimate_tool_cost(
         "animate_production_scenes",
@@ -89,7 +109,45 @@ def test_animate_scene_budget_uses_selected_scene_count_and_duration():
     assert estimate.breakdown["scene_count"] == 3
     assert estimate.breakdown["video_seconds"] == 18.0
     assert estimate.breakdown["video_model"] == "pixverse"
-    assert estimate.estimated_usd == round(18.0 * production_budget._fallback("pixverse_v6_per_second"), 4)
+    assert estimate.estimated_usd == round(
+        18.0 * estimate.breakdown["video_usd_per_second"],
+        4,
+    )
+    assert "pricing_note" in estimate.breakdown
+
+
+def test_finalize_production_budget_includes_narration_and_sound_design(tmp_path, monkeypatch):
+    from studio_agent import jobs
+
+    monkeypatch.setattr(jobs, "ROOT", tmp_path)
+    workspace = tmp_path / jobs.SKELETON_OUTPUT / "budgetshort"
+    workspace.mkdir(parents=True)
+    (workspace / "scenes.json").write_text(
+        json.dumps(
+            [
+                {"duration_sec": 4.0, "narration": "A" * 500},
+                {"duration_sec": 6.0, "narration": "B" * 600},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "job_spec.json").write_text(
+        json.dumps({"sfx_enabled": True, "background_music": "auto"}),
+        encoding="utf-8",
+    )
+
+    estimate = production_budget.estimate_tool_cost(
+        "finalize_production",
+        {"job_id": "budgetshort", "max_budget_usd": 2.0},
+    )
+
+    breakdown = estimate.breakdown
+    assert breakdown["scene_count"] == 2
+    assert breakdown["estimated_duration_seconds"] == 10.0
+    assert breakdown["tts_chars"] == 1100
+    assert breakdown["tts_allowance_usd"] > 0
+    assert breakdown["mmaudio_sfx_usd"] > 0
+    assert breakdown["mmaudio_bgm_usd"] > 0
 
 
 if __name__ == "__main__":

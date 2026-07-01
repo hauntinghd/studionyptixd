@@ -37,6 +37,7 @@ ENDPOINTS: dict[str, str] = {
 FALLBACK_USD: dict[str, float] = {
     "ltx_13b_distilled_per_clip": 0.04,
     "seedream_v45_per_image": 0.04,
+    "seedream_v45_edit_per_image": 0.04,
     "mmaudio_v2_per_second": 0.001,
     "fal_minimax_per_1k_chars": 0.10,
     "elevenlabs_per_1k_chars": 0.10,
@@ -45,6 +46,7 @@ FALLBACK_USD: dict[str, float] = {
     "pixverse_v6_per_second": 0.045,
     "ernie_per_image": 0.03,
     "cushion_pct": 0.15,
+    "shortform_compose_allowance_usd": 0.05,
     # Script expansion via xAI Grok — not billed to fal wallet.
     "grok_chapter_expand": 0.0,
     "grok_outline": 0.0,
