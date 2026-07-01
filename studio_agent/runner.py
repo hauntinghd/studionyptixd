@@ -2268,7 +2268,7 @@ STILLS (locked — not user-selectable):
 
 VIDEO (user-selectable — ask if unclear):
 - Call `list_skeleton_video_models` and pass `video_model` to start_shortform_generate:
-  `seedance` (default, 5 AC), `pixverse` (permissive), `kling_pro` (7 AC, best motion).
+  `ltx_budget` (3 AC, cheapest full animation), `seedance` (default, 5 AC), `pixverse` (permissive), `kling_pro` (7 AC, best motion).
 
 SCRIPT CATEGORY:
 - Call `list_skeleton_categories` (20 YouTube lanes + user custom). Use `outcast` for edgy/contrarian.

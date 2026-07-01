@@ -26,6 +26,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
+from studio_agent import production_costs
+
 from .scripting_grok import GrokClient, build_script_prompt
 from .canonical_edit import build_scene_edit_prompt, generate_still_edit, sanitize_skeleton_outfit
 from .i2v_engine import (
@@ -350,6 +352,10 @@ def _write_progress(workspace: Path, *, stage: str, progress: int, detail: str =
             "progress": max(0, min(100, int(progress))),
             "detail": str(detail or "")[:240],
         }
+        try:
+            production_costs.attach_to_progress(workspace, payload)
+        except Exception:
+            pass
         (workspace / "progress.json").write_text(
             json.dumps(payload, indent=2),
             encoding="utf-8",
@@ -451,6 +457,17 @@ def run(
         out_path=workspace / "narration.mp3",
         voice_id=voice_id,
     )
+    amount, note, key, qty = production_costs.price_fal_tts(script_text)
+    production_costs.record_event(
+        workspace,
+        stage="narration",
+        provider="fal",
+        operation=key,
+        usd=amount,
+        quantity=qty,
+        unit="1k_chars",
+        metadata={"pricing_note": note, "chars": len(script_text)},
+    )
     narration_duration = probe_duration(narration_audio)
     _retime_beats_to_narration(beats, narration_duration)
 
@@ -480,6 +497,18 @@ def run(
                     outfit=beat.outfit,
                 )
                 generate_still_edit(roster_prompt, roster_path, seed=420100 + beat.index)
+                amount, note, key = production_costs.price_fal_image(edit=True)
+                production_costs.record_event(
+                    workspace,
+                    stage="stills",
+                    provider="fal",
+                    operation=key,
+                    usd=amount,
+                    quantity=1,
+                    unit="image",
+                    scene_index=beat.index,
+                    metadata={"pricing_note": note, "role": "roster_reference"},
+                )
                 roster_cache[outfit_key] = roster_path
             extra_refs = [str(roster_path)]
 
@@ -499,6 +528,18 @@ def run(
             if isinstance(still_result, dict)
             else still_result
         )
+        amount, note, key = production_costs.price_fal_image(edit=True)
+        production_costs.record_event(
+            workspace,
+            stage="stills",
+            provider="fal",
+            operation=key,
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=beat.index,
+            metadata={"pricing_note": note, "role": "scene_still"},
+        )
         clip_path = gen_clip(
             still_path,
             beat.motion_prompt,
@@ -506,6 +547,27 @@ def run(
             tier=tier,
             video_model=video_model,
             duration_sec=10 if float(beat.duration_sec or 0) > 5 else 5,
+        )
+        try:
+            sidecar = clip_path.with_suffix(clip_path.suffix + ".fal.json")
+            clip_meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
+        except Exception:
+            clip_meta = {}
+        endpoint = str(clip_meta.get("endpoint") or "")
+        duration = float(clip_meta.get("duration_sec") or (10 if float(beat.duration_sec or 0) > 5 else 5))
+        amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
+        production_costs.record_event(
+            workspace,
+            stage="animation",
+            provider="fal",
+            operation=key,
+            usd=amount,
+            quantity=duration,
+            unit="second",
+            endpoint=endpoint,
+            request_id=str(clip_meta.get("request_id") or ""),
+            scene_index=beat.index,
+            metadata={"pricing_note": note, "video_model": clip_meta.get("video_model") or video_model},
         )
         trimmed = trim_with_captions(
             clip_path,
@@ -538,6 +600,7 @@ def run(
         "ac_charged": ac_cost,
         "category": category_key,
         "topic": topic,
+        "cost": production_costs.load_summary(workspace),
     }
     (workspace / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     safe_topic = str(topic or cat["label"] or "Skeleton Short").strip()

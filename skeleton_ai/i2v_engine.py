@@ -23,6 +23,7 @@ Pipeline:
 FAL queue polling is throttled for full multi-scene renders.
 """
 from __future__ import annotations
+import json
 import os
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ class I2VError(RuntimeError):
 SEEDANCE_ENDPOINT = "bytedance/seedance-2.0/image-to-video"
 PIXVERSE_V6_ENDPOINT = "fal-ai/pixverse/v6/image-to-video"
 KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
+LTX_098_ENDPOINT = "fal-ai/ltxv-13b-098-distilled/image-to-video"
 
 # Standard tier fallback chain — first model that doesn't 422 wins.
 STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
@@ -69,6 +71,12 @@ VIDEO_MODELS: dict[str, dict[str, object]] = {
         "description": "Highest quality motion; premium cost per short.",
         "endpoints": [KLING_PRO_ENDPOINT],
         "ac_cost": AC_COST_PREMIUM,
+    },
+    "ltx_budget": {
+        "label": "LTX 0.9.8 Budget",
+        "description": "Lowest-cost full animation lane. Use when budget matters more than premium motion.",
+        "endpoints": [LTX_098_ENDPOINT],
+        "ac_cost": 3,
     },
 }
 
@@ -119,6 +127,19 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
             "aspect_ratio": aspect_ratio,
             "negative_prompt": _NEG_VIDEO,
         }
+    if endpoint == LTX_098_ENDPOINT:
+        fps = 24
+        return {
+            "prompt": motion_prompt,
+            "image_url": image_url,
+            "negative_prompt": _NEG_VIDEO,
+            "resolution": "720p",
+            "aspect_ratio": aspect_ratio,
+            "num_frames": max(121, int(duration_sec) * fps),
+            "frame_rate": fps,
+            "expand_prompt": False,
+            "enable_detail_pass": False,
+        }
     return {
         "prompt": motion_prompt,
         "image_url": image_url,
@@ -153,6 +174,8 @@ def _queue_result(endpoint: str, args: dict, *, timeout_sec: int) -> dict:
                 payload = fal_client.result(endpoint, request_id)
             if not isinstance(payload, dict):
                 raise I2VError(f"{endpoint} returned non-object result: {payload!r}")
+            payload["_fal_endpoint"] = endpoint
+            payload["_fal_request_id"] = request_id
             return payload
         if status_name in {"failed", "canceled", "cancelled"}:
             raise I2VError(f"{endpoint} {status_name} on {request_id}: {status}")
@@ -182,6 +205,13 @@ def list_video_models() -> list[dict[str, object]]:
             "description": "Permissive moderation when Seedance blocks skeleton scenes.",
             "ac_cost": AC_COST_STANDARD,
             "image_model": "seedream_v45_edit (locked — not selectable)",
+        },
+        {
+            "key": "ltx_budget",
+            "label": "LTX 0.9.8 Budget",
+            "description": "Cheapest full-animation lane; test before using on premium client work.",
+            "ac_cost": 3,
+            "image_model": "seedream_v45_edit (locked - not selectable)",
         },
         {
             "key": "kling_pro",
@@ -268,6 +298,22 @@ def generate(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _download(video_url, out_path)
+    try:
+        (out_path.with_suffix(out_path.suffix + ".fal.json")).write_text(
+            json.dumps(
+                {
+                    "endpoint": used_endpoint,
+                    "request_id": result.get("_fal_request_id"),
+                    "duration_sec": int(duration_sec),
+                    "video_model": _vm,
+                    "video_url": video_url,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     return out_path
 
 

@@ -72,6 +72,12 @@ export type AgentJobSnapshot = {
     engagement?: Record<string, number>;
     frame_count?: number;
     blueprint_hint?: string;
+    cost?: {
+        actual_usd?: number;
+        actual_usd_decimal?: string;
+        event_count?: number;
+        status?: string;
+    };
 };
 
 export type ProductionProgressUpdate = {

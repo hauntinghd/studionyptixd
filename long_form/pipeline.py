@@ -112,8 +112,8 @@ from long_form.fal_pricing import (  # noqa: E402
 FAL_PRICING_USD: dict[str, float] = dict(_FAL_FALLBACK)
 FAL_PRICING_USD.update({
     "seedream_v45_per_image": _FAL_FALLBACK["seedream_v45_per_image"],
-    "ltx_13b_distilled_per_clip": _FAL_FALLBACK["ltx_13b_distilled_per_clip"],
-    "ltx_13b_per_second": 0.02,  # legacy; v5 uses flat $0.04/clip from API
+    "ltx_13b_distilled_per_second": _FAL_FALLBACK["ltx_13b_distilled_per_second"],
+    "ltx_13b_per_second": _FAL_FALLBACK["ltx_13b_distilled_per_second"],
     "mmaudio_v2_per_call": _FAL_FALLBACK["mmaudio_v2_per_second"] * 8,
     "grok_chapter_expand": 0.0,
     "grok_outline": 0.0,

@@ -23,6 +23,7 @@ FAL_PLATFORM_BASE = "https://api.fal.ai/v1"
 # Endpoints our pipelines actually call (v5_episode, sleep_doc, ZT Ken Burns).
 ENDPOINTS: dict[str, str] = {
     "ltx_13b_distilled": "fal-ai/ltx-video-13b-distilled/image-to-video",
+    "ltx_098_distilled": "fal-ai/ltxv-13b-098-distilled/image-to-video",
     "seedream_v45": "fal-ai/bytedance/seedream/v4.5/text-to-image",
     "seedream_v45_edit": "fal-ai/bytedance/seedream/v4.5/edit",
     "mmaudio_v2": "fal-ai/mmaudio-v2/text-to-audio",
@@ -30,12 +31,15 @@ ENDPOINTS: dict[str, str] = {
     "kling_v21_standard": "fal-ai/kling-video/v2.1/standard/image-to-video",
     "kling_v21_pro": "fal-ai/kling-video/v2.1/pro/image-to-video",
     "pixverse_v6": "fal-ai/pixverse/v6/image-to-video",
+    "seedance_20_i2v": "bytedance/seedance-2.0/image-to-video",
+    "wan_i2v": "fal-ai/wan/v2.2-a14b/image-to-video",
     "minimax_speech_zt": "fal-ai/minimax/speech-02-hd",
 }
 
 # Used when API is down or key missing — last verified 2026-05-28 via Platform API.
 FALLBACK_USD: dict[str, float] = {
-    "ltx_13b_distilled_per_clip": 0.04,
+    "ltx_13b_distilled_per_second": 0.04,
+    "ltx_098_distilled_per_second": 0.02,
     "seedream_v45_per_image": 0.04,
     "seedream_v45_edit_per_image": 0.04,
     "mmaudio_v2_per_second": 0.001,
@@ -44,6 +48,8 @@ FALLBACK_USD: dict[str, float] = {
     "kling_v21_standard_per_second": 0.056,
     "kling_v21_pro_per_second": 0.098,
     "pixverse_v6_per_second": 0.045,
+    "seedance_20_i2v_per_second": 0.03,
+    "wan_i2v_per_second": 0.05,
     "ernie_per_image": 0.03,
     "cushion_pct": 0.15,
     "shortform_compose_allowance_usd": 0.05,
@@ -239,9 +245,19 @@ def i2v_cost_per_clip(
 ) -> tuple[float, str]:
     """Cost for one i2v clip based on channel model default."""
     model = (i2v_model or "ltx_13b").strip().lower()
+    if model in ("ltx_098", "ltxv_098", "ltxv-13b-098", "ltx_098_distilled"):
+        return _unit_cost(
+            snapshot,
+            "ltx_098_distilled",
+            fallback_key="ltx_098_distilled_per_second",
+            quantity=max(5.0, clip_sec),
+        )
     if model in ("ltx_13b", "ltx", "ltx_13b_distilled"):
         return _unit_cost(
-            snapshot, "ltx_13b_distilled", fallback_key="ltx_13b_distilled_per_clip", quantity=1.0
+            snapshot,
+            "ltx_13b_distilled",
+            fallback_key="ltx_13b_distilled_per_second",
+            quantity=max(5.0, clip_sec),
         )
     if "kling" in model and "pro" in model:
         return _unit_cost(
@@ -265,7 +281,10 @@ def i2v_cost_per_clip(
             quantity=max(5.0, clip_sec),
         )
     return _unit_cost(
-        snapshot, "ltx_13b_distilled", fallback_key="ltx_13b_distilled_per_clip", quantity=1.0
+        snapshot,
+        "ltx_13b_distilled",
+        fallback_key="ltx_13b_distilled_per_second",
+        quantity=max(5.0, clip_sec),
     )
 
 

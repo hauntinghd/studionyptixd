@@ -684,8 +684,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                         "video_model": {
                             "type": "string",
-                            "enum": ["seedance", "pixverse", "kling_pro"],
-                            "description": "i2v model for motion clips.",
+                            "enum": ["ltx_budget", "seedance", "pixverse", "kling_pro"],
+                            "description": "i2v model for motion clips. Use ltx_budget when full animation must be cheaper.",
                         },
                         "visual_brief": {
                             "type": "string",

@@ -16,7 +16,7 @@ type Tab = 'script' | 'scenes' | 'audio';
 /** Stills always use canonical master + Seedream 4.5 edit (backend ignores other models). */
 const CANONICAL_IMAGE_MODEL = 'seedream_edit' as const;
 
-type VideoModel = 'seedance' | 'pixverse' | 'kling_pro';
+type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
 
 interface CategoryInfo {
     key: string;
@@ -731,7 +731,7 @@ function AudioTab({
     onGenerate: () => void;
     generating: boolean;
 }) {
-    const cost = videoModel === 'kling_pro' ? 7 : 5;
+    const cost = videoModel === 'kling_pro' ? 7 : videoModel === 'ltx_budget' ? 3 : 5;
     return (
         <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-white">Narration Voice</h2>
@@ -793,8 +793,9 @@ function AudioTab({
                 <p className="text-xs text-zinc-500 mb-2">
                     Stills are locked: canonical skeleton + Seedream 4.5 edit only. You choose how each still is animated.
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                     {([
+                        { key: 'ltx_budget' as const, title: 'LTX Budget', sub: '3 AC', hint: 'Cheapest full animation' },
                         { key: 'seedance' as const, title: 'Seedance 2.0', sub: 'Default · 5 AC', hint: 'Auto-fallback to Pixverse if flagged' },
                         { key: 'pixverse' as const, title: 'Pixverse V6', sub: '5 AC', hint: 'Permissive moderation' },
                         { key: 'kling_pro' as const, title: 'Kling 2.1 Pro', sub: '7 AC', hint: 'Best motion' },

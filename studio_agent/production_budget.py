@@ -448,6 +448,12 @@ def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
     if "pixverse" in model:
         cost, note = _priced_unit("pixverse_v6", fallback_key="pixverse_v6_per_second", quantity=max(0.0, seconds))
         return cost, _unit_rate(cost, max(0.0, seconds)), note
+    if "ltx_budget" in model or "ltxv" in model or "ltx_098" in model:
+        cost, note = _priced_unit("ltx_098_distilled", fallback_key="ltx_098_distilled_per_second", quantity=max(0.0, seconds))
+        return cost, _unit_rate(cost, max(0.0, seconds)), note
+    if "seedance" in model:
+        cost, note = _priced_unit("seedance_20_i2v", fallback_key="seedance_20_i2v_per_second", quantity=max(0.0, seconds))
+        return cost, _unit_rate(cost, max(0.0, seconds)), note
     cost, note = _priced_unit("kling_v21_standard", fallback_key="kling_v21_standard_per_second", quantity=max(0.0, seconds))
     return cost, _unit_rate(cost, max(0.0, seconds)), note
 
@@ -476,6 +482,8 @@ def _fallback(key: str) -> float:
             "kling_v21_standard_per_second": 0.056,
             "kling_v21_pro_per_second": 0.098,
             "pixverse_v6_per_second": 0.045,
+            "seedance_20_i2v_per_second": 0.03,
+            "ltx_098_distilled_per_second": 0.02,
             "mmaudio_v2_per_second": 0.001,
             "shortform_compose_allowance_usd": 0.05,
         }.get(key, 0.0)

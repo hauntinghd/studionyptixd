@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from studio_agent import production_costs
 from studio_agent.render_styles import RenderStyle, get_render_style
 
 from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
@@ -545,6 +546,7 @@ def plan_scenes(
                 from .canonical_edit import generate_still_edit
 
                 generate_still_edit(prompt, still_target, seed=420042 + i)
+                amount, note, key = production_costs.price_fal_image(edit=True)
             else:
                 if reference_images:
                     from .styled_stills import generate_still_reference_edit
@@ -556,6 +558,7 @@ def plan_scenes(
                         negative_prompt=style.negative_prompt,
                         seed=420042 + i,
                     )
+                    amount, note, key = production_costs.price_fal_image(edit=True)
                 else:
                     generate_still_t2i(
                         prompt,
@@ -563,6 +566,18 @@ def plan_scenes(
                         negative_prompt=style.negative_prompt,
                         seed=420042 + i,
                     )
+                    amount, note, key = production_costs.price_fal_image(edit=False)
+            production_costs.record_event(
+                workspace,
+                stage="stills",
+                provider="fal",
+                operation=key,
+                usd=amount,
+                quantity=1,
+                unit="image",
+                scene_index=i,
+                metadata={"pricing_note": note, "cached": False},
+            )
         scenes.append({
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
             "outfit": outfit, "scene_action": action,
@@ -803,6 +818,27 @@ def animate_scenes_stage(
                 tier=tier, video_model=sc.get("video_model"),
                 duration_sec=int(sc.get("duration_sec", 5)),
             )
+            try:
+                sidecar = clip.with_suffix(clip.suffix + ".fal.json")
+                clip_meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
+            except Exception:
+                clip_meta = {}
+            endpoint = str(clip_meta.get("endpoint") or "")
+            duration = float(clip_meta.get("duration_sec") or sc.get("duration_sec") or 5.0)
+            amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
+            production_costs.record_event(
+                workspace,
+                stage="animation",
+                provider="fal",
+                operation=key,
+                usd=amount,
+                quantity=duration,
+                unit="second",
+                endpoint=endpoint,
+                request_id=str(clip_meta.get("request_id") or ""),
+                scene_index=int(sc["index"]),
+                metadata={"pricing_note": note, "video_model": sc.get("video_model")},
+            )
             sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
             sc["status"] = "clip_ready"
             sc.pop("error", None)
@@ -908,6 +944,18 @@ def finalize_stage(
         sc["narration"] = _normalize_tts_text(sc["narration"])
         na_path = work_dir / f"nar_{sc['sid']}.mp3"
         na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
+        amount, note, key, qty = production_costs.price_fal_tts(sc["narration"])
+        production_costs.record_event(
+            workspace,
+            stage="narration",
+            provider="fal",
+            operation=key,
+            usd=amount,
+            quantity=qty,
+            unit="1k_chars",
+            scene_index=int(sc.get("index", n)),
+            metadata={"pricing_note": note, "chars": len(str(sc.get("narration") or ""))},
+        )
         na_dur = probe_duration(na) or float(sc.get("duration_sec", 5.0))
         trimmed = trim_with_captions(
             clip, trimmed_dir / f"{sc['sid']}.mp4",
@@ -942,6 +990,17 @@ def finalize_stage(
         narration_audio = narration_target
     else:
         narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
+        amount, note, key, qty = production_costs.price_fal_tts(script_text)
+        production_costs.record_event(
+            workspace,
+            stage="narration",
+            provider="fal",
+            operation=key,
+            usd=amount,
+            quantity=qty,
+            unit="1k_chars",
+            metadata={"pricing_note": note, "chars": len(script_text)},
+        )
 
     mixed_audio = narration_audio
     sound_result: dict[str, Any] = {
@@ -968,6 +1027,22 @@ def finalize_stage(
                 )
                 generated = _generate_short_audio_bed(prompt, duration, work_dir / f"sfx_{sc['sid']}.mp3")
                 if generated:
+                    amount, note = production_costs.fal_unit_cost(
+                        "mmaudio_v2",
+                        fallback_key="mmaudio_v2_per_second",
+                        quantity=float(duration or 0.0),
+                    )
+                    production_costs.record_event(
+                        workspace,
+                        stage="sound_design",
+                        provider="fal",
+                        operation="mmaudio_v2",
+                        usd=amount,
+                        quantity=float(duration or 0.0),
+                        unit="second",
+                        scene_index=int(sc.get("index", idx)),
+                        metadata={"pricing_note": note},
+                    )
                     sfx_paths.append(generated)
             sfx_track = _concat_audio_tracks(sfx_paths, work_dir / "sfx_full.mp3")
             if sfx_track:
@@ -990,6 +1065,22 @@ def finalize_stage(
                     work_dir / "bgm.mp3",
                 )
                 if bgm_track:
+                    bgm_duration = float(probe_duration(narration_audio) or 30.0)
+                    amount, note = production_costs.fal_unit_cost(
+                        "mmaudio_v2",
+                        fallback_key="mmaudio_v2_per_second",
+                        quantity=bgm_duration,
+                    )
+                    production_costs.record_event(
+                        workspace,
+                        stage="sound_design",
+                        provider="fal",
+                        operation="mmaudio_v2_background_music",
+                        usd=amount,
+                        quantity=bgm_duration,
+                        unit="second",
+                        metadata={"pricing_note": note},
+                    )
                     sound_result["bgm_generated"] = True
                     sound_result["bgm_track"] = str(bgm_track)
 
@@ -1027,6 +1118,7 @@ def finalize_stage(
         "sound_design": sound_result,
         "scene_count": len(scenes), "animated_scenes": animated,
         "tier": tier, "ac_charged": ac_cost,
+        "cost": production_costs.load_summary(workspace),
     }
     _write_result(workspace, result)
 

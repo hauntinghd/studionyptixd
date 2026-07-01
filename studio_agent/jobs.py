@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from studio_agent import production_budget, telemetry
+from studio_agent import production_budget, production_costs, telemetry
 
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
@@ -422,12 +422,19 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     progress_path = workspace / "progress.json"
     spec_path = workspace / "job_spec.json"
 
+    def _attach_cost(snap: dict[str, Any]) -> dict[str, Any]:
+        try:
+            production_costs.attach_to_progress(workspace, snap)
+        except Exception:
+            pass
+        return snap
+
     if not workspace.is_dir() and not result_path.is_file():
         err = (
             "Production workspace was lost (likely server restart). "
             "Tap Retry in the render dock to run again."
         )
-        return _shortform_failed_snap(job_id, err)
+        return _attach_cost(_shortform_failed_snap(job_id, err))
 
     if not result_path.is_file():
         last_touch = 0.0
@@ -452,7 +459,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                 f" (last file ages: {ages})"
             )
             _write_shortform_result(workspace, status="failed", error=err, job_id=job_id)
-            return _shortform_failed_snap(job_id, err)
+            return _attach_cost(_shortform_failed_snap(job_id, err))
         progress = 12
         stage = "pipeline"
         stage_label = "Building short"
@@ -484,6 +491,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "running": True,
             "title": "Short-form video",
         }
+        _attach_cost(snap)
         return _attach_production_control(
             snap,
             "start_shortform_generate",
@@ -493,7 +501,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return {
+        return _attach_cost({
             "job_id": job_id,
             "kind": "shortform",
             "status": "failed",
@@ -502,7 +510,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "stage_label": "Failed",
             "error": str(exc)[:200],
             "running": False,
-        }
+        })
     st = str(data.get("status") or "").lower()
     video_path = _existing_shortform_video_path(workspace, data)
     if video_path and st != "failed":
@@ -593,6 +601,9 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
         "running": not complete and not terminal_fail and not awaiting_scene_review,
         "title": str(data.get("topic") or data.get("category") or "Short-form"),
     }
+    if isinstance(data.get("cost"), dict):
+        snap["cost"] = data.get("cost")
+    _attach_cost(snap)
     if scene_count > 0:
         snap["current_scene"] = scene_count
         snap["total_scenes"] = scene_count

@@ -36,6 +36,9 @@ export default function AgentRenderDock({
     const rawDl = snapshot.download_url || snapshot.mp4_url || '';
     const downloadUrl =
         rawDl && accessToken ? mediaUrl(rawDl, accessToken) : rawDl;
+    const actualCost = snapshot.cost?.actual_usd_decimal
+        || (typeof snapshot.cost?.actual_usd === 'number' ? snapshot.cost.actual_usd.toFixed(6) : '');
+    const costLabel = actualCost && Number(actualCost) > 0 ? `$${actualCost}` : '';
 
     return (
         <div className="pointer-events-auto fixed bottom-5 right-5 z-[70] w-[min(100vw-2rem,340px)]">
@@ -112,6 +115,11 @@ export default function AgentRenderDock({
                                         ? `Scene ${snapshot.current_scene || 0}/${snapshot.total_scenes}`
                                         : 'Server-side — keep this tab open')}
                         </p>
+                        {costLabel ? (
+                            <p className="mt-1 text-[10px] font-medium text-cyan-200/80">
+                                FAL spent so far: <span className="tabular-nums">{costLabel}</span>
+                            </p>
+                        ) : null}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                             {running ? (
                                 <span className="inline-flex items-center gap-1.5 text-[10px] text-gray-500">
