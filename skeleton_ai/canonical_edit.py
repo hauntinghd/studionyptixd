@@ -43,6 +43,11 @@ ARTIFACT_GUARD = (
     "Exactly ONE canonical skeleton host in frame unless the scene explicitly "
     "requires background people. Anatomically correct hands, no extra limbs, "
     "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render. "
+    "The transparent glass shell is ONLY a thin body-shaped clear shell hugging "
+    "the skeleton silhouette like clear skin. It is never a bell jar, capsule, "
+    "dome, specimen tube, cylinder, display case, helmet bubble, glass container "
+    "wall, circular base, floor shadow ring, or floating glass edge. "
+    "No readable text, labels, callouts, diagrams, captions, or UI elements inside the image. "
     "Both arms, both hands, all fingers, both legs, both feet, and all toes must visibly "
     "match the reference skeleton: ivory bones enclosed by clear glass, never skin. "
     "Wardrobe must be physically coherent and complete: shirts cover the torso as a real shirt, "
@@ -61,6 +66,9 @@ NEG_EDIT = (
     "half human, asymmetrical anatomy, opaque skin replacing glass, duplicate skeleton, twin bodies, "
     "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
     "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt, "
+    "bell jar, capsule, dome, specimen tube, cylinder, display case, glass container, "
+    "helmet bubble, glass walls, circular base, floor ring, floating glass edge, "
+    "diagram label, callout, readable text, typography, UI element, "
     "extra fingers, broken hands, low quality, blurry, watermark, text overlay"
 )
 
@@ -279,6 +287,12 @@ def build_scene_edit_prompt(
         "Every exposed body part remains ivory bone inside clear glass; zero human skin "
         "or flesh."
     )
+    parts.append(
+        "GLASS-SHELL RULE: the glass shell must hug the skeleton body silhouette like "
+        "clear skin. Do not create a bell jar, capsule, dome, specimen tube, cylinder, "
+        "display case, helmet bubble, glass container walls, circular base, floor ring, "
+        "floating glass edge, text label, callout, diagram label, or any readable text."
+    )
     if topic:
         parts.append(f"TOPIC CONTEXT: {topic}.")
 
@@ -297,7 +311,7 @@ def build_scene_edit_prompt(
 
     parts.append(
         "Exactly one skeleton host. Vertical 9:16 cinematic composition, environment "
-        "clearly visible, sharp focus."
+        "clearly visible, sharp focus. No text or watermark."
     )
     return " ".join(parts)[:1800]
 
