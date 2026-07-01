@@ -38,3 +38,37 @@ def test_cost_ledger_summarizes_and_attaches_to_progress(tmp_path):
     payload = production_costs.attach_to_progress(workspace, {"stage": "animate"})
     assert payload["cost"]["actual_usd_decimal"] == "0.265000"
     assert payload["cost"]["event_count"] == 2
+
+
+def test_cost_billing_state_tracks_only_unbilled_delta(tmp_path):
+    workspace = tmp_path / "job"
+    workspace.mkdir()
+
+    production_costs.record_event(
+        workspace,
+        stage="stills",
+        provider="fal",
+        operation="seedream_v45_edit",
+        usd="0.040000",
+    )
+    assert str(production_costs.pending_billable_usd(workspace)) == "0.040000"
+
+    state = production_costs.mark_billed(
+        workspace,
+        usd="0.040000",
+        credits=100,
+        user_id="user_a",
+        reservation_id="res_a",
+        reason="test",
+    )
+    assert state["charged_usd_decimal"] == "0.040000"
+    assert str(production_costs.pending_billable_usd(workspace)) == "0.000000"
+
+    production_costs.record_event(
+        workspace,
+        stage="animation",
+        provider="fal",
+        operation="ltx_098_distilled",
+        usd="0.030000",
+    )
+    assert str(production_costs.pending_billable_usd(workspace)) == "0.030000"

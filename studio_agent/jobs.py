@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from studio_agent import production_budget, production_costs, telemetry
+from studio_agent.production_slots import slot_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
@@ -734,6 +735,11 @@ def get_job_snapshot(job_id: str, kind: str) -> dict[str, Any]:
         snap = _longform_status(job_id)
     if snap.get("status") == "complete" and kind in {"shortform", "longform"}:
         _attach_render_qa(snap, job_id, kind)
+    if kind == "shortform":
+        try:
+            snap["production_slots"] = slot_snapshot()
+        except Exception:
+            pass
     snap["polled_at"] = time.time()
     return snap
 

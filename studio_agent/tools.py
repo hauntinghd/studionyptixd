@@ -14,7 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from studio_agent import production_budget
+from studio_agent import production_budget, production_costs
+from studio_agent.production_slots import production_slot
 from studio_agent import skills as skill_loader
 from studio_agent import telemetry
 
@@ -45,6 +46,8 @@ _SHORTFORM_CHANNEL_CATEGORY_ALIASES = {
     "mrskelewellyai": "human_limits",
     "skeletonai": "human_limits",
 }
+
+_CREDIT_RESERVATION_FILE = "credit_reservation.json"
 
 
 def _run_async(coro):
@@ -1614,6 +1617,209 @@ def _session_channel_brand(session_id: str | None) -> str:
     return "Studio"
 
 
+def _shortform_credit_reservation_path(workspace: Path) -> Path:
+    return Path(workspace) / _CREDIT_RESERVATION_FILE
+
+
+def _write_shortform_credit_reservation(
+    workspace: Path,
+    *,
+    reservation: dict[str, Any] | None,
+    user_id: str | None,
+    tool: str,
+    session_id: str | None,
+    budget: dict[str, Any] | None = None,
+) -> None:
+    if not reservation:
+        return
+    payload = {
+        "reservation": reservation,
+        "user_id": str(user_id or ""),
+        "tool": str(tool or ""),
+        "session_id": str(session_id or ""),
+        "budget": budget or {},
+        "created_at": time.time(),
+    }
+    try:
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        _shortform_credit_reservation_path(workspace).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_shortform_credit_reservation(workspace: Path) -> dict[str, Any] | None:
+    path = _shortform_credit_reservation_path(workspace)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _clear_shortform_credit_reservation(workspace: Path) -> None:
+    try:
+        _shortform_credit_reservation_path(workspace).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _credits_for_pending_usd(pending_usd: Any) -> int:
+    import unified_credits as uc
+
+    return max(0, int(uc.usd_to_credits(pending_usd)))
+
+
+def _reconcile_shortform_costs(
+    user_id: str | None,
+    job_id: str,
+    *,
+    reservation_payload: dict[str, Any] | None = None,
+    reason: str,
+    tool: str = "",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Bill only newly observed provider spend for a shortform workspace."""
+    jid = str(job_id or "").strip()
+    workspace = (ROOT / SKELETON_OUTPUT / jid).resolve()
+    loaded_payload = reservation_payload or _load_shortform_credit_reservation(workspace)
+    reservation = (
+        loaded_payload.get("reservation")
+        if isinstance(loaded_payload, dict) and isinstance(loaded_payload.get("reservation"), dict)
+        else None
+    )
+    uid = str(user_id or "").strip() or str((loaded_payload or {}).get("user_id") or "").strip()
+    pending = production_costs.pending_billable_usd(workspace)
+    summary = production_costs.load_summary(workspace)
+    if pending <= 0:
+        if reservation:
+            _release_shortform_reservation(
+                uid,
+                {"reservation": reservation, "user_id": uid},
+                reason=f"{reason}:no_new_spend",
+            )
+            _clear_shortform_credit_reservation(workspace)
+        return {
+            "charged": 0,
+            "charged_usd": 0.0,
+            "charged_usd_decimal": "0.000000",
+            "actual_usd": summary.get("total_usd", 0.0),
+            "actual_usd_decimal": summary.get("total_usd_decimal", "0.000000"),
+            "event_count": summary.get("event_count", 0),
+        }
+
+    import unified_credits as uc
+
+    actual_credits = _credits_for_pending_usd(pending)
+    rid = str((reservation or {}).get("reservation_id") or "").strip()
+    held_credits = int((reservation or {}).get("credits", 0) or 0)
+    balance_after = uc.get_balance(uid) if uid else 0
+    charged_credits = actual_credits
+    refunded_credits = 0
+    overage_credits = 0
+    if uid and rid and not bool((reservation or {}).get("unlimited")):
+        state = uc.commit_reservation(
+            uid,
+            rid,
+            actual_credits=actual_credits,
+            reason=reason,
+            metadata={
+                "tool": tool or str((loaded_payload or {}).get("tool") or ""),
+                "session_id": session_id or str((loaded_payload or {}).get("session_id") or ""),
+                "job_id": jid,
+                "provider_usd_decimal": str(pending),
+                "actual_credits": actual_credits,
+            },
+        )
+        balance_after = int(state.get("balance", 0) or 0)
+        charged_credits = min(actual_credits, held_credits)
+        refunded_credits = max(0, held_credits - charged_credits)
+        overage_credits = max(0, actual_credits - held_credits)
+        if overage_credits:
+            ok, balance_after = uc.debit_credits(
+                uid,
+                overage_credits,
+                reason=f"{reason}:overage",
+                metadata={
+                    "tool": tool,
+                    "session_id": session_id,
+                    "job_id": jid,
+                    "provider_usd_decimal": str(pending),
+                    "reservation_id": rid,
+                },
+                allow_negative=True,
+            )
+            if ok:
+                charged_credits += overage_credits
+    elif uid:
+        charged_credits, balance_after = uc.debit_usd(
+            uid,
+            pending,
+            reason=reason,
+            metadata={"tool": tool, "session_id": session_id, "job_id": jid},
+            allow_negative=True,
+        )
+    production_costs.mark_billed(
+        workspace,
+        usd=pending,
+        credits=charged_credits,
+        user_id=uid,
+        reservation_id=rid,
+        reason=reason,
+        metadata={
+            "tool": tool,
+            "session_id": session_id,
+            "job_id": jid,
+            "actual_credits": actual_credits,
+            "held_credits": held_credits,
+            "refunded_credits": refunded_credits,
+            "overage_credits": overage_credits,
+        },
+    )
+    _clear_shortform_credit_reservation(workspace)
+    return {
+        "charged": charged_credits,
+        "actual_credits": actual_credits,
+        "repair_reserve_refunded": refunded_credits,
+        "overage_credits": overage_credits,
+        "balance_after": balance_after,
+        "charged_usd": float(pending),
+        "charged_usd_decimal": str(pending),
+        "actual_usd": summary.get("total_usd", 0.0),
+        "actual_usd_decimal": summary.get("total_usd_decimal", "0.000000"),
+        "event_count": summary.get("event_count", 0),
+    }
+
+
+def _release_shortform_reservation(
+    user_id: str | None,
+    reservation_payload: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> None:
+    reservation = (
+        reservation_payload.get("reservation")
+        if isinstance(reservation_payload, dict) and isinstance(reservation_payload.get("reservation"), dict)
+        else reservation_payload
+        if isinstance(reservation_payload, dict) and reservation_payload.get("reservation_id")
+        else None
+    )
+    uid = str(user_id or "").strip() or str((reservation_payload or {}).get("user_id") or "").strip()
+    rid = str((reservation or {}).get("reservation_id") or "").strip()
+    if not uid or not rid or bool((reservation or {}).get("unlimited")):
+        return
+    try:
+        import unified_credits as uc
+
+        uc.release_reservation(uid, rid, reason=reason)
+    except Exception:
+        pass
+
+
 def _spawn_shortform_job(
     *,
     category_key: str,
@@ -1634,6 +1840,9 @@ def _spawn_shortform_job(
     resume_job_id: str | None = None,
     reference_images: list[str] | None = None,
     product_reference: dict[str, Any] | None = None,
+    credit_reservation: dict[str, Any] | None = None,
+    credit_session_id: str | None = None,
+    credit_budget: dict[str, Any] | None = None,
 ) -> str:
     # Resume: reuse the prior job's workspace so finished stills/clips/VO are
     # not re-rendered (and not re-billed). Falls back to a fresh job otherwise.
@@ -1686,6 +1895,14 @@ def _spawn_shortform_job(
         json.dumps(spec, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    _write_shortform_credit_reservation(
+        workspace,
+        reservation=credit_reservation,
+        user_id=user_id,
+        tool="start_shortform_generate",
+        session_id=credit_session_id,
+        budget=credit_budget,
+    )
 
     # Early marker so status can see "we accepted the work" even before first progress write.
     try:
@@ -1720,19 +1937,47 @@ def _spawn_shortform_job(
             # animate_production_scenes/finalize_production.
             from skeleton_ai.styled_pipeline import plan_scenes
 
-            plan_scenes(
-                category_key=category_key,
-                topic=topic,
-                workspace=workspace,
-                render_style=render_style,
-                tier=tier,
-                video_model=video_model,
-                visual_brief=visual_brief,
-                script_override=script,
-                user_id=user_id,
-                default_animate=False,
-                reference_images=list(reference_images or []),
-                sound_design_brief=sound_design_brief,
+            def _on_slot_wait(admission: Any) -> None:
+                try:
+                    (workspace / "progress.json").write_text(
+                        json.dumps(
+                            {
+                                "stage": "render_queue",
+                                "progress": 5,
+                                "detail": (
+                                    f"Waiting for render slot #{admission.queue_position} "
+                                    f"({admission.active}/{admission.limit} active)."
+                                ),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+
+            with production_slot("render", on_wait=_on_slot_wait):
+                plan_scenes(
+                    category_key=category_key,
+                    topic=topic,
+                    workspace=workspace,
+                    render_style=render_style,
+                    tier=tier,
+                    video_model=video_model,
+                    visual_brief=visual_brief,
+                    script_override=script,
+                    user_id=user_id,
+                    default_animate=False,
+                    reference_images=list(reference_images or []),
+                    sound_design_brief=sound_design_brief,
+                )
+            _reconcile_shortform_costs(
+                user_id,
+                job_id,
+                reservation_payload=_load_shortform_credit_reservation(workspace),
+                reason="studio_shortform_stills_actual",
+                tool="start_shortform_generate",
+                session_id=credit_session_id,
             )
         except Exception as exc:
             from skeleton_ai.pipeline import RenderCancelled
@@ -1750,6 +1995,27 @@ def _spawn_shortform_job(
                     pass
             try:
                 (workspace / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            try:
+                pending = production_costs.pending_billable_usd(workspace)
+                reservation_payload = _load_shortform_credit_reservation(workspace)
+                if pending > 0:
+                    _reconcile_shortform_costs(
+                        user_id,
+                        job_id,
+                        reservation_payload=reservation_payload,
+                        reason="studio_shortform_failed_actual",
+                        tool="start_shortform_generate",
+                        session_id=credit_session_id,
+                    )
+                else:
+                    _release_shortform_reservation(
+                        user_id,
+                        reservation_payload,
+                        reason="studio_shortform_failed_no_spend",
+                    )
+                    _clear_shortform_credit_reservation(workspace)
             except Exception:
                 pass
         finally:
@@ -2697,6 +2963,9 @@ def execute_tool(
             resume_job_id=resume_job_id,
             reference_images=reference_images,
             product_reference=product_manifest,
+            credit_reservation=args.get("_credit_reservation") if isinstance(args.get("_credit_reservation"), dict) else None,
+            credit_session_id=str(args.get("_credit_session_id") or session_id or ""),
+            credit_budget=args.get("_credit_budget") if isinstance(args.get("_credit_budget"), dict) else None,
         )
         stills_model = (
             "seedream_v45_edit_canonical"
@@ -3720,6 +3989,7 @@ def execute_tool_logged(
     """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
     budget_estimate = None
     credit_reservation: dict[str, Any] | None = None
+    billed_with_actuals = False
     try:
         budget_estimate = production_budget.enforce_budget(name, arguments)
         if budget_estimate is not None and str(user_id or "").strip():
@@ -3736,11 +4006,60 @@ def execute_tool_logged(
                 },
                 repair_reserve_pct=0.25,
             )
+            if name in {
+                "start_shortform_generate",
+                "animate_production_scenes",
+                "finalize_production",
+                "edit_production_scene_still",
+                "edit_production_scenes_still",
+                "regenerate_production_scene_still",
+                "re_edit_production",
+            }:
+                arguments = dict(arguments or {})
+                arguments["_credit_reservation"] = credit_reservation
+                arguments["_credit_session_id"] = session_id or ""
+                arguments["_credit_budget"] = budget_estimate.as_dict()
         result = execute_tool(
             name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
         )
         result = production_budget.with_budget_metadata(result, budget_estimate, arguments)
-        if credit_reservation and not credit_reservation.get("unlimited"):
+        if credit_reservation and name in {
+            "animate_production_scenes",
+            "finalize_production",
+            "edit_production_scene_still",
+            "edit_production_scenes_still",
+            "regenerate_production_scene_still",
+            "re_edit_production",
+        }:
+            try:
+                payload = json.loads(result or "{}")
+                job_id = str(payload.get("job_id") or (arguments or {}).get("job_id") or "").strip()
+                if job_id:
+                    credits = _reconcile_shortform_costs(
+                        user_id,
+                        job_id,
+                        reservation_payload={
+                            "reservation": credit_reservation,
+                            "user_id": user_id,
+                            "tool": name,
+                            "session_id": session_id or "",
+                            "budget": budget_estimate.as_dict() if budget_estimate else {},
+                        },
+                        reason=f"studio_tool_actual:{name}",
+                        tool=name,
+                        session_id=session_id,
+                    )
+                    if isinstance(payload, dict):
+                        payload["credits"] = credits
+                        result = json.dumps(payload, indent=2, ensure_ascii=False)
+                    billed_with_actuals = True
+            except Exception:
+                billed_with_actuals = False
+        if credit_reservation and not billed_with_actuals and name == "start_shortform_generate":
+            # Start is asynchronous. The worker owns billing once its real FAL
+            # spend lands in cost_ledger.jsonl; keep the hold open on disk.
+            billed_with_actuals = True
+        if credit_reservation and not credit_reservation.get("unlimited") and not billed_with_actuals:
             import unified_credits as uc
 
             base_credits = uc.usd_to_credits(budget_estimate.estimated_usd if budget_estimate else 0.0)
@@ -3770,11 +4089,42 @@ def execute_tool_logged(
             try:
                 import unified_credits as uc
 
-                uc.release_reservation(
-                    user_id,
-                    str(credit_reservation.get("reservation_id") or ""),
-                    reason=f"studio_tool_failed:{name}",
-                )
+                job_id = str((arguments or {}).get("job_id") or "").strip()
+                if job_id and name in {
+                    "animate_production_scenes",
+                    "finalize_production",
+                    "edit_production_scene_still",
+                    "edit_production_scenes_still",
+                    "regenerate_production_scene_still",
+                    "re_edit_production",
+                }:
+                    pending = production_costs.pending_billable_usd(_shortform_workspace(job_id))
+                    if pending > 0:
+                        _reconcile_shortform_costs(
+                            user_id,
+                            job_id,
+                            reservation_payload={
+                                "reservation": credit_reservation,
+                                "user_id": user_id,
+                                "tool": name,
+                                "session_id": session_id or "",
+                            },
+                            reason=f"studio_tool_failed_actual:{name}",
+                            tool=name,
+                            session_id=session_id,
+                        )
+                    else:
+                        uc.release_reservation(
+                            user_id,
+                            str(credit_reservation.get("reservation_id") or ""),
+                            reason=f"studio_tool_failed:{name}",
+                        )
+                else:
+                    uc.release_reservation(
+                        user_id,
+                        str(credit_reservation.get("reservation_id") or ""),
+                        reason=f"studio_tool_failed:{name}",
+                    )
             except Exception:
                 pass
         telemetry.record_tool_call(

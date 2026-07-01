@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from studio_agent import production_costs
+from studio_agent.production_slots import production_slot
 from studio_agent.render_styles import RenderStyle, get_render_style
 
 from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
@@ -22,6 +23,24 @@ from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
 from .styled_stills import build_styled_scene_prompt, generate_still_t2i
 from .voice_fal import FalVoiceClient
+
+
+def _slot_wait_progress(workspace: Path, stage: str, detail: str):
+    def _on_wait(admission: Any) -> None:
+        try:
+            _write_progress(
+                workspace,
+                stage=stage,
+                progress=5,
+                detail=(
+                    f"{detail}: waiting for {admission.lane} slot "
+                    f"#{admission.queue_position} ({admission.active}/{admission.limit} active)"
+                ),
+            )
+        except Exception:
+            pass
+
+    return _on_wait
 
 
 def _local_topic_label(topic: str | None, category_label: str = "") -> str:
@@ -542,31 +561,35 @@ def plan_scenes(
             sfx_direction = f"{str(sound_design_brief).strip()} {sfx_direction}".strip()
         still_target = stills_dir / f"{sid}.png"
         if not (still_target.exists() and still_target.stat().st_size > 0):
-            if is_skeleton:
-                from .canonical_edit import generate_still_edit
+            with production_slot(
+                "stills",
+                on_wait=_slot_wait_progress(workspace, "stills_queue", f"Scene {i + 1} still"),
+            ):
+                if is_skeleton:
+                    from .canonical_edit import generate_still_edit
 
-                generate_still_edit(prompt, still_target, seed=420042 + i)
-                amount, note, key = production_costs.price_fal_image(edit=True)
-            else:
-                if reference_images:
-                    from .styled_stills import generate_still_reference_edit
-
-                    generate_still_reference_edit(
-                        prompt,
-                        still_target,
-                        reference_paths=reference_images,
-                        negative_prompt=style.negative_prompt,
-                        seed=420042 + i,
-                    )
+                    generate_still_edit(prompt, still_target, seed=420042 + i)
                     amount, note, key = production_costs.price_fal_image(edit=True)
                 else:
-                    generate_still_t2i(
-                        prompt,
-                        still_target,
-                        negative_prompt=style.negative_prompt,
-                        seed=420042 + i,
-                    )
-                    amount, note, key = production_costs.price_fal_image(edit=False)
+                    if reference_images:
+                        from .styled_stills import generate_still_reference_edit
+
+                        generate_still_reference_edit(
+                            prompt,
+                            still_target,
+                            reference_paths=reference_images,
+                            negative_prompt=style.negative_prompt,
+                            seed=420042 + i,
+                        )
+                        amount, note, key = production_costs.price_fal_image(edit=True)
+                    else:
+                        generate_still_t2i(
+                            prompt,
+                            still_target,
+                            negative_prompt=style.negative_prompt,
+                            seed=420042 + i,
+                        )
+                        amount, note, key = production_costs.price_fal_image(edit=False)
             production_costs.record_event(
                 workspace,
                 stage="stills",
@@ -813,11 +836,21 @@ def animate_scenes_stage(
             if "skeleton_host" in skeleton_scene_text or "skeleton" in skeleton_scene_text:
                 motion_prompt = apply_wardrobe_motion_lock(motion_prompt, sc.get("outfit"))
                 sc["motion_prompt"] = motion_prompt
-            gen_clip(
-                still, motion_prompt, clip,
-                tier=tier, video_model=sc.get("video_model"),
-                duration_sec=int(sc.get("duration_sec", 5)),
-            )
+            video_model = str(sc.get("video_model") or "")
+            lane = "i2v_premium" if "kling" in video_model.lower() or "premium" in video_model.lower() else "i2v"
+            with production_slot(
+                lane,
+                on_wait=_slot_wait_progress(
+                    workspace,
+                    "animation_queue",
+                    f"Scene {int(sc['index']) + 1} animation",
+                ),
+            ):
+                gen_clip(
+                    still, motion_prompt, clip,
+                    tier=tier, video_model=sc.get("video_model"),
+                    duration_sec=int(sc.get("duration_sec", 5)),
+                )
             try:
                 sidecar = clip.with_suffix(clip.suffix + ".fal.json")
                 clip_meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
@@ -943,7 +976,11 @@ def finalize_stage(
         # Per-scene narration audio for PERFECT sync (visual + 3-word captions timed to voice chunk)
         sc["narration"] = _normalize_tts_text(sc["narration"])
         na_path = work_dir / f"nar_{sc['sid']}.mp3"
-        na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
+        with production_slot(
+            "audio",
+            on_wait=_slot_wait_progress(workspace, "audio_queue", f"Scene {n + 1} narration"),
+        ):
+            na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
         amount, note, key, qty = production_costs.price_fal_tts(sc["narration"])
         production_costs.record_event(
             workspace,
@@ -989,7 +1026,11 @@ def finalize_stage(
         subprocess.run(cmd, check=True, capture_output=True)
         narration_audio = narration_target
     else:
-        narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
+        with production_slot(
+            "audio",
+            on_wait=_slot_wait_progress(workspace, "audio_queue", "Narration"),
+        ):
+            narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
         amount, note, key, qty = production_costs.price_fal_tts(script_text)
         production_costs.record_event(
             workspace,
@@ -1025,7 +1066,11 @@ def finalize_stage(
                     if idx < len(narration_audios)
                     else float(sc.get("duration_sec") or 5.0)
                 )
-                generated = _generate_short_audio_bed(prompt, duration, work_dir / f"sfx_{sc['sid']}.mp3")
+                with production_slot(
+                    "audio",
+                    on_wait=_slot_wait_progress(workspace, "audio_queue", f"Scene {idx + 1} SFX"),
+                ):
+                    generated = _generate_short_audio_bed(prompt, duration, work_dir / f"sfx_{sc['sid']}.mp3")
                 if generated:
                     amount, note = production_costs.fal_unit_cost(
                         "mmaudio_v2",
@@ -1059,11 +1104,15 @@ def finalize_stage(
                     f"Short-form background music bed: {bgm_choice}. "
                     "Instrumental only, low-volume, subtle, loopable, no vocals, no lyrics, no lead melody that fights narration."
                 )
-                bgm_track = _generate_short_audio_bed(
-                    bgm_prompt,
-                    float(probe_duration(narration_audio) or 30.0),
-                    work_dir / "bgm.mp3",
-                )
+                with production_slot(
+                    "audio",
+                    on_wait=_slot_wait_progress(workspace, "audio_queue", "Background music"),
+                ):
+                    bgm_track = _generate_short_audio_bed(
+                        bgm_prompt,
+                        float(probe_duration(narration_audio) or 30.0),
+                        work_dir / "bgm.mp3",
+                    )
                 if bgm_track:
                     bgm_duration = float(probe_duration(narration_audio) or 30.0)
                     amount, note = production_costs.fal_unit_cost(
@@ -1100,8 +1149,12 @@ def finalize_stage(
             mixed_audio = narration_audio
 
     _write_progress(workspace, stage="compose", progress=92, detail="Muxing final MP4")
-    silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
-    final = mux_narration(silent, mixed_audio, workspace / "styled_short.mp4")
+    with production_slot(
+        "compose",
+        on_wait=_slot_wait_progress(workspace, "compose_queue", "Final MP4"),
+    ):
+        silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
+        final = mux_narration(silent, mixed_audio, workspace / "styled_short.mp4")
 
     animated = [s["index"] for s in scenes if s.get("animate")]
     meta = _read_result(workspace)

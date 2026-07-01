@@ -37,6 +37,10 @@ def _summary_path(workspace: Path) -> Path:
     return Path(workspace) / "cost_summary.json"
 
 
+def _billing_path(workspace: Path) -> Path:
+    return Path(workspace) / "cost_billing_state.json"
+
+
 def _read_events(workspace: Path) -> list[dict[str, Any]]:
     path = _ledger_path(workspace)
     if not path.is_file():
@@ -94,6 +98,70 @@ def load_summary(workspace: Path) -> dict[str, Any]:
         except Exception:
             pass
     return summarize(workspace)
+
+
+def load_billing_state(workspace: Path) -> dict[str, Any]:
+    path = _billing_path(workspace)
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("charged_usd_decimal", "0.000000")
+                data.setdefault("charges", [])
+                return data
+        except Exception:
+            pass
+    return {"charged_usd_decimal": "0.000000", "charges": []}
+
+
+def pending_billable_usd(workspace: Path) -> Decimal:
+    summary = load_summary(workspace)
+    billing = load_billing_state(workspace)
+    total = _usd(summary.get("total_usd_decimal", summary.get("total_usd", 0)))
+    charged = _usd(billing.get("charged_usd_decimal", 0))
+    if total <= charged:
+        return Decimal("0.000000")
+    return _usd(total - charged)
+
+
+def mark_billed(
+    workspace: Path,
+    *,
+    usd: Any,
+    credits: int,
+    user_id: str = "",
+    reservation_id: str = "",
+    reason: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace)
+    state = load_billing_state(workspace)
+    amount = _usd(usd)
+    charged = _usd(state.get("charged_usd_decimal", 0)) + amount
+    row = {
+        "ts": time.time(),
+        "usd": float(amount),
+        "usd_decimal": str(amount),
+        "credits": int(credits or 0),
+        "user_id": str(user_id or ""),
+        "reservation_id": str(reservation_id or ""),
+        "reason": str(reason or ""),
+        "metadata": metadata or {},
+    }
+    charges = list(state.get("charges") or [])
+    charges.append(row)
+    state = {
+        "charged_usd": float(_usd(charged)),
+        "charged_usd_decimal": str(_usd(charged)),
+        "charges": charges[-200:],
+        "updated_at": time.time(),
+    }
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        _billing_path(workspace).write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return state
 
 
 def record_event(
