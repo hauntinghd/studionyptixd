@@ -1943,6 +1943,55 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
                 result = loaded
         except Exception:
             pass
+        final_video = None
+        for raw in (
+            str(result.get("video_path") or ""),
+            "skeleton_short.mp4",
+            "styled_short.mp4",
+            "final.mp4",
+            "short.mp4",
+        ):
+            if not raw:
+                continue
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = ws / candidate
+            try:
+                if candidate.is_file() and candidate.stat().st_size > 1024:
+                    final_video = candidate.resolve()
+                    break
+            except OSError:
+                continue
+        if final_video and str(result.get("status") or "").lower() in {"complete", "completed", "ready", "scenes_approved"}:
+            result["status"] = "complete"
+            result["job_id"] = job_id
+            result["video_path"] = str(final_video)
+            result["scene_count"] = len(scenes)
+            result["approved_scene_count"] = approved_count
+            result["animation_pending_count"] = 0
+            result.pop("error", None)
+            result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+            (ws / "progress.json").write_text(json.dumps({
+                "stage": "complete",
+                "progress": 100,
+                "detail": "Final MP4 ready.",
+            }, indent=2), encoding="utf-8")
+            return json.dumps({
+                "ok": True,
+                "job_id": job_id,
+                "affected": changed,
+                "animate": animate,
+                "approved_for_video": changed,
+                "approved_count": approved_count,
+                "scene_count": len(scenes),
+                "all_approved": all_approved,
+                "status": "complete",
+                "video_path": str(final_video),
+                "note": (
+                    "The final MP4 already exists, so Studio kept this job complete instead of moving it "
+                    "back to scene review. Use a re-edit or regenerate flow for changes after export."
+                ),
+            }, indent=2)
         result.update({
             "status": "scenes_approved",
             "job_id": job_id,

@@ -509,7 +509,10 @@ async def _continue_active_production(
     snapshot = get_job_snapshot(job_id, "shortform")
     status = str(snapshot.get("status") or "").lower()
     tool_fires: list[ToolFire] = [ToolFire("poll_render_job", {"job_id": job_id, "kind": "shortform"}, json.dumps(snapshot))]
-    active_jobs = merge_active_jobs(
+    active_jobs = [
+        j for j in list(session.get("active_jobs") or [])
+        if str(j.get("job_id") or "") != job_id
+    ] if status in {"complete", "failed", "error", "cancelled"} else merge_active_jobs(
         list(session.get("active_jobs") or []),
         [{
             "job_id": job_id,
@@ -519,6 +522,23 @@ async def _continue_active_production(
         }],
     )
     await _fire_event(emit, "active_jobs", jobs=active_jobs)
+
+    if status == "complete":
+        assistant_text = _format_polled_job_status(json.dumps(snapshot))
+        messages.append(_tool_observation_message("poll_render_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        await _fire_event(emit, "tool_end", tool="poll_render_job", status="ok")
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [],
+            "active_jobs": active_jobs,
+            "approval_mode": str(session.get("approval_mode") or "confirm"),
+            "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
 
     if status in {"failed", "error", "cancelled"}:
         try:
@@ -613,12 +633,18 @@ async def _continue_active_production(
                 break
 
     final_snapshot = get_job_snapshot(job_id, "shortform")
-    active_jobs = merge_active_jobs(active_jobs, [{
-        "job_id": job_id,
-        "kind": "shortform",
-        "title": str(final_snapshot.get("title") or "Short-form video"),
-        "started_at": time.time(),
-    }])
+    if str(final_snapshot.get("status") or "").lower() == "complete":
+        active_jobs = [
+            j for j in active_jobs
+            if str(j.get("job_id") or "") != job_id
+        ]
+    else:
+        active_jobs = merge_active_jobs(active_jobs, [{
+            "job_id": job_id,
+            "kind": "shortform",
+            "title": str(final_snapshot.get("title") or "Short-form video"),
+            "started_at": time.time(),
+        }])
     if _production_result_failed(last_result):
         assistant_text = f"I continued the short, but the next production step failed: {str(last_result.get('error') or last_result)[:500]}"
     elif _production_result_complete(last_result) or final_snapshot.get("status") == "complete":

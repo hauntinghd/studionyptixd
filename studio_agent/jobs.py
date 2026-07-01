@@ -373,6 +373,28 @@ def _shortform_failed_snap(job_id: str, error: str, *, progress: int = 0) -> dic
     }
 
 
+def _existing_shortform_video_path(workspace: Path, data: dict[str, Any] | None = None) -> Path | None:
+    """Return a real final MP4 if the workspace already has one.
+
+    This intentionally treats media on disk as the source of truth. Approval tools
+    can rewrite result.json while the final MP4 remains valid; polling must not
+    move a finished job back to scene review.
+    """
+    candidates: list[Path] = []
+    raw = str((data or {}).get("video_path") or "").strip()
+    if raw:
+        p = Path(raw)
+        candidates.append(p if p.is_absolute() else workspace / p)
+    candidates.extend(workspace / name for name in ("skeleton_short.mp4", "styled_short.mp4", "final.mp4", "short.mp4"))
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 1024:
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def _attach_production_control(
     snap: dict[str, Any],
     tool_name: str,
@@ -482,16 +504,36 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "running": False,
         }
     st = str(data.get("status") or "").lower()
+    video_path = _existing_shortform_video_path(workspace, data)
+    if video_path and st != "failed":
+        complete = True
+        st = "complete"
+        data["status"] = "complete"
+        data["video_path"] = str(video_path)
+        data.pop("error", None)
+        try:
+            result_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            progress_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "complete",
+                        "progress": 100,
+                        "detail": "Final MP4 ready.",
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
     if st == "cancelled":
         # If a re-edit/retry reused the workspace, a stale cancelled result can
         # briefly coexist with a finished MP4. Prefer the actual deliverable.
-        for candidate in ("styled_short.mp4", "final.mp4", "short.mp4"):
-            if (workspace / candidate).is_file() and (workspace / candidate).stat().st_size > 1024:
-                st = "complete"
-                data["status"] = "complete"
-                data.setdefault("video_path", str(workspace / candidate))
-                data.pop("error", None)
-                break
+        if video_path:
+            st = "complete"
+            data["status"] = "complete"
+            data.setdefault("video_path", str(video_path))
+            data.pop("error", None)
     cancelled = st == "cancelled"
     complete = st == "complete"
     awaiting_scene_review = st in {

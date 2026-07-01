@@ -45,9 +45,10 @@ jobs:
             ${{ env.DOCKERHUB_IMAGE }}:latest
             ${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }}
 
-      # Auto-deploy the freshly-built image to Fly.io so backend changes
-      # actually go live without a manual `flyctl deploy`. Requires the
-      # FLY_API_TOKEN repo secret (generate via `flyctl tokens create deploy`).
+      # Auto-deploy from this checkout using fly.toml so Fly receives the same
+      # app config, VM sizing, mounts, and release behavior as local deploys.
+      # Do not deploy the Docker Hub image directly: that path has previously
+      # wedged the volume-backed machine in `replacing` and bypassed config.
       #
       # PRIOR BUG (fixed in this commit): the previous guard
       #   if: ${{ github.ref == 'refs/heads/master' && env.FLY_API_TOKEN != '' }}
@@ -80,7 +81,9 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           flyctl deploy \
-            --image ${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }} \
+            --remote-only \
+            --config fly.toml \
             -a nyptid-studio \
-            --strategy rolling
+            --strategy immediate \
+            --wait-timeout 180
 # Force rebuild Mon Apr 13 09:21:18 EDT 2026

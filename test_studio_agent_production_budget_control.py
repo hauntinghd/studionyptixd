@@ -143,6 +143,54 @@ class ProductionBudgetControlTests(unittest.TestCase):
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
+    def test_shortform_snapshot_does_not_downgrade_existing_mp4_to_scene_review(self):
+        job_id = f"test{uuid.uuid4().hex[:12]}"
+        workspace = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            video = workspace / "styled_short.mp4"
+            video.write_bytes(b"0" * 2048)
+            (workspace / "result.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": job_id,
+                        "status": "scenes_approved",
+                        "topic": "Finished short",
+                        "video_path": str(video),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "progress.json").write_text(
+                json.dumps({"stage": "scenes_approved", "progress": 85}),
+                encoding="utf-8",
+            )
+            (workspace / "scenes.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "index": 0,
+                            "approved_for_video": True,
+                            "approved_for_animation": False,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snap = jobs.get_job_snapshot(job_id, "shortform")
+            result = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
+            progress = json.loads((workspace / "progress.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(snap["status"], "complete")
+            self.assertEqual(snap["progress"], 100)
+            self.assertFalse(snap["running"])
+            self.assertIn("/api/studio-agent/jobs/", snap["mp4_url"])
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(progress["stage"], "complete")
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
     def test_running_shortform_snapshot_exposes_resume_safe_render_lane(self):
         job_id = f"test{uuid.uuid4().hex[:12]}"
         workspace = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
@@ -280,7 +328,50 @@ class ProductionBudgetControlTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(calls, ["set_production_scenes_animate", "finalize_production"])
         self.assertIn("finished the MP4", result["assistant_message"])
-        self.assertEqual(result["active_jobs"][-1]["kind"], "shortform")
+        self.assertEqual(result["active_jobs"], [])
+
+    def test_continue_shortform_prunes_completed_job_instead_of_reactivating_it(self):
+        job_id = uuid.uuid4().hex[:12]
+        session = {
+            "session_id": f"sa_{uuid.uuid4().hex[:16]}",
+            "user_id": "owner",
+            "content_format": "short",
+            "approval_mode": "confirm",
+            "reasoning_depth": "deep",
+            "messages": [],
+            "active_jobs": [{"job_id": job_id, "kind": "shortform", "title": "Old finished short"}],
+        }
+        complete_snapshot = {
+            "job_id": job_id,
+            "kind": "shortform",
+            "status": "complete",
+            "progress": 100,
+            "title": "Old finished short",
+            "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform",
+        }
+
+        with (
+            patch.object(runner, "_recover_poll_target", return_value=(job_id, "shortform")),
+            patch.object(runner, "get_job_snapshot", return_value=complete_snapshot),
+            patch.object(runner.store, "get_session", return_value=session),
+            patch.object(runner.store, "update_session") as update_session,
+        ):
+            result = asyncio.run(
+                runner._continue_active_production(
+                    session=session,
+                    user_id="owner",
+                    content_format="short",
+                    emit=None,
+                    membership_plan="owner",
+                    billing_profile={"unlimited": True},
+                )
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["active_jobs"], [])
+        self.assertIn("complete", result["assistant_message"])
+        update_session.assert_called()
+        self.assertEqual(update_session.call_args.kwargs["active_jobs"], [])
 
     def test_run_turn_threads_membership_plan_into_continue_shortcut(self):
         session = {

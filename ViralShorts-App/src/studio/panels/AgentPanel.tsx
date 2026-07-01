@@ -737,7 +737,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                   : snap.status === 'awaiting_approval'
                     ? approvalMode === 'auto'
                       ? 'Stills are ready — auto-finalize is exporting voice, sound, and MP4.'
-                      : 'Your long-form stills are ready. Review the grid, then tap Finalize & export MP4.'
+                      : snap.kind === 'longform'
+                        ? 'Your long-form stills are ready. Review the grid, then tap Finalize & export MP4.'
+                        : 'Your short-form scenes are ready. Review the grid, then approve animation or export MP4.'
                     : 'Your video is ready.';
         setMessages((m) => {
             const nextRow: ChatMessage = {
