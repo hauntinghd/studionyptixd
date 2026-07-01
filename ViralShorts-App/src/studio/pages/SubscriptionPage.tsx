@@ -37,7 +37,7 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
     const normalizedCurrentPlan = useMemo<UnifiedPlanId | ''>(() => {
         const raw = String(membershipPlanId || '').trim().toLowerCase();
-        const alias = raw === 'creator' ? 'studio_pro_2k' : raw === 'studio' ? 'studio_pro_8k' : raw;
+        const alias = raw === 'creator' ? 'studio_pro_2500' : raw === 'studio' ? 'studio_pro_11k' : raw;
         if (UNIFIED_PLANS.some((p) => p.id === alias)) return alias as UnifiedPlanId;
         return '';
     }, [membershipPlanId]);
@@ -80,7 +80,7 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
 
     useEffect(() => {
         if (subscriptionResult !== 'success') return;
-        const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_2k';
+        const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_1k';
         const match = UNIFIED_PLANS.find((p) => p.id === planId);
         const search = typeof window === 'undefined' ? '' : window.location.search;
         trackOnce(`subscription_membership_success:${search}`, () => {

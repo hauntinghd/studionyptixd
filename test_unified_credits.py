@@ -79,6 +79,24 @@ class UnifiedCreditsTests(unittest.TestCase):
         self.assertEqual(state["balance"], 500)
         self.assertEqual(state["lifetime_spent"], 500)
 
+    def test_decimal_usd_conversion_ceilings_are_stable(self) -> None:
+        self.assertEqual(credits.usd_to_credits("0.000001"), 1)
+        self.assertEqual(credits.usd_to_credits("0.010000"), 1)
+        self.assertEqual(credits.usd_to_credits("0.010001"), 2)
+        self.assertEqual(credits.openrouter_usd(
+            {"prompt_tokens": 333, "completion_tokens": 667},
+            "0.15",
+            "0.60",
+        ), credits._usd_decimal("0.000450"))
+
+    def test_debit_usd_records_exact_decimal_metadata(self) -> None:
+        credits.add_credits("user", 10)
+        charged, balance = credits.debit_usd("user", "0.010001", reason="exact_test")
+        self.assertEqual(charged, 2)
+        self.assertEqual(balance, 8)
+        ledger = credits.LEDGER_PATH.read_text(encoding="utf-8")
+        self.assertIn('"provider_usd_decimal": "0.010001"', ledger)
+
     def test_failed_operation_releases_full_reservation(self) -> None:
         credits.add_credits("user", 1_000)
         reservation = credits.reserve_credits("user", 700, reason="production")

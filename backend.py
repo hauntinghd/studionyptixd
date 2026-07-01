@@ -4234,8 +4234,16 @@ def _profile_plan_is_paid(plan: str) -> bool:
     return normalized in PLAN_LIMITS or normalized in UNIFIED_PLANS
 
 
-CHAT_STORY_ALLOWED_PLANS = set(PUBLIC_PLAN_IDS) | {"creator", "studio", "starter", "pro"}
-DEFAULT_MEMBERSHIP_PLAN_ID = "studio_pro_2k"
+CHAT_STORY_ALLOWED_PLANS = set(PUBLIC_PLAN_IDS) | {
+    "creator",
+    "studio",
+    "starter",
+    "pro",
+    "studio_pro_2k",
+    "studio_pro_8k",
+    "studio_pro_15k",
+}
+DEFAULT_MEMBERSHIP_PLAN_ID = "studio_pro_1k"
 
 
 def _default_membership_plan_id() -> str:

@@ -1,9 +1,11 @@
 import { CheckCircle2, CreditCard, Gauge, Sparkles, WalletCards, Zap } from 'lucide-react';
-import type { ReactNode, RefObject } from 'react';
+import { useEffect, useMemo, useState, type ReactNode, type RefObject } from 'react';
 
 type PlanCard = {
     id: string;
     title: string;
+    priceUsd: number;
+    monthlyCredits: number;
     priceLabel: string;
     description: string;
     features: string[];
@@ -55,6 +57,22 @@ export default function BillingPremiumView({
     refundSection: React.ReactNode;
 }) {
     const currentPlanTitle = publicPlans.find((plan) => plan.id === normalizedCurrentPlan)?.title || 'Active';
+    const [selectedPlanId, setSelectedPlanId] = useState(() => normalizedCurrentPlan || publicPlans[0]?.id || '');
+    useEffect(() => {
+        if (normalizedCurrentPlan && publicPlans.some((plan) => plan.id === normalizedCurrentPlan)) {
+            setSelectedPlanId(normalizedCurrentPlan);
+        }
+    }, [normalizedCurrentPlan, publicPlans]);
+    const selectedPlan = useMemo(
+        () => publicPlans.find((plan) => plan.id === selectedPlanId) || publicPlans[0] || null,
+        [publicPlans, selectedPlanId],
+    );
+    const selectedIsCurrent = Boolean(selectedPlan && billingActive && normalizedCurrentPlan === selectedPlan.id);
+    const selectedActionLabel = selectedIsCurrent
+        ? 'Manage Studio Pro'
+        : billingActive
+            ? 'Update monthly credits'
+            : 'Start Studio Pro';
     return (
         <div className="mx-auto max-w-7xl space-y-8">
             {paypalBanner}
@@ -95,57 +113,68 @@ export default function BillingPremiumView({
             <section>
                 <div className="flex flex-wrap items-end justify-between gap-4">
                     <div>
-                        <h2 className="text-lg font-bold text-white">Monthly credit tiers</h2>
-                        <p className="mt-1 text-sm text-gray-500">One Studio Pro plan. Upgrade monthly credits when production needs more capacity.</p>
+                        <h2 className="text-lg font-bold text-white">Studio Pro</h2>
+                        <p className="mt-1 text-sm text-gray-500">One plan. Pick the monthly credits you need, then scale up when production volume grows.</p>
                     </div>
                     <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
                         Usage-priced
                     </span>
                 </div>
-                <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    {publicPlans.map((planCard) => {
-                        const isCurrent = billingActive && normalizedCurrentPlan === planCard.id;
-                        const actionLabel = isCurrent
-                            ? 'Extend plan'
-                            : billingActive
-                                ? `Switch to ${planCard.title}`
-                                : `Start ${planCard.title}`;
-                        return (
-                            <div
-                                key={planCard.id}
-                                className={`relative flex flex-col rounded-2xl border p-5 shadow-sm shadow-black/30 ${
-                                    isCurrent ? 'border-violet-500/40 bg-violet-500/[0.08]' : 'border-white/[0.08] bg-gradient-to-br from-white/[0.04] to-white/[0.015]'
-                                }`}
-                            >
-                                {planCard.bestValue && (
-                                    <span className="absolute right-4 top-4 rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-cyan-200">
-                                        Best value
-                                    </span>
-                                )}
-                                <p className="text-xs uppercase tracking-wider text-gray-500">{planCard.title}</p>
-                                <p className="mt-2 text-3xl font-bold text-white">{planCard.priceLabel}</p>
-                                <p className="mt-2 flex-1 text-sm text-gray-400">{planCard.description}</p>
-                                <ul className="mt-4 space-y-2">
-                                    {planCard.features.map((f) => (
-                                        <li key={f} className="flex gap-2 text-xs text-gray-300">
-                                            <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                                            {f}
-                                        </li>
-                                    ))}
-                                </ul>
-                                <button
-                                    type="button"
-                                    disabled={planLoadingId === planCard.id}
-                                    onClick={() => onPlanAction(planCard.id)}
-                                    className={`mt-5 w-full rounded-xl py-2.5 text-sm font-semibold transition ${
-                                        isCurrent ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-violet-600 text-white hover:bg-violet-500'
-                                    } disabled:opacity-50`}
-                                >
-                                    {planLoadingId === planCard.id ? 'Opening...' : actionLabel}
-                                </button>
+                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.72fr)]">
+                    <div className="rounded-2xl border border-white/[0.08] bg-gradient-to-br from-white/[0.045] to-white/[0.015] p-5 shadow-sm shadow-black/30">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs uppercase tracking-wider text-gray-500">Pro</p>
+                                <div className="mt-2 flex flex-wrap items-end gap-x-2 gap-y-1">
+                                    <p className="text-4xl font-bold text-white">${selectedPlan?.priceUsd ?? 0}</p>
+                                    <p className="pb-1 text-sm text-gray-400">per month, billed monthly</p>
+                                </div>
                             </div>
-                        );
-                    })}
+                            {selectedPlan?.bestValue && (
+                                <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
+                                    Best value
+                                </span>
+                            )}
+                        </div>
+                        <label className="mt-5 block">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Monthly credits</span>
+                            <select
+                                value={selectedPlanId}
+                                onChange={(event) => setSelectedPlanId(event.target.value)}
+                                className="mt-2 w-full rounded-xl border border-white/[0.08] bg-black/35 px-4 py-3 text-sm font-semibold text-white outline-none transition hover:border-white/[0.14] focus:border-cyan-400"
+                            >
+                                {publicPlans.map((plan) => (
+                                    <option key={plan.id} value={plan.id} className="bg-zinc-950 text-white">
+                                        {plan.monthlyCredits.toLocaleString()} / month - ${plan.priceUsd}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <p className="mt-3 min-h-[40px] text-sm leading-relaxed text-gray-400">{selectedPlan?.description}</p>
+                        {selectedPlan && (
+                            <button
+                                type="button"
+                                disabled={planLoadingId === selectedPlan.id}
+                                onClick={() => onPlanAction(selectedPlan.id)}
+                                className={`mt-5 w-full rounded-xl py-3 text-sm font-semibold transition ${
+                                    selectedIsCurrent ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-violet-600 text-white hover:bg-violet-500'
+                                } disabled:opacity-50`}
+                            >
+                                {planLoadingId === selectedPlan.id ? 'Opening...' : selectedActionLabel}
+                            </button>
+                        )}
+                    </div>
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Included in Studio Pro</p>
+                        <ul className="mt-4 space-y-3">
+                            {(selectedPlan?.features || []).map((f) => (
+                                <li key={f} className="flex gap-2 text-sm text-gray-300">
+                                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                                    {f}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
                 </div>
             </section>
 

@@ -511,8 +511,14 @@ PLAN_PRICE_USD = {
     "starter": float(os.getenv("PLAN_PRICE_STARTER_USD", "14")),
     "creator": float(os.getenv("UNIFIED_PLAN_CREATOR_USD", os.getenv("PLAN_PRICE_CREATOR_USD", "60"))),
     "studio": float(os.getenv("UNIFIED_PLAN_STUDIO_USD", "200")),
+    "studio_pro_1k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_USD", "25")),
     "studio_pro_2k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_USD", "60")),
-    "studio_pro_5k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "125")),
+    "studio_pro_2500": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_USD", "50")),
+    "studio_pro_5k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "100")),
+    "studio_pro_11k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_USD", "200")),
+    "studio_pro_17k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_USD", "300")),
+    "studio_pro_24k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_USD", "400")),
+    "studio_pro_32k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_USD", "500")),
     "studio_pro_8k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_USD", "200")),
     "studio_pro_15k": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_USD", "350")),
     "pro": float(os.getenv("PLAN_PRICE_PRO_USD", "39")),
@@ -547,19 +553,63 @@ UNIFIED_PLANS = {
         "best_value": True,
         "legacy": True,
     },
+    "studio_pro_1k": {
+        "id": "studio_pro_1k",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_USD", "25")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_CREDITS", "1000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_PRICE_ID", "").strip(),
+    },
     "studio_pro_2k": {
         "id": "studio_pro_2k",
         "name": "Studio Pro 2K",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_USD", "60")),
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_CREDITS", "2000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_2K_PRICE_ID", os.getenv("UNIFIED_PLAN_CREATOR_PRICE_ID", "")).strip(),
+        "legacy_public": True,
+    },
+    "studio_pro_2500": {
+        "id": "studio_pro_2500",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_USD", "50")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_CREDITS", "2500")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_PRICE_ID", "").strip(),
     },
     "studio_pro_5k": {
         "id": "studio_pro_5k",
-        "name": "Studio Pro 5K",
-        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "125")),
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "100")),
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_CREDITS", "5000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_PRICE_ID", "").strip(),
+    },
+    "studio_pro_11k": {
+        "id": "studio_pro_11k",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_USD", "200")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_CREDITS", "11000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_PRICE_ID", "").strip(),
+        "best_value": True,
+    },
+    "studio_pro_17k": {
+        "id": "studio_pro_17k",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_USD", "300")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_CREDITS", "17000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_PRICE_ID", "").strip(),
+    },
+    "studio_pro_24k": {
+        "id": "studio_pro_24k",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_USD", "400")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_CREDITS", "24000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_PRICE_ID", "").strip(),
+    },
+    "studio_pro_32k": {
+        "id": "studio_pro_32k",
+        "name": "Studio Pro",
+        "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_USD", "500")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_CREDITS", "32000")),
+        "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_PRICE_ID", "").strip(),
     },
     "studio_pro_8k": {
         "id": "studio_pro_8k",
@@ -568,6 +618,7 @@ UNIFIED_PLANS = {
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_CREDITS", "8000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_8K_PRICE_ID", os.getenv("UNIFIED_PLAN_STUDIO_PRICE_ID", "")).strip(),
         "best_value": True,
+        "legacy_public": True,
     },
     "studio_pro_15k": {
         "id": "studio_pro_15k",
@@ -575,6 +626,7 @@ UNIFIED_PLANS = {
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_USD", "350")),
         "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_CREDITS", "15000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_15K_PRICE_ID", "").strip(),
+        "legacy_public": True,
     },
 }
 for _plan_id, _plan_spec in UNIFIED_PLANS.items():
@@ -613,7 +665,15 @@ TOPUP_PACKS = {
     for spec in TOPUP_PACK_SPECS
 }
 # Public-facing membership is a single Studio Pro product with selectable monthly credit tiers.
-PUBLIC_PLAN_IDS = ("studio_pro_2k", "studio_pro_5k", "studio_pro_8k", "studio_pro_15k")
+PUBLIC_PLAN_IDS = (
+    "studio_pro_1k",
+    "studio_pro_2500",
+    "studio_pro_5k",
+    "studio_pro_11k",
+    "studio_pro_17k",
+    "studio_pro_24k",
+    "studio_pro_32k",
+)
 PUBLIC_TOPUP_PACK_IDS = tuple(str(spec["id"]) for spec in TOPUP_PACK_SPECS)
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 

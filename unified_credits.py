@@ -5,9 +5,9 @@ balance that is *debited from real provider spend*:
 
     credits_charged = ceil(provider_usd * (1 + CREDIT_MARGIN) / CREDIT_USD_VALUE)
 
-Two plans (see backend_settings.UNIFIED_PLANS):
-    creator : $60/mo  -> 2,000 credits
-    studio  : $200/mo -> 8,000 credits
+Plans are defined in backend_settings.UNIFIED_PLANS. The public Studio Pro
+ladder is one plan family with selectable monthly credit grants; legacy plan IDs
+remain supported for existing subscribers and webhook compatibility.
 
 This module is intentionally self-contained (own lock + JSON persistence on the
 Fly volume) so it can be adopted incrementally without touching the legacy
@@ -17,11 +17,11 @@ legacy plans keep working until fully migrated.
 from __future__ import annotations
 
 import json
-import math
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ LEDGER_PATH = Path(TEMP_DIR) / "unified_credit_ledger.jsonl"
 _lock = threading.RLock()
 _wallets: dict[str, dict[str, Any]] = {}
 _loaded = False
+USD_QUANT = Decimal("0.000001")
 
 
 # ---------------------------------------------------------------------------
@@ -157,26 +158,49 @@ def _restore_locked(w: dict[str, Any], buckets: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Cost -> credits conversion
 # ---------------------------------------------------------------------------
-def usd_to_credits(provider_usd: float) -> int:
+def _decimal(value: Any, default: str = "0") -> Decimal:
+    try:
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value if value is not None else default))
+    except (InvalidOperation, ValueError):
+        return Decimal(default)
+
+
+def _usd_decimal(value: Any) -> Decimal:
+    usd = _decimal(value)
+    if usd <= 0:
+        return Decimal("0")
+    return usd.quantize(USD_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _usd_float(value: Any) -> float:
+    return float(_usd_decimal(value))
+
+
+def usd_to_credits(provider_usd: float | Decimal | str) -> int:
     """Convert a raw provider USD cost into billable credits (margin applied)."""
-    usd = max(0.0, float(provider_usd or 0.0))
+    usd = _usd_decimal(provider_usd)
     if usd <= 0:
         return 0
-    raw = usd * (1.0 + float(CREDIT_MARGIN)) / max(1e-9, float(CREDIT_USD_VALUE))
-    return max(1, math.ceil(raw))
+    credit_value = max(_decimal(CREDIT_USD_VALUE), Decimal("0.000000001"))
+    margin_multiplier = Decimal("1") + max(_decimal(CREDIT_MARGIN), Decimal("0"))
+    raw = (usd * margin_multiplier) / credit_value
+    return max(1, int(raw.to_integral_value(rounding=ROUND_CEILING)))
 
 
-def openrouter_usd(usage: dict[str, Any], prompt_ppm: float | None, completion_ppm: float | None) -> float:
+def openrouter_usd(usage: dict[str, Any], prompt_ppm: float | None, completion_ppm: float | None) -> Decimal:
     """USD cost of an OpenRouter completion from token usage + per-million pricing."""
-    pt = float((usage or {}).get("prompt_tokens", 0) or 0)
-    ct = float((usage or {}).get("completion_tokens", 0) or 0)
-    p = float(prompt_ppm or 0.0) / 1_000_000.0
-    c = float(completion_ppm or 0.0) / 1_000_000.0
-    return pt * p + ct * c
+    pt = max(Decimal("0"), _decimal((usage or {}).get("prompt_tokens", 0)))
+    ct = max(Decimal("0"), _decimal((usage or {}).get("completion_tokens", 0)))
+    p = max(Decimal("0"), _decimal(prompt_ppm)) / Decimal("1000000")
+    c = max(Decimal("0"), _decimal(completion_ppm)) / Decimal("1000000")
+    return _usd_decimal((pt * p) + (ct * c))
 
 
-def elevenlabs_usd(characters: int, per_1k_usd: float = 0.10) -> float:
-    return max(0, int(characters or 0)) / 1000.0 * float(per_1k_usd)
+def elevenlabs_usd(characters: int, per_1k_usd: float = 0.10) -> Decimal:
+    chars = Decimal(max(0, int(characters or 0)))
+    return _usd_decimal((chars / Decimal("1000")) * max(Decimal("0"), _decimal(per_1k_usd)))
 
 
 def fal_render_usd(
@@ -194,28 +218,35 @@ def fal_render_usd(
     Returns {usd, breakdown} so the ledger records exactly what was charged.
     Falls back to fal_pricing.FALLBACK_USD when the live API/key is unavailable.
     """
-    breakdown: dict[str, float] = {}
-    total = 0.0
+    breakdown: dict[str, float | str] = {}
+    breakdown_exact: dict[str, str] = {}
+    total = Decimal("0")
     try:
         from long_form import fal_pricing as fp
 
         snap = fp.get_pricing_snapshot()
         if images > 0:
             usd, _note = fp.unit_cost(snap, image_key, fallback_key=image_fallback, quantity=float(images))
-            breakdown["images"] = round(usd, 6)
-            total += usd
+            amount = _usd_decimal(usd)
+            breakdown["images"] = _usd_float(amount)
+            breakdown_exact["images"] = str(amount)
+            total += amount
         if video_seconds > 0:
             usd, _note = fp.unit_cost(snap, video_key, fallback_key=video_fallback, quantity=float(video_seconds))
-            breakdown["video"] = round(usd, 6)
-            total += usd
+            amount = _usd_decimal(usd)
+            breakdown["video"] = _usd_float(amount)
+            breakdown_exact["video"] = str(amount)
+            total += amount
         if tts_chars > 0:
-            rate = float(fp.FALLBACK_USD.get("elevenlabs_per_1k_chars", 0.10))
-            usd = tts_chars / 1000.0 * rate
-            breakdown["tts"] = round(usd, 6)
-            total += usd
+            rate = _decimal(fp.FALLBACK_USD.get("elevenlabs_per_1k_chars", 0.10))
+            amount = _usd_decimal((Decimal(max(0, int(tts_chars))) / Decimal("1000")) * rate)
+            breakdown["tts"] = _usd_float(amount)
+            breakdown_exact["tts"] = str(amount)
+            total += amount
     except Exception as exc:
         breakdown["error"] = str(exc)[:200]
-    return {"usd": round(total, 6), "breakdown": breakdown}
+    total = _usd_decimal(total)
+    return {"usd": _usd_float(total), "usd_decimal": str(total), "breakdown": breakdown, "breakdown_decimal": breakdown_exact}
 
 
 def debit_fal_render(
@@ -229,8 +260,14 @@ def debit_fal_render(
 ) -> tuple[int, int]:
     cost = fal_render_usd(images=images, video_seconds=video_seconds, tts_chars=tts_chars)
     md = dict(metadata or {})
-    md.update({"fal_breakdown": cost["breakdown"], "images": images, "video_seconds": video_seconds, "tts_chars": tts_chars})
-    return debit_usd(user_id, cost["usd"], reason=reason, metadata=md, allow_negative=False)
+    md.update({
+        "fal_breakdown": cost["breakdown"],
+        "fal_breakdown_decimal": cost.get("breakdown_decimal", {}),
+        "images": images,
+        "video_seconds": video_seconds,
+        "tts_chars": tts_chars,
+    })
+    return debit_usd(user_id, cost.get("usd_decimal", cost["usd"]), reason=reason, metadata=md, allow_negative=False)
 
 
 def debit_elevenlabs(
@@ -476,17 +513,20 @@ def debit_credits(
 
 def debit_usd(
     user_id: str,
-    provider_usd: float,
+    provider_usd: float | Decimal | str,
     *,
     reason: str,
     metadata: dict | None = None,
     allow_negative: bool = False,
 ) -> tuple[int, int]:
     """Convert provider USD -> credits and debit. Returns (credits_charged, balance_after)."""
+    provider_amount = _usd_decimal(provider_usd)
     credits = usd_to_credits(provider_usd)
     md = dict(metadata or {})
-    md["provider_usd"] = round(float(provider_usd or 0.0), 6)
+    md["provider_usd"] = _usd_float(provider_amount)
+    md["provider_usd_decimal"] = str(provider_amount)
     md["credit_usd_value"] = float(CREDIT_USD_VALUE)
+    md["credit_usd_value_decimal"] = str(_decimal(CREDIT_USD_VALUE))
     md["credit_margin"] = float(CREDIT_MARGIN)
     _ok, bal = debit_credits(user_id, credits, reason=reason, metadata=md, allow_negative=allow_negative)
     return credits, bal
@@ -548,17 +588,20 @@ def reserve_credits(
 
 def reserve_usd(
     user_id: str,
-    provider_usd: float,
+    provider_usd: float | Decimal | str,
     *,
     reason: str,
     metadata: dict | None = None,
     repair_reserve_pct: float = 0.25,
 ) -> dict[str, Any]:
+    provider_amount = _usd_decimal(provider_usd)
     base = usd_to_credits(provider_usd)
-    held = int(math.ceil(base * (1.0 + max(0.0, float(repair_reserve_pct or 0.0)))))
+    repair_multiplier = Decimal("1") + max(Decimal("0"), _decimal(repair_reserve_pct))
+    held = int((Decimal(base) * repair_multiplier).to_integral_value(rounding=ROUND_CEILING))
     md = dict(metadata or {})
     md.update({
-        "estimated_provider_usd": round(float(provider_usd or 0.0), 6),
+        "estimated_provider_usd": _usd_float(provider_amount),
+        "estimated_provider_usd_decimal": str(provider_amount),
         "base_estimated_credits": base,
         "repair_reserve_pct": float(repair_reserve_pct or 0.0),
     })

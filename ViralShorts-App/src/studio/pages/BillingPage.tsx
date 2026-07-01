@@ -59,7 +59,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     );
     const normalizedCurrentPlan = useMemo<UnifiedPlanId | ''>(() => {
         const raw = String(membershipPlanId || plan || '').trim().toLowerCase();
-        const alias = raw === 'creator' ? 'studio_pro_2k' : raw === 'studio' ? 'studio_pro_8k' : raw;
+        const alias = raw === 'creator' ? 'studio_pro_2500' : raw === 'studio' ? 'studio_pro_11k' : raw;
         if (UNIFIED_PLANS.some((p) => p.id === alias)) return alias as UnifiedPlanId;
         return '';
     }, [membershipPlanId, plan]);
@@ -69,6 +69,8 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             UNIFIED_PLANS.map((p) => ({
                 id: p.id,
                 title: p.title,
+                priceUsd: p.priceUsd,
+                monthlyCredits: p.monthlyCredits,
                 priceLabel: `$${p.priceUsd}/mo`,
                 description: p.description,
                 features: p.features,
@@ -172,7 +174,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     useEffect(() => {
         if (subscriptionResult !== 'success') return;
-        const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_2k';
+        const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_1k';
         const match = UNIFIED_PLANS.find((p) => p.id === planId);
         trackOnce(`billing_membership_success:${locationState.search}`, () => {
             trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
